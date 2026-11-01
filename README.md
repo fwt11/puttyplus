@@ -168,6 +168,10 @@ cargo build --release
 产物是单个可执行文件（`target/release/puttyplus`），SSH 与加密全静态，拷到别的机器上
 就能跑，只要那台机器有 GTK4 / VTE4。
 
+> **glibc 兼容性**：打包时会摘掉弱符号（`pidfd_*`）的 glibc 版本标签，deb 的依赖
+> 因此停在 `libc6 (>= 2.34)` —— 即便是在 Debian 13 / Ubuntu 25.04（glibc 2.41）上
+> 编出来的包，也能装到 glibc 2.34 及以上的系统上（Deepin 25 是 2.38）。
+
 ### 打包成 deb
 
 ```bash

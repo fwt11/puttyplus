@@ -19,6 +19,13 @@ override_dh_auto_test:
 
 override_dh_auto_build:
 	cargo build --release --locked
+	# ⚠️ 摘掉弱符号的 glibc 版本要求（pidfd_spawnp / pidfd_getpid 是 glibc
+	#    2.39 才有的，Rust 的 std 以**弱引用**方式用它们）。
+	#    在 glibc ≥ 2.39 的机器上（Debian 13 / Ubuntu 25.04）链接 ⇒ 弱引用被
+	#    打上 GLIBC_2.39 版本标签 ⇒ dpkg-shlibdeps 把依赖算成 libc6 (>= 2.39)
+	#    ⇒ **glibc 2.38 的机器（Deepin 25 等）直接装不上**，可程序本来能跑。
+	#    详见 tools/strip_weak_glibc_versions.py 的说明。
+	python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
 
 override_dh_auto_install:
 	install -D -m 0755 target/release/puttyplus \

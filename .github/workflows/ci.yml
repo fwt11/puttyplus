@@ -47,7 +47,8 @@ jobs:
             openssh-client \
             fontconfig fonts-dejavu-core fonts-noto-cjk \
             libgl1-mesa-dri \
-            xvfb xauth debhelper dpkg-dev fakeroot
+            xvfb xauth debhelper dpkg-dev fakeroot \
+            python3
 
       - uses: actions/checkout@v4
 
@@ -85,6 +86,14 @@ jobs:
 
       - name: 编译（release）
         run: cargo build --release --locked
+
+      - name: 摘掉弱符号的 glibc 版本要求
+        # ⚠️ Rust 的 std 弱引用了 pidfd_spawnp / pidfd_getpid（glibc 2.39 才有）。
+        #    在 trixie（glibc 2.41）上链接 ⇒ 这些弱引用被打了 GLIBC_2.39 标签 ⇒
+        #    dpkg-shlibdeps 把依赖算成 libc6 (>= 2.39) ⇒ **glibc 2.38 的机器
+        #    （Deepin 25 等）装不上**（程序其实能跑）。摘掉标签后依赖回到
+        #    libc6 (>= 2.34)。这个步骤对已经在老 glibc 上编出来的二进制是空操作。
+        run: python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
 
       - name: 单元测试
         # ⚠️ **不要给单测提供显示环境**！libtest 把每个测试跑在子线程上，
@@ -174,6 +183,17 @@ jobs:
           bash tools/build_deb.sh
           # dpkg-buildpackage 把产物写在**仓库目录的上一级**，搬进工作区再上传
           cp ../puttyplus_*.deb "$GITHUB_WORKSPACE/"
+
+      - name: 核对 deb 的依赖（别再出现 libc6 (>= 2.39)）
+        # 装不上老系统的根因就是这一行依赖；把它钉在 CI 里，别再回归。
+        run: |
+          set -o pipefail
+          dep="$(dpkg-deb -f puttyplus_*.deb Depends)"
+          echo "$dep"
+          if echo "$dep" | grep -qE 'libc6 \(>= 2\.(3[5-9]|[4-9][0-9])'; then
+            echo "::error::deb 的 libc 依赖过高，老系统装不上：$dep"
+            exit 1
+          fi
 
       - name: 上传 deb
         uses: actions/upload-artifact@v4

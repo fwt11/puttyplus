@@ -33,6 +33,7 @@ jobs:
             fontconfig fonts-dejavu-core fonts-noto-cjk \
             libgl1-mesa-dri \
             xvfb xauth debhelper dpkg-dev fakeroot \
+            python3 \
             jq
 
       - uses: actions/checkout@v4
@@ -60,6 +61,12 @@ jobs:
       - name: 编译（release）
         run: cargo build --release --locked
 
+      - name: 摘掉弱符号的 glibc 版本要求
+        # ⚠️ 见 ci.yml 同名步骤的注释：Rust 的 std 弱引用了 glibc 2.39 才有的
+        #    pidfd_* ⇒ 在 trixie 上链接会给它们打 GLIBC_2.39 标签 ⇒ deb 的
+        #    依赖被算成 libc6 (>= 2.39) ⇒ glibc 2.38 的机器装不上。
+        run: python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
+
       - name: 命令行契约回归（73 条黄金基准）
         # ⚠️ HOME 必须是 /home/<当前用户名>：`~` 是 eval 所在 shell 展开的，
         #    黄金基准是在 /home/<用户> 下生成的。
@@ -75,6 +82,16 @@ jobs:
           bash tools/build_deb.sh
           # dpkg-buildpackage 把产物写在仓库目录的上一级
           cp ../puttyplus_*.deb "$GITHUB_WORKSPACE/"
+
+      - name: 核对 deb 的依赖（别再出现 libc6 (>= 2.39)）
+        run: |
+          set -o pipefail
+          dep="$(dpkg-deb -f puttyplus_*.deb Depends)"
+          echo "$dep"
+          if echo "$dep" | grep -qE 'libc6 \(>= 2\.(3[5-9]|[4-9][0-9])'; then
+            echo "::error::deb 的 libc 依赖过高，老系统装不上：$dep"
+            exit 1
+          fi
 
       - name: 收拢二进制并算校验和
         run: |
