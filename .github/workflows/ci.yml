@@ -37,7 +37,9 @@ jobs:
           #      没有字体会起不来（而且本项目界面是中文的）；
           #    openssh-client —— 提供 ssh / ssh-keygen，私钥管理器与终端
           #      spawn 的逻辑会按 PATH 里有没有它们分叉；
-          #    libgl1-mesa-dri —— GSK 的软件渲染后备，headless 下要它。
+          #    libgl1-mesa-dri —— GSK 的软件渲染后备，headless 下要它；
+          #    xauth —— **Debian 的 xvfb 包不依赖它**，而 xvfb-run 找不到
+          #      xauth 就直接 exit 3（"xauth command not found"）。
           apt-get install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
             libgtk-4-dev libvte-2.91-gtk4-dev \
@@ -45,7 +47,7 @@ jobs:
             openssh-client \
             fontconfig fonts-dejavu-core fonts-noto-cjk \
             libgl1-mesa-dri \
-            xvfb debhelper dpkg-dev fakeroot
+            xvfb xauth debhelper dpkg-dev fakeroot
 
       - uses: actions/checkout@v4
 
@@ -132,13 +134,15 @@ jobs:
             else
               code=$?
               echo "$ex: 失败（退出码 $code）"
-              # ⚠️ 注解是单行文本：日志里有 ANSI/控制字符会**把整条注解吃掉**
-              #    （上次就是这样，注解只剩标题、日志没了）⇒ 改用 base64。
-              {
-                echo "::error::$ex 失败（退出码 $code），日志 base64："
-                base64 -w 0 "/tmp/$ex.log" | head -c 8000
-                echo
-              }
+              # ⚠️ 注解是单行文本：日志里有 ANSI/控制字符会**把整条注解吃掉**，
+              #    整条太长也会被丢弃 ⇒ 先 gzip 再 base64，并**分段**发。
+              gzip -c "/tmp/$ex.log" > "/tmp/$ex.gz" 2>/dev/null || true
+              rm -f "/tmp/$ex.part."*
+              split -b 800 -d "/tmp/$ex.gz" "/tmp/$ex.part." 2>/dev/null || true
+              for f in /tmp/$ex.part.*; do
+                [ -f "$f" ] || continue
+                echo "::error::$ex gz日志片段 $(basename "$f" | sed 's/.*\.//') = $(base64 -w 0 "$f")"
+              done
               rc=1
             fi
             echo "::endgroup::"
