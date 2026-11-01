@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（例：v0.1.0）'
+        required: true
+
+permissions:
+  contents: write   # 要建 Release、上传资产
+
+jobs:
+  release:
+    name: 打 tag · 构建 · 发 Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: debian:trixie
+    steps:
+      - name: 装构建依赖
+        # ⚠️ 见 ci.yml 的注释：libudev-dev / 字体 / openssh-client / xauth 都不能少
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl build-essential pkg-config \
+            libgtk-4-dev libvte-2.91-gtk4-dev \
+            libudev-dev \
+            openssh-client \
+            fontconfig fonts-dejavu-core fonts-noto-cjk \
+            libgl1-mesa-dri \
+            xvfb xauth debhelper dpkg-dev fakeroot \
+            gh
+
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust（stable）
+        run: |
+          set -eux
+          export RUSTUP_HOME=/opt/rust/rustup
+          export CARGO_HOME=/opt/rust/cargo
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+          echo "RUSTUP_HOME=/opt/rust/rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=/opt/rust/cargo" >> "$GITHUB_ENV"
+          echo "/opt/rust/cargo/bin" >> "$GITHUB_PATH"
+
+      - name: 缓存 cargo 与 target
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/rust/cargo/registry
+            /opt/rust/cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: 编译（release）
+        run: cargo build --release --locked
+
+      - name: 命令行契约回归（73 条黄金基准）
+        # ⚠️ HOME 必须是 /home/<当前用户名>：`~` 是 eval 所在 shell 展开的，
+        #    黄金基准是在 /home/<用户> 下生成的。
+        run: |
+          me="$(id -un)"
+          mkdir -p "/home/$me"
+          export HOME="/home/$me"
+          bash tools/cli_contract_check.sh
+
+      - name: 打包 deb
+        run: |
+          set -eux
+          bash tools/build_deb.sh
+          # dpkg-buildpackage 把产物写在仓库目录的上一级
+          cp ../puttyplus_*.deb "$GITHUB_WORKSPACE/"
+
+      - name: 收拢二进制并算校验和
+        run: |
+          set -eux
+          mkdir -p dist/pkg
+          cp target/release/puttyplus dist/pkg/puttyplus
+          cp README.md LICENSE dist/pkg/
+          tar -C dist/pkg -czf "$GITHUB_WORKSPACE/dist/puttyplus-linux-x86_64.tar.gz" \
+            puttyplus README.md LICENSE
+          cd dist
+          sha256sum puttyplus_*.deb puttyplus-linux-x86_64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 建 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/dist"
+          cat > notes.md <<'EOF'
+          ## PuTTYPlus 0.1.0
+
+          PuTTY 兼容的 SSH 终端 + 图形化 SFTP + 数据库工作台（Linux / GTK4）。
+
+          **下载**
+
+          - `puttyplus_<版本>_amd64.deb` —— Debian / Ubuntu 等发行版的安装包
+            （依赖 GTK ≥ 4.18、VTE ≥ 0.80）
+          - `puttyplus-linux-x86_64.tar.gz` —— 免安装的单个可执行文件
+            （SSH 与加密全静态，只要目标机器有 GTK4 / VTE4）
+
+          校验和见 `SHA256SUMS`。
+
+          **特性**：命令行与 PuTTY 兼容（可顶替 PuTTY 部署在堡垒机上）· 终端 + SFTP
+          双栏同窗口 · 数据库工作台（PostgreSQL / MySQL，通道复用当前 SSH 连接）·
+          凭据库（argon2 + AES-GCM）· 会话录制与回放（asciicast）· 串口会话。
+
+          详见 [README](https://github.com/fwt11/puttyplus#readme)。
+          EOF
+          # workflow_dispatch 时 tag 可能还没打，先确保它存在
+          git tag -f "$TAG" >/dev/null 2>&1 || true
+          git push origin "refs/tags/$TAG" --force >/dev/null 2>&1 || true
+          gh release create "$TAG" \
+            --title "PuTTYPlus $TAG" \
+            --notes-file notes.md \
+            --generate-notes \
+            puttyplus_*.deb puttyplus-linux-x86_64.tar.gz SHA256SUMS \
+            || gh release upload "$TAG" --clobber \
+                 puttyplus_*.deb puttyplus-linux-x86_64.tar.gz SHA256SUMS
