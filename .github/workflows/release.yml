@@ -33,7 +33,7 @@ jobs:
             fontconfig fonts-dejavu-core fonts-noto-cjk \
             libgl1-mesa-dri \
             xvfb xauth debhelper dpkg-dev fakeroot \
-            gh
+            jq
 
       - uses: actions/checkout@v4
 
@@ -92,12 +92,16 @@ jobs:
           cat SHA256SUMS
 
       - name: 建 Release 并上传资产
+        # ⚠️ 用 REST API 而不是 gh CLI：容器里 gh 的认证/参数组合容易出岔子，
+        #    而 API 的每一步都能看到状态码。失败时把响应体做成注解回传。
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          set -eux
+          set -uo pipefail
           cd "$GITHUB_WORKSPACE/dist"
+
           cat > notes.md <<'EOF'
           ## PuTTYPlus 0.1.0
 
@@ -105,7 +109,7 @@ jobs:
 
           **下载**
 
-          - `puttyplus_<版本>_amd64.deb` —— Debian / Ubuntu 等发行版的安装包
+          - `puttyplus_0.1.0-1_amd64.deb` —— Debian / Ubuntu 等发行版的安装包
             （依赖 GTK ≥ 4.18、VTE ≥ 0.80）
           - `puttyplus-linux-x86_64.tar.gz` —— 免安装的单个可执行文件
             （SSH 与加密全静态，只要目标机器有 GTK4 / VTE4）
@@ -118,13 +122,94 @@ jobs:
 
           详见 [README](https://github.com/fwt11/puttyplus#readme)。
           EOF
-          # workflow_dispatch 时 tag 可能还没打，先确保它存在
-          git tag -f "$TAG" >/dev/null 2>&1 || true
-          git push origin "refs/tags/$TAG" --force >/dev/null 2>&1 || true
-          gh release create "$TAG" \
-            --title "PuTTYPlus $TAG" \
-            --notes-file notes.md \
-            --generate-notes \
-            puttyplus_*.deb puttyplus-linux-x86_64.tar.gz SHA256SUMS \
-            || gh release upload "$TAG" --clobber \
-                 puttyplus_*.deb puttyplus-linux-x86_64.tar.gz SHA256SUMS
+
+          api() {  # api <method> <url> [json-body]
+            local method="$1" url="$2" body="${3:-}"
+            if [ -n "$body" ]; then
+              curl -sS -o /tmp/api.out -w '%{http_code}' -X "$method" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -H "Content-Type: application/json" \
+                -d "$body" "$url"
+            else
+              curl -sS -o /tmp/api.out -w '%{http_code}' -X "$method" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "$url"
+            fi
+          }
+
+          dump() {  # 把 /tmp/api.out 做成注解（gzip+base64 分段，控制字符不会吃掉整条）
+            gzip -c /tmp/api.out > /tmp/api.gz 2>/dev/null || true
+            rm -f /tmp/api.part.*
+            split -b 800 -d /tmp/api.gz /tmp/api.part. 2>/dev/null || true
+            for f in /tmp/api.part.*; do
+              [ -f "$f" ] || continue
+              echo "::error::API 响应片段 $(basename "$f" | sed 's/.*\.//') = $(base64 -w 0 "$f")"
+            done
+            echo "::error::API 响应原文（前 800 字）：$(head -c 800 /tmp/api.out | sed 's/%/%25/g' | tr '\n' ' ')"
+          }
+
+          # 1) tag 必须已经推到远端（否则 API 会拿默认分支的 HEAD 建 tag）
+          echo "::group::查 tag"
+          code=$(api GET "https://api.github.com/repos/$REPO/git/ref/tags/$TAG")
+          echo "tag 状态码：$code"
+          if [ "$code" != "200" ]; then
+            dump
+            echo "::error::tag $TAG 不在远端，先 push 再发版"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          # 2) 建 Release（已存在就复用它的 id）
+          echo "::group::建 Release"
+          code=$(api GET "https://api.github.com/repos/$REPO/releases/tags/$TAG")
+          if [ "$code" = "200" ]; then
+            rid=$(jq -r '.id' /tmp/api.out)
+            echo "Release 已存在，id=$rid"
+          else
+            body=$(jq -n --arg tag "$TAG" --arg name "PuTTYPlus $TAG" \
+                   --rawfile body notes.md \
+                   '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:false}')
+            code=$(api POST "https://api.github.com/repos/$REPO/releases" "$body")
+            echo "建 Release 状态码：$code"
+            if [ "$code" != "201" ] && [ "$code" != "200" ]; then
+              dump
+              exit 1
+            fi
+            rid=$(jq -r '.id' /tmp/api.out)
+          fi
+          echo "::endgroup::"
+
+          # 3) 上传资产（同名先删掉，否则 422）
+          echo "::group::上传资产"
+          upload_url=$(jq -r '.upload_url' /tmp/api.out)
+          [ -n "$upload_url" ] && [ "$upload_url" != "null" ] || {
+            upload_url="https://uploads.github.com/repos/$REPO/releases/$rid/assets"
+          }
+          upload_url=$(echo "$upload_url" | sed 's/{[^}]*}//')
+          for f in puttyplus_*.deb puttyplus-linux-x86_64.tar.gz SHA256SUMS; do
+            [ -f "$f" ] || continue
+            old_id=$(api GET "https://api.github.com/repos/$REPO/releases/$rid/assets" \
+                     >/dev/null 2>&1; jq -r --arg n "$f" '.[] | select(.name==$n) | .id' /tmp/api.out 2>/dev/null | head -1)
+            if [ -n "$old_id" ] && [ "$old_id" != "null" ]; then
+              api DELETE "https://api.github.com/repos/$REPO/releases/assets/$old_id" >/dev/null || true
+            fi
+            code=$(curl -sS -o /tmp/up.out -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$f" "$upload_url?name=$f")
+            echo "上传 $f：$code"
+            if [ "$code" != "201" ] && [ "$code" != "200" ]; then
+              gzip -c /tmp/up.out > /tmp/up.gz 2>/dev/null || true
+              echo "::error::上传 $f 失败（$code）：$(head -c 500 /tmp/up.out | tr '\n' ' ')"
+              exit 1
+            fi
+          done
+          echo "::endgroup::"
+
+          echo "Release 就绪：https://github.com/$REPO/releases/tag/$TAG"
