@@ -150,7 +150,16 @@ jobs:
           exit $rc
 
       - name: 命令行契约回归（73 条黄金基准）
-        run: bash tools/cli_contract_check.sh
+        # ⚠️ **HOME 必须是 /home/<当前用户名>**：脚本里 `-i ~/.ssh/id_rsa` 的
+        #    `~` 是**eval 所在的那个 shell** 展开的（既不是 HOME 环境变量，
+        #    也不是程序自己展开）⇒ 输出的 keyfile 路径长成 $HOME/.ssh/...。
+        #    黄金基准是在 /home/<用户> 下生成的 ⇒ HOME 不是 /home/<用户> 时
+        #    路径形状对不上，73 条全 DIFF。
+        run: |
+          me="$(id -un)"
+          mkdir -p "/home/$me"
+          export HOME="/home/$me"
+          bash tools/cli_contract_check.sh
 
       - name: 上传可执行文件
         uses: actions/upload-artifact@v4
