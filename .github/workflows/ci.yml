@@ -112,20 +112,38 @@ jobs:
         #    主线程里能成功 ⇒ UI 断言真的会跑（单测里那几个会按设计跳过）。
         # ⚠️ 失败时把输出尾部做成注解（run 级日志下载要 admin，拿不到）。
         run: |
-          set -o pipefail
+          set -uo pipefail
+          # ⚠️ HOME 与 ini 全指到临时目录：example 会往 ini 里写东西
+          export HOME=/tmp/pp-ci-home
+          mkdir -p "$HOME"
+          export PUTTYPLUS_SETTINGS_INI="$HOME/settings.ini"
+          export PUTTYPLUS_DB_INI="$HOME/databases.ini"
+          export PUTTYPLUS_CONN_INI="$HOME/connections.ini"
+          export PUTTYPLUS_HIST_INI="$HOME/history.ini"
+          export PUTTYPLUS_COLS_INI="$HOME/columns.ini"
+          export PUTTYPLUS_RECENT_INI="$HOME/recent.ini"
+          export PUTTYPLUS_VAULT="$HOME/credentials.vault"
+          rc=0
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke; do
             echo "::group::$ex"
-            timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
-              2>&1 | tee "/tmp/$ex.log" || {
-                echo "::endgroup::"
-                {
-                  echo "::error::$ex 失败，输出尾部："
-                  tail -c 3000 "/tmp/$ex.log" | sed 's/%/%25/g' | tr '\n' '%0A'
-                }
-                exit 1
+            if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
+                 > "/tmp/$ex.log" 2>&1; then
+              echo "$ex: OK"
+            else
+              code=$?
+              echo "$ex: 失败（退出码 $code）"
+              # ⚠️ 注解是单行文本：日志里有 ANSI/控制字符会**把整条注解吃掉**
+              #    （上次就是这样，注解只剩标题、日志没了）⇒ 改用 base64。
+              {
+                echo "::error::$ex 失败（退出码 $code），日志 base64："
+                base64 -w 0 "/tmp/$ex.log" | head -c 8000
+                echo
               }
+              rc=1
+            fi
             echo "::endgroup::"
           done
+          exit $rc
 
       - name: 命令行契约回归（73 条黄金基准）
         run: bash tools/cli_contract_check.sh
