@@ -38,29 +38,36 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 装 Rust（stable）
+        # ⚠️ 装到**固定路径** /opt/rust：容器 job 里 HOME 不是 /root
+        #    （runner 会设成 /github/home），硬编码 $HOME/.cargo 会找不到。
         run: |
           set -eux
+          export RUSTUP_HOME=/opt/rust/rustup
+          export CARGO_HOME=/opt/rust/cargo
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
-          echo "CARGO_HOME=/root/.cargo" >> "$GITHUB_ENV"
-          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
+            | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+          echo "RUSTUP_HOME=/opt/rust/rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=/opt/rust/cargo" >> "$GITHUB_ENV"
+          echo "/opt/rust/cargo/bin" >> "$GITHUB_PATH"
 
       - name: 缓存 cargo 与 target
         uses: actions/cache@v4
         with:
           path: |
-            /root/.cargo/registry
-            /root/.cargo/git
+            /opt/rust/cargo/registry
+            /opt/rust/cargo/git
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: 打印工具链与依赖版本
+        # 只是给人看的诊断，不让它把整个 CI 拖红（真缺库编译那步会自己报错）
         run: |
-          set -eux
-          rustc --version
-          cargo --version
-          pkg-config --modversion gtk4
-          pkg-config --modversion vte-2.91-gtk4
+          rustc --version || echo "!! 没有 rustc"
+          cargo --version || echo "!! 没有 cargo"
+          pkg-config --modversion gtk4 || echo "!! 找不到 gtk4.pc"
+          pkg-config --modversion vte-2.91-gtk4 || echo "!! 找不到 vte-2.91-gtk4.pc"
+          echo "HOME=$HOME"
+          echo "PATH=$PATH"
 
       - name: 编译（release）
         run: cargo build --release --locked
