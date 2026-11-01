@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: 构建 · 测试 · 打包
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # ⚠️ 用 Debian 13 (trixie) 容器：它带 GTK 4.18.6 / VTE 0.80.1，
+    #    正好是 debian/control 里声明的依赖下限（Ubuntu runner 只有 GTK 4.14，
+    #    编译期就会被 gtk4-sys 的版本断言挡下）。
+    container:
+      image: debian:trixie
+    steps:
+      - name: 装构建依赖
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl build-essential pkg-config \
+            libgtk-4-dev libvte-2.91-gtk4-dev \
+            xvfb debhelper dpkg-dev fakeroot
+
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust（stable）
+        run: |
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "CARGO_HOME=/root/.cargo" >> "$GITHUB_ENV"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: 缓存 cargo 与 target
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: 打印工具链与依赖版本
+        run: |
+          set -eux
+          rustc --version
+          cargo --version
+          pkg-config --modversion gtk4
+          pkg-config --modversion vte-2.91-gtk4
+
+      - name: 编译（release）
+        run: cargo build --release --locked
+
+      - name: 单元测试
+        run: xvfb-run -a cargo test --lib --locked
+
+      - name: 命令行契约回归（73 条黄金基准）
+        run: bash tools/cli_contract_check.sh
+
+      - name: 上传可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: puttyplus-linux-x86_64
+          path: target/release/puttyplus
+          if-no-files-found: error
+
+      - name: 打包 deb
+        run: |
+          set -eux
+          bash tools/build_deb.sh
+          # dpkg-buildpackage 把产物写在**仓库目录的上一级**，搬进工作区再上传
+          cp ../puttyplus_*.deb "$GITHUB_WORKSPACE/"
+
+      - name: 上传 deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: puttyplus-deb-amd64
+          path: puttyplus_*.deb
+          if-no-files-found: error

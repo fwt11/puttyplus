@@ -1,5 +1,7 @@
 # PuTTYPlus
 
+[![CI](https://github.com/fwt11/puttyplus/actions/workflows/ci.yml/badge.svg)](https://github.com/fwt11/puttyplus/actions/workflows/ci.yml)
+
 **PuTTY 兼容的 SSH 终端 + 图形化 SFTP + 数据库工作台** —— Linux 桌面上的单文件程序，界面全中文。
 
 技术栈：GTK4 + VTE4 + russh + russh-sftp。SSH/SFTP 协议栈与加密库全部静态打进一个
@@ -215,6 +217,20 @@ cargo run --example db_ui_smoke               # GUI 冒烟（无桌面可用 xvf
 bash tools/cli_contract_check.sh              # 命令行契约回归（73 条基准）
 ./target/release/puttyplus --sftp-selftest <host> <port> <user> [password]
 ```
+
+## 持续集成
+
+`.github/workflows/ci.yml` 在每次 push 到 `main`、提 PR、或手动触发时跑：
+
+- 在 **Debian 13 (trixie)** 容器里编译 —— 它带 GTK 4.18.6 / VTE 0.80.1，
+  正好是 `debian/control` 里声明的依赖下限（Ubuntu runner 只有 GTK 4.14，
+  编译期就会被版本断言挡下）；
+- 跑全部单元测试（`xvfb-run` 提供显示环境）；
+- 跑命令行契约回归（73 条黄金基准）；
+- 打成 deb 包。
+
+产物在 Actions 页面直接下载：`puttyplus-linux-x86_64`（可执行文件）与
+`puttyplus-deb-amd64`（deb 包）。
 
 ## 许可
 
