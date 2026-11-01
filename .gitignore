@@ -14,6 +14,14 @@
 *.changes
 *.buildinfo
 
+# 交付用的 release 可执行文件（放进仓库根的 release/，不进 git）
+/release/
+
+# C 版遗留的编译产物
+*.o
+puttyplus
+test_follow
+
 # 编辑器与系统
 *.swp
 .DS_Store
