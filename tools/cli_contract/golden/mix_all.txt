@@ -1,0 +1,15 @@
+--- argv ---
+-ssh -l ops -P 2222 -pw pw -i ~/.ssh/id_rsa -C -v -4 -N -L 9000:127.0.0.1:9000 -R 2222:h:22 -D 1080 -title T -proxycmd 'ssh -W %h:%p gw' -- host.example.com remote cmd
+--- stdout ---
+proto=ssh host=host.example.com port=2222 user=ops
+password=<set> keyfile=/home/<ME>/.ssh/id_rsa session=-
+title=T
+flags: N=1 t=0 T=0 v4=1 v6=0 C=1 v=1 batch=0
+forwards=3 remote_cmd=<set>
+  fwd[0]=L:9000:127.0.0.1:9000
+  fwd[1]=R:2222:h:22
+  fwd[2]=D:1080
+--- stderr ---
+
+--- exit ---
+0

@@ -1,0 +1,45 @@
+[package]
+name = "puttyplus"
+version = "0.1.0"
+edition = "2024"
+description = "PuTTY 兼容的 SSH 终端 + SFTP 图形客户端（Rust 重构版）"
+
+[[bin]]
+name = "puttyplus"
+path = "src/main.rs"
+
+[profile.release]
+# 体积优化：strip 符号 + 全程序 LTO + abort/size 档（Rust 版 SSH/crypto
+# 全静态链接，与 C 版共享库的 115KB 不可直接比，这里尽量压缩差距）
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = "s"
+
+[dependencies]
+gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
+glib = "0.22"
+vte4 = { version = "0.10", features = ["v0_80"] }
+russh = { version = "0.63", default-features = false, features = ["rsa", "flate2", "ring"] }
+russh-sftp = "3.0"
+tokio = { version = "1", features = ["macros", "time", "sync", "io-util", "fs", "process", "net"] }
+zeroize = "1"
+thiserror = "2"
+chrono = "0.4"
+sha1 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+async-channel = "2"
+libc = "0.2"
+serialport = "4"
+argon2 = "0.6"
+aes-gcm = "0.11"
+getrandom = "0.4.3"
+ssh-key = "0.7.0-rc.11"
+rand_core = "0.10"
+# 数据库通道（7.2）：PostgreSQL 驱动接受任意 AsyncRead + AsyncWrite，
+# 正好接 SSH direct-tcpip 通道；TLS 暂用 NoTls（SSH 本身已加密）
+tokio-postgres = "0.7"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
+futures-util = { version = "0.3", default-features = false }

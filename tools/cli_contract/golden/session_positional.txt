@@ -1,0 +1,15 @@
+--- argv ---
+Demo
+--- stdout ---
+proto=ssh host=192.168.100.100 port=2222 user=ops
+password=- keyfile=~/.ssh/id_rsa session=Demo
+title=-
+flags: N=0 t=0 T=0 v4=0 v6=0 C=0 v=0 batch=0
+forwards=3 remote_cmd=-
+  fwd[0]=L:9000:127.0.0.1:9000
+  fwd[1]=D:1080
+  fwd[2]=R:2222:h:22
+--- stderr ---
+
+--- exit ---
+0

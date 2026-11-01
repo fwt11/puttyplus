@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+# 把 Rust 主线打成 deb（在本目录上一级即 rust/ 里执行）：
+#     dpkg-buildpackage -us -uc -b
+# 构建依赖：cargo / pkg-config / build-essential / libgtk-4-dev /
+#            libvte-2.91-gtk4-dev
+#
+# release profile（Cargo.toml）已带 strip + fat LTO + opt-level=s +
+# panic=abort，产物是单文件、静态打进 SSH/crypto 实现，不依赖
+# libssh/libcrypto，只需 GTK4 / VTE4 运行库。
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+# 单元测试由 tools/build_deb.sh 单独跑（cargo test 会另编一份依赖，
+# 打包阶段不重复，避免每次打包多花几分钟）。
+override_dh_auto_test:
+
+override_dh_auto_build:
+	cargo build --release --locked
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/puttyplus \
+		debian/puttyplus/usr/bin/puttyplus
+	install -D -m 0644 debian/puttyplus.desktop \
+		debian/puttyplus/usr/share/applications/puttyplus.desktop
+	install -D -m 0644 debian/puttyplus.1 \
+		debian/puttyplus/usr/share/man/man1/puttyplus.1
+	install -D -m 0644 README.md \
+		debian/puttyplus/usr/share/doc/puttyplus/README.md
+	install -D -m 0644 debian/icons/puttyplus.png \
+		debian/puttyplus/usr/share/icons/hicolor/128x128/apps/puttyplus.png
+	install -D -m 0644 debian/icons/puttyplus-64.png \
+		debian/puttyplus/usr/share/icons/hicolor/64x64/apps/puttyplus.png
+	install -D -m 0644 debian/icons/puttyplus-48.png \
+		debian/puttyplus/usr/share/icons/hicolor/48x48/apps/puttyplus.png
+	install -D -m 0644 debian/icons/puttyplus-24.png \
+		debian/puttyplus/usr/share/icons/hicolor/24x24/apps/puttyplus.png
+	install -D -m 0644 debian/icons/puttyplus-16.png \
+		debian/puttyplus/usr/share/icons/hicolor/16x16/apps/puttyplus.png
+
+# 保留 target/ 里的增量缓存（下次打包快很多），只清暂存目录。
+override_dh_auto_clean:
+	rm -rf debian/puttyplus
+
+# glib 在 Debian trixie 是 libglib2.0-0t64，在 Deepin 25 / 老发行版仍是
+# libglib2.0-0：control 里手工声明「二选一」，所以把 dpkg 自动解析出的那
+# 个从 ${shlibs:Depends} 里排除掉（否则会被简化成单一分支，t64 上装不上）。
+override_dh_shlibdeps:
+	dh_shlibdeps -- -xlibglib2.0-0 -xlibglib2.0-0t64

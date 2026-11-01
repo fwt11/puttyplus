@@ -1,0 +1,1785 @@
+//! SFTP 双栏面板（对应 C 版 sftp_panel.c 的主体）。
+//!
+//! 线程模型：UI 状态集中在 `Rc<PanelState>`（仅主线程访问）；
+//! 连接与传输在 worker 线程（见 worker.rs），通过 enum 消息往来。
+
+// TreeView/ListStore 自 GTK 4.10 起标记弃用（推荐 ListView/ColumnView）。
+// 为与 C 版行为/代码结构保持一致，第一版沿用旧 API。
+#![allow(deprecated)]
+
+pub mod dbconn;
+pub mod dbgrid;
+pub mod dbimport;
+pub mod dbtransfer;
+pub mod erview;
+pub mod dbtree;
+pub mod dbui;
+pub mod closeguard;
+pub mod dialogs;
+pub mod fileedit;
+pub mod fwdmgr;
+pub mod mirrorui;
+pub mod namecell;
+pub mod pane;
+pub mod quickcmd;
+pub mod queue;
+pub mod relay;
+pub mod subtabs;
+pub mod relayui;
+pub mod sessopt;
+pub mod syntax;
+pub mod worker;
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::mpsc::Sender;
+
+use gtk::gdk;
+use gtk::gio;
+use gtk::glib;
+use gtk::prelude::*;
+use zeroize::Zeroizing;
+
+use crate::args::ConnOptions;
+use crate::theme::State;
+use crate::util::{find_program_in_path, path_basename, path_join, path_parent};
+
+use pane::Pane;
+use queue::{QueueItem, QueueUi};
+use worker::{FwdView, PanelEvent, SimpleOp, WorkerCmd, XferKind, XferSpec, XferState};
+
+pub struct PanelState {
+    pub opts: ConnOptions,
+    /// 会话期保存的密码（来自 -pw 或用户输入），释放时抹零
+    pub pw: RefCell<Option<Zeroizing<String>>>,
+    pub conn_ok: Cell<bool>,
+    pub tx: RefCell<Option<Sender<WorkerCmd>>>,
+
+    pub root: gtk::Paned,
+    pub remote_pane: RefCell<Option<Rc<Pane>>>,
+    pub local_pane: RefCell<Option<Rc<Pane>>>,
+    pub remote_cwd: RefCell<String>,
+    pub remote_home: RefCell<Option<String>>,
+    pub local_cwd: RefCell<String>,
+
+    /* 外部文件变化自动刷新 */
+    /// 本地面板当前目录的 GIO 监视器（命令行 rm/touch 等即时反映）
+    pub local_monitor: RefCell<Option<gio::FileMonitor>>,
+    /// 监视器对应的目录，目录不变就不重建
+    pub local_monitor_path: RefCell<String>,
+    /// 本地刷新去抖：一次变更可能连着来好多个事件
+    pub local_refresh_pending: Cell<bool>,
+    /// 远端当前目录上次看到的 mtime（SFTP stat）
+    pub remote_mtime: Cell<i64>,
+    /// 已发出 DirStamp、等 worker 回包，避免堆积请求
+    pub remote_stat_pending: Cell<bool>,
+    /// 远程列表请求 id：只接受最新一次，防止慢的旧回包把目录改回去
+    pub next_list: Cell<u64>,
+    pub last_list: Cell<u64>,
+    /// 最新一次 List 还在路上；期间不要发目录 stat 轮询
+    pub remote_list_pending: Cell<bool>,
+
+    pub rreconnect: RefCell<Option<gtk::Button>>,
+    pub follow_btn: RefCell<Option<gtk::ToggleButton>>,
+
+    /* 终端目录跟随 */
+    pub follow: Cell<bool>,
+    pub follow_pending: Cell<bool>,
+    pub term_spawn_wall: Cell<i64>,
+    /// 当前会话的保活间隔（秒）；会话选项改完存这里，重连时随 Connect 下发
+    pub keepalive_sec: Cell<u32>,
+    /// 认证优先级（2.2）；同上，重连时随 Connect 下发
+    pub auth_order: Cell<crate::args::AuthOrder>,
+    /// 本标签的终端（会话选项对话框要即时改字号/响铃）
+    pub term: RefCell<Option<vte4::Terminal>>,
+    pub exec_fail: Cell<i32>,
+    pub follow_poll_dead: Cell<bool>,
+    pub follow_last: RefCell<Option<String>>,
+    pub dead: Cell<bool>, // shutdown 后停轮询
+
+    /* 传输队列 */
+    pub next_id: Cell<u64>,
+    /// 上传预检请求 id（每次 CheckExists 唯一，避免并发批次互相覆盖）
+    pub next_check: Cell<u64>,
+    pub items: RefCell<Vec<QueueItem>>,
+    pub queue_ui: RefCell<Option<QueueUi>>,
+
+    /* 进程内端口转发（worker → Forwards 事件回填；状态栏摘要、tooltip 明细、
+       转发管理窗口共用同一份视图快照，含停用项与失败原因） */
+    pub fwd_views: RefCell<Vec<FwdView>>,
+    pub fwd_ui: RefCell<Option<fwdmgr::FwdUi>>,
+
+    /// 数据库窗口（7.2，懒创建，hide-on-close）
+    pub db_ui: RefCell<Option<dbui::DbUi>>,
+
+    /// **还活着的终端个数**（阶段 65 / 审计 P0-4）。
+    ///
+    /// 分屏 / 额外终端页签 ⇒ 一个会话可能有多个终端 ⇒ 记个数而不是布尔。
+    /// 子进程起来 +1、退出 -1。
+    pub term_alive_count: Cell<i32>,
+    /// **起过的终端**（有没有成功起来过）。
+    ///
+    /// 用来区分「终端掉了」（Dead）和「终端还没起来」（Unknown）——
+    /// 后者不该报成故障。
+    pub term_ever_alive: Cell<bool>,
+
+    /// **当前连着库的数据库连接名**（阶段 57：两棵树上的活跃标记用）。
+    ///
+    /// 为什么不直接读 `db_ui` 里的 `connected`：那边是工作台自己的状态，
+    /// 读它要借 `db_ui` 的 RefCell——而工作台的事件处理**正借着**它，
+    /// 借两次直接 panic。这里存一份副本：谁改谁写，别的模块只读。
+    pub db_active: RefCell<Option<String>>,
+
+    /// **当场输入 / 临时连接**的数据库密码（按连接名存，不进凭据库）。
+    ///
+    /// **为什么挂在面板状态上、而不是工作台里**：工作台页签是可以被用户
+    /// 关掉的（关掉就自动断开），而密码是**会话级**的东西——用户刚输过
+    /// 一次密码，关掉页签再打开**不该再问一遍**。挂在工作台上会跟着
+    /// 页签一起没了（实测 e2e 里表现为"重新打开就要密码"）。
+    ///
+    /// **按连接名分开存**：一条连接的密码不能串到另一条上去——用户给 A
+    /// 输了密码，切到 B 时不能拿 A 的密码去连 B。
+    pub db_pass: RefCell<HashMap<String, zeroize::Zeroizing<String>>>,
+
+    /// 目录镜像窗口（懒创建，hide-on-close）；worker 的扫描结果回填到它
+    pub mirror_ui: RefCell<Option<mirrorui::MirrorUi>>,
+
+    /// 已打开的本地/远程文本查看/编辑器窗口（每个文件一个独立窗口）
+    pub file_edits: RefCell<Vec<Rc<fileedit::FileEdit>>>,
+    /// 正在等 worker 回包的远端文件读取：id → 是否只读（查看 vs 编辑）
+    pub pending_file_reads: RefCell<HashMap<u64, bool>>,
+
+    /* 拖拽源记录（同面板自拖忽略） */
+    pub drag_from: Cell<Option<bool>>,
+
+    /// 状态变化钩子（标签栏的状态点用）：面板不关心谁在听。
+    pub status_hook: RefCell<Option<Box<dyn Fn(State)>>>,
+
+    /// 当前状态行的内容（级别 / 文案 / tooltip）。
+    ///
+    /// 存起来是为了**主题切换后能重画**：状态色来自 `theme::state_hex`，
+    /// 是写进 Pango markup 的字符串，不跟着 CSS 变。
+    pub status: RefCell<Option<(State, String, String)>>,
+
+    /// 上传两阶段预检：请求 id → 等待结果的批次。
+    /// 用 map 而不是单个 Vec：第一个预检还没回来时又提交第二批，
+    /// 两批不能互相覆盖。
+    pub pending_uploads: RefCell<HashMap<u64, Vec<(String, String, bool)>>>,
+    /// 本连接页的子标签（终端 / 数据库 / 文件编辑器）
+    ///
+    /// **阶段 12**：文件编辑器与数据库工作台从独立弹窗改成**连接页里的子标签**
+    /// （对标 XTerminal 的第二层标签栏）——弹窗把屏幕切碎了，数据库工作台
+    /// 那点宽度根本不够用。
+    pub sub_tabs: RefCell<Option<Rc<subtabs::SubTabs>>>,
+}
+
+impl PanelState {
+    pub fn pane(&self, remote: bool) -> Rc<Pane> {
+        if remote {
+            Rc::clone(self.remote_pane.borrow().as_ref().unwrap())
+        } else {
+            Rc::clone(self.local_pane.borrow().as_ref().unwrap())
+        }
+    }
+
+    pub fn pane_cwd(&self, remote: bool) -> String {
+        if remote {
+            self.remote_cwd.borrow().clone()
+        } else {
+            self.local_cwd.borrow().clone()
+        }
+    }
+
+    pub fn set_pane_show_hidden(&self, remote: bool, v: bool) {
+        self.pane(remote).show_hidden.set(v);
+    }
+
+    pub fn attach_pane_widget(&self, remote: bool, w: gtk::Box) {
+        if remote {
+            self.root.set_start_child(Some(&w));
+        } else {
+            self.root.set_end_child(Some(&w));
+        }
+    }
+
+    /// 顶层窗口（对话框父窗口用）。
+    pub fn topwin(&self) -> Option<gtk::Window> {
+        self.root
+            .ancestor(gtk::Window::static_type())
+            .and_downcast::<gtk::Window>()
+    }
+
+    /// 本连接页的子标签容器（阶段 12）。
+    pub fn sub_tabs(&self) -> Option<Rc<subtabs::SubTabs>> {
+        self.sub_tabs.borrow().clone()
+    }
+}
+
+pub struct SftpPanel {
+    pub st: Rc<PanelState>,
+}
+
+impl SftpPanel {
+    pub fn new(opts: &ConnOptions) -> SftpPanel {
+        let st = Rc::new(PanelState {
+            pw: RefCell::new(opts.password.clone()),
+            conn_ok: Cell::new(false),
+            tx: RefCell::new(None),
+            root: gtk::Paned::new(gtk::Orientation::Vertical),
+            remote_pane: RefCell::new(None),
+            local_pane: RefCell::new(None),
+            remote_cwd: RefCell::new("/".into()),
+            remote_home: RefCell::new(None),
+            local_cwd: RefCell::new(String::new()),
+            local_monitor: RefCell::new(None),
+            local_monitor_path: RefCell::new(String::new()),
+            local_refresh_pending: Cell::new(false),
+            remote_mtime: Cell::new(0),
+            remote_stat_pending: Cell::new(false),
+            next_list: Cell::new(1),
+            last_list: Cell::new(0),
+            remote_list_pending: Cell::new(false),
+            rreconnect: RefCell::new(None),
+            follow_btn: RefCell::new(None),
+            follow: Cell::new(true),
+            follow_pending: Cell::new(false),
+            term_spawn_wall: Cell::new(0),
+            keepalive_sec: Cell::new(opts.keepalive_sec),
+            auth_order: Cell::new(opts.auth_order),
+            term: RefCell::new(None),
+            exec_fail: Cell::new(0),
+            follow_poll_dead: Cell::new(false),
+            follow_last: RefCell::new(None),
+            dead: Cell::new(false),
+            next_id: Cell::new(1),
+            next_check: Cell::new(1),
+            items: RefCell::new(Vec::new()),
+            queue_ui: RefCell::new(None),
+            mirror_ui: RefCell::new(None),
+            file_edits: RefCell::new(Vec::new()),
+            pending_file_reads: RefCell::new(HashMap::new()),
+            fwd_views: RefCell::new(Vec::new()),
+            fwd_ui: RefCell::new(None),
+            db_ui: RefCell::new(None),
+            term_alive_count: Cell::new(0),
+            term_ever_alive: Cell::new(false),
+            db_active: RefCell::new(None),
+            db_pass: RefCell::new(HashMap::new()),
+            drag_from: Cell::new(None),
+            status_hook: RefCell::new(None),
+            status: RefCell::new(None),
+            pending_uploads: RefCell::new(HashMap::new()),
+            sub_tabs: RefCell::new(None),
+            opts: opts.clone(),
+        });
+
+        // 本地起始目录：PUTTYPLUS_LOCALDIR → 上次关闭时的目录
+        //              → ~/Downloads → ~
+        let mut local = std::env::var("PUTTYPLUS_LOCALDIR").unwrap_or_default();
+        if local.is_empty() {
+            local = crate::settings::last_local_dir()
+                .filter(|p| usable_local_dir(p))
+                .unwrap_or_else(default_local_dir);
+        }
+        *st.local_cwd.borrow_mut() = local;
+
+        st.root.set_position(420); // 远程/本地 ≈ 55:45
+        let remote_pane = Rc::new(pane::build_pane(&st, true));
+        let local_pane = Rc::new(pane::build_pane(&st, false));
+        *st.remote_pane.borrow_mut() = Some(remote_pane);
+        *st.local_pane.borrow_mut() = Some(local_pane);
+
+        fill_local_pane(&st);
+
+        // worker 线程 + 事件通道（glib 0.22 已移除 MainContext::channel，
+        // 用 async-channel + 主线程 spawn_local 循环替代）
+        let (tx, rx) = std::sync::mpsc::channel::<WorkerCmd>();
+        let (ui_tx, ui_rx) = async_channel::unbounded::<PanelEvent>();
+        // 转发承接策略：终端 spawn 的 ssh/plink 已通过 -L/-R/-D argv 承接
+        // 转发，进程内再绑同一端口只会 EADDRINUSE 撞车。进程内转发只承接
+        // 终端不带的情形（找不到 ssh/plink、非 SSH 协议），以及后续转发
+        // 管理 UI 动态添加的规则（不经过 ssh argv，天然无冲突）。
+        let worker_forwards = if opts.is_ssh()
+            && (find_program_in_path("plink").is_some()
+                || find_program_in_path("ssh").is_some())
+        {
+            Vec::new()
+        } else {
+            opts.forwards.clone()
+        };
+        worker::spawn_worker(
+            opts.host.clone(),
+            opts.port,
+            opts.user.clone(),
+            opts.proxycmd.clone(),
+            worker_forwards,
+            opts.inproc_forwards.clone(),
+            rx,
+            ui_tx,
+        );
+        *st.tx.borrow_mut() = Some(tx);
+
+        let st_loop = Rc::clone(&st);
+        glib::MainContext::default().spawn_local(async move {
+            loop {
+                match ui_rx.recv().await {
+                    Ok(ev) => handle_event(&st_loop, ev),
+                    Err(_) => break, // sender 全部释放
+                }
+            }
+        });
+
+        if opts.is_ssh() && !opts.host.is_empty() {
+            set_remote_sensitive(&st, false);
+            set_remote_status(
+                &st,
+                State::Warn,
+                &format!("正在连接 {}@{}:{}…", opts.user, opts.host, opts.port),
+            );
+            submit_connect(&st);
+        } else {
+            set_remote_sensitive(&st, false);
+            set_remote_status(&st, State::Err, "仅 SSH 协议支持文件传输");
+            if let Some(b) = st.rreconnect.borrow().as_ref() {
+                b.set_sensitive(false);
+            }
+        }
+
+        // 目录跟随轮询（默认 2 秒；C 对照基线是 4 秒。PUTTYPLUS_FOLLOW_MS 可调）
+        // 上一次 exec 没回来时下面的回调会跳过这一拍（follow_pending），
+        // 所以慢链路上不会把命令越堆越多。
+        let mut ms: u64 = 2000;
+        if let Ok(fm) = std::env::var("PUTTYPLUS_FOLLOW_MS") {
+            ms = crate::util::atoi_like(&fm).max(0) as u64;
+        }
+        if ms > 0 {
+            let st2 = Rc::clone(&st);
+            glib::timeout_add_local(std::time::Duration::from_millis(ms), move || {
+                follow_poll_cb(&st2)
+            });
+        }
+
+        // 远端目录自动刷新：SFTP stat 当前目录，mtime 变了就静默重列。
+        // 不用每次全量 read_dir；PUTTYPLUS_WATCH_MS 可调（0 = 关闭，测试用）。
+        let mut watch_ms: u64 = 2500;
+        if let Ok(v) = std::env::var("PUTTYPLUS_WATCH_MS") {
+            watch_ms = crate::util::atoi_like(&v).max(0) as u64;
+        }
+        if watch_ms > 0 {
+            let st3 = Rc::clone(&st);
+            glib::timeout_add_local(
+                std::time::Duration::from_millis(watch_ms),
+                move || remote_watch_cb(&st3),
+            );
+        }
+
+        SftpPanel { st }
+    }
+
+    pub fn widget(&self) -> &gtk::Paned {
+        &self.st.root
+    }
+}
+
+/* ---------------- 本地目录记忆 ---------------- */
+
+/// 路径是否真的能读：不只 stat 是目录，还要能列——省得恢复到一个
+/// 没权限的目录后，一启动就弹「读取本地目录失败」。
+fn usable_local_dir(path: &str) -> bool {
+    std::path::Path::new(path).is_absolute() && std::fs::read_dir(path).is_ok()
+}
+
+/// 没有记忆时的默认起点：~/Downloads（可读）→ ~。
+fn default_local_dir() -> String {
+    let dl = glib::home_dir().join("Downloads");
+    if usable_local_dir(&dl.to_string_lossy()) {
+        dl.to_string_lossy().into_owned()
+    } else {
+        glib::home_dir().to_string_lossy().into_owned()
+    }
+}
+
+/// 记住本地目录（相对路径先转绝对，避免从桌面启动时 cwd 不同导致跑偏）。
+pub fn remember_local_dir(path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    let abs = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+    crate::settings::set_last_local_dir(&abs);
+}
+
+/// 本地目录的唯一变更入口：改状态 + 立即落盘。
+fn set_local_cwd(st: &Rc<PanelState>, path: &str) {
+    *st.local_cwd.borrow_mut() = path.to_string();
+    remember_local_dir(path);
+}
+
+/// 终端 ssh 启动时刻（秒），目录跟随轮询用。
+pub fn set_term_spawn(st: &Rc<PanelState>, t: i64) {
+    st.term_spawn_wall.set(t);
+}
+
+/// 把本标签的终端交给面板：会话选项对话框要即时改字号/响铃，
+/// 不用穿过 Tabs 再回来。
+pub fn set_term(st: &Rc<PanelState>, term: &vte4::Terminal) {
+    *st.term.borrow_mut() = Some(term.clone());
+}
+
+/// OSC 7 报告的终端目录（file:// URI）。
+pub fn notify_cwd_uri(st: &Rc<PanelState>, uri: &str) {
+    let Some(path) = uri.strip_prefix("file://").and_then(|r| r.find('/').map(|i| &r[i..])) else {
+        return;
+    };
+    let dec = percent_decode(path);
+    follow_apply(st, &dec);
+}
+
+/// 这个会话的**终端存活状态**（阶段 65 / 审计 P0-4）。
+///
+/// 三态：没起来过（Unknown）/ 活着（Alive）/ 起过但结束了（Dead）。
+pub fn term_state(st: &Rc<PanelState>) -> crate::active::TermState {
+    use crate::active::TermState;
+    if st.term_alive_count.get() > 0 {
+        TermState::Alive
+    } else if st.term_ever_alive.get() {
+        TermState::Dead
+    } else {
+        TermState::Unknown
+    }
+}
+
+/// 终端的存活状态变了（子进程起来 / 退出）。
+///
+/// 改完要**刷新状态点**：标签上的点与两棵树上的点都靠它。
+pub fn note_term_alive(st: &Rc<PanelState>, alive: bool) {
+    if alive {
+        st.term_alive_count.set(st.term_alive_count.get() + 1);
+        st.term_ever_alive.set(true);
+    } else {
+        let n = st.term_alive_count.get() - 1;
+        st.term_alive_count.set(n.max(0));
+    }
+    // 状态点要跟着变（标签上的点 + 两棵树上的点）
+    crate::tabs::refresh_dots();
+    refresh_active_marks();
+}
+
+/// 冒烟 / e2e 用：设置面板状态（**不真的连**）。
+///
+/// 状态点是聚合的（阶段 65），冒烟要能单独造出"文件面板正常、终端已死"
+/// 这种组合 ⇒ 得能单独设状态。
+pub fn set_status_for_smoke(st: &Rc<PanelState>, level: State, text: &str) {
+    set_remote_status(st, level, text);
+}
+
+/// 正在跑或排队的传输个数（阶段 63：关窗口确认要用）。
+///
+/// "排队"也算：还没开始传，但关窗口一样会被取消掉。
+pub fn running_xfer_count(st: &Rc<PanelState>) -> usize {
+    st.items
+        .borrow()
+        .iter()
+        .filter(|it| {
+            let g = it.shared.lock().unwrap();
+            matches!(g.state, XferState::Wait | XferState::Run)
+        })
+        .count()
+}
+
+/// 退出前清理：取消传输、销毁队列窗口、通知 worker 退出。
+pub fn shutdown(st: &Rc<PanelState>) {
+    st.dead.set(true);
+    for it in st.items.borrow().iter() {
+        it.shared.lock().unwrap().cancel = true;
+    }
+    // 队列窗口是 hide-on-close 的独立窗口，不销毁会拖着进程不退出
+    if let Some(qu) = st.queue_ui.borrow().as_ref() {
+        qu.win.destroy();
+    }
+    if let Some(fu) = st.fwd_ui.borrow().as_ref() {
+        fu.win.destroy();
+    }
+    // 数据库工作台**不再有属于自己的窗口**（阶段 12：它是连接页里的子标签），
+    // 所以这里只能关它自己那两个浮窗（搜索结果 / 执行历史）。
+    // ⚠️ 千万别去 destroy `db_ui.win`——那是宿主窗口（主窗口），
+    // destroy 掉等于关一个连接标签就把整个程序关了。
+    dbui::close_now(st);
+    // 查看/编辑窗口是每个文件一个，关标签时一并销毁（含未保存内容）
+    fileedit::close_all(st);
+    st.local_monitor.borrow_mut().take();
+    st.tx.borrow_mut().take(); // drop sender → worker 退出
+}
+
+/* ---------------- 状态显示 ---------------- */
+
+fn set_remote_status(st: &Rc<PanelState>, level: State, text: &str) {
+    set_remote_status_tip(st, level, text, text);
+}
+
+/// 状态栏 + 独立 tooltip（转发明细较长，tooltip 放完整信息）。
+fn set_remote_status_tip(st: &Rc<PanelState>, level: State, text: &str, tip: &str) {
+    *st.status.borrow_mut() = Some((level, text.to_string(), tip.to_string()));
+    render_status(st);
+    // 活跃标记（阶段 57）：会话状态变了 → 两棵树上的状态点要跟着变
+    refresh_active_marks();
+}
+
+/// 活跃状态变了 → 会话树（侧栏）重画。
+///
+/// ⚠️ **别在这儿做重活**：状态变化只在连接/断开/转发增删时发生，频率很低，
+/// 重建一棵几十行的树完全够用；但要是改成轮询就会把树的选中状态冲掉。
+pub fn refresh_active_marks() {
+    crate::sidebar::refresh();
+    // 标签上的状态点也是聚合的（SFTP + 终端 + 数据库）⇒ 一起刷（阶段 65）
+    crate::tabs::refresh_dots();
+    // 顶栏状态区也显示聚合状态（阶段 77c-2）⇒ 一起刷
+    crate::statusbar::refresh_all();
+}
+
+/// 注册状态变化钩子（标签栏状态点用），注册后立刻用当前状态回调一次。
+pub fn set_status_hook<F: Fn(State) + 'static>(st: &Rc<PanelState>, f: F) {
+    *st.status_hook.borrow_mut() = Some(Box::new(f));
+    render_status(st);
+}
+
+/// 当前状态级别（没设过就 None）。
+pub fn current_state(st: &Rc<PanelState>) -> Option<State> {
+    st.status.borrow().as_ref().map(|(l, _, _)| *l)
+}
+
+/// 按当前主题重画状态行（主题切换后由 `tabs::refresh_theme_colors` 调）。
+pub fn reapply_status(st: &Rc<PanelState>) {
+    render_status(st);
+}
+
+fn render_status(st: &Rc<PanelState>) {
+    let Some((level, text, tip)) = st.status.borrow().clone() else {
+        return;
+    };
+    let lbl = st.pane(true).status_lbl.clone();
+    let esc = glib::markup_escape_text(&text);
+    lbl.set_markup(&format!(
+        "<span foreground='{}'>●</span> {}",
+        crate::theme::state_hex(level),
+        esc.as_str()
+    ));
+    // 工具栏宽度有限，显示可截断；完整信息悬停可看
+    lbl.set_tooltip_text(Some(&tip));
+    // 通知外部（标签栏状态点）
+    if let Some(h) = st.status_hook.borrow().as_ref() {
+        h(level);
+    }
+}
+
+/// 已连接状态栏文案：基础信息 + 端口转发摘要（详情见 connected_tip）。
+fn connected_text(st: &Rc<PanelState>, _detail: &str) -> String {
+    // ⚠️ 阶段 76 / 审计 P1-15：**不重复路径**。路径栏就在上面一行，
+    // 状态行再抄一遍完整路径 ⇒ 340px 的面板里被截断，什么都看不清。
+    // 完整路径挪进 tooltip（悬停能看全）。
+    let base = format!(
+        "已连接 {}@{}:{}",
+        st.opts.user, st.opts.host, st.opts.port
+    );
+    let n = st.fwd_views.borrow().len();
+    if n > 0 {
+        format!("{base}｜转发 {n}")
+    } else {
+        base
+    }
+}
+
+fn connected_tip(st: &Rc<PanelState>, detail: &str) -> String {
+    // ⚠️ tooltip 里**保留完整路径**（状态行放不下的东西在这儿能看）
+    let text = format!(
+        "已连接 {}@{}:{} — {detail}",
+        st.opts.user, st.opts.host, st.opts.port
+    );
+    let views = st.fwd_views.borrow();
+    if views.is_empty() {
+        text
+    } else {
+        let body = views
+            .iter()
+            .map(FwdView::line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{text}\n\n端口转发：\n{body}")
+    }
+}
+
+fn set_connected_status(st: &Rc<PanelState>, detail: &str) {
+    set_remote_status_tip(
+        st,
+        State::Ok,
+        &connected_text(st, detail),
+        &connected_tip(st, detail),
+    );
+}
+
+fn set_remote_sensitive(st: &Rc<PanelState>, sens: bool) {
+    let pane = st.pane(true);
+    let mut c = pane.toolbar.first_child();
+    while let Some(w) = c {
+        // 路径框保持可输入：断线时也能先写好路径，重连后回车即去
+        if !w.is::<gtk::Entry>() && !w.is::<gtk::Label>() {
+            w.set_sensitive(sens);
+        }
+        c = w.next_sibling();
+    }
+    pane.view.set_sensitive(sens);
+}
+
+/* ---------------- 提交任务 ---------------- */
+
+fn submit_connect(st: &Rc<PanelState>) {
+    let pw = st
+        .pw
+        .borrow()
+        .as_ref()
+        .map(|p| p.to_string());
+    let ka = st.keepalive_sec.get();
+    let ao = st.auth_order.get();
+    let _ = st.tx.borrow().as_ref().unwrap().send(WorkerCmd::Connect {
+        keepalive_sec: ka,
+        auth_order: ao,
+        auth_method: st.opts.auth_method,
+        password: pw,
+        keyfile: st.opts.keyfile.clone(),
+    });
+}
+
+fn submit_list_full(st: &Rc<PanelState>, path: &str, silent: bool) {
+    let id = st.next_list.get();
+    st.next_list.set(id + 1);
+    st.last_list.set(id);
+    st.remote_list_pending.set(true);
+    if st
+        .tx
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .send(WorkerCmd::List {
+            id,
+            path: path.to_string(),
+            silent,
+        })
+        .is_err()
+    {
+        st.remote_list_pending.set(false);
+    }
+}
+
+fn submit_list(st: &Rc<PanelState>, path: &str) {
+    submit_list_full(st, path, false);
+}
+
+fn submit_simple(st: &Rc<PanelState>, op: SimpleOp, path: &str, new_path: Option<&str>) {
+    let _ = st.tx.borrow().as_ref().unwrap().send(WorkerCmd::Simple {
+        op,
+        path: path.to_string(),
+        new_path: new_path.map(str::to_string),
+    });
+}
+
+/* ---------------- 事件处理（主线程） ---------------- */
+
+/// 连接被替换/断开时，旧调度器里的任务已经 abort；把 UI 侧还没落终态的
+/// 项标成取消并汇总一次，免得队列永远停在「等待/传输中」。
+fn cancel_aborted_xfers(st: &Rc<PanelState>) {
+    let mut cancelled = Vec::new();
+    for it in st.items.borrow().iter() {
+        let mut g = it.shared.lock().unwrap();
+        if matches!(g.state, XferState::Wait | XferState::Run) {
+            g.state = XferState::Cancel;
+            g.msg = Some("连接已断开或已重建".into());
+            cancelled.push((
+                crate::util::path_basename(&it.src).to_string(),
+                XferState::Cancel,
+            ));
+        }
+    }
+    if !cancelled.is_empty() {
+        // 通知发不出去时在状态栏写一句（**不弹窗**）
+        let st2 = Rc::clone(st);
+        crate::notify::report_batch(&cancelled, move |msg| {
+            set_remote_status(&st2, State::Warn, msg);
+        });
+    }
+}
+
+fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
+    match ev {
+        PanelEvent::Connected(Ok(cwd)) => {
+            // 重连会 abort 旧传输调度器，先把旧队列里未完成的项标成取消
+            cancel_aborted_xfers(st);
+            st.conn_ok.set(true);
+            st.remote_mtime.set(0);
+            st.remote_stat_pending.set(false);
+            st.remote_list_pending.set(false);
+            *st.remote_home.borrow_mut() = Some(cwd.clone());
+            set_connected_status(st, &cwd);
+            set_remote_sensitive(st, true);
+            submit_list(st, &cwd);
+        }
+        PanelEvent::Connected(Err(err)) => {
+            // 旧连接已经断开，在跑的传输不可能完成
+            cancel_aborted_xfers(st);
+            st.conn_ok.set(false);
+            st.remote_mtime.set(0);
+            st.remote_stat_pending.set(false);
+            st.remote_list_pending.set(false);
+            set_remote_sensitive(st, false);
+            if let Some(b) = st.rreconnect.borrow().as_ref() {
+                b.set_sensitive(true);
+            }
+
+            let have_pw = st.pw.borrow().is_some() || st.opts.password.is_some();
+            let have_key = st
+                .opts
+                .keyfile
+                .as_deref()
+                .map_or(false, |k| !k.is_empty());
+            if !have_pw && !have_key && err.contains("认证") {
+                // 无凭据且认证失败：询问密码后重试
+                let msg = format!(
+                    "SFTP 连接 {}@{}:{} 需要密码：\n{err}",
+                    st.opts.user, st.opts.host, st.opts.port
+                );
+                let top = st.topwin();
+                let st = Rc::clone(st);
+                dialogs::ask_password(top.as_ref(), "SFTP 密码", &msg, move |pw| {
+                    let st = st.clone();
+                    if let Some(pw) = pw {
+                        *st.pw.borrow_mut() = Some(Zeroizing::new(pw));
+                        set_remote_status(&st, State::Warn, "正在连接…");
+                        submit_connect(&st);
+                    } else {
+                        // 状态栏只显示状态词；完整错误在弹窗与 tooltip 里
+                        set_remote_status(&st, State::Err, "未连接");
+                    }
+                });
+                return;
+            }
+            set_remote_status(&st, State::Err, "未连接");
+            // ⚠️ 复查 R1 / §4.2「错误恢复不闭环」：以前这个框只有一颗
+            // 「关闭」⇒ 用户关掉弹窗只能干瞪眼，而「连接 → 重新连接 SFTP」
+            // 就在两步之外，弹窗却不说。⇒ 给一颗**当场重试**的按钮。
+            let st2 = Rc::clone(st);
+            dialogs::show_error_with_retry(
+                st.topwin().as_ref(),
+                "SFTP 连接失败",
+                &err,
+                "重试",
+                move || {
+                    set_remote_status(&st2, State::Warn, "正在连接…");
+                    submit_connect(&st2);
+                },
+            );
+        }
+        PanelEvent::Forwards { views, failed } => {
+            *st.fwd_views.borrow_mut() = views;
+            // 开着的管理窗口跟着刷新（增删/启停后列表要立刻反映事件）
+            fwdmgr::refresh(&st);
+            // 活跃标记（阶段 57）：转发在跑/停了 → 树上的「运行中」跟着变
+            refresh_active_marks();
+            // 刷新状态栏：Connected 已设置过文案，这里补上转发摘要
+            let detail = st.remote_home.borrow().clone().unwrap_or_default();
+            set_connected_status(&st, &detail);
+            if !failed.is_empty() {
+                dialogs::show_error(
+                    st.topwin().as_ref(),
+                    "端口转发",
+                    &failed.join("\n"),
+                );
+            }
+        }
+        PanelEvent::Listed {
+            id,
+            path,
+            silent,
+            result,
+            dir_mtime,
+        } => {
+            // 慢的旧回包可能带着旧目录；只认最后一次请求
+            if id != st.last_list.get() {
+                return;
+            }
+            st.remote_list_pending.set(false);
+            match result {
+            Ok(entries) => {
+                *st.remote_cwd.borrow_mut() = path.clone();
+                st.pane(true).set_cwd_entry(&path);
+                let show_hidden = st.pane(true).show_hidden.get();
+                pane::fill_model(&st.pane(true), show_hidden, pane::entry_rows(&entries));
+                st.remote_mtime.set(dir_mtime);
+                set_connected_status(st, &path);
+            }
+            Err(err) if !silent => {
+                dialogs::show_error(
+                    st.topwin().as_ref(),
+                    "读取远程目录失败",
+                    &format!("{err}\n目录：{path}"),
+                );
+            }
+            _ => {}
+            }
+        }
+        PanelEvent::DirStamp { path, mtime } => {
+            st.remote_stat_pending.set(false);
+            if path != *st.remote_cwd.borrow() {
+                return;
+            }
+            if mtime == 0 {
+                st.remote_mtime.set(0);
+                return;
+            }
+            let last = st.remote_mtime.get();
+            st.remote_mtime.set(mtime);
+            if last != 0 && last != mtime {
+                submit_list_full(st, &path, true);
+            }
+        }
+        PanelEvent::SimpleDone { path, result } => {
+            if let Err(err) = &result {
+                dialogs::show_error(st.topwin().as_ref(), "操作失败", err);
+            }
+            // 上级目录可能被整体删除，列父目录更安全
+            let parent = path_parent(&path);
+            if parent == *st.remote_cwd.borrow() || result.is_err() {
+                submit_list(st, &parent);
+            } else {
+                let cwd = st.remote_cwd.borrow().clone();
+                submit_list(st, &cwd);
+            }
+        }
+        PanelEvent::FileRead { id, path, result } => {
+            fileedit::on_read(st, id, &path, result);
+        }
+        PanelEvent::FileWritten { id, path, result } => {
+            fileedit::on_written(st, id, &path, result);
+        }
+        PanelEvent::FollowDone(path) => {
+            st.follow_pending.set(false);
+            match path {
+                Some(p) => follow_apply(st, &p),
+                None => {
+                    let n = st.exec_fail.get() + 1;
+                    st.exec_fail.set(n);
+                    if n > 15 {
+                        st.follow_poll_dead.set(true);
+                        eprintln!(
+                            "PuTTYPlus: 远程 exec 通道不可用，目录跟随轮询已停止\
+                             （shell 若支持 OSC 7 仍可跟随）"
+                        );
+                    }
+                }
+            }
+        }
+        PanelEvent::CheckExistsDone { id, exists } => {
+            let Some(pending) = st.pending_uploads.borrow_mut().remove(&id) else {
+                return;
+            };
+            let conflicts: Vec<String> = pending
+                .iter()
+                .zip(exists.iter())
+                .filter(|(_, ex)| **ex)
+                .map(|((src, dst_dir, _), _)| path_join(dst_dir, path_basename(src)))
+                .collect();
+            ask_then_submit(st, pending, conflicts);
+        }
+        PanelEvent::MirrorPlan {
+            local,
+            remote,
+            result,
+        } => {
+            mirrorui::on_scan_result(st, local, remote, result);
+        }
+        PanelEvent::RelayDone { id: _, ok, msg } => {
+            // 不占用远程状态行/标签状态点（那是连接状态，别被一次传输失败染红）
+            if !ok {
+                super::panel::dialogs::show_error(
+                    st.topwin().as_ref(),
+                    "跨服务器传输失败",
+                    &msg,
+                );
+            }
+        }
+        PanelEvent::DbConnected(result) => {
+            dbui::on_connected(st, result);
+            // 活跃标记（阶段 57）：连上了 → 树上点亮
+            refresh_active_marks();
+        }
+        PanelEvent::DbNeedPassword(detail) => {
+            dbui::on_need_password(st, detail);
+            refresh_active_marks();
+        }
+        PanelEvent::DbRows { id, rows } => dbui::on_rows(st, id, rows),
+        PanelEvent::DbError(err) => dbui::on_error(st, err),
+        PanelEvent::DbClosed => {
+            dbui::on_closed(st);
+            // 活跃标记（阶段 57）：断开了 → 树上灭掉
+            refresh_active_marks();
+        }
+        PanelEvent::DbMeta { id, req, result } => dbui::on_meta(st, id, req, result),
+        PanelEvent::DbExec { id, result } => dbui::on_exec(st, id, result),
+        PanelEvent::DbTx { id, op, result } => dbui::on_tx(st, id, op, result),
+        PanelEvent::DbImport { id, result } => dbui::on_import_result(st, id, result),
+        PanelEvent::DbEr { id, result } => dbui::on_er(st, id, result),
+        PanelEvent::DbExport { id, result } => dbui::on_export(st, id, result),
+        PanelEvent::XferTick => {
+            queue::flush(st);
+        }
+        PanelEvent::XferDrained { results } => {
+            // 传输状态变了 ⇒ 顶栏状态区的第四维要跟着变（阶段 77c-2）
+            crate::statusbar::refresh_all();
+            // 整个传输队列清空（不是每个提交批次）→ 通知 + 有失败/取消时
+            // 汇总一次。追加的新批次在同一个窗口里，不会提前弹。
+            pane::clear_progress(&st.pane(true));
+            pane::clear_progress(&st.pane(false));
+            // 传输完成**只发通知，不弹窗**（用户 2026-10-27 明确要求）。
+            // 桌面通知不可用时在状态栏写一句——不打扰，但也不让人完全
+            // 不知道传完了。
+            let level = if results.iter().any(|(_, s)| *s == XferState::Err) {
+                State::Warn
+            } else {
+                State::Ok
+            };
+            let st2 = Rc::clone(st);
+            crate::notify::report_batch(&results, move |msg| {
+                set_remote_status(&st2, level, msg);
+            });
+            let cwd = st.remote_cwd.borrow().clone();
+            if st.conn_ok.get() {
+                submit_list(st, &cwd);
+            }
+            fill_local_pane(st);
+        }
+    }
+}
+
+/* ---------------- 目录跟随 ---------------- */
+
+fn follow_apply(st: &Rc<PanelState>, path: &str) {
+    if !st.follow.get() || !st.conn_ok.get() || path.is_empty() {
+        return;
+    }
+    // follow_last 记录的是"shell 上次被观察到的目录"（OSC 7 与轮询都汇聚到这里）。
+    // 只有 shell 真的移动了才切换面板，用户的手动浏览不受轮询影响
+    if st.follow_last.borrow().as_deref() == Some(path) {
+        return;
+    }
+    *st.follow_last.borrow_mut() = Some(path.to_string());
+    if *st.remote_cwd.borrow() == path {
+        return;
+    }
+    submit_list_full(st, path, true);
+}
+
+fn follow_poll_cb(st: &Rc<PanelState>) -> glib::ControlFlow {
+    if st.dead.get() || st.follow_poll_dead.get() {
+        return glib::ControlFlow::Break;
+    }
+    if !st.follow.get() || !st.conn_ok.get() || st.follow_pending.get() {
+        return glib::ControlFlow::Continue;
+    }
+    st.follow_pending.set(true);
+    let spawn_wall = st.term_spawn_wall.get();
+    if spawn_wall == 0 {
+        st.follow_pending.set(false);
+        return glib::ControlFlow::Continue;
+    }
+    let age = chrono::Local::now().timestamp() - spawn_wall;
+    let _ = st
+        .tx
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .send(WorkerCmd::Follow { age_sec: age });
+    glib::ControlFlow::Continue
+}
+
+/// 远端目录自动刷新：每 2.5 秒 stat 一次当前目录的 mtime。文件增删/改名会
+/// 更新目录 mtime；文件内容修改不会（那是文件自己的 mtime），后者仍靠手动
+/// 刷新或重新进入目录。传输进行中跳过轮询，避免和队列刷新打架。
+fn remote_watch_cb(st: &Rc<PanelState>) -> glib::ControlFlow {
+    if st.dead.get() {
+        return glib::ControlFlow::Break;
+    }
+    if !st.conn_ok.get()
+        || st.remote_stat_pending.get()
+        || st.remote_list_pending.get()
+    {
+        return glib::ControlFlow::Continue;
+    }
+    let busy = st.items.borrow().iter().any(|it| {
+        matches!(
+            it.shared.lock().unwrap().state,
+            XferState::Wait | XferState::Run
+        )
+    });
+    if busy {
+        return glib::ControlFlow::Continue;
+    }
+    let cwd = st.remote_cwd.borrow().clone();
+    if !cwd.starts_with('/') {
+        return glib::ControlFlow::Continue;
+    }
+    st.remote_stat_pending.set(true);
+    let sent = st
+        .tx
+        .borrow()
+        .as_ref()
+        .map(|tx| tx.send(WorkerCmd::DirStamp { path: cwd }).is_ok())
+        .unwrap_or(false);
+    if !sent {
+        st.remote_stat_pending.set(false);
+    }
+    glib::ControlFlow::Continue
+}
+
+/* ---------------- 面板操作回调 ---------------- */
+
+/// 编辑器保存成功后刷新对应面板：大小/修改时间变了，列表不该停在旧值。
+pub(crate) fn refresh_after_edit_save(st: &Rc<PanelState>, remote: bool) {
+    if !remote || st.conn_ok.get() {
+        on_refresh(st, remote);
+    }
+}
+
+pub fn on_refresh(st: &Rc<PanelState>, remote: bool) {
+    if remote {
+        let cwd = st.remote_cwd.borrow().clone();
+        submit_list(st, &cwd);
+    } else {
+        fill_local_pane(st);
+    }
+}
+
+/// 文件面板右键「取消传输」：选中项里有普通上传/下载在等待或运行时，
+/// 取消对应源文件的传输。目录递归传输的 src 就是目录本身，也能匹配。
+pub fn on_cancel_transfers(st: &Rc<PanelState>, remote: bool) {
+    let sel = st.pane(remote).selected(&st.pane_cwd(remote));
+    if sel.is_empty() {
+        return;
+    }
+    let mut canceled = false;
+    {
+        for it in st.items.borrow().iter() {
+            if it.kind != XferKind::Transfer || (!it.upload) != remote {
+                continue;
+            }
+            if !sel.iter().any(|(p, _)| p == &it.src) {
+                continue;
+            }
+            let mut g = it.shared.lock().unwrap();
+            match g.state {
+                XferState::Run => {
+                    g.cancel = true;
+                    g.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    canceled = true;
+                }
+                XferState::Wait => {
+                    // 等待中的任务调度器仍会启动；cancel=true 让它在
+                    // run_transfer 开头直接退出，状态立即显示为取消
+                    g.cancel = true;
+                    g.state = XferState::Cancel;
+                    canceled = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if canceled {
+        queue::flush(st);
+    }
+}
+
+/// 文件面板右键「打开」：只能作用于单个文件（目录不进文本编辑器）。
+///
+/// `readonly` = 只读打开（只看不改）。菜单里的「打开」是可改可存的；
+/// 只读模式仍留着给内部调用（非法 UTF-8 之类存不回去的情况由编辑器自己降级）。
+pub fn on_open_file(st: &Rc<PanelState>, remote: bool, readonly: bool) {
+    let sel = st.pane(remote).selected(&st.pane_cwd(remote));
+    match sel.as_slice() {
+        [] => dialogs::show_error(
+            st.topwin().as_ref(),
+            "无法打开文件",
+            "请先在文件列表里选择一个文件。",
+        ),
+        [(path, false)] => {
+            if remote {
+                fileedit::open_remote(st, path, readonly);
+            } else {
+                fileedit::open_local(st, path, readonly);
+            }
+        }
+        [(path, true)] => dialogs::show_error(
+            st.topwin().as_ref(),
+            "无法打开文件",
+            &format!(
+                "「{}」是目录，内置查看/编辑器只处理文本文件。",
+                path_basename(path)
+            ),
+        ),
+        _ => dialogs::show_error(
+            st.topwin().as_ref(),
+            "无法打开文件",
+            &format!(
+                "一次只能查看/编辑一个文件（已选中 {} 项）。",
+                sel.len()
+            ),
+        ),
+    }
+}
+
+pub fn on_up(st: &Rc<PanelState>, remote: bool) {
+    let cwd = st.pane_cwd(remote);
+    let parent = path_parent(&cwd);
+    if remote {
+        if !cwd.starts_with('/') {
+            return; // ~ 相对路径保护
+        }
+        submit_list(st, &parent);
+    } else {
+        set_local_cwd(st, &parent);
+        fill_local_pane(st);
+    }
+}
+
+pub fn on_home(st: &Rc<PanelState>, remote: bool) {
+    if remote {
+        let home = st.remote_home.borrow().clone();
+        if let Some(h) = home {
+            submit_list(st, &h);
+        }
+    } else {
+        set_local_cwd(st, &glib::home_dir().to_string_lossy());
+        fill_local_pane(st);
+    }
+}
+
+pub fn on_entry_activated(st: &Rc<PanelState>, remote: bool, txt: &str) {
+    if txt.is_empty() {
+        return;
+    }
+    if remote {
+        let home = st.remote_home.borrow().clone();
+        let target = match (&home, txt.strip_prefix('~')) {
+            (Some(h), Some(rest)) if rest.is_empty() => h.clone(),
+            (Some(h), Some(rest)) => path_join(h, rest.trim_start_matches('/')),
+            _ => txt.to_string(),
+        };
+        submit_list(st, &target);
+    } else {
+        let p = std::path::Path::new(txt);
+        if p.is_dir() {
+            set_local_cwd(st, txt);
+        }
+        fill_local_pane(st); // 失败时 fill 会把 entry 改回 cwd
+    }
+}
+
+pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bool) {
+    if name == ".." {
+        // 列表首行的上级导航条目（与原工具栏「上级」同语义）
+        on_up(st, remote);
+        return;
+    }
+    let cwd = st.pane_cwd(remote);
+    let full = path_join(&cwd, name);
+    if isdir {
+        if remote {
+            submit_list(st, &full);
+        } else {
+            set_local_cwd(st, &full);
+            fill_local_pane(st);
+        }
+    } else if remote {
+        // 双击 → **编辑**（阶段 23）：不是下载。
+        //
+        // **为什么改**：双击一个文件，用户想的是"打开看看/改改"，不是
+        // "把它拉到本地去"。下载/上传挪到工具栏那颗常驻按钮和右键菜单里了
+        // （「下载…」/「上传…」），没丢功能。
+        fileedit::open_remote(st, &full, false);
+    } else {
+        fileedit::open_local(st, &full, false);
+    }
+}
+
+pub fn on_mkdir(st: &Rc<PanelState>, remote: bool) {
+    let top = st.topwin();
+    let title = if remote { "新建远程目录" } else { "新建本地目录" };
+    let st = Rc::clone(st);
+    dialogs::ask_text(top.as_ref(), title, "", move |name| {
+        let st = st.clone();
+        let Some(name) = name else { return };
+        let cwd = st.pane_cwd(remote);
+        let full = path_join(&cwd, &name);
+        if remote {
+            submit_simple(&st, SimpleOp::Mkdir, &full, None);
+        } else {
+            if let Err(e) = std::fs::create_dir(&full) {
+                dialogs::show_error(
+                    st.topwin().as_ref(),
+                    "创建目录失败",
+                    &format!("{e}: {full}"),
+                );
+            }
+            fill_local_pane(&st);
+        }
+    });
+}
+
+pub fn on_rename(st: &Rc<PanelState>, remote: bool) {
+    let sel = st.pane(remote).selected(&st.pane_cwd(remote));
+    if sel.len() != 1 {
+        return;
+    }
+    let (old, _) = sel[0].clone();
+    let oldname = path_basename(&old).to_string();
+    let top = st.topwin();
+    let title = if remote { "重命名（远程）" } else { "重命名（本地）" };
+    let st = Rc::clone(st);
+    let defval = oldname.clone();
+    dialogs::ask_text(top.as_ref(), title, &defval, move |newname| {
+        let st = st.clone();
+        let Some(newname) = newname else { return };
+        if newname.is_empty() || newname == oldname {
+            return;
+        }
+        let cwd = st.pane_cwd(remote);
+        if remote {
+            let full_new = path_join(&cwd, &newname);
+            submit_simple(&st, SimpleOp::Rename, &old, Some(&full_new));
+        } else {
+            if let Err(e) = std::fs::rename(&old, newname) {
+                dialogs::show_error(st.topwin().as_ref(), "重命名失败", &e.to_string());
+            }
+            fill_local_pane(&st);
+        }
+    });
+}
+
+pub fn on_delete(st: &Rc<PanelState>, remote: bool) {
+    let sel = st.pane(remote).selected(&st.pane_cwd(remote));
+    if sel.is_empty() {
+        return;
+    }
+    let n = sel.len();
+    let msg = format!(
+        "确定删除选中的 {n} 项？\n{}",
+        if remote {
+            "远程删除不可恢复，目录将递归删除。"
+        } else {
+            "本地文件优先移入回收站（不可用时直接删除）。"
+        }
+    );
+    let top = st.topwin();
+    let st = Rc::clone(st);
+    dialogs::confirm(top.as_ref(), &msg, move |ok| {
+        let st = st.clone();
+        if !ok {
+            return;
+        }
+        if remote {
+            for (p, _) in sel {
+                submit_simple(&st, SimpleOp::Remove, &p, None);
+            }
+        } else {
+            for (p, _) in &sel {
+                let f = gtk::gio::File::for_path(p);
+                // 本地优先进回收站；失败详情取最后一个错误（与 C 版一致）
+                let mut last_err = None;
+                if let Err(e) = f.trash(None::<&gtk::gio::Cancellable>) {
+                    last_err = Some(e);
+                    if let Err(e2) = f.delete(None::<&gtk::gio::Cancellable>) {
+                        last_err = Some(e2);
+                    }
+                }
+                if let Some(e) = last_err {
+                    dialogs::show_error(
+                        st.topwin().as_ref(),
+                        "删除失败",
+                        &format!("{p}: {}", e.message()),
+                    );
+                }
+            }
+            fill_local_pane(&st);
+        }
+    });
+}
+
+pub fn on_transfer_btn(st: &Rc<PanelState>, remote: bool) {
+    let sel = st.pane(remote).selected(&st.pane_cwd(remote));
+    let paths: Vec<String> = sel.into_iter().map(|(p, _)| p).collect();
+    if paths.is_empty() {
+        return;
+    }
+    if remote {
+        start_downloads(st, paths);
+    } else {
+        start_uploads(st, paths);
+    }
+}
+
+pub fn on_reconnect(st: &Rc<PanelState>) {
+    if let Some(b) = st.rreconnect.borrow().as_ref() {
+        b.set_sensitive(false);
+    }
+    set_remote_status(
+        st,
+        State::Warn,
+        &format!("正在连接 {}@{}:{}…", st.opts.user, st.opts.host, st.opts.port),
+    );
+    // worker 侧 Connect 会先关闭旧连接
+    submit_connect(st);
+}
+
+pub fn on_open_queue(st: &Rc<PanelState>) {
+    queue::ensure(st);
+    if let Some(qu) = st.queue_ui.borrow().as_ref() {
+        qu.win.present();
+    }
+}
+
+/// 转发管理窗口入口（会话菜单 / 标签右键菜单）。
+pub fn on_open_forwards(st: &Rc<PanelState>) {
+    fwdmgr::ensure(st);
+}
+
+/// 数据库窗口入口（会话菜单 / 标签右键菜单 / Ctrl+Shift+D）。
+///
+/// 阶段 22：打开工作台**并且连上当前连接**（上次用的那条）——工作台里已经
+/// 没有「连接」按钮了，点这里就该直接能用。
+pub fn on_open_db(st: &Rc<PanelState>) {
+    if !check_db_channel(st) {
+        return;
+    }
+    dbui::ensure(st);
+    dbui::connect_current(st);
+}
+
+/// 只打开数据库工作台页面，**不连**。
+///
+/// 双击某条具体的数据库连接时走这条：那条连接由 `dbui::use_profile`
+/// 选中并连上——要是这里先连了"上次用的那条"，就得连错一次再断开重连。
+pub fn on_open_db_page(st: &Rc<PanelState>) {
+    if !check_db_channel(st) {
+        return;
+    }
+    dbui::ensure(st);
+}
+
+/// 数据库通道只支持 SSH 会话：通道要挂在一条已认证的 SSH 连接上。
+fn check_db_channel(st: &Rc<PanelState>) -> bool {
+    if st.opts.is_ssh() {
+        return true;
+    }
+    dialogs::show_error(
+        st.topwin().as_ref(),
+        "数据库",
+        "数据库通道只支持 SSH 会话：当前协议没有可复用的 SSH 连接。",
+    );
+    false
+}
+
+/// 会话选项入口（会话菜单 / 标签右键菜单）：保活/字号/响铃的会话级覆盖。
+pub fn on_open_session_opts(st: &Rc<PanelState>) {
+    sessopt::open(st);
+}
+
+/// 快速命令入口（标签头按钮 / Ctrl+Shift+K）：把命令敲进 `term` 那个终端。
+pub fn on_open_quickcmds(st: &Rc<PanelState>, term: &vte4::Terminal, anchor: &gtk::Widget) {
+    quickcmd::open_popover(st, term, anchor);
+}
+
+/* ---------------- 传输 ---------------- */
+
+/// 传输唯一入口：先做目标冲突预检，再询问策略/直接提交。
+fn submit_transfers(st: &Rc<PanelState>, specs: Vec<(String, String, bool)>) {
+    if specs.is_empty() {
+        return;
+    }
+    let all_upload = specs.iter().all(|(_, _, up)| *up);
+    let all_download = specs.iter().all(|(_, _, up)| !*up);
+    if all_download {
+        // 本地目标：UI 线程同步预检
+        let dst_dir = &specs[0].1;
+        let conflicts: Vec<String> = specs
+            .iter()
+            .map(|(src, dir, _)| path_join(dir, path_basename(src)))
+            .filter(|p| std::path::Path::new(p).is_file())
+            .collect();
+        ask_then_submit(st, specs, conflicts);
+    } else if all_upload {
+        // 远端目标：两阶段——先发预检命令，结果回来后询问
+        let paths: Vec<String> = specs
+            .iter()
+            .map(|(src, dir, _)| path_join(dir, path_basename(src)))
+            .collect();
+        let check = st.next_check.get();
+        st.next_check.set(check + 1);
+        st.pending_uploads
+            .borrow_mut()
+            .insert(check, specs.clone());
+        let _ = st
+            .tx
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .send(WorkerCmd::CheckExists { id: check, paths });
+    } else {
+        // 混合批次当前不会出现（上传/下载分开入口），防御性直接传
+        do_submit(st, &specs, ConflictPolicy::All);
+    }
+}
+
+/// 一批传输的冲突策略（阶段 79）。
+///
+/// 逐个确认时是「目标路径 → 覆盖？」的映射。
+enum ConflictPolicy {
+    /// 全部覆盖。
+    All,
+    /// 全部跳过已存在的。
+    Skip,
+    /// 逐个决定。
+    PerItem(HashMap<String, bool>),
+}
+
+impl ConflictPolicy {
+    /// 这个目标路径该怎么办。
+    fn decide(&self, dest: &str) -> worker::XferConflict {
+        match self {
+            ConflictPolicy::All => worker::XferConflict::Overwrite,
+            ConflictPolicy::Skip => worker::XferConflict::Skip,
+            ConflictPolicy::PerItem(m) => match m.get(dest) {
+                Some(true) => worker::XferConflict::Overwrite,
+                Some(false) => worker::XferConflict::Skip,
+                // 没冲突过 ⇒ 老样子（覆盖）
+                None => worker::XferConflict::Overwrite,
+            },
+        }
+    }
+}
+
+/// 冲突询问后按策略提交；conflicts 为空则直接提交（零打扰）。
+fn ask_then_submit(
+    st: &Rc<PanelState>,
+    specs: Vec<(String, String, bool)>,
+    conflicts: Vec<String>,
+) {
+    if conflicts.is_empty() {
+        do_submit(st, &specs, ConflictPolicy::All);
+        return;
+    }
+    let top = st.topwin();
+    let st2 = Rc::clone(st);
+    let conflicts2 = conflicts.clone();
+    // ⚠️ 正文（冲突数量 + 示例）由 `dialogs::ask_conflict` 统一生成 ⇒
+    // 只有一份说法（阶段 79）。
+    dialogs::ask_conflict(top.as_ref(), &conflicts, move |choice| {
+        let st = st2.clone();
+        let Some(c) = choice else { return }; // 取消整批：什么都不提交
+        let policy = match c {
+            dialogs::ConflictChoice::All => ConflictPolicy::All,
+            dialogs::ConflictChoice::Skip => ConflictPolicy::Skip,
+            dialogs::ConflictChoice::PerItem(v) => {
+                // 结果与冲突列表**一一对应** ⇒ 拼成「路径 → 覆盖？」
+                let mut m: HashMap<String, bool> = HashMap::new();
+                for (path, over) in conflicts2.iter().zip(v) {
+                    m.insert(path.clone(), over);
+                }
+                ConflictPolicy::PerItem(m)
+            }
+        };
+        do_submit(&st, &specs, policy);
+    });
+}
+
+/// 策略确定后的实际提交。
+fn do_submit(
+    st: &Rc<PanelState>,
+    specs: &[(String, String, bool)],
+    policy: ConflictPolicy,
+) {
+    let mut items_ui = Vec::new();
+    let mut specs_w = Vec::new();
+    for (src, dst_dir, upload) in specs {
+        let id = st.next_id.get();
+        st.next_id.set(id + 1);
+        let shared = worker::XferShared::new();
+        items_ui.push(QueueItem {
+            id,
+            src: src.clone(),
+            dst_dir: dst_dir.clone(),
+            upload: *upload,
+            kind: worker::XferKind::Transfer,
+            shared: shared.clone(),
+        });
+        specs_w.push(XferSpec {
+            id,
+            src: src.clone(),
+            dst_dir: dst_dir.clone(),
+            upload: *upload,
+            kind: worker::XferKind::Transfer,
+            // ⚠️ 逐个确认时**每个文件**按自己的决定来（阶段 79）
+            conflict: policy.decide(&path_join(dst_dir, path_basename(src))),
+            shared,
+        });
+    }
+    {
+        let mut items = st.items.borrow_mut();
+        for it in &items_ui {
+            items.push(QueueItem {
+                id: it.id,
+                src: it.src.clone(),
+                dst_dir: it.dst_dir.clone(),
+                upload: it.upload,
+                kind: it.kind,
+                shared: it.shared.clone(),
+            });
+        }
+    }
+    for it in &items_ui {
+        queue::add_item(st, it);
+    }
+    let _ = st
+        .tx
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .send(WorkerCmd::Transfers { items: specs_w });
+}
+
+pub fn start_uploads(st: &Rc<PanelState>, lpaths: Vec<String>) {
+    if !st.conn_ok.get() {
+        dialogs::show_error(st.topwin().as_ref(), "未连接", "SFTP 尚未连接，无法上传。");
+        return;
+    }
+    let dst = st.remote_cwd.borrow().clone();
+    submit_transfers(
+        st,
+        lpaths.into_iter().map(|p| (p, dst.clone(), true)).collect(),
+    );
+}
+
+/// `gdk::FileList` → 本地路径列表。
+///
+/// **为什么抽成独立函数**：GTK **没有"模拟一次拖放"的 API**——
+/// `DropTarget` 的 `drop` 回调只有真的拖一次才会触发，手工拖没法
+/// 自动化验证。把"取路径"和"发起上传"拆开之后，冒烟可以直接调
+/// 同一段代码验（见 `drop_upload_files`）。
+pub fn filelist_paths(fl: &gdk::FileList) -> Vec<String> {
+    fl.files()
+        .iter()
+        .filter_map(|f| f.path().map(|p| p.to_string_lossy().into_owned()))
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// 拖拽上传的**实际动作**：把 FileList 里的文件传到当前远程目录。
+///
+/// 返回 false 表示"这次拖拽没东西可传"（调用方据此拒绝这次 drop）。
+///
+/// 目标目录 = **面板当前浏览的远程目录**（`start_uploads` 自己取
+/// `remote_cwd`）——拖到终端上的文件落在用户正看着的那个目录里，
+/// 跟拖到远程文件列表是一个语义。
+pub fn drop_upload_files(st: &Rc<PanelState>, fl: &gdk::FileList) -> bool {
+    let paths = filelist_paths(fl);
+    if paths.is_empty() {
+        return false;
+    }
+    start_uploads(st, paths);
+    true
+}
+
+/// 给终端挂上「**拖文件进来 = 上传到当前远程目录**」。
+///
+/// ⚠️ **只接 `gdk::FileList`（`text/uri-list`）**：VTE 自己的拖放是**拖选
+/// 文本**（接 String），两者类型不同、互不抢——从终端往外拖文本到编辑器
+/// 的老功能不受影响。
+///
+/// ⚠️ 闭包只抓**弱引用**：DropTarget 挂在终端上，终端属于 PanelState 的
+/// 控件树；抓强引用就是「PanelState → 终端 → DropTarget → PanelState」
+/// 的**引用环**，面板永远释放不掉（AGENTS.md 的红线）。
+pub fn enable_drop_upload(st: &Rc<PanelState>, term: &vte4::Terminal) {
+    let dst = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let weak = Rc::downgrade(st);
+    dst.connect_drop(move |_dt, value, _x, _y| {
+        let Some(st) = weak.upgrade() else {
+            return false;
+        };
+        let Ok(fl) = value.get::<gdk::FileList>() else {
+            return false;
+        };
+        drop_upload_files(&st, &fl)
+    });
+    term.add_controller(dst);
+}
+
+pub fn start_downloads(st: &Rc<PanelState>, rpaths: Vec<String>) {
+    if !st.conn_ok.get() {
+        dialogs::show_error(st.topwin().as_ref(), "未连接", "SFTP 尚未连接，无法下载。");
+        return;
+    }
+    let dst = st.local_cwd.borrow().clone();
+    submit_transfers(
+        st,
+        rpaths.into_iter().map(|p| (p, dst.clone(), false)).collect(),
+    );
+}
+
+/// 外部 URI（文件管理器）拖进本地面板：复制进当前目录（非递归，与 C 版一致）。
+pub fn copy_uris_into_local(st: &Rc<PanelState>, paths: &[String], dstdir: &str) {
+    let mut first_err: Option<String> = None;
+    for lp in paths {
+        if lp == dstdir {
+            continue;
+        }
+        let bn = path_basename(lp);
+        let dst = path_join(dstdir, bn);
+        let src = gtk::gio::File::for_path(lp);
+        let df = gtk::gio::File::for_path(&dst);
+        if let Err(e) = df.copy(
+            &src,
+            gtk::gio::FileCopyFlags::OVERWRITE,
+            None::<&gtk::gio::Cancellable>,
+            None::<&mut dyn FnMut(i64, i64)>,
+        ) {
+            first_err.get_or_insert_with(|| e.to_string());
+        }
+    }
+    if let Some(e) = first_err {
+        dialogs::show_error(st.topwin().as_ref(), "复制文件失败", &e);
+    }
+    fill_local_pane(st);
+}
+
+/* ---------------- 本地面板填充 ---------------- */
+
+/// 让本地面板盯住当前目录：命令行/外部程序 rm、touch、mv 都即时刷新。
+/// 目录没变就不重建监视器；监视器本身由 PanelState 持有。
+fn ensure_local_monitor(st: &Rc<PanelState>, cwd: &str) {
+    if *st.local_monitor_path.borrow() == cwd && st.local_monitor.borrow().is_some() {
+        return;
+    }
+    *st.local_monitor_path.borrow_mut() = cwd.to_string();
+    st.local_monitor.borrow_mut().take();
+    let file = gio::File::for_path(cwd);
+    let Ok(mon) = file.monitor_directory(
+        gio::FileMonitorFlags::NONE,
+        None::<&gio::Cancellable>,
+    ) else {
+        return;
+    };
+    let stw = Rc::downgrade(st);
+    mon.connect_changed(move |_m, _file, _other, event| {
+        if matches!(
+            event,
+            gio::FileMonitorEvent::PreUnmount | gio::FileMonitorEvent::Unmounted
+        ) {
+            return;
+        }
+        if let Some(st) = stw.upgrade() {
+            schedule_local_refresh(&st);
+        }
+    });
+    *st.local_monitor.borrow_mut() = Some(mon);
+}
+
+/// 一次文件变动会连发多个事件，250ms 去抖后再整目录重列。
+fn schedule_local_refresh(st: &Rc<PanelState>) {
+    if st.dead.get() || st.local_refresh_pending.get() {
+        return;
+    }
+    st.local_refresh_pending.set(true);
+    let stw = Rc::downgrade(st);
+    glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+        if let Some(st) = stw.upgrade() {
+            st.local_refresh_pending.set(false);
+            if !st.dead.get() {
+                fill_local_pane(&st);
+            }
+        }
+    });
+}
+
+pub fn fill_local_pane(st: &Rc<PanelState>) {
+    let pane = st.pane(false);
+    let cwd = st.local_cwd.borrow().clone();
+    match pane::read_local_dir(&cwd) {
+        Ok(rows) => {
+            let show_hidden = pane.show_hidden.get();
+            pane::fill_model(&pane, show_hidden, rows);
+            pane.set_cwd_entry(&cwd);
+            ensure_local_monitor(st, &cwd);
+        }
+        Err(e) => {
+            // 目录读不了时停掉旧目录的监视器，避免它继续触发刷新
+            st.local_monitor.borrow_mut().take();
+            st.local_monitor_path.borrow_mut().clear();
+            pane.set_cwd_entry(&cwd);
+            dialogs::show_error(
+                st.topwin().as_ref(),
+                "读取本地目录失败",
+                &format!("{e}\n目录：{cwd}"),
+            );
+        }
+    }
+}
+
+/* ---------------- URI 解码 ---------------- */
+
+/// 简单百分号解码（对应 g_uri_unescape_string）。
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = |c: u8| c.is_ascii_hexdigit().then(|| (c as char).to_digit(16)).flatten();
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{percent_decode, usable_local_dir};
+
+    #[test]
+    fn uri_decode() {
+        assert_eq!(percent_decode("/home/user"), "/home/user");
+        assert_eq!(percent_decode("/a%20b/c"), "/a b/c");
+        assert_eq!(percent_decode("/%E4%B8%AD"), "/中");
+        assert_eq!(percent_decode("/%zz"), "/%zz"); // 非法序列保留
+    }
+
+    #[test]
+    fn local_dir_memory_only_restores_usable_abs_dirs() {
+        let d = crate::util::testutil::temp_home("localdir");
+        assert!(usable_local_dir(&d.to_string_lossy()), "临时目录应可恢复");
+
+        let file = d.join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!usable_local_dir(&file.to_string_lossy()), "文件不是目录");
+
+        assert!(!usable_local_dir("relative/path"), "相对路径不恢复");
+        assert!(
+            !usable_local_dir("/definitely/not/exist/puttyplus"),
+            "不存在的目录不恢复"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

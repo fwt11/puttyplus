@@ -1,0 +1,32 @@
+Source: puttyplus
+Section: net
+Priority: optional
+Maintainer: fwt11 <wutong.feng@qq.com>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               pkg-config,
+               build-essential,
+               libgtk-4-dev (>= 4.18.0),
+               libvte-2.91-gtk4-dev (>= 0.80.0)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: puttyplus
+Architecture: any
+Depends: ${shlibs:Depends},
+         libglib2.0-0t64 (>= 2.54.0) | libglib2.0-0 (>= 2.54.0),
+         libgtk-4-1 (>= 4.18.0),
+         libvte-2.91-gtk4-0 (>= 0.80.0)
+Recommends: hicolor-icon-theme
+Suggests: adwaita-icon-theme, gnome-icon-theme
+Description: PuTTY 兼容的 SSH 终端与 SFTP 图形客户端
+ PuTTYPlus 是 PuTTY 兼容的 SSH 客户端：主窗为会话侧边栏 + 多标签布局，
+ 每个标签一套「SFTP 双栏文件面板 + VTE 终端」。
+ .
+ 支持 PuTTY 命令行参数（-ssh/-telnet/-rlogin/-raw、-P/-l/-pw/-pwfile/-i、
+ -m、-L/-R/-D、-load、-proxycmd、-title、-N/-t/-T、-4/-6/-C、-batch 等），
+ 可直接顶替 PuTTY 部署在堡垒机上；也能识别 ~/.ssh/config 别名与 PuTTY
+ 会话文件。
+ .
+ 特性：多标签会话、SFTP 递归传输、串口（-serial）会话、数据库通道
+ （PostgreSQL/MySQL）、私钥管理与凭据库、本地化中文界面。

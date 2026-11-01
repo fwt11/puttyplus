@@ -1,0 +1,12 @@
+--- argv ---
+-t h
+--- stdout ---
+proto=ssh host=h port=22 user=<ME>
+password=- keyfile=- session=-
+title=-
+flags: N=0 t=1 T=0 v4=0 v6=0 C=0 v=0 batch=0
+forwards=0 remote_cmd=-
+--- stderr ---
+
+--- exit ---
+0

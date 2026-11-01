@@ -1,0 +1,214 @@
+.TH PUTTYPLUS 1 "2026年10月21日" "puttyplus 0.1.0" "PuTTYPlus 手册"
+.SH 名称
+puttyplus \- PuTTY 兼容的 SSH 终端与 SFTP 图形客户端
+.SH 概述
+.B puttyplus
+[\fI选项\fR] [\fI主机\fR] [\fI端口\fR]
+.SH 描述
+.B PuTTYPlus
+是 PuTTY 兼容的 SSH 客户端。启动后主窗为「会话侧边栏 + 多标签」布局，
+每个标签包含一套 SFTP 双栏文件面板与 VTE 终端；标签页可自由增删，
+每个标签独立保持自己的连接。
+.PP
+命令行参数与 PuTTY 逐项兼容，可直接顶替 PuTTY 部署在堡垒机上：
+除
+.B \-ssh
+.B \-telnet
+.B \-rlogin
+.B \-raw
+.B \-P
+.B \-l
+.B \-pw
+.B \-pwfile
+.B \-i
+.B \-m
+.B \-L
+.B \-R
+.B \-D
+.B \-load
+.B \-proxycmd
+.B \-title
+.B \-N
+.B \-t
+.B \-T
+.B \-4
+.B \-6
+.B \-C
+.B \-batch
+等参数外，还识别
+.B \-\-print-config
+（打印解析后的连接配置后退出）与
+.B \-\-sftp\-selftest
+（对真实 sshd 跑 SFTP 全流程自检）。
+.PP
+不带主机名启动时直接进入欢迎页，可在侧边栏里双击会话连接，或用
+标签页上的「+」新建会话。
+.SH 选项
+.TP
+.B \-ssh
+.TQ
+.B \-telnet
+.TQ
+.B \-rlogin
+.TQ
+.B \-raw
+选择协议。默认
+.BR ssh 。
+.TP
+.BI \-P " 端口"
+端口号。按 PuTTY 的 atoi 语义原样透传，非法值按 0 处理。
+.TP
+.BI \-l " 用户名"
+登录用户名。
+.TP
+.BI \-pw " 密码"
+密码。密码不会出现在进程列表（argv）里，但同机用户若能读取
+.B /proc
+仍可能看到，敏感场景请改用
+.B \-pwfile
+或
+.B SSH_ASKPASS
+。
+.TP
+.BI \-pwfile " 文件"
+从文件读密码，只取第一行并去掉行尾空白。
+.TP
+.BI \-i " 私钥文件"
+私钥路径，支持
+.B ~
+展开。
+.TP
+.BI \-m " 命令文件"
+从文件读远程命令，连接后直接执行。
+.TP
+.BI \-L " 转发"
+.TQ
+.BI \-R " 转发"
+.TQ
+.BI \-D " 转发"
+本地、远程与动态端口转发。
+.TP
+.BI \-load " 会话名"
+载入 PuTTY 会话文件（\fB~/.putty/sessions\fR）。
+.TP
+.BI \-proxycmd " 命令"
+用外部命令做代理。
+.TP
+.BI \-title " 标题"
+设置窗口标题，支持
+.BI \-title= 标题
+的连写形式。
+.TP
+.B \-N
+不请求远程 shell，只做转发。
+.TP
+.B \-t
+强制分配 PTY。
+.TP
+.B \-T
+禁止分配 PTY。
+.TP
+.B \-4
+.TQ
+.B \-6
+强制 IPv4 / IPv6。
+.TP
+.B \-C
+启用压缩。
+.TP
+.B \-batch
+批处理模式，不弹交互对话框。
+.TP
+.BI \-serial " 设备"
+以串口会话连接（如
+.BR /dev/ttyUSB0 ），
+.B \-sercfg
+可指定波特率、数据位、校验、流控。
+.TP
+.B \-\-print-config
+打印解析后的连接配置到标准输出后退出，用于排查参数解析。
+.TP
+.BI \-\-sftp\-selftest " 主机 端口 用户 [密码]"
+对指定主机跑 SFTP 全流程自检（连接/认证/列表/递归传输/exec），
+按结果返回退出码。
+.PP
+被 PuTTY 接受但本实现忽略的参数：
+.BR \-A ,
+.BR \-a ,
+.BR \-1 ,
+.BR \-2 ,
+.BR \-no\-antispoof ,
+.BR \-share ,
+.BR \-noshare ,
+.BR \-beep ,
+.BR \-logappend ,
+.BR \-noagent ,
+.BR \-agent ,
+.BR \-loghost ,
+.BR \-hostkey ,
+.BR \-sessionlog 。
+.SH 快捷键
+.TP
+.B Ctrl+Shift+T
+新建标签页。
+.TP
+.B Ctrl+Shift+W
+关闭当前标签页。
+.TP
+.B Ctrl+Shift+D
+打开数据库通道窗口。
+.TP
+.B Ctrl+F
+终端内查找。
+.TP
+.B Ctrl+Shift+C
+.TQ
+.B Ctrl+Shift+V
+复制 / 粘贴。
+.SH 文件
+.TP
+.I ~/.config/puttyplus/connections.ini
+连接管理器保存的会话（权限 600）。
+.TP
+.I ~/.config/puttyplus/recent.ini
+最近连接记录。
+.TP
+.I ~/.config/puttyplus/settings.ini
+窗口尺寸、主题、密度等 GUI 设置。
+.TP
+.I ~/.config/puttyplus/credentials.vault
+凭据库（口令加密存放，与 connections.ini 分开）。
+.TP
+.I ~/.ssh/known_hosts
+主机密钥校验（与 PuTTY 一致，支持 hashed 与
+.IR [host]:port
+形式）。
+.SH 环境变量
+.TP
+.B SSH_ASKPASS
+指定 askpass 程序；PuTTYPlus 也可用自身充当 askpass（见
+.BR \-\-askpass ）。
+.TP
+.B SSH_ASKPASS_REQUIRE
+设为
+.B force
+时无终端也走 askpass。
+.TP
+.B PUTTYPLUS_PW
+askpass 模式下回显给调用方的密码。
+.TP
+.B PUTTYPLUS_PW_SESSION
+连接管理器拉起子进程时传递密码，避免密码出现在 argv。
+.TP
+.B SSHPASS
+.B \-pw
+缺失时的兜底密码来源。
+.SH 参见
+.BR ssh (1),
+.BR ssh_config (5),
+.BR sftp (1)
+.SH 报告问题
+源码与问题反馈见项目仓库；Rust 重构版说明见
+.I README.md
+（随包安装在
+.IR /usr/share/doc/puttyplus/README.md ）。

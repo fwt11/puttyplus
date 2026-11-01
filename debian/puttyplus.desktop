@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PuTTYPlus
+GenericName=SSH 终端与 SFTP 客户端
+Comment=PuTTY 兼容的 SSH 终端 + SFTP 图形客户端
+Exec=puttyplus %f
+TryExec=puttyplus
+Icon=puttyplus
+Terminal=false
+Categories=Network;RemoteAccess;TerminalEmulator;
+Keywords=SSH;SFTP;PuTTY;terminal;serial;terminal emulator;终端;远程;串口;
+StartupNotify=true
