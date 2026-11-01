@@ -237,6 +237,16 @@ mod tests {
 }
 
 /// 侧边栏是否显示（[ui] show_sidebar，默认 true）。
+/// 界面语言（存 `[general] language`）。
+pub fn language() -> crate::i18n::Lang {
+    crate::i18n::Lang::from_code(&get_str("general", "language"))
+}
+
+/// 保存界面语言。
+pub fn set_language(l: crate::i18n::Lang) {
+    set_str("general", "language", l.code());
+}
+
 pub fn show_sidebar() -> bool {
     let kf = glib::KeyFile::new();
     if kf.load_from_file(path(), glib::KeyFileFlags::NONE).is_err() {

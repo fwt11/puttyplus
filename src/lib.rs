@@ -13,6 +13,8 @@ pub mod density;
 pub mod emptystate;
 pub mod findbar;
 pub mod fwdtable;
+pub mod i18n;
+pub mod i18n_en;
 pub mod keymgr;
 pub mod keyui;
 pub mod menu;

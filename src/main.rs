@@ -74,6 +74,10 @@ fn main() {
         std::process::exit(code.clamp(0, 255) as i32);
     }
 
+    // 界面语言：必须在**建任何界面之前**读（菜单表、页签标题都是建的时候
+    // 就把文案定下来的 ⇒ 之后改语言要重启，见 settingsui 的「界面语言」）
+    puttyplus::i18n::set_lang(settings::language());
+
     let app = gtk::Application::builder()
         .application_id("org.puttyplus.PuttyPlus")
         // C 版（GTK3 gtk_init）没有单实例语义：堡垒机每次拉起

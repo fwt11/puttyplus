@@ -18,6 +18,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use crate::density::{self, Density, UiFont};
+use crate::i18n::{tr, Lang};
 use crate::theme::{self, Palette, Theme};
 use crate::windows::ToolKind;
 
@@ -42,12 +43,12 @@ impl Page {
     /// 页签上的名字。
     pub fn title(self) -> &'static str {
         match self {
-            Page::Appearance => "外观",
-            Page::Terminal => "终端",
-            Page::Transfer => "传输",
-            Page::Security => "安全",
-            Page::Shortcuts => "快捷键",
-            Page::Advanced => "高级",
+            Page::Appearance => tr("外观"),
+            Page::Terminal => tr("终端"),
+            Page::Transfer => tr("传输"),
+            Page::Security => tr("安全"),
+            Page::Shortcuts => tr("快捷键"),
+            Page::Advanced => tr("高级"),
         }
     }
 
@@ -98,6 +99,16 @@ pub struct SettingItem {
     pub page: Page,
     /// 原来住在哪儿（迁移前的落点）——写给文档看，也提醒"这儿曾经有第二处"。
     pub from: &'static str,
+}
+
+impl SettingItem {
+    /// 界面上显示的名字（**按当前语言翻译**）。
+    ///
+    /// 注册表里的 `label` 是**中文原文**（const 上下文里不能调函数）⇒
+    /// 显示时统一走这里翻译，冒烟按它找控件才不会在英文下找不到。
+    pub fn label_text(&self) -> &'static str {
+        tr(self.label)
+    }
 }
 
 /// **全部设置项的注册表**（唯一来源）。
@@ -309,6 +320,39 @@ pub fn build_page(page: Page) -> gtk::Box {
 
 /// 外观页：界面主题 / 界面密度 / 界面字号。
 fn appearance_page(root: &gtk::Box) {
+    /* ---- 界面语言 ---- */
+    {
+        let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        sec.append(&section(tr("界面语言")));
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_margin_top(7);
+        row.set_margin_bottom(7);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        let lbl = gtk::Label::new(Some(tr("界面语言")));
+        lbl.set_xalign(0.0);
+        lbl.set_hexpand(true);
+        let combo = gtk::ComboBoxText::new();
+        for l in [Lang::Zh, Lang::En] {
+            combo.append(Some(l.id()), &l.self_name());
+        }
+        // ⚠️ **先设当前值、再接回调**：否则 `set_active_id` 自己就会触发
+        //    `changed` ⇒ 一开窗口就把语言"改"一遍。
+        combo.set_active_id(Some(crate::i18n::lang().id()));
+        combo.connect_changed(move |c| {
+            let Some(id) = c.active_id() else { return };
+            let l = Lang::from_code(&id);
+            crate::settings::set_language(l);
+            crate::i18n::set_lang(l);
+        });
+        row.append(&lbl);
+        row.append(&combo);
+        sec.append(&row);
+        sec.append(&hint_label(tr("切换语言后需要重启应用才能生效。")));
+        root.append(&sec);
+    }
+
     /* ---- 界面主题 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
