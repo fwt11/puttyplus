@@ -90,9 +90,12 @@ jobs:
         run: |
           set -o pipefail
           xvfb-run -a cargo test --lib --locked 2>&1 | tee /tmp/test.log || {
-            echo "::error::单元测试失败，失败名单："
-            grep -E "^(test .*FAILED|    [a-z_:]+$)" /tmp/test.log | head -60
-            echo "::error::完整日志见本步骤输出"
+            # 注解是单行的：换行写成 %0A，% 本身要先转义成 %25
+            echo "::error::单元测试失败，详见本步骤输出。失败名单："
+            sed -n '/^failures:$/,/^test result:/p' /tmp/test.log \
+              | head -c 4000 | sed 's/%/%25/g' | tr '\n' '%0A'
+            echo
+            grep -E "^test result:" /tmp/test.log | sed 's/%/%25/g'
             exit 1
           }
 
