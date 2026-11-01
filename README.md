@@ -225,12 +225,21 @@ bash tools/cli_contract_check.sh              # 命令行契约回归（73 条�
 - 在 **Debian 13 (trixie)** 容器里编译 —— 它带 GTK 4.18.6 / VTE 0.80.1，
   正好是 `debian/control` 里声明的依赖下限（Ubuntu runner 只有 GTK 4.14，
   编译期就会被版本断言挡下）；
-- 跑全部单元测试（`xvfb-run` 提供显示环境）；
+- 跑全部单元测试；
+- 跑三个关键 GUI 冒烟（`db_ui_smoke` / `db_empty_smoke` / `tree_panel_smoke`）——
+  GTK 要求在主线程初始化，所以界面断言放在独立进程（example）里跑，
+  单元测试里那几个 GTK 用例按设计跳过；
 - 跑命令行契约回归（73 条黄金基准）；
 - 打成 deb 包。
 
 产物在 Actions 页面直接下载：`puttyplus-linux-x86_64`（可执行文件）与
-`puttyplus-deb-amd64`（deb 包）。
+`puttyplus-deb-amd64`（deb 包）。本地等价命令：
+
+```bash
+cargo test --lib                              # 单元测试（不需要显示环境）
+xvfb-run -a cargo run --example db_ui_smoke   # GUI 冒烟
+bash tools/cli_contract_check.sh              # 命令行契约回归
+```
 
 ## 许可
 
