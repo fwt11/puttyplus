@@ -82,6 +82,9 @@ jobs:
           mkdir -p dist/pkg
           cp target/release/puttyplus dist/pkg/puttyplus
           cp README.md LICENSE dist/pkg/
+          # ⚠️ deb 在仓库根（dpkg-buildpackage 写在上一级），**得先拷进 dist/**
+          #    —— 否则下一步在 dist/ 里 sha256sum 找不到它，直接退出 1。
+          cp puttyplus_*.deb dist/
           tar -C dist/pkg -czf "$GITHUB_WORKSPACE/dist/puttyplus-linux-x86_64.tar.gz" \
             puttyplus README.md LICENSE
           cd dist
