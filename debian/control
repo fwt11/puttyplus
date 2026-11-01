@@ -7,7 +7,8 @@ Build-Depends: debhelper-compat (= 13),
                pkg-config,
                build-essential,
                libgtk-4-dev (>= 4.18.0),
-               libvte-2.91-gtk4-dev (>= 0.80.0)
+               libvte-2.91-gtk4-dev (>= 0.80.0),
+               libudev-dev
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 

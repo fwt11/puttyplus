@@ -30,9 +30,12 @@ jobs:
         run: |
           set -eux
           apt-get update
+          # ⚠️ libudev-dev 不能少：serialport → libudev-sys 要 pkg-config
+          #    找 libudev.pc，缺了就在编译期炸（发行版的 GTK/VTE 不带它）。
           apt-get install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
             libgtk-4-dev libvte-2.91-gtk4-dev \
+            libudev-dev \
             xvfb debhelper dpkg-dev fakeroot
 
       - uses: actions/checkout@v4
