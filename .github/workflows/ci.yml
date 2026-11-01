@@ -30,12 +30,21 @@ jobs:
         run: |
           set -eux
           apt-get update
-          # ⚠️ libudev-dev 不能少：serialport → libudev-sys 要 pkg-config
-          #    找 libudev.pc，缺了就在编译期炸（发行版的 GTK/VTE 不带它）。
+          # ⚠️ 这几个都不能少（少一个就在后面某步炸）：
+          #    libudev-dev —— serialport → libudev-sys 要 pkg-config 找
+          #      libudev.pc，它既不是 GTK 的依赖也不是 VTE 的依赖；
+          #    fontconfig + fonts-* —— 基础镜像里**一个字体都没有**，GTK
+          #      没有字体会起不来（而且本项目界面是中文的）；
+          #    openssh-client —— 提供 ssh / ssh-keygen，私钥管理器与终端
+          #      spawn 的逻辑会按 PATH 里有没有它们分叉；
+          #    libgl1-mesa-dri —— GSK 的软件渲染后备，headless 下要它。
           apt-get install -y --no-install-recommends \
             git ca-certificates curl build-essential pkg-config \
             libgtk-4-dev libvte-2.91-gtk4-dev \
             libudev-dev \
+            openssh-client \
+            fontconfig fonts-dejavu-core fonts-noto-cjk \
+            libgl1-mesa-dri \
             xvfb debhelper dpkg-dev fakeroot
 
       - uses: actions/checkout@v4
@@ -76,7 +85,16 @@ jobs:
         run: cargo build --release --locked
 
       - name: 单元测试
-        run: xvfb-run -a cargo test --lib --locked
+        # ⚠️ 失败时把失败名单打成 Actions 注解（网页上直接能看见，
+        #    也方便用 API 读 —— run 级日志下载要 admin，拿不到）。
+        run: |
+          set -o pipefail
+          xvfb-run -a cargo test --lib --locked 2>&1 | tee /tmp/test.log || {
+            echo "::error::单元测试失败，失败名单："
+            grep -E "^(test .*FAILED|    [a-z_:]+$)" /tmp/test.log | head -60
+            echo "::error::完整日志见本步骤输出"
+            exit 1
+          }
 
       - name: 命令行契约回归（73 条黄金基准）
         run: bash tools/cli_contract_check.sh
