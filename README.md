@@ -128,6 +128,25 @@ ssh 子进程长什么样 —— 每一处都要和 PuTTY 对得上。
   一个归属页。
 - **主题**：浅色 / 深色 / 跟随系统，次要文字按 WCAG AA 计算对比度，不是随手取的灰。
 
+## 下载
+
+到 [Releases 页](https://github.com/fwt11/puttyplus/releases) 取最新版本：
+
+| 资产 | 用途 |
+|---|---|
+| `puttyplus_<版本>_amd64.deb` | Debian / Ubuntu 等发行版的安装包（依赖 GTK ≥ 4.18、VTE ≥ 0.80） |
+| `puttyplus-linux-x86_64.tar.gz` | 免安装的单文件版：解开直接跑 `puttyplus` |
+| `SHA256SUMS` | 校验和（`sha256sum -c SHA256SUMS`） |
+
+```bash
+# 装 deb
+sudo dpkg -i puttyplus_0.1.0-1_amd64.deb
+
+# 免安装版
+tar xf puttyplus-linux-x86_64.tar.gz
+./puttyplus
+```
+
 ## 快速开始
 
 ### 依赖
