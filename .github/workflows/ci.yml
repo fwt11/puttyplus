@@ -85,11 +85,19 @@ jobs:
         run: cargo build --release --locked
 
       - name: 单元测试
-        # ⚠️ 失败时把失败名单打成 Actions 注解（网页上直接能看见，
-        #    也方便用 API 读 —— run 级日志下载要 admin，拿不到）。
+        # ⚠️ **不要给单测提供显示环境**！libtest 把每个测试跑在子线程上，
+        #    GTK 要求在主线程初始化：容器里若有 DISPLAY，gtk::init() 会真
+        #    的成功 ⇒ 那几个 GTK 用例（theme/menu/density…）就会在子线程里
+        #    操作 GTK ⇒ 命中 GTK 的致命断言 ⇒ **整个测试进程 abort**
+        #    （失败段都是空的，只有 "test failed"）。不给 DISPLAY 时
+        #    gtk::init() 返回 Err ⇒ 那几个用例按设计跳过 ⇒ 与本机一致。
+        #    GUI 的断言放在下面的「GUI 冒烟」步骤里（example 跑在主线程）。
+        #
+        # ⚠️ 失败时把失败名单打成 Actions 注解（网页上直接能看见，也能用
+        #    check-runs API 读 —— run 级日志下载要 admin，拿不到）。
         run: |
           set -o pipefail
-          xvfb-run -a cargo test --lib --locked 2>&1 | tee /tmp/test.log || {
+          cargo test --lib --locked 2>&1 | tee /tmp/test.log || {
             # 注解是单行的：换行写成 %0A，% 本身要先转义成 %25
             echo "::error::单元测试失败，详见本步骤输出。失败名单："
             sed -n '/^failures:$/,/^test result:/p' /tmp/test.log \
@@ -98,6 +106,26 @@ jobs:
             grep -E "^test result:" /tmp/test.log | sed 's/%/%25/g'
             exit 1
           }
+
+      - name: GUI 冒烟（example 跑在主线程）
+        # ⚠️ GTK 的断言只能在这儿测：example 是独立进程 ⇒ gtk::init() 在
+        #    主线程里能成功 ⇒ UI 断言真的会跑（单测里那几个会按设计跳过）。
+        # ⚠️ 失败时把输出尾部做成注解（run 级日志下载要 admin，拿不到）。
+        run: |
+          set -o pipefail
+          for ex in db_ui_smoke db_empty_smoke tree_panel_smoke; do
+            echo "::group::$ex"
+            timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
+              2>&1 | tee "/tmp/$ex.log" || {
+                echo "::endgroup::"
+                {
+                  echo "::error::$ex 失败，输出尾部："
+                  tail -c 3000 "/tmp/$ex.log" | sed 's/%/%25/g' | tr '\n' '%0A'
+                }
+                exit 1
+              }
+            echo "::endgroup::"
+          done
 
       - name: 命令行契约回归（73 条黄金基准）
         run: bash tools/cli_contract_check.sh
