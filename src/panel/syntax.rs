@@ -1337,6 +1337,14 @@ fn scan_json(text: &str) -> Vec<Span> {
 }
 
 /// YAML：`key:` 是键，`#` 后是注释，值里的字符串/数字/布尔。
+///
+/// 除了这四类，还认 YAML **特有**的结构（用户 2026-11-02「增加 yml 的语法高亮」）：
+/// - **文档分隔符** `---` / `...`（必须顶格）
+/// - **序列项** `- item`（行首的 `-`；**后面跟空格**才是序列项，`-5` 是负数）
+/// - **块标量** `|` / `>`（含 `|-` `>-` `|2` 标记；**内容整段当字符串**）
+/// - **标签** `!!str` / `!tag`
+/// - **锚点/别名** `&a` / `*a`
+/// - **日期/时间** `2024-01-31` / `12:30:00`（当**一个**数字，不拆成三段）
 fn scan_yaml(text: &str) -> Vec<Span> {
     let b = text.as_bytes();
     let n = b.len();
@@ -1347,12 +1355,38 @@ fn scan_yaml(text: &str) -> Vec<Span> {
 
     while pg.step(&mut i, n) {
         let c = b[i];
+        // 文档分隔符 `---` / `...`：**必须顶格**（前面有缩进就不算）
+        if (i == 0 || b[i - 1] == b'\n')
+            && (b[i..].starts_with(b"---") || b[i..].starts_with(b"..."))
+        {
+            out.push((i, i + 3, Tok::Heading));
+            i += 3;
+            line_start = false;
+            continue;
+        }
         // '#' 在行首、或前面是空白时都是注释（YAML 的规矩）
         if c == b'#' && (line_start || i > 0 && (b[i - 1] == b' ' || b[i - 1] == b'\t')) {
             let end = find_line_end(b, i);
             out.push((i, end, Tok::Comment));
             i = end;
             continue;
+        }
+        // 标签 `!!str` / `!tag`（`!` 后面必须跟名字，否则当普通标量）
+        if c == b'!' {
+            let mut j = i + 1;
+            if j < n && b[j] == b'!' {
+                j += 1;
+            }
+            let name = j;
+            while j < n && (is_ident_cont(b[j]) || b[j] == b'-' || b[j] == b'/') {
+                j += 1;
+            }
+            if j > name {
+                out.push((i, j, Tok::Tag));
+                i = j;
+                line_start = false;
+                continue;
+            }
         }
         if c == b'"' || c == b'\'' {
             let end = scan_string(b, i, c, c == b'"', false);
@@ -1361,12 +1395,37 @@ fn scan_yaml(text: &str) -> Vec<Span> {
             line_start = false;
             continue;
         }
-        if c.is_ascii_digit() || (c == b'-' && i + 1 < n && b[i + 1].is_ascii_digit() && !line_start) {
-            let end = scan_number(b, i);
+        // 数字（负号、日期、时间都算**一个**数）
+        if c.is_ascii_digit() || (c == b'-' && i + 1 < n && b[i + 1].is_ascii_digit()) {
+            let end = scan_yaml_number(b, i);
             out.push((i, end, Tok::Number));
             i = end;
             line_start = false;
             continue;
+        }
+        // 序列项的 `-`：**行首**且 `-` 后面是空白
+        //（`-5` 已经在上面当数字处理掉了）
+        if c == b'-' && line_start && (i + 1 >= n || b[i + 1] == b' ' || b[i + 1] == b'\t') {
+            out.push((i, i + 1, Tok::Meta));
+            i += 1;
+            line_start = false;
+            continue;
+        }
+        // 块标量 `|` / `>`：标记本身 + **整段内容**
+        if c == b'|' || c == b'>' {
+            if let Some((ind_end, body_start)) = yaml_block_indicator(b, i) {
+                out.push((i, ind_end, Tok::Meta));
+                // 内容行的缩进要比**键那行**深，所以先量出键的缩进
+                let indent = yaml_line_indent(b, i);
+                let body_end = yaml_block_body_end(b, body_start, indent);
+                if body_end > body_start {
+                    out.push((body_start, body_end, Tok::String));
+                }
+                // 整段跳过（别再逐字扫一遍），停在最后一行内容的末尾
+                i = body_end;
+                line_start = true;
+                continue;
+            }
         }
         if c == b'&' || c == b'*' {
             // 锚点/别名
@@ -1376,6 +1435,26 @@ fn scan_yaml(text: &str) -> Vec<Span> {
             }
             out.push((i, j, Tok::Meta));
             i = j;
+            line_start = false;
+            continue;
+        }
+        // 合并键 `<<:`（YAML 拿它合并映射）
+        if c == b'<' && b[i..].starts_with(b"<<") {
+            let mut j = i + 2;
+            while j < n && (b[j] == b' ' || b[j] == b'\t') {
+                j += 1;
+            }
+            if j < n && b[j] == b':' {
+                out.push((i, i + 2, Tok::Attr));
+                i += 2;
+                line_start = false;
+                continue;
+            }
+        }
+        // 空值 `~`（必须**单独一个词**，否则 `~foo` 是普通标量）
+        if c == b'~' && (i + 1 >= n || !is_ident_cont(b[i + 1])) {
+            out.push((i, i + 1, Tok::Literal));
+            i += 1;
             line_start = false;
             continue;
         }
@@ -1393,8 +1472,13 @@ fn scan_yaml(text: &str) -> Vec<Span> {
             let is_key = k < n && b[k] == b':';
             let tok = if is_key {
                 Tok::Attr
-            } else if w == "true" || w == "false" || w == "null" || w == "yes" || w == "no"
-                || w == "on" || w == "off" || w == "~"
+            } else if w.eq_ignore_ascii_case("true")
+                || w.eq_ignore_ascii_case("false")
+                || w.eq_ignore_ascii_case("null")
+                || w == "yes"
+                || w == "no"
+                || w == "on"
+                || w == "off"
             {
                 Tok::Literal
             } else {
@@ -1418,6 +1502,143 @@ fn scan_yaml(text: &str) -> Vec<Span> {
     to_char_spans(text, &out)
 }
 
+/// YAML 里的数字：比通用的多了**日期**和**时间**。
+///
+/// `2024-01-31`、`12:30:00` 在 YAML 里极常见；通用数字扫描器会把
+/// `2024-01-31` 拆成「2024」「-01」「-31」三段（中间还夹一个负号），
+/// 颜色跳来跳去很难看。
+fn scan_yaml_number(b: &[u8], start: usize) -> usize {
+    let n = b.len();
+    let mut i = start;
+    // 负号（`-5`）：调用方保证 `-` 后面就是数字
+    if b[i] == b'-' {
+        i += 1;
+    }
+    let d0 = i;
+    while i < n && (b[i].is_ascii_digit() || b[i] == b'_') {
+        i += 1;
+    }
+    let digits = i - d0;
+    // 日期 `2024-01-31`（年 4 位 - 月 2 位 - 日 2 位）
+    if digits == 4 && i + 2 < n && b[i] == b'-' && b[i + 1].is_ascii_digit() && b[i + 2].is_ascii_digit() {
+        let mut j = i + 3;
+        if j + 1 < n && b[j] == b'-' && b[j + 1].is_ascii_digit() {
+            j += 1;
+            while j < n && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            return j;
+        }
+    }
+    // 小数
+    if i < n && b[i] == b'.' && i + 1 < n && b[i + 1].is_ascii_digit() {
+        i += 1;
+        while i < n && (b[i].is_ascii_digit() || b[i] == b'_') {
+            i += 1;
+        }
+    }
+    // 指数 `1e3` / `1.5e-3`
+    if i < n && (b[i] | 0x20) == b'e' {
+        let mut j = i + 1;
+        if j < n && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        if j < n && b[j].is_ascii_digit() {
+            i = j;
+            while i < n && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+    }
+    // 时间 `12:30` / `12:30:00`
+    if i < n && b[i] == b':' && i + 1 < n && b[i + 1].is_ascii_digit() {
+        let mut j = i + 1;
+        while j < n && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j < n && b[j] == b':' && j + 1 < n && b[j + 1].is_ascii_digit() {
+            j += 1;
+            while j < n && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    i
+}
+
+/// 块标量标记（`|` / `>`）扫到哪儿结束，外加**内容从哪儿开始**。
+///
+/// 返回 `None` 表示这**不是**块标量（比如 `a|b` 里的 `|`）。
+/// 判据：标记后面只能跟缩进指示器（`2`）、chomping（`+` / `-`）、
+/// 空白和注释，然后就该换行了。
+fn yaml_block_indicator(b: &[u8], i: usize) -> Option<(usize, usize)> {
+    let n = b.len();
+    let mut j = i + 1;
+    // 缩进指示器 / chomping 标记（顺序随意：`|2-`、`|-2` 都行）
+    while j < n && (b[j].is_ascii_digit() || b[j] == b'+' || b[j] == b'-') {
+        j += 1;
+    }
+    let ind_end = j;
+    // 后面只能是空白 + 注释
+    while j < n && (b[j] == b' ' || b[j] == b'\t') {
+        j += 1;
+    }
+    if j < n && b[j] == b'#' {
+        j = find_line_end(b, j);
+    }
+    if j < n && b[j] != b'\n' {
+        return None;
+    }
+    Some((ind_end, next_line_start(b, j)))
+}
+
+/// `pos` 所在那一行的**缩进**（前导空白个数）。
+fn yaml_line_indent(b: &[u8], pos: usize) -> usize {
+    let mut s = pos;
+    while s > 0 && b[s - 1] != b'\n' {
+        s -= 1;
+    }
+    let mut n = 0;
+    let mut i = s;
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+        n += 1;
+        i += 1;
+    }
+    n
+}
+
+/// 块标量**内容**的末尾（不含最后一行的换行符）。
+///
+/// 内容 = 后面那些**缩进比键更深**的行；遇到空行算内容的一部分，
+/// 遇到缩进 <= 键的行就是下一个键了，块到此为止。
+fn yaml_block_body_end(b: &[u8], start: usize, key_indent: usize) -> usize {
+    let n = b.len();
+    let mut i = start;
+    let mut end = start;
+    while i < n {
+        let mut j = i;
+        let mut ind = 0;
+        while j < n && (b[j] == b' ' || b[j] == b'\t') {
+            j += 1;
+            ind += 1;
+        }
+        let line_end = find_line_end(b, j);
+        if j >= line_end {
+            // 空行：属于块的一部分
+            end = next_line_start(b, j);
+            i = end;
+            continue;
+        }
+        if ind <= key_indent {
+            // 同级或更浅 ⇒ 块结束（后面是下一个键）
+            break;
+        }
+        end = line_end;
+        i = next_line_start(b, j);
+    }
+    end
+}
 /// TOML：`[section]`、`key = value`、字符串/数字/布尔。
 fn scan_toml(text: &str) -> Vec<Span> {
     let b = text.as_bytes();
@@ -2178,6 +2399,85 @@ mod tests {
         let src = "key: value # 注释\nlist:\n  - a";
         assert!(has(src, Lang::Yaml, Tok::Attr, "key"));
         assert!(has(src, Lang::Yaml, Tok::Comment, "注释"));
+    }
+
+    /// **文档分隔符** `---` / `...`（顶格）。
+    #[test]
+    fn yaml_文档分隔符() {
+        let src = "---\nname: x\n...\n";
+        assert!(has(src, Lang::Yaml, Tok::Heading, "---"));
+        assert!(has(src, Lang::Yaml, Tok::Heading, "..."));
+        // 缩进的就不是分隔符了
+        let src2 = "  ---\n";
+        assert!(!has(src2, Lang::Yaml, Tok::Heading, "---"));
+    }
+
+    /// **序列项**的行首 `-` 是标记，**`-5` 却是负数**（别搞混）。
+    #[test]
+    fn yaml_序列项与负数() {
+        let src = "list:\n  - a\n  - -5\n";
+        assert!(has(src, Lang::Yaml, Tok::Meta, "-"));
+        // 负数整体当**一个**数
+        let neg = toks(src, Lang::Yaml);
+        assert!(
+            neg.iter().any(|(t, p)| *t == Tok::Number && p.contains("-5")),
+            "负数应整体着成数字：{neg:?}"
+        );
+    }
+
+    /// **块标量** `|` / `>`：标记 + **整段内容**（内容当字符串）。
+    #[test]
+    fn yaml_块标量() {
+        let src = "script: |\n  echo 一\n  echo 二\nnext: 1\n";
+        assert!(has(src, Lang::Yaml, Tok::Meta, "|"));
+        assert!(has(src, Lang::Yaml, Tok::String, "echo 一"));
+        // 内容到下一个键为止 ⇒ `next` 还是键
+        assert!(has(src, Lang::Yaml, Tok::Attr, "next"));
+        // 块里的内容**不该**被当成键
+        let ks: Vec<&str> = toks(src, Lang::Yaml)
+            .iter()
+            .filter(|(t, _)| *t == Tok::Attr)
+            .map(|(_, p)| *p)
+            .collect();
+        assert!(!ks.iter().any(|k| k.contains("echo")), "块内容被当成键了：{ks:?}");
+    }
+
+    /// `|-` / `>-` 这类 chomping 标记也算块标量。
+    #[test]
+    fn yaml_块标量带标记() {
+        let src = "a: >-\n  缩进的内容\nb: 2\n";
+        assert!(has(src, Lang::Yaml, Tok::Meta, ">-"));
+        assert!(has(src, Lang::Yaml, Tok::String, "缩进的内容"));
+    }
+
+    /// **标签** `!!str` / `!tag`。
+    #[test]
+    fn yaml_标签与锚点() {
+        let src = "a: !!str 123\nb: &锚 1\nc: *锚\n";
+        assert!(has(src, Lang::Yaml, Tok::Tag, "!!str"));
+        assert!(has(src, Lang::Yaml, Tok::Meta, "&锚"));
+        assert!(has(src, Lang::Yaml, Tok::Meta, "*锚"));
+    }
+
+    /// **日期/时间**当**一个**数（不拆成三段）。
+    #[test]
+    fn yaml_日期时间() {
+        let src = "d: 2024-01-31\nt: 12:30:00\n";
+        let ns: Vec<&str> = toks(src, Lang::Yaml)
+            .iter()
+            .filter(|(t, _)| *t == Tok::Number)
+            .map(|(_, p)| *p)
+            .collect();
+        assert!(ns.contains(&"2024-01-31"), "日期应整体着成数字：{ns:?}");
+        assert!(ns.contains(&"12:30:00"), "时间应整体着成数字：{ns:?}");
+    }
+
+    /// **合并键** `<<:` 算键；**空值** `~` 算字面量。
+    #[test]
+    fn yaml_合并键与空值() {
+        let src = "base: &b\n  x: 1\nchild:\n  <<: *b\n  y: ~\n";
+        assert!(has(src, Lang::Yaml, Tok::Attr, "<<"));
+        assert!(has(src, Lang::Yaml, Tok::Literal, "~"));
     }
 
     #[test]
