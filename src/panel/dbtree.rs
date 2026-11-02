@@ -76,6 +76,41 @@ impl NodeKind {
         }
     }
 
+    /// 这一类对象的**图标**（Adwaita symbolic 系列）。
+    ///
+    /// ⚠️ **为什么每类一个图标**（用户 2026-11-02 给的 dbx 截图）：
+    /// dbx 的对象树里，表 / 视图 / 函数 / 序列 / 类型各配一个图标 ⇒
+    /// **一眼就分得出是什么对象**，不用去读「说明」列里的字。
+    /// 我们以前只有一列字（"表" / "视图" / "模式"…）⇒ 得逐行读。
+    ///
+    /// **图标名必须是系统里确实有的**（`/usr/share/icons/*/symbolic/`），
+    /// 写错了 GTK 静默不画 ⇒ 图标列一片空白（看着像"没做"）。
+    pub fn icon(self) -> &'static str {
+        match self {
+            // 连接（= 那个库）⇒ 磁盘（dbx 用的是数据库圆柱，GTK 没有）
+            NodeKind::Root => "drive-harddisk-symbolic",
+            // 模式（PG）/ 库（MySQL）⇒ 文件夹（跟 dbx 一致）
+            NodeKind::Schema => "folder-symbolic",
+            // 表 ⇒ 网格（跟 dbx 一致）
+            NodeKind::Table => "view-grid-symbolic",
+            // 视图 ⇒ 眼睛（跟 dbx 一致）
+            NodeKind::View => "view-reveal-symbolic",
+            // 列 ⇒ 列表
+            NodeKind::Column => "view-list-symbolic",
+            // 索引 ⇒ 有序列表
+            NodeKind::Index => "view-list-ordered-symbolic",
+            // 函数 ⇒ 齿轮（例程/机制）
+            NodeKind::Function => "preferences-system-symbolic",
+            // 存储过程 ⇒ 文本（跟函数区分开）
+            NodeKind::Procedure => "text-x-generic-symbolic",
+            // 触发器 ⇒ 闪电（跟 dbx 的事件触发器一致）
+            NodeKind::Trigger => "weather-storm-symbolic",
+            // 事件（定时任务）⇒ 日历
+            NodeKind::Event => "x-office-calendar-symbolic",
+            NodeKind::Placeholder => "",
+        }
+    }
+
     /// 这一层要不要挂占位子节点（= 能不能展开 = 要不要懒加载）。
     fn lazy(self) -> bool {
         matches!(
@@ -168,6 +203,11 @@ const COL_DETAIL: u32 = 2;
 const COL_SCHEMA: u32 = 3;
 const COL_TABLE: u32 = 4;
 const COL_NODE: u32 = 5;
+/// **图标名**（每类对象一个，见 [`NodeKind::icon`]）。
+///
+/// ⚠️ 放在**最后**：前面的列号是别的代码按位置取的（`COL_NAME` 等），
+/// 插在中间会全体错位。
+const COL_ICON: u32 = 6;
 
 /// 这个模式是不是**系统模式**（不该被当成"默认模式"展开）。
 ///
@@ -321,6 +361,7 @@ impl DbTree {
                 glib::Type::STRING, // SCHEMA
                 glib::Type::STRING, // TABLE
                 glib::Type::U32,    // NODE
+                glib::Type::STRING, // ICON
             ]);
             let view = gtk::TreeView::new();
             view.set_model(Some(&store));
@@ -382,6 +423,16 @@ impl DbTree {
             c.set_resizable(true);
             c.set_expand(true);
             c.set_min_width(140);
+            // ⚠️ **图标渲染器跟文字渲染器塞进同一列**（侧边栏也是这么干的）：
+            //    GTK4 把**展开箭头和缩进画在第一列** ⇒ 图标要单独占一列的话，
+            //    箭头会压在图标上。同列里排（图标 → 文字）就都露得出来。
+            if idx == COL_NAME {
+                let r_icon = gtk::CellRendererPixbuf::new();
+                // 图标与文字之间留点空隙（贴太近看着挤成一坨）
+                r_icon.set_padding(4, 2);
+                c.pack_start(&r_icon, false);
+                c.add_attribute(&r_icon, "icon-name", COL_ICON as i32);
+            }
             c.pack_start(&r, true);
             // 必须显式绑定 "text" 属性：GTK4 的 pack_start **只把渲染器塞进列**，
             // 不会把某一列的文本喂给它——不绑就是一片空白（列头还在，看着像"没数据"）。
@@ -1316,6 +1367,7 @@ impl DbTree {
         args: &str,
     ) -> u32 {
         let kind_s = kind.badge().to_string();
+        let icon_s = kind.icon().to_string();
         let name_s = name.to_string();
         let detail_s = detail.to_string();
         let schema_s = schema.to_string();
@@ -1332,6 +1384,7 @@ impl DbTree {
                 (COL_SCHEMA, &schema_s),
                 (COL_TABLE, &table_s),
                 (COL_NODE, &id),
+                (COL_ICON, &icon_s),
             ],
         );
         self.nodes.borrow_mut().push(Node {
@@ -1893,5 +1946,42 @@ impl DbTree {
         let iter = model.iter(&path)?;
         let id = self.store.get::<u32>(&iter, COL_NODE as i32) as usize;
         self.nodes.borrow().get(id).map(|n| n.name.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **每类对象一个图标，而且互不相同**（用户 2026-11-02 给的 dbx 截图：
+    /// "它为表、数据库、视图等都提供了不同的图标，一眼就能分辨"）。
+    #[test]
+    fn 每类对象一个不重样的图标() {
+        let kinds = [
+            NodeKind::Root,
+            NodeKind::Schema,
+            NodeKind::Table,
+            NodeKind::View,
+            NodeKind::Column,
+            NodeKind::Index,
+            NodeKind::Function,
+            NodeKind::Procedure,
+            NodeKind::Trigger,
+            NodeKind::Event,
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        for k in kinds {
+            let ic = k.icon();
+            assert!(!ic.is_empty(), "{:?} 没有图标", k);
+            assert!(
+                ic.ends_with("-symbolic"),
+                "{:?} 的图标名不像 symbolic 系列：{ic}",
+                k
+            );
+            assert!(!seen.contains(&ic), "{:?} 的图标跟别人重了：{ic}", k);
+            seen.push(ic);
+        }
+        // 占位节点（"载入中…"）不占图标位
+        assert!(NodeKind::Placeholder.icon().is_empty());
     }
 }
