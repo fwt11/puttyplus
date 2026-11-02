@@ -47,7 +47,7 @@ fn main() {
     pump(800);
     shot("/tmp/pp_newconn.png");
 
-    dbconn::ui_new(None, "10.0.0.1:22:root", |_, _| {});
+    dbconn::ui_new(None, "10.0.0.1:22:root", None, |_, _| {});
     pump(800);
     shot("/tmp/pp_dbconn_dlg.png");
 

@@ -98,7 +98,7 @@ fn main() {
     // ---- 1) 填连接名 + 密码，点「连接」 ----
     let name = "pp_当场密码";
     let pw = "s3cret-9527";
-    dbconn::ui_new(None, &key, |_k, _n| {});
+    dbconn::ui_new(None, &key, None, |_k, _n| {});
     pump(600);
 
     let dlg = gtk::Window::list_toplevels()
@@ -152,7 +152,7 @@ fn main() {
     // ---- 4) 密码框留空 → 不塞空密码 ----
     {
         let name2 = "pp_空密码";
-        dbconn::ui_new(None, &key, |_k, _n| {});
+        dbconn::ui_new(None, &key, None, |_k, _n| {});
         pump(600);
         let dlg2 = gtk::Window::list_toplevels()
             .into_iter()

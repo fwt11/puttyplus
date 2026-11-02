@@ -276,7 +276,7 @@ fn main() {
     check!("不勾 + 连接 ⇒ 照样连", connected.get(), "回调没被调用");
 
     // ---------- 2. 数据库连接对话框 ----------
-    dbconn::ui_new(None, "冒烟会话", |_, _| {});
+    dbconn::ui_new(None, "冒烟会话", None, |_, _| {});
     pump(600);
     let ddlg = find_dialog("新建数据库连接（当前会话）").expect("数据库连接对话框要开着");
     let (dw, dh) = (ddlg.width(), ddlg.height());

@@ -77,7 +77,7 @@ fn main() {
 
     // 堡垒机场景：当前会话**不在**连接列表里
     let sess = "root@10.0.0.9:22";
-    dbconn::ui_new(None, sess, |_k, _n| {});
+    dbconn::ui_new(None, sess, None, |_k, _n| {});
     pump(600);
 
     // 找到那个对话框
