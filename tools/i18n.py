@@ -226,6 +226,10 @@ def cmd_extract(args):
                 files.append(os.path.join(root, nm))
     files.sort()
     for path in files:
+        # ⚠️ **生成的英文表不是文案源**：它里面每一条都是"中文原文 + 英文译文"，
+        #    抽进去等于**自举**（下次再 extract，译文表会把自己的译文也当词条）。
+        if os.path.basename(path) == "i18n_en.rs":
+            continue
         src = open(path, encoding="utf-8").read()
         _lits, marks = strip_code(src)
         t_ranges = test_ranges(src)
@@ -393,7 +397,9 @@ def cmd_gen(args):
     lines.append(f"pub static EN: [(&str, &str); {len(tr)}] = [")
     for k in sorted(tr):
         v = tr[k]
-        lines.append(f'    ({escape(k)}, {escape(v)}),')
+        # ⚠️ `escape()` 返回的是**字面量内容**（不含引号）⇒ 这里要自己补上。
+        #    （忘了补 ⇒ 生成 `(\n\n中文, ...)` 这种没有引号的东西 ⇒ 编译不过。）
+        lines.append(f'    ("{escape(k)}", "{escape(v)}"),')
     lines.append("];")
     with open(args.out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")

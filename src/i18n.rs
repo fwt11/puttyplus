@@ -180,15 +180,6 @@ mod tests {
     fn 英文表里没有空译文也没有漏占位符() {
         for (zh, en) in EN.iter() {
             assert!(!en.trim().is_empty(), "「{zh}」的译文是空的");
-            fn ph(s: &str) -> Vec<&str> {
-                let mut v: Vec<&str> = s
-                    .split('{')
-                    .filter_map(|p| p.split('}').next())
-                    .filter(|p| !p.is_empty() && !p.contains(' '))
-                    .collect();
-                v.sort_unstable();
-                v
-            }
             assert_eq!(
                 ph(zh),
                 ph(en),
@@ -197,10 +188,53 @@ mod tests {
         }
     }
 
+    /// 这条文案里的**占位符**（`trf!` 用的那种 `{名字}`）。
+    ///
+    /// ⚠️ **`${名字}` 这种不算**：那是文档里给用户看的 **shell 示例**
+    /// （`${名字:默认值}` 是 shell 的默认值语法），不是 `trf!` 的占位符 ——
+    /// 英文译文里它要变成 `${name:default}`，两边**本来就该不一样**
+    /// （例：「tail -n ${行数:100} ${路径:/var/log/syslog}」）。
+    fn ph(s: &str) -> Vec<&str> {
+        let b = s.as_bytes();
+        let mut out: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'{' {
+                if i > 0 && b[i - 1] == b'$' {
+                    // `${…}`：整个跳过（连后面的 `}` 一起）
+                    i += 1;
+                    while i < b.len() && b[i] != b'}' {
+                        i += 1;
+                    }
+                    i += 1;
+                    continue;
+                }
+                let rest = &s[i + 1..];
+                if let Some(end) = rest.find('}') {
+                    let name = &rest[..end];
+                    if !name.is_empty() && !name.contains(' ') {
+                        out.push(name);
+                    }
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out.sort_unstable();
+        out
+    }
+
     #[test]
     fn 查不到就原样返回中文() {
         set_lang(Lang::En);
-        assert_eq!(tr("这句话不在英文表里"), "这句话不在英文表里");
+        // ⚠️ 这句话**故意**用得很古怪：它必须**不在**英文表里
+        //    （表里只有真界面上的文案）。要是哪天它进了表 ⇒ 说明
+        //    「测试代码里的字符串被当成界面文案」又发生了。
+        assert_eq!(
+            tr("这句话从来不会出现在任何界面上"),
+            "这句话从来不会出现在任何界面上"
+        );
         set_lang(Lang::Zh);
         assert_eq!(tr("原样"), "原样");
     }
