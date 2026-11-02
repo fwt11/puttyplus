@@ -724,6 +724,12 @@ pub fn state_short(st: vault::State) -> &'static str {
 pub struct RememberPolicy {
     /// 「记住密码」能不能勾。
     pub can_remember: bool,
+    /// 「记住密码」这一项**要不要显示**。
+    ///
+    /// ⚠️ **凭据库没启用 ⇒ 不显示**（用户 2026-11-02：「只有在凭证库开启的
+    /// 时候才应该显示保存密码」）：勾了也存不住（`save()` 那头会拦下），
+    /// 摆一个**点了没反应**的选项纯属添乱。
+    pub show_checkbox: bool,
     /// 状态说明（人话）。
     pub text: &'static str,
     /// 要不要给一个「解锁」入口。
@@ -739,24 +745,30 @@ pub fn remember_policy(st: vault::State) -> RememberPolicy {
     match st {
         vault::State::Unlocked => RememberPolicy {
             can_remember: true,
+            show_checkbox: true,
             text: "凭据库已启用并已解锁：勾上「记住密码」= 密码加密存进本机凭据库。",
             offer_unlock: false,
         },
         vault::State::Plain => RememberPolicy {
             can_remember: true,
+            show_checkbox: true,
             text: "凭据库已启用但没有主密码：密码明文存在本机文件里。设一个主密码就能加密。",
             offer_unlock: false,
         },
         vault::State::Locked => RememberPolicy {
             can_remember: false,
+            show_checkbox: true,
             text: "凭据库已启用但当前锁定：解锁后才能把密码加密存进本机；\
                    现在勾上也只是明文写进本机的连接配置里。",
             offer_unlock: true,
         },
         vault::State::Off => RememberPolicy {
             can_remember: false,
-            text: "凭据库还没启用：勾上「记住密码」会把密码明文写进本机的连接配置里。\
-                   想加密保存，先启用凭据库。",
+            // ⚠️ **没启用就不显示**（用户 2026-11-02）——
+            //    勾了也存不住（存的那头会拦下并说清楚）⇒ 干脆不摆。
+            show_checkbox: false,
+            text: "凭据库还没启用：这次的密码只用这一次，不保存。\
+                   想加密保存，先去「工具 → 凭据库…」启用凭据库。",
             offer_unlock: false,
         },
     }
@@ -792,6 +804,9 @@ pub fn remember_row(
     let cb = gtk::CheckButton::with_label("记住密码");
     cb.set_sensitive(pol.can_remember);
     cb.set_active(default_active && pol.can_remember);
+    // ⚠️ **凭据库没启用 ⇒ 整个不显示**（用户 2026-11-02）：
+    //    勾了也存不住 ⇒ 摆一个"点了没反应"的选项没用还添乱。
+    cb.set_visible(pol.show_checkbox);
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let lbl = gtk::Label::new(Some(pol.text));
@@ -812,6 +827,8 @@ pub fn remember_row(
         let alive = add_state_hook(move |st| {
             let p = remember_policy(st);
             cb2.set_sensitive(p.can_remember);
+            // 状态变了 ⇒ 显隐也跟着变（刚在别的窗口启用了凭据库 ⇒ 冒出来）
+            cb2.set_visible(p.show_checkbox);
             if !p.can_remember {
                 cb2.set_active(false);
             }
@@ -963,6 +980,22 @@ mod tests {
         assert!(remember_policy(vault::State::Locked).offer_unlock);
         // 没启用 ⇒ 解锁也没用（库还不存在）
         assert!(!remember_policy(vault::State::Off).offer_unlock);
+    }
+
+    /// **凭据库没启用 ⇒ 整个「记住密码」不显示**（用户 2026-11-02：
+    /// 「只有在凭证库开启的时候才应该显示保存密码」）。
+    ///
+    /// ⚠️ 锁着（已启用、只是锁着）⇒ **要显示**（用户能就地解锁）。
+    #[test]
+    fn 凭据库没启用时不显示记住密码() {
+        assert!(!remember_policy(vault::State::Off).show_checkbox);
+        assert!(remember_policy(vault::State::Locked).show_checkbox);
+        assert!(remember_policy(vault::State::Plain).show_checkbox);
+        assert!(remember_policy(vault::State::Unlocked).show_checkbox);
+        // 没显示的时候，说明里**不该**再提「勾上「记住密码」」
+        //（根本没有那个勾选框，提了用户会找）
+        let off = remember_policy(vault::State::Off);
+        assert!(!off.text.contains("勾上「记住密码」"), "{}", off.text);
     }
 
     #[test]
