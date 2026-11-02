@@ -350,9 +350,12 @@ pub fn ui_new(
     let remember = gtk::CheckButton::with_label("记住密码（存进凭据库）");
     // ⚠️ 右边**不要再写一遍「记住密码」**（阶段 73b，审计 P1-11）：
     // 勾选框自带文案，再配一个同名标签就是同一行出现两次「记住密码」。
-    // ⚠️ **凭据库没启用 ⇒ 整个不显示**（用户 2026-11-02）：勾了也存不住
+    // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：勾了也存不住
     //    （`save()` 那头会拦下并说清楚）⇒ 摆个"点了没反应"的选项没用。
-    remember.set_visible(crate::vaultui::remember_policy(crate::vault::state()).show_checkbox);
+    //    判定只有一份（`vaultui::remember_policy`）⇒ 跟别处不会打架。
+    let pol = crate::vaultui::remember_policy(crate::vault::state());
+    remember.set_visible(pol.show_checkbox);
+    remember.set_sensitive(pol.can_remember);
     let (pr, _, _) = dialogs::form_pair("密码", &pass, "", &remember);
     box_.append(&pr);
 
@@ -589,10 +592,13 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     pass.set_visibility(false);
     pass.set_placeholder_text(Some("密码（留空表示不改）"));
     let remember = gtk::CheckButton::with_label("记住密码（存进凭据库）");
-    remember.set_active(p.remember);
     // ⚠️ 右边不要再写一遍「记住密码」（阶段 73b，审计 P1-11）
-    // ⚠️ **凭据库没启用 ⇒ 整个不显示**（用户 2026-11-02）：同上。
-    remember.set_visible(crate::vaultui::remember_policy(crate::vault::state()).show_checkbox);
+    // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：同上。
+    let pol = crate::vaultui::remember_policy(crate::vault::state());
+    remember.set_visible(pol.show_checkbox);
+    remember.set_sensitive(pol.can_remember);
+    // 存不住的时候不许"带着勾"（看着像已经记住了，其实压根没存）
+    remember.set_active(p.remember && pol.can_remember);
     let (pr, _, _) = dialogs::form_pair("密码", &pass, "", &remember);
     box_.append(&pr);
 
