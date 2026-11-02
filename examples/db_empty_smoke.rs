@@ -57,6 +57,7 @@ fn main() {
 
         let panel = SftpPanel::new(&ConnOptions::default());
         panel::on_open_db(&panel.st);
+        puttyplus::panel::dbui::mount_for_test(&panel.st);
         assert!(panel.st.db_ui.borrow().is_some(), "数据库工作台没建起来");
         pump(400);
 

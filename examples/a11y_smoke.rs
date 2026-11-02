@@ -98,6 +98,7 @@ fn main() {
 
     /* ---- ③ 工作台（DB） ---- */
     dbui::ensure(&st);
+    dbui::mount_for_test(&st);
     pump(600);
     for b in dbui::sql_row_buttons_now(&st) {
         roots.push(("工作台 SQL 行".into(), b.upcast()));

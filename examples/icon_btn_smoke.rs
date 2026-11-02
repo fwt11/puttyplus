@@ -73,6 +73,7 @@ fn main() {
     // ---- ② 工作台 SQL 行的四个按钮 ----
     // 把工作台开出来（没有子标签容器时它会退回独立窗口，冒烟里没关系）
     dbui::ensure(&st);
+    dbui::mount_for_test(&st);
     pump(400);
     let btns = dbui::sql_row_buttons_now(&st);
     assert_eq!(

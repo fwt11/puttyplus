@@ -197,6 +197,7 @@ fn main() {
         // ⚠️ **不给面板另开窗口**：工作台在"没有子标签容器"时会**自己开一个
         // 窗口**（`dbui::ensure` 的兜底路径），那才是要截图的东西。
         panel::on_open_db(&panel.st);
+        puttyplus::panel::dbui::mount_for_test(&panel.st);
         assert!(panel.st.db_ui.borrow().is_some(), "数据库工作台没建起来");
         pump(400);
 

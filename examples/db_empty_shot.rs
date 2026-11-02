@@ -79,6 +79,7 @@ fn main() {
 
     let panel = SftpPanel::new(&o);
     panel::on_open_db(&panel.st);
+    puttyplus::panel::dbui::mount_for_test(&panel.st);
     pump(700);
 
     let out = if dark {

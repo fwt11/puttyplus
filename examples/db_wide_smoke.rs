@@ -85,6 +85,7 @@ fn main() {
 
     // ---- 2) 打开 DB 页 ⇒ 文件面板让位 ----
     puttyplus::panel::on_open_db_page(&st);
+    puttyplus::panel::dbui::mount_for_test(&st);
     pump(600);
     assert_eq!(
         sub.current_kind(),
@@ -209,6 +210,7 @@ fn main() {
     if std::env::args().any(|a| a == "--hold") {
         // 步骤 6 把 DB 页签关掉了 ⇒ 这里重新开一个
         puttyplus::panel::on_open_db_page(&st);
+        puttyplus::panel::dbui::mount_for_test(&st);
         pump(700);
         // --collapsed：把对象树收起来（另一张截图）
         let collapsed = std::env::args().any(|a| a == "--collapsed");

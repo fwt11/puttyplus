@@ -351,6 +351,7 @@ fn main() {
     pump(200);
 
     panel::on_open_db(&panel.st);
+    puttyplus::panel::dbui::mount_for_test(&panel.st);
     pump(400);
     let db_open = panel.st.db_ui.borrow().is_some();
     println!("db window opened: {db_open}");
@@ -445,6 +446,7 @@ fn main() {
         assert!(!sub.has(tab_id), "页签还在 notebook 里");
         // 再点「数据库」要能重新挂回来（否则用户看到的是"点了没反应"）
         panel::on_open_db(&panel.st);
+        puttyplus::panel::dbui::mount_for_test(&panel.st);
         pump(200);
         let new_id = panel.st.db_ui.borrow().as_ref().unwrap().tab_id.get();
         assert!(sub.has(new_id), "重新打开后数据库页签没挂回来");

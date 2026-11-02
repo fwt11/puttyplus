@@ -213,6 +213,15 @@ pub struct DbUi {
     hist_entries: RefCell<Vec<dbhist::HistEntry>>,
     connected: Cell<bool>,
     busy: Cell<bool>,
+    /// 工作台页面**已经挂上去了**吗（子标签 / 独立窗口）。
+    ///
+    /// ⚠️ 用户 2026-11-02：「任何时候，必须连上数据库之后才允许显示数据库
+    /// 管理页面，不允许在还没连接上数据库时显示数据库管理页面」⇒ 页面在
+    /// 连上之前**不挂**（见 `mount`）。
+    ///
+    /// 这个标志用来判断"状态行用户看不看得见"：没挂 ⇒ 状态行在屏幕上根本
+    /// 没有 ⇒ 该说的话得**弹对话框**，否则用户点了"数据库"毫无反应。
+    mounted: Cell<bool>,
     session_key: String,
     /// 请求 id（与 worker 的事件对上）
     next_req: Cell<u64>,
@@ -832,7 +841,11 @@ struct Form {
     pass: gtk::Entry,
 }
 
-/// 懒创建并显示（db_ui 挂在 PanelState 上，随标签生命周期存活）。
+/// 懒创建工作台（db_ui 挂在 PanelState 上，随标签生命周期存活）。
+///
+/// ⚠️ **这里只"建"，不"挂"**（用户 2026-11-02：「任何时候，必须连上数据库
+/// 之后才允许显示数据库管理页面」）⇒ 页面要等 `on_connected` 成功之后
+/// 才由 `mount` 摆到屏幕上。
 ///
 /// **阶段 12**：数据库工作台不再是独立弹窗，而是**连接页里的一个子标签**
 /// （对标 XTerminal）——弹窗那点宽度根本放不下对象树 + 结果网格。
@@ -840,11 +853,35 @@ pub fn ensure(st: &Rc<PanelState>) {
     if st.db_ui.borrow().is_none() {
         let ui = build(st);
         wire(st, &ui);
-        // 挂到连接页的子标签上（第一个子页是终端）
-        let page = ui.page.clone();
-        let mut ui = ui;
-        match st.sub_tabs() {
-            Some(sub) => {
+        st.db_ui.borrow_mut().replace(ui);
+    }
+}
+
+/// 把工作台页面**挂上去**（子标签 / 独立窗口）并切过去。
+///
+/// ⚠️ **只有连上数据库之后才调它**（用户 2026-11-02：「任何时候，必须连上
+/// 数据库之后才允许显示数据库管理页面，不允许在还没连接上数据库时显示
+/// 数据库管理页面」）。
+///
+/// **为什么拆成两步**：`ensure` 只**建**工作台（控件、状态、事件），
+/// `mount` 才把它**摆到屏幕上**。中间那段（连接中）用户看到的是终端，
+/// 不是"一个连不上的空工作台"——以前连不上也会开出一页空白界面，用户
+/// 完全不知道发生了什么。
+///
+/// 这里再判一次 `connected` 是**保险**：万一哪个调用方在没连上的时候喊了
+/// 一嗓子，页面也不会挂出去（"任何时候"是硬要求，不是"大部分时候"）。
+pub fn mount(st: &Rc<PanelState>) {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    if !ui.connected.get() {
+        return;
+    }
+    match st.sub_tabs() {
+        Some(sub) => {
+            // 页签可能已经被用户用 × 关掉了——那种情况下它不在 notebook
+            // 里了，光 `switch_to` 什么也不会发生（用户看到的是"再点一次
+            // 数据库，界面毫无反应"）。所以要先确认页还在，不在就重新挂。
+            if !sub.has(ui.tab_id.get()) {
                 // 页签带图标：主标签头不放图标了，"这一页是数据库"由
                 // 子页签自己的图标说。
                 //
@@ -895,13 +932,13 @@ pub fn ensure(st: &Rc<PanelState>) {
                     Some("drive-harddisk-symbolic"),
                     "数据库",
                     super::subtabs::PageKind::Db,
-                    page,
+                    ui.page.clone(),
                     Some(on_close),
                 );
                 id_cell.set(tab_id);
-                ui.tab_id = Cell::new(tab_id);
+                ui.tab_id.set(tab_id);
                 // 页签头写上连的是哪条
-                update_tab_title(st, &ui);
+                update_tab_title(st, ui);
                 // 关掉这个页签 → **自动断开**这条连接（工作台里不再摆
                 // 「断开」按钮）。自己注册自己的钩子：谁的东西谁管。
                 //
@@ -919,15 +956,18 @@ pub fn ensure(st: &Rc<PanelState>) {
                     });
                 }
             }
-            None => {
-                // 没有子标签容器（老路径 / 单测 / 示例）：退回独立窗口。
-                //
-                // **为什么必须兜底**：这一页若既不在子标签里、也不在窗口里，
-                // 就是「存在但谁也看不见」——用户看到的是"点了没反应"，
-                // 截图是一片空白，比直接报错还难查。
+            sub.switch_to(ui.tab_id.get());
+        }
+        None => {
+            // 没有子标签容器（老路径 / 单测 / 示例）：退回独立窗口。
+            //
+            // **为什么必须兜底**：这一页若既不在子标签里、也不在窗口里，
+            // 就是「存在但谁也看不见」——用户看到的是"点了没反应"，
+            // 截图是一片空白，比直接报错还难查。
+            if !ui.mounted.get() {
                 ui.win.set_title(Some("数据库工作台"));
                 ui.win.set_default_size(1200, 760);
-                ui.win.set_child(Some(&page));
+                ui.win.set_child(Some(&ui.page.clone()));
                 // 独立窗口路径：关窗口 = 关工作台 → **自动断开**这条连接
                 // （子标签路径由 SubTabs 的 close_hook 通知，见 on_tab_closed）
                 {
@@ -946,32 +986,29 @@ pub fn ensure(st: &Rc<PanelState>) {
                     });
                 }
                 ui.win.present();
-                ui.tab_id = Cell::new(0);
             }
         }
-        st.db_ui.borrow_mut().replace(ui);
     }
-    if let Some(ui) = st.db_ui.borrow().as_ref() {
-        // 切到这个子标签（原来是 present 弹窗）
-        if let Some(sub) = st.sub_tabs() {
-            // ⚠️ 页签可能已经被用户用 × 关掉了——那种情况下它不在 notebook
-            // 里了，光 `switch_to` 什么也不会发生（用户看到的是"再点一次
-            // 数据库，界面毫无反应"）。所以要先确认页还在，不在就重新挂。
-            if !sub.has(ui.tab_id.get()) {
-                let id = sub.add_page_icon_kind(
-                    Some("drive-harddisk-symbolic"),
-                    "数据库",
-                    super::subtabs::PageKind::Db,
-                    ui.page.clone(),
-                    None,
-                );
-                ui.tab_id.set(id);
-                // 重新挂上之后把标题补上（连的是哪条）
-                update_tab_title(st, ui);
-            }
-            sub.switch_to(ui.tab_id.get());
-        }
-    }
+    ui.mounted.set(true);
+}
+
+/// 冒烟 / 离线测试用：**假装已经连上**，把工作台挂上去。
+///
+/// ⚠️ 真机上页面是 `on_connected` 成功之后才挂的（用户 2026-11-02：
+///    「必须连上数据库之后才允许显示数据库管理页面」）。离线测试连不了库，
+///    就用这个钩子把页面挂出来（否则测试连界面都看不到）。
+pub fn mount_for_test(st: &Rc<PanelState>) {
+    set_connected_for_test(st, true);
+    mount(st);
+}
+
+/// 冒烟测试用：直接设「已连接」标志（**不真的连库**）。
+///
+/// 用来验证 `mount` 的那道保险：**没连上 ⇒ 挂不上去**。
+pub fn set_connected_for_test(st: &Rc<PanelState>, v: bool) {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.connected.set(v);
 }
 
 fn build(st: &Rc<PanelState>) -> DbUi {
@@ -1416,6 +1453,8 @@ fn build(st: &Rc<PanelState>) -> DbUi {
         hist_entries: RefCell::new(Vec::new()),
         connected: Cell::new(false),
         busy: Cell::new(false),
+        // ⚠️ 页面**还没挂**：连上数据库之后才挂（用户 2026-11-02）
+        mounted: Cell::new(false),
         session_key: key,
         next_req: Cell::new(1),
         pending: RefCell::new(HashMap::new()),
@@ -2097,35 +2136,39 @@ fn update_tab_title(st: &Rc<PanelState>, ui: &DbUi) {
     }
 }
 
-fn do_connect(st: &Rc<PanelState>, ui: &DbUi) {
+///
+/// **返回值** = 「当场就能发现的错误」（没选连接 / 参数不完整 / worker 没了）。
+/// 异步的连接结果走 `on_connected`。返回值是为了让调用方能在**释放
+/// `st.db_ui` 借用之后**再弹对话框（弹窗时页面可能还没挂 ⇒ 状态行没人看）。
+fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
     if ui.busy.get() {
-        return;
+        return None;
     }
     // **连接信息来自「当前连接」**（阶段 13：不在工作台里填表了）。
     // 没有选中连接 → 说清楚下一步该做什么，而不是默默失败。
     let Some(cur) = ui.current.borrow().clone() else {
-        set_status(
-            ui,
-            "还没有选中数据库连接：先在会话树 / 连接管理器里加一个（右键会话树 →「新建数据库连接…」）",
-            true,
-        );
-        return;
+        let msg = "还没有选中数据库连接：先在会话树 / 连接管理器里加一个（右键会话树 →「新建数据库连接…」）";
+        set_status(ui, msg, true);
+        return Some(msg.to_string());
     };
     // 现读一次配置：连接管理器里可能**改过**地址 / 端口 / 库名，
     // 缓存里的那份是旧的（用户明明改了，却还在拿旧地址去连）。
     // 读不到（比如临时连接没落盘）就用缓存的那份。
     let p = dbstore::get(&ui.session_key, &cur.name).unwrap_or(cur);
     if p.host.trim().is_empty() {
-        set_status(ui, "这条连接的数据库地址是空的（去连接管理器里改）", true);
-        return;
+        let msg = "这条连接的数据库地址是空的（去连接管理器里改）";
+        set_status(ui, msg, true);
+        return Some(msg.to_string());
     }
     if p.port == 0 {
-        set_status(ui, "这条连接的端口无效（去连接管理器里改）", true);
-        return;
+        let msg = "这条连接的端口无效（去连接管理器里改）";
+        set_status(ui, msg, true);
+        return Some(msg.to_string());
     }
     if p.user.trim().is_empty() {
-        set_status(ui, "这条连接的数据库用户是空的（去连接管理器里改）", true);
-        return;
+        let msg = "这条连接的数据库用户是空的（去连接管理器里改）";
+        set_status(ui, msg, true);
+        return Some(msg.to_string());
     }
     // 密码：先看「当场输入过 / 临时连接」的（不进凭据库），
     // 再看凭据库里记住的（冒烟测试的临时连接走前者 —— 它不进凭据库）
@@ -2169,15 +2212,45 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) {
         Some(tx) => {
             if tx.send(WorkerCmd::DbConnect { config: cfg }).is_err() {
                 ui.busy.set(false);
-                set_status(ui, "发送连接命令失败（worker 已退出）", true);
+                let msg = "发送连接命令失败（worker 已退出）";
+                set_status(ui, msg, true);
                 update_buttons(ui);
+                return Some(msg.to_string());
             }
         }
         None => {
             ui.busy.set(false);
-            set_status(ui, "SSH 连接未就绪", true);
+            let msg = "SSH 连接未就绪";
+            set_status(ui, msg, true);
             update_buttons(ui);
+            return Some(msg.to_string());
         }
+    }
+    None
+}
+
+/// **页面还没挂**的时候，那句状态提示在屏幕上根本不存在 ⇒ 弹成对话框。
+///
+/// ⚠️ 用户 2026-11-02：「任何时候，必须连上数据库之后才允许显示数据库管理
+/// 页面」⇒ 连不上的时候用户面前**什么都没有**，光靠状态行他永远不知道
+/// 出了什么事（以前还会开出一个空工作台，看着像功能坏了）。
+///
+/// 页面**已经**挂着的时候不弹：状态行看得见就够了（用户嫌啰嗦）。
+fn report_unmounted(st: &Rc<PanelState>, msg: &str, is_error: bool) {
+    let mounted = st
+        .db_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.mounted.get())
+        .unwrap_or(false);
+    if mounted {
+        return;
+    }
+    let parent = st.topwin();
+    if is_error {
+        dialogs::show_error(parent.as_ref(), "数据库", msg);
+    } else {
+        dialogs::info(parent.as_ref(), "数据库", msg);
     }
 }
 
@@ -6448,37 +6521,54 @@ fn send_next_save(st: &Rc<PanelState>, ui: &DbUi) {
 /* ---------------- worker 事件 ---------------- */
 
 pub fn on_connected(st: &Rc<PanelState>, result: Result<String, String>) {
-    let slot = st.db_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    ui.busy.set(false);
-    match result {
-        Ok(label) => {
-            ui.connected.set(true);
-            // 活跃标记（阶段 57）：两棵树上的「已连接」跟着变。
-            // 存副本到面板状态，别让别的模块去借 db_ui（那边正被这里借着）。
-            *st.db_active.borrow_mut() = ui.current.borrow().as_ref().map(|p| p.name.clone());
-            let proto = current_proto(ui);
-            // 默认模式自动展开（阶段 72d）：连上就看得见表，不用再点三角
-            ui.tree.set_default_schema(default_schema_of(ui));
-            ui.tree.reset(&label, proto.label());
-            // 连接早就建好了（阶段 13：连接信息在连接管理器 / 会话树里建），
-            // 这里**不再落配置**——省得"连上了才算数"，用户配错的连接也会
-            // 被悄悄存下来。
-            let msg = format!("已连接：{label}");
-            set_status(ui, &msg, false);
+    // ⚠️ **借用要尽快结束**：挂页面（`mount`）还要再借一次 `st.db_ui`，
+    //    在同一个借用里调 ⇒ RefCell 双重借用 panic。
+    let mut fail: Option<String> = None;
+    {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return };
+        ui.busy.set(false);
+        match &result {
+            Ok(label) => {
+                ui.connected.set(true);
+                // 活跃标记（阶段 57）：两棵树上的「已连接」跟着变。
+                // 存副本到面板状态，别让别的模块去借 db_ui（那边正被这里借着）。
+                *st.db_active.borrow_mut() = ui.current.borrow().as_ref().map(|p| p.name.clone());
+                let proto = current_proto(ui);
+                // 默认模式自动展开（阶段 72d）：连上就看得见表，不用再点三角
+                ui.tree.set_default_schema(default_schema_of(ui));
+                ui.tree.reset(label, proto.label());
+                // 连接早就建好了（阶段 13：连接信息在连接管理器 / 会话树里建），
+                // 这里**不再落配置**——省得"连上了才算数"，用户配错的连接也会
+                // 被悄悄存下来。
+                let msg = format!("已连接：{label}");
+                set_status(ui, &msg, false);
+            }
+            Err(e) => {
+                ui.connected.set(false);
+                *st.db_active.borrow_mut() = None;
+                clear_tabs(ui);
+                let msg = format!("连接失败：{e}");
+                set_status(ui, &msg, true);
+                fail = Some(msg);
+            }
         }
-        Err(e) => {
-            ui.connected.set(false);
-            *st.db_active.borrow_mut() = None;
-            clear_tabs(ui);
-            set_status(ui, &format!("连接失败：{e}"), true);
-        }
+        update_buttons(ui);
+        // 空态跟着换（阶段 51：连上了 / 没连上，写法不一样）
+        refresh_empty(st, ui);
+        // 数据库这一维变了 ⇒ 状态点 / 两棵树上的标记跟着变（阶段 57/65）
+        super::refresh_active_marks();
     }
-    update_buttons(ui);
-    // 空态跟着换（阶段 51：连上了 / 没连上，写法不一样）
-    refresh_empty(st, ui);
-    // 数据库这一维变了 ⇒ 状态点 / 两棵树上的标记跟着变（阶段 57/65）
-    super::refresh_active_marks();
+    // —— 借用放掉了，下面可以安全地挂页面 / 弹窗 ——
+    if let Some(msg) = fail {
+        // ⚠️ 连不上 ⇒ **不挂页面**（用户 2026-11-02）⇒ 状态行用户看不见
+        //    ⇒ 这种时候得弹出来说清楚。
+        report_unmounted(st, &msg, true);
+    } else {
+        // ⚠️ **连上了才把工作台摆出来**（用户 2026-11-02：「任何时候，必须
+        // 连上数据库之后才允许显示数据库管理页面」）。
+        mount(st);
+    }
 }
 
 /// 服务器要密码、但这条连接没带密码 → **弹密码框**让用户当场输，再重连。
@@ -6511,8 +6601,12 @@ pub fn on_need_password(st: &Rc<PanelState>, detail: String) {
     set_status(ui, "数据库要求密码：请在上面对话框里输入", false);
     update_buttons(ui);
     let st2 = Rc::clone(st);
+    // ⚠️ 父窗口用**主窗口**：工作台页面这时还没挂（没连上不许显示），
+    //    `ui.win` 在独立窗口模式下是个还没映射的窗口 ⇒ 当 transient parent
+    //    会让对话框位置跑飞。
+    let parent = st.topwin();
     dialogs::ask_password_remember(
-        Some(&ui.win),
+        parent.as_ref(),
         "数据库需要密码",
         &msg,
         p.remember,
@@ -6520,27 +6614,39 @@ pub fn on_need_password(st: &Rc<PanelState>, detail: String) {
             let Some(pw) = pw else {
                 // 取消：把"下一步该做什么"说清楚，别让用户对着
                 // "连接失败"发呆。
-                let slot = st2.db_ui.borrow();
-                let Some(ui) = slot.as_ref() else { return };
-                // ⚠️ **只说一句**（阶段 96，用户 2026-11-01：「这是没必要的，
-                // 没必要这么啰嗦。用户肯定知道自己在干啥」）：原来还附了一整段
-                // 「要么现在重连时再输一次，要么去连接管理器里编辑…（勾「记住
-                // 密码」，并先在顶栏「凭据库…」里解锁…）」——用户自己点的取消，
-                // 知道自己要干什么 ⇒ 这段既占地方（顶栏被撑成两行，把下面的
-                // 内容顶下去），又是说教。
-                set_status(ui, "没输入密码，连接已取消。", true);
-                update_buttons(ui);
+                {
+                    let slot = st2.db_ui.borrow();
+                    let Some(ui) = slot.as_ref() else { return };
+                    // ⚠️ 阶段 96，用户 2026-11-01：「这是没必要的，
+                    // 没必要这么啰嗦。用户肯定知道自己在干啥」：原来还附了一整段
+                    // 「要么现在重连时再输一次，要么去连接管理器里编辑…（勾「记住
+                    // 密码」，并先在顶栏「凭据库…」里解锁…）」——用户自己点的取消，
+                    // 知道自己要干什么 ⇒ 这段既占地方（顶栏被撑成两行，把下面的
+                    // 内容顶下去），又是说教。
+                    set_status(ui, "没输入密码，连接已取消。", true);
+                    update_buttons(ui);
+                }
+                // ⚠️ 页面还没挂（没连上不许显示工作台）⇒ 状态行用户看不见
+                //    ⇒ 弹一句，别让"点了没反应"。
+                //    ⚠️ 必须在**释放借用之后**调（它自己还要借 `st.db_ui`）。
+                report_unmounted(&st2, "没输入密码，连接已取消。", false);
                 return;
             };
             let pw = zeroize::Zeroizing::new(pw);
             if keep {
                 remember_password(&key, &name, pw.as_str());
             }
-            let slot = st2.db_ui.borrow();
-            let Some(ui) = slot.as_ref() else { return };
-            // 这次连接就用刚输的密码（哪怕没能存进凭据库）
-            st2.db_pass.borrow_mut().insert(name.clone(), pw);
-            do_connect(&st2, ui);
+            let err = {
+                let slot = st2.db_ui.borrow();
+                let Some(ui) = slot.as_ref() else { return };
+                // 这次连接就用刚输的密码（哪怕没能存进凭据库）
+                st2.db_pass.borrow_mut().insert(name.clone(), pw);
+                do_connect(&st2, ui)
+            };
+            // 借用放掉了再弹窗
+            if let Some(msg) = err {
+                report_unmounted(&st2, &msg, true);
+            }
         },
     );
 }
@@ -8537,9 +8643,15 @@ pub fn set_conn_now(
 
 /// 冒烟测试用：等价于点「连接」按钮。
 pub fn connect_now(st: &Rc<PanelState>) {
-    let slot = st.db_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    do_connect(st, ui);
+    let err = {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return };
+        do_connect(st, ui)
+    };
+    // 借用放掉了再弹窗
+    if let Some(msg) = err {
+        report_unmounted(st, &msg, true);
+    }
 }
 
 /// 冒烟测试用：给某个表页签设置过滤条件（走与 UI「应用」**同一条路径**）。
@@ -9140,15 +9252,18 @@ pub fn open_hist_window_now(st: &Rc<PanelState>) {
 ///
 /// 阶段 22：工作台里没有「连接」按钮了——打开工作台就该是能用的状态。
 pub fn connect_current(st: &Rc<PanelState>) {
-    let slot = st.db_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    if ui.connected.get() {
-        return; // 已经连着了，别打断
+    let err = {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return };
+        if ui.connected.get() {
+            return; // 已经连着了，别打断
+        }
+        do_connect(st, ui)
+    };
+    // 借用放掉了再弹窗（弹窗时页面可能还没挂）
+    if let Some(msg) = err {
+        report_unmounted(st, &msg, true);
     }
-    if ui.current.borrow().is_none() {
-        return; // 没有连接可选 —— 状态栏已经说了下一步该干什么
-    }
-    do_connect(st, ui);
 }
 
 /// 子标签被关掉时的处理：关掉的是**数据库工作台**这一页时，**自动断开**。
@@ -9186,14 +9301,20 @@ pub fn use_profile(st: &Rc<PanelState>, key: &str, name: &str) {
     let Some(p) = dbstore::get(key, name) else {
         return;
     };
-    let slot = st.db_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    // 选中它（工作台里没有下拉了，选中 = 记住"当前连的是哪条"）
-    set_current_conn(st, ui, key, name);
-    let msg = format!("正在连接 {}…", p.name);
-    set_status(ui, &msg, false);
-    // **直接连上**：双击即用，不让用户再点一次
-    do_connect(st, ui);
+    let err = {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return };
+        // 选中它（工作台里没有下拉了，选中 = 记住"当前连的是哪条"）
+        set_current_conn(st, ui, key, name);
+        let msg = format!("正在连接 {}…", p.name);
+        set_status(ui, &msg, false);
+        // **直接连上**：双击即用，不让用户再点一次
+        do_connect(st, ui)
+    };
+    // 借用放掉了再弹窗（弹窗时页面还没挂 ⇒ 状态行没人看）
+    if let Some(msg) = err {
+        report_unmounted(st, &msg, true);
+    }
 }
 
 /// 冒烟测试用：把 SQL 放进编辑器并按「执行」（走**真实**路径，会记进历史）。
