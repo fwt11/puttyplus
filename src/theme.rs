@@ -941,14 +941,6 @@ const COMPONENTS: &str = r#"
 /* 标题 / 副标题：跟下面那一列行同靠左 */
 .pp-empty-title { font-size: 1.15em; font-weight: 700; }
 .pp-empty-sub { color: @pp_dim; font-size: 0.9em; margin-top: 2px; }
-/* 小节标题：比正文更小更淡，但**加粗**（不然像句说明文字，不像分组） */
-.pp-empty-sec {
-  color: @pp_dim;
-  font-size: 0.78em;
-  font-weight: 700;
-  margin-top: 18px;
-  margin-bottom: 2px;
-}
 .pp-empty-hint { color: @pp_dim; font-size: 0.8em; margin-top: 14px; }
 /* 一行 = 图标 + 文字，整列等宽（卡片是竖排 Box，子控件默认 FILL ⇒
    同一列的行拿到同样的宽度） */
@@ -957,9 +949,6 @@ const COMPONENTS: &str = r#"
   margin-top: 3px;
   border-radius: 8px;
 }
-/* 连接行：名字用正文色 + 加粗，摘要用小号淡色（阶段 93 侧栏同款） */
-.pp-empty-row-name { font-weight: 600; }
-.pp-empty-row-sub { color: @pp_dim; font-size: 0.85em; }
 /* 主 CTA（新建连接）：实心强调色。
    ⚠️ **别给主按钮加 `flat`**：Adwaita 的 `button.flat` 是
    `background-color: transparent`，优先级比自定义类高 ⇒ 实心底没了

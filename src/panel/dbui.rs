@@ -1514,46 +1514,32 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
     what.set_xalign(0.5);
     box_.append(&what);
 
-    // 分隔线：把"招牌"和"手上的活"分开（否则一坨内容看不出层次）
-    //
-    // ⚠️ **用 `gtk::Separator` 而不是自己拿 Box 画**：空 Box 的背景色在
-    // GTK4 里不画出来（实测：`.pp-empty-sep` 的 background-color 完全没
-    // 生效 ⇒ 那条线根本看不见）。Separator 自己会画。
-    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-    sep.add_css_class("pp-empty-sep");
-    box_.append(&sep);
-
     // ================= 现在开着什么 =================
+    //
+    // ⚠️ 用户 2026-11-02：「'这个会话的数据库连接'放在这里也没什么用，
+    // 我进入这个页面肯定是我点了某个数据库连接或者新建了数据库连接，
+    // 那我的目的就是明确的，就是为了打开那个数据库」
+    // ⇒ **那一列连接整个删掉**（连没连上都删）：能进到这一屏，说明用户
+    //   刚选好了 ⇒ 一列选择器纯属多余；没连上时那一列也帮不上忙
+    //   （他得先有连接才有这一列）。
+    //
+    // ⚠️ 连上了就只留一个 **chip**，说明"你现在开着哪个库"（**不可点**）。
     if connected {
-        // ---- 连上了：只显示**当前连的是哪个库** ----
+        // 分隔线：把"招牌"和"手上的活"分开（否则一坨内容看不出层次）
         //
-        // ⚠️ 以前这里摆的是「这个会话的数据库连接」一列**可点的**连接，
-        // 用户说没用（2026-11-02）：能进到这一屏说明他已经选好了 ⇒
-        // 一列选择器是多余的 ⇒ 现在只留一个 chip，说明"你现在开着哪个库"。
+        // ⚠️ **用 `gtk::Separator` 而不是自己拿 Box 画**：空 Box 的背景色在
+        // GTK4 里不画出来（实测：`.pp-empty-sep` 的 background-color 完全没
+        // 生效 ⇒ 那条线根本看不见）。Separator 自己会画。
+        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        sep.add_css_class("pp-empty-sep");
+        box_.append(&sep);
+
         if let Some(p) = &cur {
             box_.append(&empty_chip(
                 "drive-harddisk-symbolic",
                 &p.name,
                 &p.summary(),
             ));
-        }
-    } else {
-        // ---- 没连上：这一列连接**这时才有用**（挑一个连上）----
-        let profiles = dbstore::list(&ui.session_key);
-        if !profiles.is_empty() {
-            box_.append(&empty_section("这个会话下的数据库连接"));
-            for p in profiles {
-                let b = empty_conn_row(&p);
-                b.set_tooltip_text(Some(&format!("{} —— 点一下连上", conn_label_of(&p))));
-                let weak = Rc::downgrade(st);
-                let key = ui.session_key.clone();
-                let name = p.name.clone();
-                b.connect_clicked(move |_| {
-                    let Some(st) = weak.upgrade() else { return };
-                    use_profile(&st, &key, &name);
-                });
-                box_.append(&b);
-            }
         }
     }
 
@@ -1634,41 +1620,6 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
             });
             box_.append(&b);
         }
-    } else {
-        // ---- 没连上：唯一能做的事就是**建一条连接** ----
-        //
-        // ⚠️ 复查 N4：**可用 CTA 排第一**。没连上时唯一能点的就是它 ⇒
-        // 该排第一（以前它排在两个置灰按钮下面，削弱了正确动作）。
-        //
-        // ⚠️ 阶段 80（审计 P2-1）：**连上了就不摆它**——已经连着一个库的
-        // 时候，主 CTA 还写着「新建连接」会让人以为当前连接是坏的。
-        let b = empty_row("list-add-symbolic", "新建连接");
-        // ⚠️ **主 CTA 单独一个类**（审计 P0-2）：它是最重要的入口，
-        // 窄容器里被裁掉就等于"功能坏了"。类名给冒烟用来定位它。
-        b.add_css_class("pp-empty-primary");
-        // ⚠️ **别给它加 `flat`**：Adwaita 的 `button.flat` 是
-        // `background-color: transparent`，优先级比自定义类高 ⇒ 实心底没了
-        // （`.pp-chip` 踩过同一个坑）。`pp-primary` 才是实心主按钮。
-        b.add_css_class("pp-primary");
-        b.set_tooltip_text(Some(
-            "新建一条数据库连接（数据库类型 / 地址 / 端口 / 用户 / 库名 / 密码）",
-        ));
-        let weak = Rc::downgrade(st);
-        b.connect_clicked(move |_| {
-            let Some(st) = weak.upgrade() else { return };
-            let (key, parent) = {
-                let slot = st.db_ui.borrow();
-                let Some(ui) = slot.as_ref() else { return };
-                (ui.session_key.clone(), ui.win.clone())
-            };
-            let weak2 = Rc::downgrade(&st);
-            crate::panel::dbconn::ui_new(Some(&parent), &key, Some(Rc::clone(&st)), move |k, name| {
-                // 建好就直接连上并打开工作台（跟子标签栏「+」一个路数）
-                let Some(st) = weak2.upgrade() else { return };
-                use_profile(&st, &k, &name);
-            });
-        });
-        box_.append(&b);
     }
 
     // ---- 提示 ----
@@ -1681,7 +1632,7 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
     let hint = gtk::Label::new(Some(if connected {
         "左侧双击表看数据"
     } else {
-        "连上以后，左侧会出现对象树"
+        "先在左侧打开一个数据库连接"
     }));
     hint.add_css_class("pp-empty-hint");
     hint.set_xalign(0.0);
@@ -1731,37 +1682,6 @@ fn empty_chip(icon: &str, name: &str, summary: &str) -> gtk::Box {
     row
 }
 
-/// 空态卡里的**一条数据库连接**（图标 + 名字 + 地址摘要，一行）。
-///
-/// ⚠️ 摘要跟名字**分开两个 Label**（不是拼在一个字符串里）：分开才能
-/// 名字用正文色、摘要用小号淡色（阶段 93 侧栏同一个写法）。
-fn empty_conn_row(p: &DbProfile) -> gtk::Button {
-    let b = gtk::Button::new();
-    b.add_css_class("pp-empty-btn");
-    b.add_css_class("flat");
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let img = gtk::Image::from_icon_name("drive-harddisk-symbolic");
-    img.set_pixel_size(16);
-    row.append(&img);
-    let name = gtk::Label::new(Some(&p.name));
-    name.add_css_class("pp-empty-row-name");
-    name.set_xalign(0.0);
-    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    name.set_max_width_chars(14);
-    row.append(&name);
-    let sep = gtk::Label::new(Some("·"));
-    sep.add_css_class("pp-empty-row-sub");
-    row.append(&sep);
-    let sum = gtk::Label::new(Some(&p.summary()));
-    sum.add_css_class("pp-empty-row-sub");
-    sum.set_xalign(0.0);
-    sum.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    sum.set_max_width_chars(28);
-    row.append(&sum);
-    b.set_child(Some(&row));
-    b
-}
-
 /// 空态卡里的一行（图标 + 文字），**整行可点**。
 ///
 /// ⚠️ **不能只用 `gtk::Button::with_label`**：那样按钮里只有一个 Label，
@@ -1784,16 +1704,6 @@ fn empty_row(icon: &str, label: &str) -> gtk::Button {
     row.append(&l);
     b.set_child(Some(&row));
     b
-}
-
-/// 空态里的一行小标题（「这个会话的数据库连接」这种）。
-fn empty_section(text: &str) -> gtk::Label {
-    let l = gtk::Label::new(Some(text));
-    l.add_css_class("pp-empty-sec");
-    // ⚠️ 小节标题跟标题、按钮**同靠左**（阶段 96）：以前只有它是左对齐，
-    // 别的都居中 ⇒ 混着排。
-    l.set_xalign(0.0);
-    l
 }
 
 /* ---------------- 事件接线 ---------------- */
@@ -4554,12 +4464,7 @@ fn build_stats_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     root.append(&build_stats_view(ui));
 
     let btn_close = gtk::Button::with_label("关闭");
-    {
-        let w = win.clone();
-        btn_close.connect_clicked(move |_| {
-            w.close();
-        });
-    }
+    wire_tool_close(&win, &btn_close);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.set_halign(gtk::Align::End);
     row.append(&btn_close);
@@ -4977,12 +4882,7 @@ fn build_search_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     status.set_hexpand(true);
 
     let btn_close = gtk::Button::with_label("关闭");
-    {
-        let w = win.clone();
-        btn_close.connect_clicked(move |_| {
-            w.close();
-        });
-    }
+    wire_tool_close(&win, &btn_close);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.append(&status);
     row.append(&btn_close);
@@ -5009,7 +4909,7 @@ fn build_search_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
                 let Some(hit) = hit else { return };
                 open_search_hit(&st2, ui, &hit);
                 drop(slot);
-                w.close();
+                hide_tool_window(&w);
             });
     }
     win
@@ -5090,6 +4990,36 @@ fn sql_one_line(sql: &str) -> String {
     }
 }
 
+/* ---------------- 工具窗的关闭（阶段 98） ---------------- */
+
+/// 把工具窗**藏起来**（不是 `close()`）。
+///
+/// ⚠️ **GTK 4.18 的 `gtk_window_close()` 只有第一次有效**：第一次发
+/// `close-request` 并把窗口藏起来；之后再 `close()` 就只发信号、
+/// **窗口不藏** ⇒ 用户看到的现象是「第一次能关，第二次关不掉」。
+/// 最小复现：`examples/gtktest.rs`（一个**空窗口**也这样 ⇒ 是 GTK 自身
+/// 的行为，不是我们代码的锅）。
+/// ⇒ 一律用 `set_visible(false)` 藏窗口。
+pub fn hide_tool_window(w: &gtk::Window) {
+    w.set_visible(false);
+}
+
+/// 给工具窗装上「关闭」：**按钮**和**窗口自带的 X**都能关。
+///
+/// ⚠️ X 那个按钮走的是 `close-request` ⇒ 必须自己接住并藏起来
+/// （返回 [`gtk::glib::Propagation::Stop`]，别让 GTK 的默认处理再跑一遍
+/// —— 它第一次会把窗口"销毁"掉，后面就不听使唤了）。
+fn wire_tool_close(win: &gtk::Window, btn_close: &gtk::Button) {
+    let w = win.clone();
+    btn_close.connect_clicked(move |_| {
+        hide_tool_window(&w);
+    });
+    win.connect_close_request(move |w| {
+        hide_tool_window(w);
+        gtk::glib::Propagation::Stop
+    });
+}
+
 /// 造历史窗口。
 fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     let win = gtk::Window::builder()
@@ -5098,6 +5028,10 @@ fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
         .default_width(760)
         .default_height(420)
         .build();
+    // ⚠️ **模态**（用户 2026-11-02：「我认为它应该是个 modal 的对话框，
+    // 它开着，别的东西都点不了」）：它是"看历史、挑一条填回编辑器"的
+    // 短任务 ⇒ 开着的时候主窗口不该还能点（更不该能直接关掉程序）。
+    win.set_modal(true);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
     root.set_margin_start(12);
     root.set_margin_end(12);
@@ -5142,12 +5076,7 @@ fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
             }
         });
     }
-    {
-        let w = win.clone();
-        btn_close.connect_clicked(move |_| {
-            w.close();
-        });
-    }
+    wire_tool_close(&win, &btn_close);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.append(&status);
     row.append(&btn_fill);
@@ -9102,7 +9031,7 @@ pub fn close_history_now(st: &Rc<PanelState>) {
     let Some(ui) = slot.as_ref() else { return };
     let w = ui.hist_win.borrow().clone();
     if let Some(w) = w {
-        w.close();
+        hide_tool_window(&w);
     }
 }
 
@@ -9112,7 +9041,7 @@ pub fn close_search_now(st: &Rc<PanelState>) {
     let Some(ui) = slot.as_ref() else { return };
     let w = ui.search_win.borrow().clone();
     if let Some(w) = w {
-        w.close();
+        hide_tool_window(&w);
     }
 }
 
@@ -9122,7 +9051,7 @@ pub fn close_stats_now(st: &Rc<PanelState>) {
     let Some(ui) = slot.as_ref() else { return };
     let w = ui.stats_win.borrow().clone();
     if let Some(w) = w {
-        w.close();
+        hide_tool_window(&w);
     }
 }
 
@@ -9191,6 +9120,20 @@ pub fn history_window_open(st: &Rc<PanelState>) -> bool {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
     ui.hist_win.borrow().is_some()
+}
+
+/// 冒烟测试用：那个「执行历史」窗口本体（阶段 97）。
+pub fn history_window(st: &Rc<PanelState>) -> Option<gtk::Window> {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return None };
+    ui.hist_win.borrow().clone()
+}
+
+/// 冒烟测试用：打开「执行历史」窗口（阶段 97）。
+pub fn open_hist_window_now(st: &Rc<PanelState>) {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    open_history_window(st, ui);
 }
 
 /// 连接当前选中的连接（工作台已经开着、已经连着就别重连）。
