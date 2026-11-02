@@ -1145,6 +1145,47 @@ def menu_label_ranges(toks):
     return ranges
 
 
+def pattern_ranges(toks):
+    """**match 模式**里的字符串字面量区间（不能包 `tr()`）。
+
+    ⚠️ 模式里的中文字符串是**数据**（拿它跟某个值比），不是界面文案：
+    ```rust
+    match label {
+        "启用转发" => { … }          // ← 模式
+        _ => "别的文案",              // ← 这个是**表达式**，要翻
+    }
+    ```
+    包了 `tr()` 的话：① `tr("…")` 是函数调用，**语法上就不能当模式**；
+    ② 就算能当，匹配的也是**译文**，而 `label` 那时可能还没翻 ⇒ 对不上。
+
+    判据：字面量后面（跳过空白与闭合括号）是 `=>` ⇒ 模式；
+    后面是 `|` ⇒ 模式里的**或**（`"a" | "b" => …`）。
+    """
+    ranges = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "str":
+            continue
+        j = i + 1
+        while j < n and toks[j].kind == "ws":
+            j += 1
+        # 跳过闭合括号（`Some("x") => …`）
+        while j < n and toks[j].kind == "punct" and toks[j].text in (")", "]"):
+            j += 1
+            while j < n and toks[j].kind == "ws":
+                j += 1
+        if j >= n or toks[j].kind != "punct":
+            continue
+        if toks[j].text == "|":
+            ranges.append((t.start, t.end))
+            continue
+        # ⚠️ 分词器把 `=>` 切成**两个** punct（`=` 和 `>`）⇒ 要两个一起看
+        if toks[j].text == "=" and j + 1 < n and toks[j + 1].kind == "punct" \
+                and toks[j + 1].text == ">":
+            ranges.append((t.start, t.end))
+    return ranges
+
+
 def i18n_call_ranges(toks):
     """已有的 `tr("…")` / `trf!("…", …)` 里那个**模板字面量**的区间。
 
@@ -1246,15 +1287,33 @@ def transform_range(toks, lo, hi, protected, name_overrides, stats):
     return "".join(out)
 
 
-def add_imports(out, need_tr, need_trf):
+def already_imported(out, name):
+    """这个文件里是不是**已经**导入了 `name`？
+
+    ⚠️ 不能只查 `use crate::i18n::tr;` —— 文件里可能是
+    `use crate::i18n::{tr, Lang};`（分组导入）⇒ 再加一行就是
+    "the name `tr` is defined multiple times"（编译不过）。
+    """
+    for m in re.finditer(r"^use\s+([^;]*);", out, re.M | re.S):
+        seg = m.group(1)
+        seg = re.sub(r"\s+as\s+\w+", "", seg)   # `tr as t` ⇒ 仍算导入了 tr
+        if re.search(r"\b%s\b" % re.escape(name), seg):
+            return True
+    return False
+
+
+def add_imports(out, need_tr, need_trf, prefix="crate::"):
+    """补 `use` 行。
+
+    ⚠️ `prefix`：**二进制目标**（`src/main.rs`）里 `crate::` 指的是
+    **它自己那个 bin crate**，不是 lib ⇒ 得写 `puttyplus::`。
+    """
     lines = []
-    if need_tr:
-        lines.append("use crate::i18n::tr;")
-    if need_trf:
-        lines.append("use crate::trf;")
+    if need_tr and not already_imported(out, "tr"):
+        lines.append("use %si18n::tr;" % prefix)
+    if need_trf and not already_imported(out, "trf"):
+        lines.append("use %strf;" % prefix)
     if not lines:
-        return out
-    if "use crate::i18n::tr;" in out and "use crate::trf;" in out:
         return out
     uses = list(re.finditer(r"^use [^;]*;", out, re.M | re.S))
     if uses:
@@ -1284,6 +1343,7 @@ def cmd_apply(args):
         #    - 菜单标签参数：菜单文字在 `menu::row` 里统一翻译。
         protected = (const_ranges(src) + test_ranges(src)
                      + keep_regions(src) + menu_label_ranges(toks)
+                     + pattern_ranges(toks)
                      + i18n_call_ranges(toks))
         stats = {"plain": 0, "fmt": 0, "kept": 0}
         out = transform_range(toks, 0, len(toks), protected, overrides, stats)
@@ -1291,7 +1351,10 @@ def cmd_apply(args):
             continue
         need_tr = stats["plain"] > 0
         need_trf = stats["fmt"] > 0
-        out = add_imports(out, need_tr, need_trf)
+        # ⚠️ **二进制目标**（src/main.rs）里 `crate::` 指的是 bin 自己 ⇒
+        # 得用 lib 的名字（`puttyplus::`）。
+        prefix = "puttyplus::" if re.search(r"^use puttyplus::", src, re.M) else "crate::"
+        out = add_imports(out, need_tr, need_trf, prefix)
         open(path, "w", encoding="utf-8").write(out)
         total += stats["plain"] + stats["fmt"]
         print(f"{path}: tr() {stats['plain']} 处、trf!() {stats['fmt']} 处"
