@@ -310,8 +310,8 @@ fn reset_flow(parent: Option<&gtk::Window>) {
          重置会丢弃整个凭据库：已保存的连接密码全部永久丢失，\
          需要重新输入一遍。\n\n\
          不会丢的：连接列表、数据库连接的定义、\
-         「记住密码」的勾选都还在。重新连上时弹一次密码框、\
-         勾上「记住密码」，就又存进新库了。"),
+         「存进凭据库」的勾选都还在。重新连上时弹一次密码框、\
+         勾上那一项，就又存进新库了。"),
         tr("重置凭据库"),
         move |ok| {
             if !ok {
@@ -348,7 +348,7 @@ fn reset_flow(parent: Option<&gtk::Window>) {
                                 p5.as_ref(),
                                 tr("凭据库已重置"),
                                 tr("凭据库已用新主密码重建。之前保存的密码已清空——\
-                                 需要时重新输入一次即可（勾「记住密码」会存进新库）。"),
+                                 需要时重新输入一次即可（勾上「存进凭据库」会存进新库）。"),
                             );
                             open_vault_window(p5.as_ref());
                         }
@@ -512,7 +512,7 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
         }
         let names = vault::names();
         if names.is_empty() {
-            let l = gtk::Label::new(Some(tr("库里还没有凭据。\n连上某个连接并勾「记住密码」就会存进来。")));
+            let l = gtk::Label::new(Some(tr("库里还没有凭据。\n连上某个连接并勾上「存进凭据库」就会存进来。")));
             l.set_xalign(0.0);
             l.add_css_class("dim-label");
             list.append(&l);
@@ -751,7 +751,10 @@ pub fn remember_policy(st: vault::State) -> RememberPolicy {
         vault::State::Unlocked => RememberPolicy {
             can_remember: true,
             show_checkbox: true,
-            text: tr("凭据库已启用并已解锁：勾上「记住密码」= 密码加密存进本机凭据库。"),
+            // ⚠️ **不提「记住密码」**（用户 2026-11-03：「对于堡垒机使用
+            //    场景，所有地方都不要出现『记住密码』」—— 状态说明是**全局**
+            //    文字 ⇒ 干脆统一不提，指代改成"上面那个选项"）。
+            text: tr("凭据库已启用并已解锁：勾选上面的选项，密码就会加密存进本机凭据库。"),
             offer_unlock: false,
         },
         vault::State::Plain => RememberPolicy {
@@ -790,7 +793,7 @@ pub fn unlock_button(parent: Option<&gtk::Window>) -> gtk::Button {
     let b = gtk::Button::with_label(tr("解锁凭据库…"));
     b.set_halign(gtk::Align::Start);
     b.set_tooltip_text(Some(
-        tr("输入主密码解锁本机凭据库；解锁后就能勾「记住密码」，密码会加密保存。"),
+        tr("输入主密码解锁本机凭据库；解锁后就能勾上「存进凭据库」，密码会加密保存。"),
     ));
     let p = parent.cloned();
     b.connect_clicked(move |_| unlock_vault(p.as_ref()));
@@ -805,17 +808,28 @@ pub fn unlock_button(parent: Option<&gtk::Window>) -> gtk::Button {
 /// - 凭据库**锁着** ⇒ 状态区额外给一个「解锁凭据库…」入口
 ///   （用户不用关掉表单去顶栏菜单里找）；解锁后勾选框**立刻冒出来**；
 /// - 凭据库状态**变了**（比如刚在状态区里解锁了）⇒ 勾选框与说明自动跟着变。
+/// `session_key` = 这个界面属于**哪条会话**。
+///
+/// - `Some(key)` ⇒ 按**堡垒机会话**判定：会话没在连接列表里 ⇒ **不显示**
+///   「记住密码」（用户 2026-11-03：「对于堡垒机使用场景，所有地方都不要
+///   出现『记住密码』」）；
+/// - `None` ⇒ 不按会话判定（连接编辑器那种**编辑要保存的连接**的地方）。
 pub fn remember_row(
     parent: Option<&gtk::Window>,
     default_active: bool,
+    session_key: Option<&str>,
 ) -> (gtk::CheckButton, gtk::Box) {
     let pol = remember_policy(vault::state());
+    let bastion = session_key
+        .map(crate::panel::dbconn::is_bastion_session)
+        .unwrap_or(false);
     let cb = gtk::CheckButton::with_label(tr("记住密码"));
     cb.set_sensitive(pol.can_remember);
-    cb.set_active(default_active && pol.can_remember);
+    cb.set_active(default_active && pol.can_remember && !bastion);
     // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：
     //    勾了也存不住 ⇒ 摆一个"点了没反应"的选项没用还添乱。
-    cb.set_visible(pol.show_checkbox);
+    // ⚠️ **堡垒机会话 ⇒ 也不显示**（用户 2026-11-03）。
+    cb.set_visible(pol.show_checkbox && !bastion);
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let lbl = gtk::Label::new(Some(pol.text));
@@ -837,7 +851,7 @@ pub fn remember_row(
             let p = remember_policy(st);
             cb2.set_sensitive(p.can_remember);
             // 状态变了 ⇒ 显隐也跟着变（刚在别的窗口启用了凭据库 ⇒ 冒出来）
-            cb2.set_visible(p.show_checkbox);
+            cb2.set_visible(p.show_checkbox && !bastion);
             if !p.can_remember {
                 cb2.set_active(false);
             }

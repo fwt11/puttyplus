@@ -121,7 +121,7 @@ pub fn save(draft: &DbConnDraft) -> Option<String> {
     let mut hint = None;
     if profile.remember {
         match &draft.password {
-            None => hint = Some(tr("密码没填，记住密码这次不生效").to_string()),
+            None => hint = Some(tr("密码没填，这次不保存").to_string()),
             Some(pw) => {
                 if !crate::vault::exists() {
                     // **要说清楚去哪儿办**：光说"没保存"，用户不知道该做什么
@@ -129,7 +129,7 @@ pub fn save(draft: &DbConnDraft) -> Option<String> {
                         tr("凭据库还没建，密码这次没保存。\n\n\
                          凭据库是本机存连接密码的地方（用主密码加密）。\
                          去顶栏菜单「凭据库…」设个主密码建一个，\
-                         之后勾「记住密码」就能存住。\n\n\
+                         之后勾上「存进凭据库」就能存住。\n\n\
                          不建也能用——只是每次连库要重新输密码。")
                             .to_string(),
                     );
@@ -172,6 +172,19 @@ fn form_in_scroller(content: &gtk::Box) -> gtk::ScrolledWindow {
     sw.set_vexpand(true);
     sw.set_child(Some(content));
     sw
+}
+
+/// 这个会话是不是**堡垒机会话**（**没保存在连接列表里**）。
+///
+/// **为什么这么判**：堡垒机场景 = 用户**刻意不保存**会话（端口/密码下次
+/// 就变，存下来是过期垃圾）⇒ 这条会话在连接列表里**找不到**。
+/// 反过来，列表里有的会话 = 用户自己管理的普通连接。
+///
+/// ⚠️ 用户 2026-11-03：「对于堡垒机使用场景，**所有地方**都不要出现
+///    『记住密码』」⇒ 这些会话里不摆那个勾选框（一次性会话的密码没有
+///    "下次复用"可言，摆出来只会让人以为能存）。
+pub fn is_bastion_session(session_key: &str) -> bool {
+    !session_choices().iter().any(|(k, _)| k == session_key)
 }
 
 pub fn session_choices() -> Vec<(String, String)> {
@@ -353,8 +366,10 @@ pub fn ui_new(
     // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：勾了也存不住
     //    （`save()` 那头会拦下并说清楚）⇒ 摆个"点了没反应"的选项没用。
     //    判定只有一份（`vaultui::remember_policy`）⇒ 跟别处不会打架。
+    // ⚠️ **堡垒机会话 ⇒ 也不显示**（用户 2026-11-03）：一次性会话的密码
+    //    没有"下次复用"可言。
     let pol = crate::vaultui::remember_policy(crate::vault::state());
-    remember.set_visible(pol.show_checkbox);
+    remember.set_visible(pol.show_checkbox && !is_bastion_session(preset_session));
     remember.set_sensitive(pol.can_remember);
     let (pr, _, _) = dialogs::form_pair(tr("密码"), &pass, "", &remember);
     box_.append(&pr);
@@ -594,11 +609,16 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     let remember = gtk::CheckButton::with_label(tr("记住密码（存进凭据库）"));
     // ⚠️ 右边不要再写一遍「记住密码」（阶段 73b，审计 P1-11）
     // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：同上。
+    // ⚠️ **堡垒机会话 ⇒ 也不显示**（用户 2026-11-03）：同上。
     let pol = crate::vaultui::remember_policy(crate::vault::state());
-    remember.set_visible(pol.show_checkbox);
+    // ⚠️ **堡垒机会话 ⇒ 连"带着勾"都不行**（用户 2026-11-03）：勾选框已经
+    //    藏起来了，要是还留着 `active`，保存时就会**悄悄**把密码写进
+    //    凭据库 —— 用户压根没勾过。
+    let bastion = is_bastion_session(key);
+    remember.set_visible(pol.show_checkbox && !bastion);
     remember.set_sensitive(pol.can_remember);
     // 存不住的时候不许"带着勾"（看着像已经记住了，其实压根没存）
-    remember.set_active(p.remember && pol.can_remember);
+    remember.set_active(p.remember && pol.can_remember && !bastion);
     let (pr, _, _) = dialogs::form_pair(tr("密码"), &pass, "", &remember);
     box_.append(&pr);
 

@@ -385,11 +385,16 @@ pub fn ask_password<F: FnOnce(Option<String>) + 'static>(
 ///
 /// ⚠️ **密码不进 argv、不进日志**：回调拿到的密码由调用方负责
 /// `Zeroizing` 包裹。
+///
+/// `session_key` = 这个提示框属于**哪条会话**（`None` = 不按会话判定）。
+/// ⚠️ 堡垒机会话（会话没在连接列表里）⇒ **不显示**「记住密码」
+/// （用户 2026-11-03）。
 pub fn ask_password_remember<F: FnOnce(Option<String>, bool) + 'static>(
     parent: Option<&gtk::Window>,
     title: &str,
     message: &str,
     remember_default: bool,
+    session_key: Option<&str>,
     done: F,
 ) {
     // ⚠️ 走 `windows::dialog`：**必定**挂上父窗口（阶段 67 / 审计 P2-16）
@@ -414,7 +419,8 @@ pub fn ask_password_remember<F: FnOnce(Option<String>, bool) + 'static>(
     // ⚠️ 阶段 79：「记住密码」**三处共用**同一个构件（连接表单 / DB 密码提示 /
     // 凭据库管理器）——凭据库没启用或锁着时**不可勾**，并说清为什么；
     // 锁着时还给一个「解锁凭据库…」入口。
-    let (remember, status_box) = crate::vaultui::remember_row(parent, remember_default);
+    let (remember, status_box) =
+        crate::vaultui::remember_row(parent, remember_default, session_key);
     let ca = dlg.content_area();
     ca.set_margin_top(8);
     ca.set_margin_bottom(8);

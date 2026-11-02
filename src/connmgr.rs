@@ -1359,8 +1359,10 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
     // DB 密码提示那边又写了一份 ⇒ 同一件事两处说法、还各自漂移。
     // 现在三处共用 `vaultui::remember_row`（未启用 ⇒ 不可勾 + 说明；
     // 已锁定 ⇒ 给「解锁」入口）。
+    // ⚠️ `None` = 不按会话判定：这里编辑的是**要保存的连接条目**
+    //    （堡垒机场景压根不保存连接 ⇒ 这个对话框在那种场景下用不上）。
     let (w_remember, status_box) =
-        crate::vaultui::remember_row(parent, !w_pass.text().is_empty());
+        crate::vaultui::remember_row(parent, !w_pass.text().is_empty(), None);
     // 勾的状态跟着密码框走：填了密码就是"要记住"
     {
         let w_remember = w_remember.clone();

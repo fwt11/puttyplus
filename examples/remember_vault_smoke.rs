@@ -6,6 +6,10 @@
 //! - ⚠️ **凭据库存不住密码时，「记住密码」整个不显示**（用户 2026-11-02：
 //!   「只有在凭证库开启的时候才可以显示保存密码的选项，但你似乎并没有这么做」
 //!   —— 根因是他的库**建了但锁着**（忘了主密码），而判定只挡住了"没启用"）；
+//! - ⚠️ **堡垒机会话里，「记住密码」一个地方都不出现**（用户 2026-11-03：
+//!   「对于堡垒机使用场景，所有地方都不要出现『记住密码』」）——判定 =
+//!   **这个会话不在连接列表里**（堡垒机的 launcher 从命令行拉起的一次性
+//!   连接，用户刻意不保存 ⇒ 列表里找不到；反过来列表里有的就是普通连接）；
 //! - 传输冲突对话框：「覆盖全部」是**危险**动作（红色），默认响应是
 //!   「跳过已存在」，正文列出冲突数量与示例。
 //!
@@ -18,6 +22,11 @@
 
 use gtk::prelude::*;
 use puttyplus::panel::{dbconn, dialogs};
+
+/// **已保存**的会话键（连接列表里有一条 ⇒ 普通会话，不是堡垒机）。
+const SAVED_SESSION: &str = "s:saved-srv";
+/// **堡垒机会话**的会话键（命令行拉起的一次性连接 ⇒ 不在连接列表里）。
+const BASTION_SESSION: &str = "ops@10.0.0.9:2222";
 
 fn pump(ms: u64) {
     let ctx = gtk::glib::MainContext::default();
@@ -121,6 +130,9 @@ fn main() {
         std::env::set_var("PUTTYPLUS_SETTINGS_INI", home.join("settings.ini"));
         std::env::set_var("PUTTYPLUS_DB_INI", home.join("databases.ini"));
         std::env::set_var("PUTTYPLUS_CONN_INI", home.join("connections.ini"));
+        // ⚠️ 「最近连接」也得隔离：它会决定"这个会话算不算堡垒机会话"
+        //    （堡垒机拉起的一次性会话**不记**最近，见 `record_cli_recent`）。
+        std::env::set_var("PUTTYPLUS_RECENT_INI", home.join("recent.ini"));
     }
 
     gtk::init().expect("gtk init");
@@ -144,6 +156,7 @@ fn main() {
         "数据库需要密码",
         "测试用的提示正文。",
         false,
+        None,
         |_pw, _k| {},
     );
     pump(200);
@@ -193,6 +206,27 @@ fn main() {
     //
     // ⚠️ 用户 2026-11-02 反馈的根因就在这一档：**库建了但锁着**（忘了主密码）
     // ⇒ 存不进去 ⇒ 不该摆那个选项。
+    //
+    // ⚠️ 先造一条**已保存**的连接（`s:saved-srv`）⇒ 它是"普通会话"，
+    //    不是堡垒机会话（堡垒机会话判定见 ④）。不造的话连接列表是空的
+    //    ⇒ 所有会话都成了堡垒机会话 ⇒ 这一档会全灭。
+    assert!(
+        puttyplus::connmgr::save_entry(
+            "saved-srv",
+            "10.0.0.9",
+            22,
+            Some("root"),
+            None,
+            Some("ssh"),
+            None,
+            None,
+        ),
+        "写不进临时 connections.ini"
+    );
+    assert!(
+        !dbconn::is_bastion_session(SAVED_SESSION),
+        "已保存的会话不该被当成堡垒机会话"
+    );
     let cases: Vec<(&str, bool)> = vec![
         ("Off（没建库）", false),
         ("Locked（建了、锁着）", false),
@@ -228,7 +262,7 @@ fn main() {
             (
                 "数据库新建连接",
                 probe_visible_remember("数据库新建连接", expect_visible, || {
-                    dbconn::ui_new(None, "root@10.0.0.9:22", None, |_k, _n| {});
+                    dbconn::ui_new(None, SAVED_SESSION, None, |_k, _n| {});
                 }),
             ),
             (
@@ -239,6 +273,7 @@ fn main() {
                         "数据库需要密码",
                         "请输入密码：",
                         true,
+                        Some(SAVED_SESSION),
                         |_p, _r| {},
                     );
                 }),
@@ -255,6 +290,92 @@ fn main() {
                 detail
             );
         }
+    }
+
+    // ---- ④ 堡垒机会话：所有地方都不出现「记住密码」（用户 2026-11-03）----
+    //
+    // 堡垒机场景 = 堡垒机的 launcher 从外面拉起本程序（命令行一次性会话）。
+    // 这类会话**不在连接列表里** ⇒ 判定为「堡垒机会话」⇒
+    // **所有地方都不摆「记住密码」**。
+    //
+    // ⚠️ 前置：先把凭据库设成"**存得住**"的状态（Plain）——不然分不清
+    //    是"库存不住"把它藏了，还是"堡垒机会话"把它藏了。
+    let _ = std::fs::remove_file(&vault);
+    puttyplus::vault::lock();
+    puttyplus::vault::create("", &[]).expect("建明文库");
+    check!(
+        "前置：凭据库已是「存得住」的状态",
+        puttyplus::vault::state() == puttyplus::vault::State::Plain,
+        format!("vault::state() = {:?}", puttyplus::vault::state())
+    );
+    check!(
+        "堡垒机会话判定：不在连接列表里的会话 ⇒ 是堡垒机会话",
+        dbconn::is_bastion_session(BASTION_SESSION),
+        format!("{BASTION_SESSION} 被当成了普通会话")
+    );
+
+    let bastion_probes: Vec<(&str, Result<(), String>)> = vec![
+        (
+            "数据库新建连接（堡垒机会话）",
+            probe_visible_remember("数据库新建连接（堡垒机会话）", false, || {
+                dbconn::ui_new(None, BASTION_SESSION, None, |_k, _n| {});
+            }),
+        ),
+        (
+            "数据库密码提示框（堡垒机会话）",
+            probe_visible_remember("数据库密码提示框（堡垒机会话）", false, || {
+                dialogs::ask_password_remember(
+                    None,
+                    "数据库需要密码",
+                    "请输入密码：",
+                    true,
+                    Some(BASTION_SESSION),
+                    |_p, _r| {},
+                );
+            }),
+        ),
+    ];
+    for (tag, r) in bastion_probes {
+        let ok = r.is_ok();
+        let detail = r.err().unwrap_or_default();
+        check!(
+            &format!("{tag}：不出现「记住密码」"),
+            ok,
+            detail
+        );
+    }
+
+    // 对照组：同样凭据库状态、同样界面，换成**已保存**的会话 ⇒
+    // 「记住密码」照旧出现（别把普通用户也误伤了）。
+    let saved_probes: Vec<(&str, Result<(), String>)> = vec![
+        (
+            "数据库新建连接（已保存会话）",
+            probe_visible_remember("数据库新建连接（已保存会话）", true, || {
+                dbconn::ui_new(None, SAVED_SESSION, None, |_k, _n| {});
+            }),
+        ),
+        (
+            "数据库密码提示框（已保存会话）",
+            probe_visible_remember("数据库密码提示框（已保存会话）", true, || {
+                dialogs::ask_password_remember(
+                    None,
+                    "数据库需要密码",
+                    "请输入密码：",
+                    true,
+                    Some(SAVED_SESSION),
+                    |_p, _r| {},
+                );
+            }),
+        ),
+    ];
+    for (tag, r) in saved_probes {
+        let ok = r.is_ok();
+        let detail = r.err().unwrap_or_default();
+        check!(
+            &format!("{tag}：「记住密码」照旧出现"),
+            ok,
+            detail
+        );
     }
 
     // ---- ③ 冲突对话框：危险层级 + 默认响应 + 正文 ----

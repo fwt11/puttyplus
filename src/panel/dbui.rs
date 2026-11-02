@@ -6601,6 +6601,10 @@ pub fn on_need_password(st: &Rc<PanelState>, detail: String) {
         tr("数据库需要密码"),
         &msg,
         p.remember,
+        // ⚠️ 堡垒机会话（会话没在连接列表里）⇒ 不显示「记住密码」
+        //    （用户 2026-11-03：「对于堡垒机使用场景，所有地方都不要出现
+        //    『记住密码』」）。
+        Some(ui.session_key.as_str()),
         move |pw, keep| {
             let Some(pw) = pw else {
                 // 取消：把"下一步该做什么"说清楚，别让用户对着
@@ -6654,7 +6658,7 @@ fn remember_password(key: &str, name: &str, pw: &str) {
             tr("凭据库还没建，这次的密码没有存住（连接不受影响）。\n\n\
              凭据库是本机存连接密码的地方（用主密码加密）。\
              去顶栏菜单「凭据库…」设个主密码建一个，\
-             之后连库就能记住密码。"),
+             之后连库时勾上「存进凭据库」就能存住。"),
         );
         return;
     }
@@ -6663,7 +6667,7 @@ fn remember_password(key: &str, name: &str, pw: &str) {
             None,
             tr("密码没有保存"),
             tr("凭据库没解锁，这次的密码没有存住（连接不受影响）。\n\n\
-             去顶栏菜单「凭据库…」输入主密码解锁，再连一次就能记住。"),
+             去顶栏菜单「凭据库…」输入主密码解锁，再连一次就能存住。"),
         );
         return;
     }
