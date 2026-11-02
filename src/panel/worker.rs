@@ -186,6 +186,19 @@ pub enum WorkerCmd {
     },
     /// 数据库通道（7.2）：在现有 SSH 连接上连到跳板机视角的数据库
     DbConnect { config: crate::backend::db::DbConfig },
+    /// 数据库通道：**只测一下连不连得上**（不建会话、不动当前连接）。
+    ///
+    /// ⚠️ **为什么要有**：新建数据库连接的对话框要**当场验密码**——
+    /// 密码错了就**留在那个对话框里**、在密码框那儿提示，而不是先打开
+    /// 工作台再弹一个「请输入密码」的框（那个框很容易被错过，
+    /// 错过之后用户就不知道该怎么办了）。
+    ///
+    /// ⚠️ 与 [`WorkerCmd::DbConnect`] 分开：后者会**顶掉**当前数据库
+    /// 会话（`db.take()`），拿它当"测试"会把正在用的连接掐了。
+    DbTest {
+        id: u64,
+        config: crate::backend::db::DbConfig,
+    },
     /// 数据库通道：执行 SQL 并取第一页
     DbQuery { id: u64, sql: String, page_size: usize },
     /// 数据库通道：取下一页（PostgreSQL 游标 / MySQL 缓冲切片）
@@ -469,6 +482,17 @@ pub enum PanelEvent {
     },
     /// 数据库通道：连接结果（Ok = `user@host:port/db` 展示串）
     DbConnected(Result<String, String>),
+    /// 数据库通道：**测连**的结果（`DbTest` 的回包）。
+    ///
+    /// - `result` = `Ok(())` ⇒ 连得上；
+    /// - `Err(msg)` ⇒ 连不上，`msg` 是后端的原文（人话）；
+    /// - `needs_password` ⇒ 服务器**要密码**（这条连接没带密码），
+    ///   UI 据此把光标放到**密码框**上，而不是笼统地说"连接失败"。
+    DbTest {
+        id: u64,
+        result: Result<(), String>,
+        needs_password: bool,
+    },
     /// 数据库通道：**服务器要密码，但我们没带**。
     ///
     /// 单独一个变体（而不是塞进 `DbConnected(Err(..))`）：UI 见到它要
@@ -861,6 +885,33 @@ pub fn spawn_worker(
                                 }
                             }
                             push_forwards(conn.as_deref(), &ui_tx, failed).await;
+                        }
+                        WorkerCmd::DbTest { id, config } => {
+                            // ⚠️ **只测，不建会话**：当前数据库连接不动。
+                            //    （`DbConnect` 会 `db.take()` 顶掉正在用的连接，
+                            //    拿它当"测试"会把用户的活连接掐了。）
+                            let mut needs_password = false;
+                            let result = match conn.as_ref() {
+                                None => Err("SSH 连接已断开".to_string()),
+                                Some(c) => {
+                                    match c.open_tcp_stream(&config.host, config.port).await {
+                                        Err(e) => Err(e.0),
+                                        Ok(stream) => match DbSession::open(stream, &config).await
+                                        {
+                                            Ok(_) => Ok(()),
+                                            Err(e) => {
+                                                needs_password = e.needs_password();
+                                                Err(e.message())
+                                            }
+                                        },
+                                    }
+                                }
+                            };
+                            let _ = ui_tx.try_send(PanelEvent::DbTest {
+                                id,
+                                result,
+                                needs_password,
+                            });
                         }
                         WorkerCmd::DbConnect { config } => {
                             if let Some(d) = db.take() {

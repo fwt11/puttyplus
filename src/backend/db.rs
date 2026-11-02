@@ -134,12 +134,17 @@ impl DbOpenError {
     /// **PG 的坑**：`Display` 只给 "invalid configuration"，真正的原因在
     /// `source()` 里（"password missing"）。不看 source 就永远只知道那句
     /// 英文。
+    ///
+    /// ⚠️ **别用 `format!("{e}")`**：PG 的 `Display` 对 `DbError` 只给
+    /// **"db error"** 三个字 ⇒ 用户看到的是"db error"，完全不知道是
+    /// **密码错了**还是库名不对。**服务器给的原文在 `as_db_error()` 里**
+    /// （见 [`pg_msg`]）。
     pub(crate) fn from_pg(e: &tokio_postgres::Error) -> Self {
         let cause = std::error::Error::source(e).map(|s| s.to_string());
         if is_missing_password_cause(cause.as_deref()) {
             DbOpenError::need_password()
         } else {
-            DbOpenError::Other(format!("{e}"))
+            DbOpenError::Other(pg_msg(e))
         }
     }
 
@@ -165,6 +170,23 @@ impl DbOpenError {
 
 /// tokio-postgres 里"服务端要密码、我们没给"的 cause 原文。
 pub(crate) const PG_MISSING_PASSWORD: &str = "password missing";
+
+/// 这条错误是不是「**密码不对**」（纯函数，便于单测）。
+///
+/// ⚠️ 为什么要在后端认：认出来才能把提示写在**密码框**那儿 ——
+/// 「新建数据库连接」的对话框里，用户刚敲完密码，最需要知道的是
+/// "是密码错了"还是"地址/库名不对"（笼统一句"连接失败"等于没说）。
+///
+/// - PG：`password authentication failed for user "x"`
+/// - MySQL：`Error 1045 (28000): Access denied for user 'x'@'y' (using password: YES)`
+pub(crate) fn is_password_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("password authentication failed")
+        || m.contains("authentication failed")
+        || m.contains("access denied")
+        || m.contains("incorrect password")
+        || m.contains("密码")
+}
 
 /// PG 驱动的 cause 是不是"缺密码"（纯函数，方便单测）。
 ///
@@ -1683,6 +1705,26 @@ impl Drop for SocketDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「是不是密码错了」要认得准 —— 认错了就把提示写错地方
+    /// （用户会去改密码，而真正的问题是库名/地址）。
+    #[test]
+    fn 认得出密码错误() {
+        // PG
+        assert!(is_password_error(
+            "password authentication failed for user \"postgres\""
+        ));
+        // MySQL
+        assert!(is_password_error(
+            "Error 1045 (28000): Access denied for user 'root'@'10.0.0.1' (using password: YES)"
+        ));
+        // 中文原文
+        assert!(is_password_error("密码不对"));
+        // ⚠️ **别的错不能当成密码错**
+        assert!(!is_password_error("database \"demo\" does not exist"));
+        assert!(!is_password_error("连接已断开"));
+        assert!(!is_password_error("timeout"));
+    }
 
     /// 导入前的本地校验：脏数据要在**动库之前**被拦下，
     /// 而且错误要能直接定位到 CSV 的哪一格。

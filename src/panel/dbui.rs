@@ -1569,7 +1569,7 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
                 (ui.session_key.clone(), ui.win.clone())
             };
             let weak2 = Rc::downgrade(&st);
-            crate::panel::dbconn::ui_new(Some(&parent), &key, move |k, name| {
+            crate::panel::dbconn::ui_new(Some(&parent), &key, Some(Rc::clone(&st)), move |k, name| {
                 // 建好就直接连上并打开工作台（跟子标签栏「+」一个路数）
                 let Some(st) = weak2.upgrade() else { return };
                 use_profile(&st, &k, &name);

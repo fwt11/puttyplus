@@ -16,6 +16,9 @@
 //! **保存即落盘**（`databases.ini` + 可选的凭据库），不像从前那样"连上了才
 //! 存"——现在连接是**先建好再用**，工作台不再负责创建。
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use gtk::prelude::*;
 
 use crate::backend::db::DbProto;
@@ -223,9 +226,22 @@ fn host_tag(host: &str, port: i32, user: &str) -> String {
 ///
 /// `on_done`：建好后回调（拿到的 `name` 是最终连接名——用户留空时是
 /// 自动生成的那个，调用方要拿它去开工作台）。
+/// 新建一条数据库连接。
+///
+/// ⚠️ **先测通再打开工作台**（`st` 给了会话状态时）：
+/// 密码错了 / 没填 ⇒ **留在这个对话框里**，在**密码框**那儿提示，
+/// **不打开工作台**。
+///
+/// **为什么**（用户 2026-11-02 报）：以前点「连接」就直接开工作台，
+/// 连不上时工作台里再弹一个「请输入密码」的框——那个框**很容易被错过**，
+/// 错过之后用户就不知道该怎么办了（工作台开着、里面是空的、状态栏一句
+/// "连接失败"）。
+///
+/// ⇒ 原则：**操作失败要回到发起它的界面并提示**（用户原话）。
 pub fn ui_new(
     parent: Option<&gtk::Window>,
     preset_session: &str,
+    st: Option<Rc<super::PanelState>>,
     on_done: impl Fn(&str, &str) + 'static,
 ) {
     // 按钮是「连接」不是「保存」。
@@ -383,10 +399,45 @@ pub fn ui_new(
     dlg.content_area().append(&form_in_scroller(&box_));
     dlg.present();
 
+    // ⚠️ **测连的结果**要跨过异步回包 ⇒ 放共享格里。
+    //    （外层是 `Fn` 闭包 ⇒ 不能把 `draft` 移进内层闭包 —— 那是
+    //    `FnOnce` 才干的事。）
+    let pending: Rc<RefCell<Option<(DbConnDraft, DbProfile)>>> = Rc::new(RefCell::new(None));
+    let testing = Rc::new(Cell::new(false));
+    let on_done: Rc<dyn Fn(&str, &str)> = Rc::new(on_done);
+    // 「存好 + 关窗 + 打开工作台」这一串（**测通了**才走）
+    let finish: Rc<dyn Fn(&gtk::Dialog, &DbConnDraft, &DbProfile)> = {
+        let on_done = Rc::clone(&on_done);
+        Rc::new(
+            move |dlg: &gtk::Dialog, draft: &DbConnDraft, profile: &DbProfile| {
+                let saved = save(draft);
+                // ⚠️ **这次连接就用刚敲的密码**（不勾「记住密码」也用）——
+                // 否则工作台连的时候会**再问一遍**，看着像密码框没生效。
+                stash_password(
+                    &draft.session_key,
+                    &profile.name,
+                    draft.password.as_deref().map(|z| z.as_str()),
+                );
+                dlg.close();
+                // 提示（密码没存上之类）用一次性对话框说清楚
+                if let Some(h) = saved {
+                    // 用户点的是「连接」——弹个「已保存」既误导（**还没连上**，
+                    // 工作台正要开）又挡路（弹窗压在刚打开的工作台上）。
+                    // 这里**只说密码那件事**：密码没记住，用户得知道。
+                    dialogs::info(None, "密码没记住", &h);
+                }
+                on_done(&draft.session_key, &profile.name);
+            },
+        )
+    };
+
     dlg.connect_response(move |dlg, resp| {
         if resp != gtk::ResponseType::Ok {
             dlg.close();
             return;
+        }
+        if testing.get() {
+            return; // 正在测，别重复提交
         }
         let proto = proto
             .active_id()
@@ -411,23 +462,70 @@ pub fn ui_new(
             return; // 不关对话框，让用户改
         }
         let profile = draft.to_profile();
-        let saved = save(&draft);
-        // ⚠️ **这次连接就用刚敲的密码**（不勾「记住密码」也用）——
-        // 否则工作台连的时候会**再问一遍**，看着像密码框没生效。
-        stash_password(
-            &draft.session_key,
-            &profile.name,
-            draft.password.as_deref().map(|z| z.as_str()),
-        );
-        dlg.close();
-        // 提示（密码没存上之类）用一次性对话框说清楚
-        if let Some(h) = saved {
-            // 用户点的是「连接」——弹个「已保存」既误导（**还没连上**，
-            // 工作台正要开）又挡路（弹窗压在刚打开的工作台上）。
-            // 这里**只说密码那件事**：密码没记住，用户得知道。
-            dialogs::info(None, "密码没记住", &h);
-        }
-        on_done(&draft.session_key, &profile.name);
+        // ⚠️ **没有会话状态 ⇒ 没法测**（那个会话没开标签页）：
+        //    照旧存了、打开工作台（工作台里会问密码）。
+        // ⚠️ 外层是 `Fn` 闭包 ⇒ 不能把捕获的 `Rc` **移**出来（那是 FnOnce
+        //    才干的事）⇒ 这里克隆一份（`Rc` 克隆很便宜）。
+        let Some(st) = st.clone() else {
+            finish(dlg, &draft, &profile);
+            return;
+        };
+        // ---- 当场测连 ----
+        //
+        // ⚠️ **为什么不先打开工作台**：那样用户看到的是"工作台弹出来 +
+        //    一个『请输入密码』的框"，那个框很容易被错过。
+        //    ⇒ **先测通再开工作台**；不通就留在原地、在密码框那儿提示。
+        testing.set(true);
+        pass.remove_css_class("error");
+        hint.set_text("正在连接…（验证地址与密码）");
+        let cfg = crate::backend::db::DbConfig {
+            proto: draft.proto,
+            host: draft.host.clone(),
+            port: draft.port,
+            user: draft.user.clone(),
+            dbname: draft.dbname.clone(),
+            password: draft.password.clone(),
+        };
+        *pending.borrow_mut() = Some((draft, profile));
+        let pending2 = Rc::clone(&pending);
+        let testing2 = Rc::clone(&testing);
+        let hint2 = hint.clone();
+        let pass2 = pass.clone();
+        let dlg2 = dlg.clone();
+        let finish2 = Rc::clone(&finish);
+        st.db_test(cfg, move |result, needs_password| {
+            testing2.set(false);
+            let Some((draft, profile)) = pending2.borrow_mut().take() else {
+                return;
+            };
+            match result {
+                Ok(()) => {
+                    hint2.set_text("");
+                    finish2(&dlg2, &draft, &profile);
+                }
+                Err(msg) => {
+                    // ⚠️ **留在原地**，把原因写在**密码框**那儿
+                    let wrong_pw = crate::backend::db::is_password_error(&msg);
+                    let tip = if needs_password {
+                        "⚠ 服务器要密码，但这条连接没有密码 —— 请在上面填写密码".to_string()
+                    } else if wrong_pw {
+                        format!("⚠ 密码不对：{msg}")
+                    } else {
+                        format!("⚠ 连接失败：{msg}")
+                    };
+                    hint2.set_text(&tip);
+                    if needs_password || wrong_pw {
+                        // 密码框标红 + 聚焦 + 选中（用户直接重敲就行）
+                        pass2.add_css_class("error");
+                        pass2.grab_focus();
+                        if wrong_pw {
+                            // 密码错的 ⇒ 把敲错的那个清掉
+                            pass2.set_text("");
+                        }
+                    }
+                }
+            }
+        });
     });
 }
 

@@ -9,6 +9,7 @@
 //! - **动作的实现**只有一份，在这里（[`run_in`] / [`run`]）；
 //! - 各入口只是"从表的哪个角度看"（[`crate::topmenus::NewEntry`]）。
 
+use std::rc::Rc;
 use gtk::prelude::*;
 
 use crate::panel::PanelState;
@@ -121,7 +122,7 @@ fn new_db_connection(st: Option<&std::rc::Rc<PanelState>>) {
     let key = crate::backend::dbstore::session_key(&st.opts);
     let parent = st.topwin();
     let st2 = st.clone();
-    crate::panel::dbconn::ui_new(parent.as_ref(), &key, move |k, name| {
+    crate::panel::dbconn::ui_new(parent.as_ref(), &key, Some(Rc::clone(st)), move |k, name| {
         // 建好之后打开工作台并连上（用户刚建的就是要用的那条）
         crate::panel::on_open_db_page(&st2);
         crate::panel::dbui::use_profile(&st2, &k, &name);

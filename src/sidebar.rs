@@ -1214,9 +1214,20 @@ impl Sidebar {
                                 pop2.popdown();
                                 let sk2 = sk.clone();
                                 let sb3 = Rc::clone(&sb2);
+                                // ⚠️ **测连要用这条会话的面板状态**（数据库通道
+                                //    复用这条 SSH 连接 ⇒ 得找得到对应的会话）。
+                                //    找不到（那个会话没开标签页）⇒ 传 None，
+                                //    对话框会照旧存好、打开工作台。
+                                let st = sb2
+                                    .tabs
+                                    .sessions()
+                                    .into_iter()
+                                    .find(|(k, _)| *k == sk2)
+                                    .map(|(_, st)| st);
                                 crate::panel::dbconn::ui_new(
                                     parent2.as_ref(),
                                     &sk2,
+                                    st,
                                     move |_k, _name| sb3.reload(),
                                 );
                             });

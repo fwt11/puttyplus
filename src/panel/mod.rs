@@ -55,6 +55,16 @@ pub struct PanelState {
     pub pw: RefCell<Option<Zeroizing<String>>>,
     pub conn_ok: Cell<bool>,
     pub tx: RefCell<Option<Sender<WorkerCmd>>>,
+    /// 数据库「**测连**」的回包去处（新建数据库连接的对话框在等）。
+    ///
+    /// ⚠️ 为什么要有：那个对话框要**当场验密码**——密码错了就留在
+    /// 那个对话框里、在密码框那儿提示，而不是先打开工作台再弹一个
+    /// 「请输入密码」的框（那个框很容易被错过）。
+    ///
+    /// **一次只有一个在等**（对话框是模态流程，不需要并发）。
+    pub db_test_cb: RefCell<Option<(u64, Rc<dyn Fn(Result<(), String>, bool)>)>>,
+    /// 测连请求的编号（回包按编号对得上）。
+    pub next_db_test_id: Cell<u64>,
 
     pub root: gtk::Paned,
     pub remote_pane: RefCell<Option<Rc<Pane>>>,
@@ -175,6 +185,41 @@ pub struct PanelState {
 }
 
 impl PanelState {
+    /// **测一下**这条数据库连接连不连得上（**不建会话、不动当前连接**）。
+    ///
+    /// 给「新建数据库连接」的对话框用：**当场验密码**——
+    /// 连不上就留在那个对话框里、在**密码框**那儿提示，
+    /// 而不是先打开工作台再弹一个「请输入密码」的框
+    /// （那个框很容易被错过，错过之后用户就不知道该怎么办了）。
+    ///
+    /// `cb(结果, 服务器是不是要密码)`：结果 `Err(msg)` 里是后端的原文。
+    pub fn db_test(
+        &self,
+        cfg: crate::backend::db::DbConfig,
+        cb: impl Fn(Result<(), String>, bool) + 'static,
+    ) {
+        let id = self.next_db_test_id.get();
+        self.next_db_test_id.set(id + 1);
+        *self.db_test_cb.borrow_mut() = Some((id, Rc::new(cb)));
+        let tx = self.tx.borrow().clone();
+        let Some(tx) = tx else {
+            // 没连上（SSH 都没通）⇒ 没什么可测的，当场回"连不上"
+            if let Some((cid, c)) = self.db_test_cb.borrow_mut().take() {
+                if cid == id {
+                    c(Err("SSH 连接还没建好".to_string()), false);
+                }
+            }
+            return;
+        };
+        if tx.send(WorkerCmd::DbTest { id, config: cfg }).is_err() {
+            if let Some((cid, c)) = self.db_test_cb.borrow_mut().take() {
+                if cid == id {
+                    c(Err("后台连接线程不在了".to_string()), false);
+                }
+            }
+        }
+    }
+
     pub fn pane(&self, remote: bool) -> Rc<Pane> {
         if remote {
             Rc::clone(self.remote_pane.borrow().as_ref().unwrap())
@@ -226,6 +271,8 @@ impl SftpPanel {
             pw: RefCell::new(opts.password.clone()),
             conn_ok: Cell::new(false),
             tx: RefCell::new(None),
+            db_test_cb: RefCell::new(None),
+            next_db_test_id: Cell::new(1),
             root: gtk::Paned::new(gtk::Orientation::Vertical),
             remote_pane: RefCell::new(None),
             local_pane: RefCell::new(None),
@@ -710,7 +757,12 @@ fn cancel_aborted_xfers(st: &Rc<PanelState>) {
     }
 }
 
-fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
+/// 处理一个来自 worker 的事件（**公开**：冒烟要能自己喂事件）。
+///
+/// 正常运行时是 [`crate::panel::worker`] 的回包循环在调它；
+/// 冒烟（`examples/db_conn_dialog_smoke.rs`）要能**自己造**一个
+/// 「测连失败」的回包 ⇒ 得能直接调。
+pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
     match ev {
         PanelEvent::Connected(Ok(cwd)) => {
             // 重连会 abort 旧传输调度器，先把旧队列里未完成的项标成取消
@@ -911,6 +963,20 @@ fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             dbui::on_connected(st, result);
             // 活跃标记（阶段 57）：连上了 → 树上点亮
             refresh_active_marks();
+        }
+        // ⚠️ 测连的回包：**不是**给工作台的，是给「新建数据库连接」
+        //    那个对话框的（它要留在原地、在密码框那儿提示）。
+        PanelEvent::DbTest {
+            id,
+            result,
+            needs_password,
+        } => {
+            let cb = st.db_test_cb.borrow_mut().take();
+            if let Some((cid, c)) = cb {
+                if cid == id {
+                    c(result, needs_password);
+                }
+            }
         }
         PanelEvent::DbNeedPassword(detail) => {
             dbui::on_need_password(st, detail);

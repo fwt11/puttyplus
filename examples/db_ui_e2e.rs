@@ -2798,7 +2798,7 @@ fn main() {
         let sess = puttyplus::panel::dbconn::session_choices();
         println!("[7.5] 可选会话：{:?}", sess.iter().map(|(_, l)| l).collect::<Vec<_>>());
         let cur_key = puttyplus::backend::dbstore::session_key(&st.opts);
-        puttyplus::panel::dbconn::ui_new(Some(&parent), &cur_key, |_k, _n| {});
+        puttyplus::panel::dbconn::ui_new(Some(&parent), &cur_key, Some(Rc::clone(&st)), |_k, _n| {});
         pump(800);
         shot("/tmp/stage13_dbconn.png");
     }

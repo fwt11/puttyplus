@@ -808,6 +808,7 @@ impl Tabs {
                 crate::panel::dbconn::ui_new(
                     parent.as_ref(),
                     &key,
+                    Some(Rc::clone(&st)),
                     move |k, name| {
                         // 建好之后：打开工作台并连上（用户刚建的就是要用的那条）
                         panel::on_open_db_page(&st2);
