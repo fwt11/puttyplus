@@ -1188,6 +1188,11 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     //    内容装在内层（`empty_box`，也就是 `ui.empty_box`）。
     let empty_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     empty_box.add_css_class("pp-empty-inner");
+    // ⚠️ **最小宽度**（阶段 97）：品牌页顶上那座"招牌"（图标 + 产品名）
+    // 本身不宽，卡片会被内容撑成一条窄条 ⇒ 看着像贴边的小纸条。
+    // ⇒ 给个下限（`set_size_request` 量的是**内容盒**，CSS 的 padding
+    // 再加上去 ⇒ 卡片实际比这个数宽一点）。
+    empty_box.set_size_request(360, -1);
     let empty_card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     empty_card.add_css_class("pp-empty");
     empty_card.append(&empty_box);
@@ -1462,16 +1467,22 @@ pub fn tree_paned_pos(st: &Rc<PanelState>) -> i32 {
     ui.as_ref().map(|u| u.tree_toggle.paned.position()).unwrap_or(-1)
 }
 
-/* ---------------- 空态（阶段 51：结构化骨架） ---------------- */
-/// 重建空态那一屏（阶段 51）。
+/* ---------------- 空态（阶段 51：结构化骨架；阶段 97：品牌页重做） ---------------- */
+/// 重建空态那一屏（阶段 51；**阶段 97 重新设计**）。
 ///
-/// **为什么要结构化**：原来只有一句居中的提示文字 + 一大片空白，
-/// 用户对着它发呆，像"功能坏了"。dbx 的空态是「面包屑 + 表单 + 表格骨架」，
-/// 我们没那么多东西可摆，但至少摆一个能点的"开始页"：
+/// **为什么要重新设计**（用户 2026-11-02）：
+/// - 「新建查询」「搜索对象」**点了没有任何作用**，用户不知道它们是干嘛的；
+/// - 「这个会话的数据库连接」这一列**没有意义**——能进到这一屏，说明用户
+///   刚点了某个数据库连接或者新建了一个，**目的就是打开那个库**；
+/// - 「说实话，我也不知道这里应该显示啥，或者显示个漂亮的 logo？图片？艺术字？」
+///   ⇒ 我们的工具**不是通用数据库客户端**（不像 dbx / dbeaver），
+///   抄它们的首页只会更不像我们自己。
 ///
-/// 1. **这个会话下有哪些数据库连接**——点一下就连上（不用去连接管理器）；
-/// 2. **快速开始**——新建查询 / 搜索对象 / 新建数据库连接；
-/// 3. 快捷键提示（别让人猜 Ctrl+Enter 是干嘛的）。
+/// 现在的样子（**品牌页**）：
+/// 1. **应用自己的图标** + 产品名「PuTTYPlus」+ 这一屏是什么（艺术字那一下）；
+/// 2. 连上了 ⇒ 只显示**当前连的是哪个库**（一个 chip，**不可点**）；
+///    没连上 ⇒ 这一列连接列表**这时才有用**（"我该连哪个库？"）；
+/// 3. 三个**看得见效果**的动作：浏览对象 / 写一条查询 / 执行历史。
 ///
 /// ⚠️ **回调一律抓弱引用**：这些按钮挂在 `ui.page` 上，而 `ui.page` 归
 /// `PanelState` 管——抓强引用就是 `PanelState → 页 → 按钮 → 回调 →
@@ -1485,70 +1496,152 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
     let connected = ui.connected.get();
     let cur = ui.current.borrow().clone();
 
-    // ---- 标题 + 副标题 ----
+    // ================= 品牌标识 =================
     //
-    // ⚠️ **全部左对齐**（阶段 96）：以前是「标题居中 + 小节标题左对齐 +
-    // 按钮居中」三种对齐混在一张卡里 ⇒ 看着乱。现在统一左对齐，
-    // 跟侧栏（阶段 93）一个口径。
-    let title = gtk::Label::new(Some(if connected {
-        "数据库工作台"
-    } else {
-        "开始用数据库"
-    }));
-    title.add_css_class("pp-empty-title");
-    title.set_xalign(0.0);
+    // ⚠️ 图标用 `appicon` 里**内嵌的那张 PNG**：不另找素材，也保证
+    // 「图标 = 应用」这件事在窗口标题、关于页、这里都是同一张。
+    if let Some(mark) = empty_brand_mark() {
+        mark.set_halign(gtk::Align::Center);
+        box_.append(&mark);
+    }
+    let title = gtk::Label::new(Some("PuTTYPlus"));
+    title.add_css_class("pp-empty-name");
+    // ⚠️ **招牌是居中的**：产品名 + 图标居中成一座"牌"，下面才接左对齐的活。
+    title.set_xalign(0.5);
     box_.append(&title);
+    let what = gtk::Label::new(Some("数据库工作台"));
+    what.add_css_class("pp-empty-what");
+    what.set_xalign(0.5);
+    box_.append(&what);
 
-    // 副标题：**只放连接名**（地址摘要放到下面的连接行里 ⇒ 副标题短、
-    // 卡片不会被一行长地址撑宽；两处都写摘要就是重复）。
-    let sub = match (&cur, connected) {
-        (Some(p), true) => format!("已连接 {}", p.name),
-        (Some(p), false) => format!("连接 {}", p.name),
-        (None, _) => "这个会话下还没有数据库连接".to_string(),
-    };
-    let sub_l = gtk::Label::new(Some(&sub));
-    sub_l.add_css_class("pp-empty-sub");
-    sub_l.set_xalign(0.0);
-    // ⚠️ 主机名很长时别把卡片撑破（审计 P0-2 的老问题：内容撑出容器 ⇒
-    // 里面的按钮一起被裁）⇒ 限宽 + 省略号。
-    sub_l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    sub_l.set_max_width_chars(26);
-    box_.append(&sub_l);
-
-    // ---- 这个会话下的数据库连接 ----
+    // 分隔线：把"招牌"和"手上的活"分开（否则一坨内容看不出层次）
     //
-    // **为什么这里能摆连接**：阶段 22 把工作台顶部的「当前连接」下拉撤了
-    // （连接归连接层管），但**空态**摆一份"这个会话下有哪些连接"不冲突——
-    // 它不是"当前连接是谁"的切换器，而是**开始页的入口**。
-    let profiles = dbstore::list(&ui.session_key);
-    if !profiles.is_empty() {
-        box_.append(&empty_section("这个会话的数据库连接"));
-        for p in profiles {
-            let b = empty_conn_row(&p);
-            b.set_tooltip_text(Some(&format!("{} —— 点一下连上", conn_label_of(&p))));
-            let weak = Rc::downgrade(st);
-            let key = ui.session_key.clone();
-            let name = p.name.clone();
-            b.connect_clicked(move |_| {
-                let Some(st) = weak.upgrade() else { return };
-                use_profile(&st, &key, &name);
-            });
-            box_.append(&b);
+    // ⚠️ **用 `gtk::Separator` 而不是自己拿 Box 画**：空 Box 的背景色在
+    // GTK4 里不画出来（实测：`.pp-empty-sep` 的 background-color 完全没
+    // 生效 ⇒ 那条线根本看不见）。Separator 自己会画。
+    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+    sep.add_css_class("pp-empty-sep");
+    box_.append(&sep);
+
+    // ================= 现在开着什么 =================
+    if connected {
+        // ---- 连上了：只显示**当前连的是哪个库** ----
+        //
+        // ⚠️ 以前这里摆的是「这个会话的数据库连接」一列**可点的**连接，
+        // 用户说没用（2026-11-02）：能进到这一屏说明他已经选好了 ⇒
+        // 一列选择器是多余的 ⇒ 现在只留一个 chip，说明"你现在开着哪个库"。
+        if let Some(p) = &cur {
+            box_.append(&empty_chip(
+                "drive-harddisk-symbolic",
+                &p.name,
+                &p.summary(),
+            ));
+        }
+    } else {
+        // ---- 没连上：这一列连接**这时才有用**（挑一个连上）----
+        let profiles = dbstore::list(&ui.session_key);
+        if !profiles.is_empty() {
+            box_.append(&empty_section("这个会话下的数据库连接"));
+            for p in profiles {
+                let b = empty_conn_row(&p);
+                b.set_tooltip_text(Some(&format!("{} —— 点一下连上", conn_label_of(&p))));
+                let weak = Rc::downgrade(st);
+                let key = ui.session_key.clone();
+                let name = p.name.clone();
+                b.connect_clicked(move |_| {
+                    let Some(st) = weak.upgrade() else { return };
+                    use_profile(&st, &key, &name);
+                });
+                box_.append(&b);
+            }
         }
     }
 
-    // ---- 快速开始 ----
-    box_.append(&empty_section("快速开始"));
-
-    // ⚠️ 复查 N4：**可用 CTA 排第一**。
-    // 以前这张卡把两个**置灰**按钮（新建查询 / 搜索对象）排在唯一可用的
-    // 主 CTA「新建数据库连接…」**上面** ⇒ 视觉动线先经过两个灰按钮，
-    // 削弱了正确动作。没连上时唯一能点的就是它 ⇒ 该排第一。
+    // ================= 动作 =================
     //
-    // ⚠️ 阶段 80（审计 P2-1）：**连上了就不摆它**——
-    // 已经连着一个库的时候，主 CTA 还写着「新建数据库连接…」
-    // 会让人以为当前这个连接是坏的。
-    if !connected {
+    // ⚠️ 用户 2026-11-02：「新建查询和搜索对象点了没有任何作用，
+    // 不知道他们的目的是什么。」⇒ 留下的每个动作都要**看得见效果**：
+    //   · 浏览对象 → 对象树**摆出来**（它可能正收着！）并拿到焦点；
+    //   · 写一条查询 → 底下那个编辑器清空并聚焦（它是**一直可见**的）；
+    //   · 执行历史 → 弹出历史窗口。
+    //
+    // 「搜索对象」**去掉了**：搜索框就在对象树顶上（树一摆出来就看见了），
+    // 再摆一个「聚焦那个框」的按钮意义不大——那正是"点了没反应"的来源。
+    if connected {
+        // ---- 浏览对象：把对象树摆出来 + 聚焦 ----
+        {
+            let b = empty_row("view-list-symbolic", "浏览对象");
+            b.set_tooltip_text(Some(
+                "展开左侧对象树，按模式找表 / 视图 / 函数；双击表看数据",
+            ));
+            let weak = Rc::downgrade(st);
+            b.connect_clicked(move |_| {
+                let Some(st) = weak.upgrade() else { return };
+                let (toggle, view) = {
+                    let slot = st.db_ui.borrow();
+                    let Some(ui) = slot.as_ref() else { return };
+                    (Rc::clone(&ui.tree_toggle), ui.tree.view.clone())
+                };
+                // ⚠️ **树可能正收着**（阶段 66 的折叠开关）⇒ 先把它摆出来，
+                // 否则又是「点了没反应」。
+                toggle.apply(false);
+                view.grab_focus();
+            });
+            box_.append(&b);
+        }
+        // ---- 写一条查询：清空下面的编辑器并聚焦 ----
+        {
+            let b = empty_row("text-x-generic-symbolic", "写一条查询");
+            b.set_tooltip_text(Some(
+                "清空下面的 SQL 编辑器并聚焦，直接开始写一条查询（Ctrl+Enter 执行）",
+            ));
+            let weak = Rc::downgrade(st);
+            b.connect_clicked(move |_| {
+                let Some(st) = weak.upgrade() else { return };
+                // ⚠️ **借用要尽快结束**：`db_ui` 里的控件随时可能回调进来
+                // （树发请求、按钮触发…），借着不放就是双重借用 → panic。
+                let sql = {
+                    let slot = st.db_ui.borrow();
+                    let Some(ui) = slot.as_ref() else { return };
+                    ui.sql.clone()
+                };
+                let buf = sql.buffer();
+                buf.set_text("");
+                sql.grab_focus();
+                let slot = st.db_ui.borrow();
+                if let Some(ui) = slot.as_ref() {
+                    set_status(ui, "写好 SQL 后按 Ctrl+Enter 执行", false);
+                }
+            });
+            box_.append(&b);
+        }
+        // ---- 执行历史：弹出历史窗口 ----
+        {
+            let b = empty_row("document-open-recent-symbolic", "执行历史");
+            b.set_tooltip_text(Some("看跑过的 SQL，双击一条把它填回编辑器"));
+            let weak = Rc::downgrade(st);
+            b.connect_clicked(move |_| {
+                let Some(st) = weak.upgrade() else { return };
+                // ⚠️ **先把按钮拿出来再 emit**：emit 触发的回调里也会借
+                // `db_ui`（`btn_history` 的处理器就是 `st.db_ui.borrow()`），
+                // 借着不放就是双重借用 → panic。
+                let btn = {
+                    let slot = st.db_ui.borrow();
+                    let Some(ui) = slot.as_ref() else { return };
+                    ui.btn_history.clone()
+                };
+                btn.emit_clicked();
+            });
+            box_.append(&b);
+        }
+    } else {
+        // ---- 没连上：唯一能做的事就是**建一条连接** ----
+        //
+        // ⚠️ 复查 N4：**可用 CTA 排第一**。没连上时唯一能点的就是它 ⇒
+        // 该排第一（以前它排在两个置灰按钮下面，削弱了正确动作）。
+        //
+        // ⚠️ 阶段 80（审计 P2-1）：**连上了就不摆它**——已经连着一个库的
+        // 时候，主 CTA 还写着「新建连接」会让人以为当前连接是坏的。
         let b = empty_row("list-add-symbolic", "新建连接");
         // ⚠️ **主 CTA 单独一个类**（审计 P0-2）：它是最重要的入口，
         // 窄容器里被裁掉就等于"功能坏了"。类名给冒烟用来定位它。
@@ -1578,69 +1671,64 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
         box_.append(&b);
     }
 
-    // 新建查询：清空编辑器并聚焦，用户直接打字
-    {
-        let b = empty_row("text-x-generic-symbolic", "新建查询");
-        // ⚠️ 阶段 80（审计 P2-1）：**没连上时不可用**——
-        // 以前这两颗按钮一直亮着，可没连接的时候「新建查询」根本没法执行
-        // （查询要一条连接才跑得起来），「搜索对象」同样搜不了。
-        b.set_sensitive(connected);
-        b.set_tooltip_text(Some(if connected {
-            "清空下面的 SQL 编辑器并聚焦，直接开始写一条查询"
-        } else {
-            "先连上一个数据库连接，才能写查询"
-        }));
-        let weak = Rc::downgrade(st);
-        b.connect_clicked(move |_| {
-            let Some(st) = weak.upgrade() else { return };
-            // ⚠️ **借用要尽快结束**：`db_ui` 里的控件随时可能回调进来
-            // （树发请求、按钮触发…），借着不放就是双重借用 → panic。
-            let sql = {
-                let slot = st.db_ui.borrow();
-                let Some(ui) = slot.as_ref() else { return };
-                ui.sql.clone()
-            };
-            let buf = sql.buffer();
-            buf.set_text("");
-            sql.grab_focus();
-            let slot = st.db_ui.borrow();
-            if let Some(ui) = slot.as_ref() {
-                set_status(ui, "写好 SQL 后按 Ctrl+Enter 执行", false);
-            }
-        });
-        box_.append(&b);
-    }
-    // 搜索对象：聚焦搜索框
-    {
-        let b = empty_row("system-search-symbolic", "搜索对象");
-        // ⚠️ 同上：没连接时搜不了整个库 ⇒ 置灰并说清为什么
-        b.set_sensitive(connected);
-        b.set_tooltip_text(Some(if connected {
-            "在全库里搜表 / 视图 / 字段 / 函数 / 存储过程 / 触发器 / 事件"
-        } else {
-            "先连上一个数据库连接，才能搜对象"
-        }));
-        let weak = Rc::downgrade(st);
-        b.connect_clicked(move |_| {
-            let Some(st) = weak.upgrade() else { return };
-            let slot = st.db_ui.borrow();
-            let Some(ui) = slot.as_ref() else { return };
-            ui.search_entry.grab_focus();
-        });
-        box_.append(&b);
-    }
-
     // ---- 提示 ----
     //
     // ⚠️ **不再摆快捷键提示**（阶段 96）：工具栏上已经有一模一样的
     // 「Ctrl+Enter 执行全部 · Ctrl+Shift+Enter 只跑选中的那段」
     // （`meta` 那行，见上面 `sql_row`）⇒ 卡片里再摆一遍是**重复**，
     // 而且那行字不换行时自然宽 ~450px ⇒ 把整张卡撑宽（审计 P0-2 的老毛病）。
-    // 这里只留**工具栏上没有**的那句：左侧双击表看数据。
-    let hint = gtk::Label::new(Some("左侧双击表看数据"));
+    // 这里只留**工具栏上没有**的那句。
+    let hint = gtk::Label::new(Some(if connected {
+        "左侧双击表看数据"
+    } else {
+        "连上以后，左侧会出现对象树"
+    }));
     hint.add_css_class("pp-empty-hint");
     hint.set_xalign(0.0);
     box_.append(&hint);
+}
+
+/// 空态里的**品牌标识**（应用自己的图标）。
+///
+/// ⚠️ 用 `appicon` 里**内嵌的那张 PNG**（跟窗口标题、关于页同一张）：
+/// 不另找素材 ⇒ 不会出现"图标对不上"的情况。
+fn empty_brand_mark() -> Option<gtk::Image> {
+    let tex = crate::appicon::texture()?;
+    let img = gtk::Image::from_paintable(Some(&tex));
+    img.set_pixel_size(56);
+    Some(img)
+}
+
+/// 空态里的一个 **chip**（图标 + 名字 + 淡色摘要；只表示状态，**不能点**）。
+///
+/// 用在"当前连的是哪个库"上——以前那一列是**可点的连接列表**，可用户
+/// 就是点了某个连接才进来的 ⇒ 那一列纯属多余（用户 2026-11-02）。
+///
+/// ⚠️ **名字和摘要分成两个 Label**（跟下面连接行一个写法）：合成一个
+/// 字符串的话，省略号会把**名字**也一起吃掉（"postgres（pg 127.0.0.1:…"）
+/// ⇒ 最该看清的那截反而没了。
+fn empty_chip(icon: &str, name: &str, summary: &str) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.add_css_class("pp-empty-chip");
+    let img = gtk::Image::from_icon_name(icon);
+    img.set_pixel_size(14);
+    row.append(&img);
+    let n = gtk::Label::new(Some(name));
+    n.add_css_class("pp-empty-chip-label");
+    n.set_xalign(0.0);
+    n.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    n.set_max_width_chars(16);
+    row.append(&n);
+    let sep = gtk::Label::new(Some("·"));
+    sep.add_css_class("pp-empty-chip-sub");
+    row.append(&sep);
+    let s = gtk::Label::new(Some(summary));
+    s.add_css_class("pp-empty-chip-sub");
+    s.set_xalign(0.0);
+    s.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    s.set_max_width_chars(26);
+    row.append(&s);
+    row
 }
 
 /// 空态卡里的**一条数据库连接**（图标 + 名字 + 地址摘要，一行）。
@@ -8613,6 +8701,29 @@ pub fn empty_state_buttons(st: &Rc<PanelState>) -> Vec<(String, bool)> {
     out
 }
 
+/// 冒烟 / 截图用：把空态**摆成"已经连上"的样子**（阶段 97）。
+///
+/// 为什么需要这个钩子：空态有两种长相（**没连上** / **连上了**），
+/// 而"连上了"那一版只有真连上库才会出现 ⇒ 截图工具没法离线看它。
+/// ⚠️ **只改界面状态**，不真的连库（树是空的），但**版面是真的**。
+pub fn empty_state_set_connected(st: &Rc<PanelState>, conn_name: &str) -> bool {
+    let key = {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return false };
+        ui.session_key.clone()
+    };
+    let Some(p) = dbstore::get(&key, conn_name) else {
+        return false;
+    };
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.connected.set(true);
+    // ⚠️ **借用要立刻结束**：下一行 `refresh_empty` 里还会 `borrow()` 它。
+    *ui.current.borrow_mut() = Some(p);
+    refresh_empty(st, ui);
+    true
+}
+
 /// 控件树里**第一个** Label 的文字（自绘按钮取文字用）。
 fn first_label_text(w: &gtk::Widget) -> String {
     if let Some(l) = w.downcast_ref::<gtk::Label>() {
@@ -9060,6 +9171,26 @@ pub fn sql_text(st: &Rc<PanelState>) -> String {
     let Some(ui) = slot.as_ref() else { return String::new() };
     let buf = ui.sql.buffer();
     buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string()
+}
+
+/// 冒烟测试用：往 SQL 编辑器里写字（**不执行**）。
+///
+/// 阶段 97：空态那个「写一条查询」动作就是"清空编辑器 + 聚焦" ⇒
+/// 要验它**真的有效果**，就得先往编辑器里塞点东西。
+pub fn sql_set_text(st: &Rc<PanelState>, text: &str) {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.sql.buffer().set_text(text);
+}
+
+/// 冒烟测试用：「执行历史」窗口开着吗（阶段 97）。
+///
+/// ⚠️ 别去数 `app.windows()`：那个历史窗口是 `transient_for` 宿主窗口的
+/// **独立 `gtk::Window`**，没有 `set_application` ⇒ 不在应用窗口列表里。
+pub fn history_window_open(st: &Rc<PanelState>) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.hist_win.borrow().is_some()
 }
 
 /// 连接当前选中的连接（工作台已经开着、已经连着就别重连）。

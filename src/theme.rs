@@ -965,6 +965,38 @@ const COMPONENTS: &str = r#"
    `background-color: transparent`，优先级比自定义类高 ⇒ 实心底没了
    （`.pp-chip` 踩过同一个坑）。实心底由 `button.pp-primary` 提供。 */
 button.pp-empty-primary { margin-top: 6px; }
+/* ---- 品牌页（阶段 97）----
+   用户 2026-11-02：「不知道这里应该显示啥，或者显示个漂亮的 logo？图片？艺术字？」
+   ⇒ 上面加一座"招牌"：**应用自己的图标 + 产品名 + 这一屏是什么**。
+   招牌**居中**，下面才接左对齐的活 ⇒ 一眼能看出"这是谁的界面、我在干嘛"。 */
+.pp-empty-name {
+  font-size: 1.5em;
+  font-weight: 800;
+  margin-top: 8px;
+}
+.pp-empty-what {
+  color: @pp_dim;
+  font-size: 0.95em;
+  margin-top: 1px;
+}
+/* 分隔线：招牌与"手上的活"之间（没有它就成一坨）。
+   ⚠️ 用 `gtk::Separator` 画的——自己拿空 Box 画的话，GTK4 **不画空 Box
+   的背景**（实测：background-color 完全没生效 ⇒ 那条线根本看不见）。 */
+.pp-empty-sep {
+  margin-top: 14px;
+  margin-bottom: 2px;
+}
+/* chip：当前开着哪个库（**只表示状态、不可点**）。
+   ⚠️ 别用 `flat` 那套按钮样式——那是一排"能点的行"。 */
+.pp-empty-chip {
+  background-color: @pp_bg;
+  border: 1px solid @pp_border;
+  border-radius: 8px;
+  padding: 5px 10px;
+  margin-top: 6px;
+}
+.pp-empty-chip-label { font-weight: 600; }
+.pp-empty-chip-sub { color: @pp_dim; font-size: 0.85em; }
 /* ER 图（阶段 19）：表框 / 列 / 标记。
    字号用 em / 相对值，跟着缩放档（.er-zoom-*）一起变——
    .er-table 上**不能**写死 font-size，否则会盖掉缩放档的继承。 */

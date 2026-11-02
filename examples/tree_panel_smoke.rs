@@ -3,8 +3,10 @@
 //! **不连真库**——纯界面验证，所以远端数据库连不上也能跑。
 //!
 //! 验六件事：
-//! 1. 空态**不是一句提示文字**了：标题 + 副标题 + 快速开始的三个按钮 +
-//!    快捷键提示，一样都不少；
+//! 1. 空态是**品牌页**（阶段 97 重做）：应用图标 + 产品名「PuTTYPlus」+
+//!    「数据库工作台」；没连上时只有主 CTA「新建连接」，**不再摆**
+//!    「新建查询」「搜索对象」（用户 2026-11-02：那两个点了跟没点一样）；
+//!    连上之后只剩三个**看得见效果**的动作：浏览对象 / 写一条查询 / 执行历史；
 //! 2. 树面板工具行在：「显示」下拉（6 项）+「详细」开关；
 //! 3. 「详细」开关走**真实控件**（`set_active` → `toggled` 回调），
 //!    树那边的状态跟着变；
@@ -55,6 +57,37 @@ fn find_all_by_class(w: &gtk::Widget, class: &str) -> Vec<gtk::Widget> {
         cur = c.next_sibling();
     }
     out
+}
+
+/// 控件树里**第一个** Label 的文字（自绘按钮：文字在按钮里的 Box 深处）。
+fn first_label(w: &gtk::Widget) -> String {
+    if let Some(l) = w.downcast_ref::<gtk::Label>() {
+        return l.text().to_string();
+    }
+    let mut c = w.first_child();
+    while let Some(x) = c {
+        let t = first_label(&x);
+        if !t.is_empty() {
+            return t;
+        }
+        c = x.next_sibling();
+    }
+    String::new()
+}
+
+/// 在空态那几行里按文字点一下（阶段 97：验"点了真的有效果"）。
+fn click_empty_action(page: &gtk::Widget, label: &str) -> bool {
+    for b in find_all_by_class(page, "pp-empty-btn") {
+        if first_label(&b) != label {
+            continue;
+        }
+        let Some(btn) = b.downcast_ref::<gtk::Button>() else {
+            continue;
+        };
+        btn.emit_clicked();
+        return true;
+    }
+    false
 }
 
 fn pump(ms: u64) {
@@ -143,63 +176,112 @@ fn main() {
         unsafe { std::env::set_var("PUTTYPLUS_DB_INI", &db_ini) };
         let _guard = IniGuard(db_ini.clone());
 
-        let panel = SftpPanel::new(&ConnOptions::default());
+        // ⚠️ **先存一条连接配置**：空态在"没连上"时要列出这个会话下的连接
+        // （阶段 97：连上了才不摆那一列）。
+        let opts = ConnOptions::default();
+        let key = puttyplus::backend::dbstore::session_key(&opts);
+        puttyplus::backend::dbstore::save(
+            &key,
+            &puttyplus::backend::dbstore::DbProfile {
+                name: "本地 PG".into(),
+                proto: puttyplus::backend::db::DbProto::Postgres,
+                host: "127.0.0.1".into(),
+                port: 5432,
+                user: "postgres".into(),
+                dbname: "postgres".into(),
+                remember: false,
+            },
+        );
+
+        let panel = SftpPanel::new(&opts);
         // ⚠️ **不给面板另开窗口**：工作台在"没有子标签容器"时会**自己开一个
         // 窗口**（`dbui::ensure` 的兜底路径），那才是要截图的东西。
         panel::on_open_db(&panel.st);
         assert!(panel.st.db_ui.borrow().is_some(), "数据库工作台没建起来");
         pump(400);
 
-        // ---- 断言 1：空态是结构化的 ----
+        // ---- 断言 1：空态是**品牌页**（阶段 97 重做）----
+        //
+        // ⚠️ 用户 2026-11-02：「新建查询」「搜索对象」点了没有任何作用，
+        // 不知道他们的目的是什么」「这个会话的数据库连接放在这里也没什么用」
+        // 「不知道该显示啥，也许显示个漂亮的 logo？图片？艺术字？」
+        // ⇒ 现在：招牌 = **应用图标 + 产品名 + 这一屏是什么**；
+        //   下面的动作**每一个都得看得见效果**。
         let texts = puttyplus::panel::dbui::empty_state_text(&panel.st);
         println!("空态文字：{texts:?}");
         assert!(
-            texts.iter().any(|t| t.contains("数据库") || t.contains("开始用数据库")),
-            "空态没有标题：{texts:?}"
+            texts.iter().any(|t| t == "PuTTYPlus"),
+            "空态没有产品名（品牌页的招牌）：{texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t == "新建查询"),
-            "空态没有「新建查询」：{texts:?}"
+            texts.iter().any(|t| t == "数据库工作台"),
+            "空态没有「数据库工作台」：{texts:?}"
         );
+        // ⚠️ **「新建查询」「搜索对象」删掉了**：搜索框就在对象树顶上
+        // （树一摆出来就看见了），再摆一个"聚焦那个框"的按钮毫无意义。
         assert!(
-            texts.iter().any(|t| t == "搜索对象"),
-            "空态没有「搜索对象」：{texts:?}"
+            !texts.iter().any(|t| t == "新建查询" || t == "搜索对象"),
+            "空态不该再有「新建查询」「搜索对象」（点了跟没点一样）：{texts:?}"
         );
-        // ⚠️ 阶段 80（审计 P2-1）：**没连上时**「新建查询」「搜索对象」
-        // 不可用却仍可点 ⇒ 用户点了才发现没反应。
+        // 没连上 ⇒ 主 CTA 是「新建连接」，而且**能点**
         let btns = puttyplus::panel::dbui::empty_state_buttons(&panel.st);
         println!("空态按钮：{btns:?}");
-        for want in ["新建查询", "搜索对象"] {
-            let b = btns.iter().find(|(t, _)| t == want);
+        assert!(
+            btns.iter().any(|(t, s)| t == "新建连接" && *s),
+            "空态没有可点的「新建连接」：{btns:?}"
+        );
+        // 没连上 ⇒ **不该**摆那些"要连上才有意义"的动作
+        for gone in ["浏览对象", "写一条查询", "执行历史"] {
             assert!(
-                b.map(|(_, s)| !*s).unwrap_or(false),
-                "没连上数据库时「{want}」不该能点（点了也没用）：{btns:?}"
+                !btns.iter().any(|(t, _)| t == gone),
+                "没连上时不该摆「{gone}」：{btns:?}"
             );
         }
-        // ⚠️ 阶段 96：主 CTA 改名「新建连接」——三个动作按钮要**等宽**
-        // （一列参差的按钮就是"看着丑"的主因），名字等长才等宽；
-        // 「新建数据库连接…」比别的长一截 ⇒ 宽窄不一。
+        // 没连上 ⇒ 这一列连接**这时才有用**（挑一个连上）
         assert!(
-            texts.iter().any(|t| t == "新建连接"),
-            "空态没有「新建连接」：{texts:?}"
+            btns.iter().any(|(t, _)| t == "本地 PG"),
+            "没连上时该列出这个会话下的连接：{btns:?}"
         );
-        // ⚠️ 阶段 96：**快捷键提示删掉了**（工具栏上有一模一样的
-        // 「Ctrl+Enter 执行全部 · …」那行）⇒ 卡片里不该再摆一遍。
-        assert!(
-            texts.iter().any(|t| t.contains("左侧双击表看数据")),
-            "空态没有「左侧双击表看数据」：{texts:?}"
-        );
-        assert!(
-            !texts.iter().any(|t| t.contains("Ctrl+Enter")),
-            "空态不该再摆快捷键提示（工具栏上已经有了）：{texts:?}"
-        );
-        println!("空态结构 ✓（{} 项）", texts.len());
+        println!("空态（没连上）✓ 品牌页 + 主 CTA + 连接列表");
 
-        // ---- 断言 1b：卡片**真的居中**（阶段 96）----
+        // ---- 断言 1b：切到"连上了"：三个动作都在，且**都能点** ----
         //
-        // ⚠️ 这条是被用户的截图逼出来的：以前卡片一直**贴着主区左边**，
-        // 因为 GtkBox 给非 FILL 的子控件按**左边缘**摆（halign=CENTER 在
-        // Box 里根本不居中）⇒ 宽屏下看着像"贴边的小纸条"。
+        // 阶段 97：连上之后空态只剩「浏览对象 / 写一条查询 / 执行历史」，
+        // 三个都是**看得见效果**的（用户说之前的「新建查询」「搜索对象」
+        // 点了跟没点一样）。
+        assert!(
+            puttyplus::panel::dbui::empty_state_set_connected(&panel.st, "本地 PG"),
+            "切到「已连接」状态失败"
+        );
+        pump(200);
+        let texts = puttyplus::panel::dbui::empty_state_text(&panel.st);
+        println!("连上后的空态文字：{texts:?}");
+        let btns = puttyplus::panel::dbui::empty_state_buttons(&panel.st);
+        println!("连上后的空态按钮：{btns:?}");
+        for want in ["浏览对象", "写一条查询", "执行历史"] {
+            let b = btns.iter().find(|(t, _)| t == want);
+            assert!(b.is_some(), "连上后空态没有「{want}」：{btns:?}");
+            assert!(
+                b.map(|(_, s)| *s).unwrap_or(false),
+                "「{want}」不该是灰的（点了要有效果）：{btns:?}"
+            );
+        }
+        // ⚠️ 连上了就**不该**再摆那一列连接（用户说没用：能进到这一屏
+        // 说明他已经选好了 ⇒ 一列选择器是多余的）。
+        assert!(
+            !btns.iter().any(|(t, _)| t == "本地 PG"),
+            "连上后不该再摆「这个会话的数据库连接」那一列：{btns:?}"
+        );
+        // 当前连的是哪个库 ⇒ 一个 chip（只表示状态）
+        assert!(
+            texts.iter().any(|t| t.contains("本地 PG")),
+            "空态没说当前连的是哪个库：{texts:?}"
+        );
+        println!("空态（连上了）✓ 三个动作 + 当前库 chip");
+
+        // ---- 断言 1c：一列行**等宽**（阶段 96）----
+        //
+        // 以前每颗按钮按自己的文字宽度排 ⇒ 一列参差的锯齿 ⇒ "看着丑"。
         let page = {
             let slot = panel.st.db_ui.borrow();
             let Some(ui) = slot.as_ref() else {
@@ -207,6 +289,20 @@ fn main() {
             };
             ui.page.clone()
         };
+        let rows = find_all_by_class(&page, "pp-empty-btn");
+        assert!(rows.len() >= 3, "空态行太少：{}", rows.len());
+        let w0 = rows[0].allocation().width();
+        for r in &rows {
+            let w = r.allocation().width();
+            assert_eq!(w, w0, "空态各行宽度不一致（{w} vs {w0}）⇒ 一列参差");
+        }
+        println!("空态行等宽 ✓（{} 行）", rows.len());
+
+        // ---- 断言 1d：卡片**真的居中**（阶段 96）----
+        //
+        // ⚠️ 这条是被用户的截图逼出来的：以前卡片一直**贴着主区左边**，
+        // 因为 GtkBox 给非 FILL 的子控件按**左边缘**摆（halign=CENTER 在
+        // Box 里根本不居中）⇒ 宽屏下看着像"贴边的小纸条"。
         let card = find_by_class(&page, "pp-empty").expect("找不到空态卡片");
         let parent = card.parent().expect("卡片没有父容器");
         let (cx, _) = card
@@ -221,17 +317,66 @@ fn main() {
             "空态卡没居中：左 {cx:.0}，应为 {want:.0}（父宽 {pw} 卡宽 {cw}）"
         );
 
-        // ---- 断言 1c：一列行**等宽**（阶段 96）----
+        // ---- 断言 1e：三个动作**点了真的有效果**（阶段 97 的核心）----
         //
-        // 以前每颗按钮按自己的文字宽度排 ⇒ 一列参差的锯齿 ⇒ "看着丑"。
-        let rows = find_all_by_class(&page, "pp-empty-btn");
-        assert!(rows.len() >= 3, "空态行太少：{}", rows.len());
-        let w0 = rows[0].allocation().width();
-        for r in &rows {
-            let w = r.allocation().width();
-            assert_eq!(w, w0, "空态各行宽度不一致（{w} vs {w0}）⇒ 一列参差");
-        }
-        println!("空态卡居中 + {} 行等宽 ✓", rows.len());
+        // 用户 2026-11-02：「新建查询」「搜索对象」点了没有任何作用，
+        // 不知道他们的目的是什么」⇒ 留下的动作必须**一个一个验过**：
+        // 点下去之后，界面上必须**看得见**变化。
+        //
+        // · 「浏览对象」→ 对象树**摆出来**（它可能正收着！）
+        puttyplus::panel::dbui::set_tree_collapsed(&panel.st, true);
+        pump(100);
+        assert!(
+            puttyplus::panel::dbui::tree_collapsed(&panel.st),
+            "对象树没收起来（后面那步就验不出来了）"
+        );
+        assert!(
+            click_empty_action(&page, "浏览对象"),
+            "空态里找不到「浏览对象」那颗按钮"
+        );
+        pump(200);
+        assert!(
+            !puttyplus::panel::dbui::tree_collapsed(&panel.st),
+            "点了「浏览对象」对象树还是收着的 ⇒ 又是「点了没反应」"
+        );
+        assert!(
+            puttyplus::panel::dbui::tree_col_visible(&panel.st),
+            "点了「浏览对象」对象树那一列没露出来"
+        );
+
+        // · 「写一条查询」→ 下面那个编辑器**清空**（它是**一直可见**的）
+        puttyplus::panel::dbui::sql_set_text(&panel.st, "select 1");
+        assert_eq!(
+            puttyplus::panel::dbui::sql_text(&panel.st),
+            "select 1",
+            "往编辑器里写字没写上"
+        );
+        assert!(
+            click_empty_action(&page, "写一条查询"),
+            "空态里找不到「写一条查询」那颗按钮"
+        );
+        pump(200);
+        assert_eq!(
+            puttyplus::panel::dbui::sql_text(&panel.st),
+            "",
+            "点了「写一条查询」编辑器没清空 ⇒ 点了跟没点一样"
+        );
+
+        // · 「执行历史」→ **弹出历史窗口**
+        assert!(
+            !puttyplus::panel::dbui::history_window_open(&panel.st),
+            "历史窗口一开始就是开着的（后面那步就验不出来了）"
+        );
+        assert!(
+            click_empty_action(&page, "执行历史"),
+            "空态里找不到「执行历史」那颗按钮"
+        );
+        pump(400);
+        assert!(
+            puttyplus::panel::dbui::history_window_open(&panel.st),
+            "点了「执行历史」没弹出历史窗口"
+        );
+        println!("三个动作都真的有效果 ✓");
 
         // ---- 断言 2：树面板的工具行 ----
         assert_eq!(
