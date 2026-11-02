@@ -86,6 +86,9 @@ impl FwdRow {
 }
 
 /// 类型：内部记号 ⇄ 表格里显示的字。
+// i18n:keep
+// ⚠️ 这两个字**也是写进 fwdtable.ini 的格式**（第 3 列就是它）⇒
+// 翻译了就跟老配置对不上（读回来会认成"本地"）⇒ 保持中文。
 fn kind_to_display(k: char) -> &'static str {
     match k {
         'L' => "本地",
@@ -116,6 +119,7 @@ fn mech_to_display(in_process: bool) -> &'static str {
 fn mech_from_display(s: &str) -> bool {
     s.trim() == "进程内"
 }
+// i18n:end
 
 /// 内部形的规格体 → 结构化行（拆成「监听」「目标」两列）。
 ///

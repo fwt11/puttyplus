@@ -24,6 +24,7 @@
 //! `&'static str` / 已建好的 widget），语言切换后重建整个窗口代价太大
 //! ⇒ 设置里改语言后**提示重启生效**（见 `settingsui` 的「界面语言」）。
 
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::i18n_en::EN;
@@ -99,6 +100,33 @@ fn lookup(zh: &str) -> Option<&'static str> {
     match EN.binary_search_by(|(k, _)| (*k).cmp(zh)) {
         Ok(i) => Some(EN[i].1),
         Err(_) => None,
+    }
+}
+
+/// 翻译一个**运行时才有**的文案（不是字面量）。
+///
+/// 菜单项的文字来自 const 表（`&'static str`）⇒ 本来能用 [`tr`]；
+/// 但 `menu::row` 收的是 `&str` ⇒ 用这个。
+///
+/// 查不到就原样返回（不会显示成空串，也不会显示成 key 名）。
+pub fn tr_dyn(zh: &str) -> Cow<'_, str> {
+    match lang() {
+        Lang::Zh => Cow::Borrowed(zh),
+        Lang::En => match lookup(zh) {
+            Some(en) => Cow::Borrowed(en),
+            None => Cow::Borrowed(zh),
+        },
+    }
+}
+
+/// 一段**运行时生成的错误文本**是不是「认证失败」。
+///
+/// ⚠️ `panel/mod.rs` 要靠它判断「无凭据且认证失败 ⇒ 弹密码框」，
+/// 而那句错误在英文界面里是 `Authentication failed: …` ⇒ 不能靠中文原文认。
+pub fn looks_like_auth_failure(s: &str) -> bool {
+    match lang() {
+        Lang::Zh => s.contains("认证"),
+        Lang::En => s.to_ascii_lowercase().contains("authentication"),
     }
 }
 

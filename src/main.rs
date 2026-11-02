@@ -65,10 +65,14 @@ fn main() {
 
     if argv.get(1).map(String::as_str) == Some("--sftp-selftest") {
         if argv.len() < 5 {
+            // i18n:keep
+            // ⚠️ 这句是**命令行契约**（C 版逐字相同，compat_check 要对照）
+            // ⇒ 保持中文，不翻译。
             eprintln!(
                 "用法: {} --sftp-selftest <host> <port> <user> [password]",
                 argv[0]
             );
+            // i18n:end
             std::process::exit(2);
         }
         let pw = argv.get(5).map(String::as_str);

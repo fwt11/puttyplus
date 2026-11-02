@@ -32,7 +32,9 @@ use gtk::gio::prelude::DBusProxyExtManual;
 use gtk::glib;
 use gtk::prelude::*;
 
+use crate::i18n::tr;
 use crate::panel::worker::XferState;
+use crate::trf;
 
 /// 批次结果统计（纯逻辑，可单测）。
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -53,33 +55,29 @@ impl Batch {
     pub fn summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.done > 0 {
-            parts.push(format!("成功 {}", self.done));
+            parts.push(trf!("成功 {n}", n = self.done));
         }
-        if self.failed > 0 {
-            parts.push(format!("失败 {}", self.failed));
-        }
+        // ⚠️ 失败数**单独拎出来**：以前是拼好文案后再 `strip_prefix("失败 ")`
+        // 把失败那截摘出来 ⇒ 那是在**拿文案当数据用**，一翻译就认不出来。
+        let failed_part = if self.failed > 0 {
+            Some(trf!("失败 {n}", n = self.failed))
+        } else {
+            None
+        };
         if self.skipped > 0 {
-            parts.push(format!("跳过 {}", self.skipped));
+            parts.push(trf!("跳过 {n}", n = self.skipped));
         }
         if self.canceled > 0 {
-            parts.push(format!("取消 {}", self.canceled));
+            parts.push(trf!("取消 {n}", n = self.canceled));
         }
-        if parts.is_empty() {
-            return "没有传输项".into();
+        if parts.is_empty() && failed_part.is_none() {
+            return tr("没有传输项").into();
         }
-        // 全部成功给句好话；有失败就把失败摆在最前面
-        if self.failed == 0 && self.canceled == 0 {
-            format!("全部完成：{}", parts.join("，"))
+        // 全部成功给句好话；有失败就**只报失败数**（失败才是要人管的事）
+        if failed_part.is_none() && self.canceled == 0 {
+            trf!("全部完成：{v0}", v0 = parts.join("，"))
         } else {
-            format!(
-                "{} 项{}",
-                self.total(),
-                parts
-                    .iter()
-                    .filter_map(|p| p.strip_prefix("失败 ").map(|n| format!("失败 {n}")))
-                    .collect::<Vec<_>>()
-                    .join("，")
-            )
+            trf!("{n} 项{v0}", n = self.total(), v0 = failed_part.unwrap_or_default())
         }
     }
 

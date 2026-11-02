@@ -204,6 +204,9 @@ fn run_serial_bridge(dev: &str, sercfg: &str) -> Result<(), String> {
 
 /// 入口：按桥模式运行（参数来自 main 的分发）。返回 Ok(false) 表示不是桥模式。
 pub fn run_if_bridge(args: &[String]) -> Result<bool, String> {
+    // i18n:keep
+    // ⚠️ 命令行用法提示**保持中文**（跟 `--sftp-selftest` 那句一致，
+    // 也免得同一条命令行里一半中文一半英文）。
     match args.first().map(String::as_str) {
         Some("--bridge-telnet") => {
             if args.len() < 3 {
@@ -222,6 +225,7 @@ pub fn run_if_bridge(args: &[String]) -> Result<bool, String> {
         }
         _ => Ok(false),
     }
+    // i18n:end
 }
 
 #[cfg(test)]

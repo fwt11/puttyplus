@@ -2249,6 +2249,10 @@ fn autofeed_cb(inner: &Rc<TermInner>) -> glib::ControlFlow {
         let low = trimmed.to_lowercase();
 
         let pw = inner.opts.password_str().unwrap_or("");
+        // i18n:keep
+        // ⚠️ 下面认的是**远端终端**的提示文字 —— 那是**别人机器上**的
+        // 字符串（可能是中文，也可能是英文），**不是本程序的界面文案**
+        // ⇒ 绝对不能翻译（翻了中文那句就再也认不出来了）。
         let want_pw = !pw.is_empty()
             && !trimmed.is_empty()
             && len < 200
@@ -2256,6 +2260,7 @@ fn autofeed_cb(inner: &Rc<TermInner>) -> glib::ControlFlow {
                 || trimmed.contains("密码")
                 || (ends_colon && low.contains("passphrase"))
                 || (ends_colon && low.contains("verification code")));
+        // i18n:end
         // plink 的提示写作 "(y/n, Return cancels connection, ...)"
         let want_yes = !trimmed.is_empty()
             && len < 200

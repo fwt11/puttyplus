@@ -47,7 +47,9 @@ pub fn popover(parent: &impl IsA<gtk::Widget>) -> gtk::Popover {
 
 /// 分组标题（“显示列”“常用命令”这类），比菜单项小一号、弱化。
 pub fn section(title: &str) -> gtk::Label {
-    let l = gtk::Label::new(Some(title));
+    // ⚠️ 菜单文字**统一在这里翻译**（见 [`row`] 的说明）⇒ 调用点不要自己包 `tr()`。
+    let txt = crate::i18n::tr_dyn(title);
+    let l = gtk::Label::new(Some(txt.as_ref()));
     l.set_xalign(0.0);
     l.add_css_class("pp-menu-section");
     l
@@ -68,7 +70,14 @@ fn row(
     img.set_pixel_size(16);
     img.add_css_class("pp-menu-icon");
     row.append(&img);
-    let l = gtk::Label::new(Some(label));
+    // ⚠️ 菜单文字**统一在这里翻译**。
+    //
+    // 为什么不在调用点包 `tr()`：`sidebar.rs` 那种
+    // `match label { "连接" | "打开数据库" => … }` 是拿**中文原文**当
+    // **数据**比的（菜单项的 label 来自 const 表）⇒ 翻译必须发生在
+    // **显示处**，数据那边必须留在中文。
+    let txt = crate::i18n::tr_dyn(label);
+    let l = gtk::Label::new(Some(txt.as_ref()));
     l.set_xalign(0.0);
     l.set_hexpand(true);
     l.add_css_class("pp-menu-label");

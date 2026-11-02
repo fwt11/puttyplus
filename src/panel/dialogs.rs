@@ -19,6 +19,25 @@ pub fn primary_words() -> &'static [&'static str] {
     ]
 }
 
+/// 危险操作词表（**当前语言**）。
+///
+/// ⚠️ 归类是在跟按钮上**显示出来的**文字比 ⇒ 英文界面里按钮写的是
+/// "Delete"，拿中文词表去比就一个都认不出来 ⇒ 词表也要翻译。
+fn destructive_words_t() -> Vec<String> {
+    destructive_words()
+        .iter()
+        .map(|w| crate::i18n::tr_dyn(w).into_owned())
+        .collect()
+}
+
+/// 主操作词表（**当前语言**）。
+fn primary_words_t() -> Vec<String> {
+    primary_words()
+        .iter()
+        .map(|w| crate::i18n::tr_dyn(w).into_owned())
+        .collect()
+}
+
 /* ---------------- 按钮词表（阶段 82 / 审计 P2-5） ----------------
  *
  * 同一个动作，界面上**只能有一个说法**。以前同一个界面里混着
@@ -99,13 +118,17 @@ pub fn default_button_label(dlg: &gtk::Dialog) -> Option<String> {
 }
 
 /// 在对话框里按文字找到那个按钮（GTK4 的 action area 里按钮的文字是个 Label）。
+///
+/// ⚠️ 按钮上显示的是**当前语言**的文字（英文界面里是 "Cancel"）⇒
+/// 拿中文原文去比就找不到了 ⇒ 这里比的是**翻译后**的文字。
 fn find_button(root: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+    let want = crate::i18n::tr_dyn(label);
     let mut stack = vec![root.clone()];
     while let Some(w) = stack.pop() {
         if let Some(b) = w.downcast_ref::<gtk::Button>() {
             if let Some(child) = b.child() {
                 if let Some(l) = child.downcast_ref::<gtk::Label>() {
-                    if l.text() == label {
+                    if l.text() == want.as_ref() {
                         return Some(b.clone());
                     }
                 }
@@ -175,26 +198,33 @@ pub fn style_dialog(dlg: &gtk::Dialog) {
         }
         c = next;
     }
-    let has_save_connect = labels.iter().any(|l| l.contains("保存并连接"));
+    // ⚠️ 下面比的都是按钮上**显示出来的**文字 ⇒ 词表与短语都要按
+    // **当前语言**取（英文界面里按钮写的是 "Save & Connect"）。
+    let save_connect = crate::i18n::tr_dyn("保存并连接");
+    let save = crate::i18n::tr_dyn("保存");
+    let connect_only = crate::i18n::tr_dyn("仅连接");
+    let cancel = crate::i18n::tr_dyn("取消");
+    let close = crate::i18n::tr_dyn("关闭");
+    let has_save_connect = labels.iter().any(|l| l.contains(save_connect.as_ref()));
     let has_save = labels
         .iter()
-        .any(|l| l.contains("保存") && !l.contains("并连接"));
-    let destructive = destructive_words();
-    let primary = primary_words();
+        .any(|l| l.contains(save.as_ref()) && !l.contains(save_connect.as_ref()));
+    let destructive = destructive_words_t();
+    let primary = primary_words_t();
     for (b, label) in btns.iter().zip(labels.iter()) {
-        if destructive.iter().any(|k| label.contains(k)) {
+        if destructive.iter().any(|k| label.contains(k.as_str())) {
             b.add_css_class("destructive-action");
             continue;
         }
         // 一个对话框只留一个主操作：有"保存并连接"时，保存/仅连接都退成次要
-        let is_primary = if label.contains("保存并连接") {
+        let is_primary = if label.contains(save_connect.as_ref()) {
             true
-        } else if label.contains("保存") {
+        } else if label.contains(save.as_ref()) {
             !has_save_connect
-        } else if label.contains("仅连接") {
+        } else if label.contains(connect_only.as_ref()) {
             !has_save && !has_save_connect
         } else {
-            primary.iter().any(|k| label.contains(k))
+            primary.iter().any(|k| label.contains(k.as_str()))
         };
         if is_primary {
             b.add_css_class("suggested-action");
@@ -206,8 +236,8 @@ pub fn style_dialog(dlg: &gtk::Dialog) {
             if let Some(b) = dw.downcast_ref::<gtk::Button>() {
                 let t = b.label().unwrap_or_default();
                 if !b.has_css_class("destructive-action")
-                    && !t.contains("取消")
-                    && !t.contains("关闭")
+                    && !t.contains(cancel.as_ref())
+                    && !t.contains(close.as_ref())
                 {
                     b.add_css_class("suggested-action");
                 }

@@ -181,11 +181,15 @@ pub(crate) const PG_MISSING_PASSWORD: &str = "password missing";
 /// - MySQL：`Error 1045 (28000): Access denied for user 'x'@'y' (using password: YES)`
 pub(crate) fn is_password_error(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
+    // i18n:keep
+    // ⚠️ 认的是**数据库服务器返回的原文**（中文版的 PG 会回「密码」）
+    // ⇒ 不是本程序的界面文案，**不能翻译**。
     m.contains("password authentication failed")
         || m.contains("authentication failed")
         || m.contains("access denied")
         || m.contains("incorrect password")
         || m.contains("密码")
+    // i18n:end
 }
 
 /// PG 驱动的 cause 是不是"缺密码"（纯函数，方便单测）。

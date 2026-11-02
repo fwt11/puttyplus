@@ -794,7 +794,7 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 .keyfile
                 .as_deref()
                 .map_or(false, |k| !k.is_empty());
-            if !have_pw && !have_key && err.contains("认证") {
+            if !have_pw && !have_key && crate::i18n::looks_like_auth_failure(&err) {
                 // 无凭据且认证失败：询问密码后重试
                 let msg = format!(
                     "SFTP 连接 {}@{}:{} 需要密码：\n{err}",
