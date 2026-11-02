@@ -46,6 +46,8 @@ use base64::Engine;
 use zeroize::Zeroizing;
 
 use gtk::glib;
+use crate::i18n::tr;
+use crate::trf;
 
 /// Argon2id 参数。m=64MiB / t=3 是 2026 年的保守起点：桌面机 ~0.2s，
 /// 离线爆破 8 位密码不现实。真要更高可以改这里，但改了就该重建库
@@ -158,7 +160,7 @@ fn derive_with(
     p_cost: u32,
 ) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
     let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(KEY_LEN))
-        .map_err(|e| format!("Argon2 参数无效: {e}"))?;
+        .map_err(|e| trf!("Argon2 参数无效: {e}", e = e))?;
     let a2 = argon2::Argon2::new(
         argon2::Algorithm::Argon2id,
         argon2::Version::V0x13,
@@ -166,7 +168,7 @@ fn derive_with(
     );
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     a2.hash_password_into(master.as_bytes(), salt, key.as_mut())
-        .map_err(|e| format!("密钥派生失败: {e}"))?;
+        .map_err(|e| trf!("密钥派生失败: {e}", e = e))?;
     Ok(key)
 }
 
@@ -233,7 +235,7 @@ fn create_at(
             Nonce::from_slice(&nonce_bytes),
             payload.as_bytes(),
         )
-        .map_err(|_| "加密失败".to_string())?;
+        .map_err(|_| tr("加密失败").to_string())?;
     let mut blob = Vec::with_capacity(NONCE_LEN + ct.len());
     blob.extend_from_slice(&nonce_bytes);
     blob.extend_from_slice(&ct);
@@ -365,7 +367,7 @@ fn change_master_at(p: &std::path::Path, old: &str, new: &str) -> Result<(), Str
     // ⚠️ **不许降级**成不加密：留空 = 把一份加密库改成明文，那是安全
     // 倒退，不该跟"改密码"混在一个动作里（要降级请重置——那里有后果确认）。
     if new.is_empty() {
-        return Err("新主密码不能为空（改成不加密请用「重置凭据库」）".into());
+        return Err(tr("新主密码不能为空（改成不加密请用「重置凭据库」）").into());
     }
     // 先用旧密码解一次（**不依赖全局解锁状态**，所以解锁状态是旧的还是
     // 新的都不影响）；旧密码错 → 拒绝，文件一个字都没动。
@@ -447,16 +449,16 @@ fn decrypt_with_at(
     // 明文模式：没有密钥，直接读负载（`master` 用不上）。
     if !kf_protected(&kf) {
         let blob = B64
-            .decode(kf.string("vault", "data").map_err(|_| "凭据库缺少 data 字段")?)
-            .map_err(|e| format!("data 字段不是合法 base64: {e}"))?;
+            .decode(kf.string("vault", "data").map_err(|_| tr("凭据库缺少 data 字段"))?)
+            .map_err(|e| trf!("data 字段不是合法 base64: {e}", e = e))?;
         return Ok(decode_creds(&String::from_utf8_lossy(&blob)));
     }
     let salt = decode_salt(&kf)?;
     let blob = B64
-        .decode(kf.string("vault", "data").map_err(|_| "凭据库缺少 data 字段")?)
-        .map_err(|e| format!("data 字段不是合法 base64: {e}"))?;
+        .decode(kf.string("vault", "data").map_err(|_| tr("凭据库缺少 data 字段"))?)
+        .map_err(|e| trf!("data 字段不是合法 base64: {e}", e = e))?;
     if blob.len() < NONCE_LEN {
-        return Err("凭据库数据段长度异常".into());
+        return Err(tr("凭据库数据段长度异常").into());
     }
     let (nonce, ct) = blob.split_at(NONCE_LEN);
     let key = derive_key(master, &salt)?;
@@ -466,7 +468,7 @@ fn decrypt_with_at(
             Nonce::from_slice(nonce),
             ct,
         )
-        .map_err(|_| "主密码错误，或凭据库文件已被篡改".to_string())?;
+        .map_err(|_| tr("主密码错误，或凭据库文件已被篡改").to_string())?;
     Ok(decode_creds(&String::from_utf8_lossy(&pt)))
 }
 
@@ -511,9 +513,9 @@ fn new_cipher(key: &[u8]) -> Aes256Gcm {
 
 fn decode_salt(kf: &glib::KeyFile) -> Result<[u8; SALT_LEN], String> {
     let b = B64
-        .decode(kf.string("vault", "salt").map_err(|_| "凭据库缺少 salt 字段")?)
-        .map_err(|e| format!("salt 不是合法 base64: {e}"))?;
-    b.try_into().map_err(|_| "salt 长度异常".to_string())
+        .decode(kf.string("vault", "salt").map_err(|_| tr("凭据库缺少 salt 字段"))?)
+        .map_err(|e| trf!("salt 不是合法 base64: {e}", e = e))?;
+    b.try_into().map_err(|_| tr("salt 长度异常").to_string())
 }
 
 fn read_kf() -> Result<glib::KeyFile, String> {
@@ -524,7 +526,7 @@ fn read_kf() -> Result<glib::KeyFile, String> {
 fn read_kf_at(p: &std::path::Path) -> Result<glib::KeyFile, String> {
     let kf = glib::KeyFile::new();
     kf.load_from_file(p, glib::KeyFileFlags::NONE)
-        .map_err(|e| format!("读取凭据库失败: {e}"))?;
+        .map_err(|e| trf!("读取凭据库失败: {e}", e = e))?;
     Ok(kf)
 }
 
@@ -535,13 +537,12 @@ fn write_kf(kf: &glib::KeyFile) -> Result<(), String> {
 /// 指定路径写库（**原子替换**：先写临时文件再 rename 覆盖）。
 fn write_kf_at(p: &std::path::Path, kf: &glib::KeyFile) -> Result<(), String> {
     if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+        std::fs::create_dir_all(dir).map_err(|e| trf!("创建配置目录失败: {e}", e = e))?;
     }
     let data = kf.to_data();
     // 临时文件名带 pid：程序允许多开（Application 是 NON_UNIQUE），
     // 两个窗口同时写凭据库时不能共用一个临时文件。
-    let tmp = p.with_file_name(format!(
-        "{}.tmp.{}",
+    let tmp = p.with_file_name(format!("{}.tmp.{}",
         p.file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("credentials.vault"),
@@ -555,7 +556,7 @@ fn write_kf_at(p: &std::path::Path, kf: &glib::KeyFile) -> Result<(), String> {
     // 连同里面全部密码一起没了**。凭据库是本机唯一一份密码副本，丢不起。
     if let Err(e) = std::fs::rename(&tmp, p) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("替换凭据库失败: {e}"));
+        return Err(trf!("替换凭据库失败: {e}", e = e));
     }
     set_private(&p);
     Ok(())
@@ -573,13 +574,13 @@ fn write_private(p: &std::path::Path, data: &[u8]) -> Result<(), String> {
             .truncate(true)
             .mode(0o600)
             .open(p)
-            .map_err(|e| format!("写入 {} 失败: {e}", p.display()))?;
+            .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
         f.write_all(data)
-            .map_err(|e| format!("写入 {} 失败: {e}", p.display()))?;
+            .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(p, data).map_err(|e| format!("写入 {} 失败: {e}", p.display()))?;
+        std::fs::write(p, data).map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
     }
     set_private(p);
     Ok(())
@@ -600,7 +601,7 @@ fn set_private(p: &std::path::Path) {
 /// 绝不退回弱随机，salt/nonce 弱了等于密钥弱了。
 fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     let mut buf = [0u8; N];
-    getrandom::fill(&mut buf).map_err(|e| format!("读取系统随机数失败: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| trf!("读取系统随机数失败: {e}", e = e))?;
     Ok(buf)
 }
 
@@ -726,8 +727,7 @@ mod tests {
 
     /// 测试用的库文件（临时目录，**不碰用户真实凭据库**）。
     fn tmp_vault(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "pp_vault_{tag}_{}_{:?}",
+        let dir = std::env::temp_dir().join(format!("pp_vault_{tag}_{}_{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

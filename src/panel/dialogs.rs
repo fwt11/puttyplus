@@ -1,22 +1,36 @@
 //! GTK4 下的对话框辅助（替代 C 版 gtk_dialog_run 的同步等待）。
 
 use gtk::prelude::*;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 危险操作词表：按钮文案里有这些词 ⇒ 标成 destructive（红色）。
 ///
 /// 阶段 79 补「**覆盖**」：传输冲突的「覆盖全部」是**破坏性**动作
 /// （把目标机上已有的文件换掉），以前它跟「跳过已存在」长得一模一样，
 /// 用户看不出哪个更危险。
+///
+/// ⚠️ 这里存的是**中文源词**，不是当前语言的文字 —— 运行时由
+///    `destructive_words_t()` 翻成当前语言再去比对（英文界面里按钮写的是
+///    "Delete"，拿中文词表去比一个都认不出来）。
+///
+/// ⚠️ **必须放在 `const` 里**：改写脚本会把函数体里的中文也包上 `tr()`，
+///    而这里要的是**源词**（译文要从它查出来）⇒ 包了就变成"译文查译文"。
+const DESTRUCTIVE_WORDS: [&str; 6] = ["删除", "移除", "清空", "停止", "重置", "覆盖"];
+
 pub fn destructive_words() -> &'static [&'static str] {
-    &["删除", "移除", "清空", "停止", "重置", "覆盖"]
+    &DESTRUCTIVE_WORDS
 }
 
 /// 主操作词表：按钮文案里有这些词 ⇒ 标成 suggested-action（强调色）。
+/// ⚠️ 同上：这是**中文源词表**，得放在 `const` 里（见 `DESTRUCTIVE_WORDS`）。
+const PRIMARY_WORDS: [&str; 20] = [
+    "确定", "确认", "连接", "开始", "创建", "生成", "导入", "应用", "打开", "选择", "登录", "解锁",
+    "转换", "启用", "导出", "测试", "继续", "重试", "上传", "同步",
+];
+
 pub fn primary_words() -> &'static [&'static str] {
-    &[
-        "确定", "确认", "连接", "开始", "创建", "生成", "导入", "应用", "打开", "选择", "登录", "解锁",
-        "转换", "启用", "导出", "测试", "继续", "重试", "上传", "同步",
-    ]
+    &PRIMARY_WORDS
 }
 
 /// 危险操作词表（**当前语言**）。
@@ -200,11 +214,11 @@ pub fn style_dialog(dlg: &gtk::Dialog) {
     }
     // ⚠️ 下面比的都是按钮上**显示出来的**文字 ⇒ 词表与短语都要按
     // **当前语言**取（英文界面里按钮写的是 "Save & Connect"）。
-    let save_connect = crate::i18n::tr_dyn("保存并连接");
-    let save = crate::i18n::tr_dyn("保存");
-    let connect_only = crate::i18n::tr_dyn("仅连接");
-    let cancel = crate::i18n::tr_dyn("取消");
-    let close = crate::i18n::tr_dyn("关闭");
+    let save_connect = crate::i18n::tr_dyn(tr("保存并连接"));
+    let save = crate::i18n::tr_dyn(tr("保存"));
+    let connect_only = crate::i18n::tr_dyn(tr("仅连接"));
+    let cancel = crate::i18n::tr_dyn(tr("取消"));
+    let close = crate::i18n::tr_dyn(tr("关闭"));
     let has_save_connect = labels.iter().any(|l| l.contains(save_connect.as_ref()));
     let has_save = labels
         .iter()
@@ -282,8 +296,8 @@ pub fn ask_text<F: FnOnce(Option<String>) + 'static>(
         title,
         parent,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("确定", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("确定"), gtk::ResponseType::Ok),
         ],
     );
     let entry = gtk::Entry::new();
@@ -324,8 +338,8 @@ pub fn ask_password<F: FnOnce(Option<String>) + 'static>(
         title,
         parent,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("确定", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("确定"), gtk::ResponseType::Ok),
         ],
     );
     let lbl = gtk::Label::new(Some(message));
@@ -383,8 +397,8 @@ pub fn ask_password_remember<F: FnOnce(Option<String>, bool) + 'static>(
         title,
         parent,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("确定", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("确定"), gtk::ResponseType::Ok),
         ],
     );
     let lbl = gtk::Label::new(Some(message));
@@ -441,7 +455,7 @@ pub fn confirm<F: FnOnce(bool) + 'static>(
     message: &str,
     done: F,
 ) {
-    confirm_with(parent, message, "确定", done);
+    confirm_with(parent, message, tr("确定"), done);
 }
 
 /// 带自定义确认按钮文案的确认框（危险操作用「删除」这种动词）。
@@ -453,10 +467,10 @@ pub fn confirm_with<F: FnOnce(bool) + 'static>(
 ) {
     // ⚠️ 走 `windows::dialog`：**必定**挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        "请确认",
+        tr("请确认"),
         parent,
         &[
-            ("取消", gtk::ResponseType::Cancel),
+            (tr("取消"), gtk::ResponseType::Cancel),
             (ok_label, gtk::ResponseType::Ok),
         ],
     );
@@ -694,31 +708,31 @@ pub fn ask_conflict<F: FnOnce(Option<ConflictChoice>) + 'static>(
     done: F,
 ) {
     let n = conflicts.len();
-    let mut msg = format!("有 {n} 个目标已存在：\n");
+    let mut msg = trf!("有 {n} 个目标已存在：\n", n = n);
     for p in conflicts.iter().take(5) {
         msg.push_str(p);
         msg.push('\n');
     }
     if n > 5 {
-        msg.push_str(&format!("… 等共 {n} 个\n"));
+        msg.push_str(&trf!("… 等共 {n} 个\n", n = n));
     }
-    msg.push_str("\n要覆盖它们，还是跳过已存在的文件？");
+    msg.push_str(tr("\n要覆盖它们，还是跳过已存在的文件？"));
 
     // ⚠️ 走 `windows::dialog`：**必定**挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        "目标已存在",
+        tr("目标已存在"),
         parent,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("跳过已存在", gtk::ResponseType::Apply),
-            ("逐个确认", gtk::ResponseType::Other(1)),
-            ("覆盖全部", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("跳过已存在"), gtk::ResponseType::Apply),
+            (tr("逐个确认"), gtk::ResponseType::Other(1)),
+            (tr("覆盖全部"), gtk::ResponseType::Ok),
         ],
     );
     // ⚠️ 默认响应 = 「跳过已存在」：回车 = 不动目标机上已有的文件
     dlg.set_default_response(gtk::ResponseType::Apply);
     // 默认框看得见：用户得知道回车按的是哪一个
-    mark_default(&dlg, "跳过已存在");
+    mark_default(&dlg, tr("跳过已存在"));
     let lbl = gtk::Label::new(Some(&msg));
     lbl.set_wrap(true);
     lbl.set_use_markup(false);
@@ -777,23 +791,18 @@ fn ask_one_by_one<F: FnOnce(Option<ConflictChoice>) + 'static>(
     };
     let total = items.len();
     let dlg = crate::windows::dialog(
-        "逐个确认",
+        tr("逐个确认"),
         parent.as_ref(),
         &[
-            ("跳过这一个", gtk::ResponseType::Cancel),
-            ("覆盖这一个", gtk::ResponseType::Ok),
+            (tr("跳过这一个"), gtk::ResponseType::Cancel),
+            (tr("覆盖这一个"), gtk::ResponseType::Ok),
         ],
     );
     // 默认 = 跳过（不覆盖目标机上已有的文件）
     dlg.set_default_response(gtk::ResponseType::Cancel);
     // 默认框看得见
-    mark_default(&dlg, "跳过这一个");
-    let lbl = gtk::Label::new(Some(&format!(
-        "目标已存在（第 {} / {} 个）：\n{}\n\n要覆盖它吗？",
-        idx + 1,
-        total,
-        item
-    )));
+    mark_default(&dlg, tr("跳过这一个"));
+    let lbl = gtk::Label::new(Some(&trf!("目标已存在（第 {v0} / {total} 个）：\n{item}\n\n要覆盖它吗？", v0 = idx + 1, total = total, item = item)));
     lbl.set_wrap(true);
     lbl.set_halign(gtk::Align::Start);
     lbl.set_selectable(true);

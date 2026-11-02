@@ -7,6 +7,8 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 最小 Telnet IAC 处理：剥掉协商序列并把应答写入 reply。
 /// 语义：对端 WILL → 我 DONT；对端 DO → 我 WONT（不开任何选项）；
@@ -70,9 +72,9 @@ fn strip_iac(buf: &[u8], out: &mut Vec<u8>, reply: &mut Vec<u8>) {
 /// telnet 桥：连接 host:port，stdin ↔ 剥 IAC 后的 socket。
 fn run_telnet_bridge(host: &str, port: &str) -> Result<(), String> {
     use std::net::TcpStream;
-    let port: u16 = port.parse().map_err(|_| "端口非法".to_string())?;
+    let port: u16 = port.parse().map_err(|_| tr("端口非法").to_string())?;
     let stream =
-        TcpStream::connect((host, port)).map_err(|e| format!("连接 {host}:{port} 失败: {e}"))?;
+        TcpStream::connect((host, port)).map_err(|e| trf!("连接 {host}:{port} 失败: {e}", host = host, port = port, e = e))?;
     let mut sock_read = stream.try_clone().map_err(|e| e.to_string())?;
     let sock_w_reply = stream.try_clone().map_err(|e| e.to_string())?;
     let mut sock_w_main = stream;
@@ -158,7 +160,7 @@ fn run_serial_bridge(dev: &str, sercfg: &str) -> Result<(), String> {
         })
         .timeout(std::time::Duration::from_millis(200))
         .open()
-        .map_err(|e| format!("打开串口 {dev}@{} 失败: {e}", conf.baud))?;
+        .map_err(|e| trf!("打开串口 {dev}@{v0} 失败: {e}", dev = dev, e = e, v0 = conf.baud))?;
     let mut rx = port.try_clone().map_err(|e| e.to_string())?;
     let mut tx = port;
 

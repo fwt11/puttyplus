@@ -21,6 +21,8 @@ use crate::backend::mirror::{self, Action, Plan, Scan};
 use crate::panel::queue::{self, QueueItem};
 use crate::panel::worker::{self, XferKind, XferSpec};
 use crate::panel::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 const MCOL_ACT: i32 = 0;
 const MCOL_REL: i32 = 1;
@@ -52,8 +54,8 @@ pub fn open(st: &Rc<PanelState>) {
     if !st.conn_ok.get() {
         crate::panel::dialogs::show_error(
             st.topwin().as_ref(),
-            "未连接",
-            "SFTP 尚未连接，无法扫描远程目录。",
+            tr("未连接"),
+            tr("SFTP 尚未连接，无法扫描远程目录。"),
         );
         return;
     }
@@ -69,7 +71,7 @@ fn build(st: &Rc<PanelState>) {
     // 阶段 67（审计 P2-17）：目录镜像是**工具窗**——
     // 以前是「非模态 GtkDialog」（审计点名的那种混合形态）⇒ 改成 Window。
     let dlg = gtk::Window::new();
-    dlg.set_title(Some("目录镜像（本地 → 远程）"));
+    dlg.set_title(Some(tr("目录镜像（本地 → 远程）")));
     dlg.set_transient_for(top.as_ref());
     let (mw, mh) = crate::settings::window_size("mirror").unwrap_or((860, 560));
     dlg.set_default_size(mw, mh);
@@ -92,18 +94,18 @@ fn build(st: &Rc<PanelState>) {
     remote_entry.set_hexpand(true);
     remote_entry.set_text(&*st.remote_cwd.borrow());
 
-    let browse = gtk::Button::with_label("浏览…");
+    let browse = gtk::Button::with_label(tr("浏览…"));
     let root_row = dir_row(
-        "本地目录",
+        tr("本地目录"),
         &local_entry,
         Some(&browse),
         st.clone(),
         dlg.clone(),
     );
     root.append(&root_row);
-    root.append(&dir_row("远程目录", &remote_entry, None, st.clone(), dlg.clone()));
+    root.append(&dir_row(tr("远程目录"), &remote_entry, None, st.clone(), dlg.clone()));
 
-    let scan_btn = gtk::Button::with_label("扫描差异");
+    let scan_btn = gtk::Button::with_label(tr("扫描差异"));
     scan_btn.add_css_class("suggested-action");
     {
         let st2 = Rc::clone(st);
@@ -115,8 +117,8 @@ fn build(st: &Rc<PanelState>) {
             if l.trim().is_empty() || r.trim().is_empty() {
                 crate::panel::dialogs::show_error(
                     st2.topwin().as_ref(),
-                    "目录没填",
-                    "本地目录与远程目录都要填。",
+                    tr("目录没填"),
+                    tr("本地目录与远程目录都要填。"),
                 );
                 return;
             }
@@ -128,24 +130,24 @@ fn build(st: &Rc<PanelState>) {
     bar.append(&scan_btn);
     let ignore_entry = gtk::Entry::new();
     ignore_entry.set_hexpand(true);
-    ignore_entry.set_placeholder_text(Some("忽略规则，逗号分隔（改完要重新扫描）"));
+    ignore_entry.set_placeholder_text(Some(tr("忽略规则，逗号分隔（改完要重新扫描）")));
     ignore_entry.set_tooltip_text(Some(
-        "按条目名匹配（不含路径），支持 * 与 ?。命中目录则整棵子树跳过。\n\
-         默认忽略 .git、node_modules、*.swp 之类；清空则什么都不忽略。",
+        tr("按条目名匹配（不含路径），支持 * 与 ?。命中目录则整棵子树跳过。\n\
+         默认忽略 .git、node_modules、*.swp 之类；清空则什么都不忽略。"),
     ));
     ignore_entry.set_text(&crate::settings::mirror_ignore());
-    bar.append(&gtk::Label::new(Some("忽略")));
+    bar.append(&gtk::Label::new(Some(tr("忽略"))));
     bar.append(&ignore_entry);
     root.append(&bar);
 
     /* ---- 开关 ---- */
-    let delete_cb = gtk::CheckButton::with_label("删除远程多出的文件");
+    let delete_cb = gtk::CheckButton::with_label(tr("删除远程多出的文件"));
     delete_cb.set_active(false);
     delete_cb.set_tooltip_text(Some(
-        "默认不删。勾上之后，远程存在而本地没有的文件/目录会被删除。\n\
-         不可撤销——执行前还会再确认一次。",
+        tr("默认不删。勾上之后，远程存在而本地没有的文件/目录会被删除。\n\
+         不可撤销——执行前还会再确认一次。"),
     ));
-    let same_cb = gtk::CheckButton::with_label("显示未变化的文件");
+    let same_cb = gtk::CheckButton::with_label(tr("显示未变化的文件"));
     same_cb.set_active(false);
     let opt_bar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     opt_bar.append(&delete_cb);
@@ -153,7 +155,7 @@ fn build(st: &Rc<PanelState>) {
     root.append(&opt_bar);
 
     /* ---- 预览 ---- */
-    let summary = gtk::Label::new(Some("尚未扫描。选择两端目录后点「扫描差异」。"));
+    let summary = gtk::Label::new(Some(tr("尚未扫描。选择两端目录后点「扫描差异」。")));
     summary.set_xalign(0.0);
     summary.set_wrap(true);
     summary.add_css_class("heading");
@@ -167,11 +169,11 @@ fn build(st: &Rc<PanelState>) {
         gtk::glib::Type::STRING, // 远端时间
     ]);
     let view = gtk::TreeView::with_model(&model);
-    view.append_column(&col("动作", MCOL_ACT, false));
-    view.append_column(&col("相对路径", MCOL_REL, true));
-    view.append_column(&col("大小", MCOL_SIZE, false));
-    view.append_column(&col("本地修改时间", MCOL_LMTIME, false));
-    view.append_column(&col("远程修改时间", MCOL_RMTIME, false));
+    view.append_column(&col(tr("动作"), MCOL_ACT, false));
+    view.append_column(&col(tr("相对路径"), MCOL_REL, true));
+    view.append_column(&col(tr("大小"), MCOL_SIZE, false));
+    view.append_column(&col(tr("本地修改时间"), MCOL_LMTIME, false));
+    view.append_column(&col(tr("远程修改时间"), MCOL_RMTIME, false));
     let sw = gtk::ScrolledWindow::new();
     sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     sw.set_child(Some(&view));
@@ -185,8 +187,8 @@ fn build(st: &Rc<PanelState>) {
     root.append(&status);
 
     let tip = gtk::Label::new(Some(
-        "单向镜像：只把本地推向远程，不拉取、不合并冲突。\n\
-         两边类型不同（一目录一文件）的路径一律不动，列在预览里等你处理。",
+        tr("单向镜像：只把本地推向远程，不拉取、不合并冲突。\n\
+         两边类型不同（一目录一文件）的路径一律不动，列在预览里等你处理。"),
     ));
     tip.set_xalign(0.0);
     tip.set_wrap(true);
@@ -195,11 +197,11 @@ fn build(st: &Rc<PanelState>) {
 
     /* ---- 底部按钮 ---- */
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let start_btn = gtk::Button::with_label("开始镜像");
+    let start_btn = gtk::Button::with_label(tr("开始镜像"));
     start_btn.add_css_class("suggested-action");
     start_btn.set_sensitive(false);
     buttons.append(&start_btn);
-    let close_btn = gtk::Button::with_label("关闭");
+    let close_btn = gtk::Button::with_label(tr("关闭"));
     {
         let d2 = dlg.clone();
         close_btn.connect_clicked(move |_| d2.close());
@@ -248,10 +250,10 @@ fn build(st: &Rc<PanelState>) {
         browse.connect_clicked(move |_| {
             let top = st2.topwin();
             let mut b = gtk::FileChooserNative::builder()
-                .title("选本地目录")
+                .title(tr("选本地目录"))
                 .action(gtk::FileChooserAction::SelectFolder)
-                .accept_label("选定")
-                .cancel_label("取消")
+                .accept_label(tr("选定"))
+                .cancel_label(tr("取消"))
                 .modal(true);
             if let Some(p) = top.as_ref() {
                 b = b.transient_for(p);
@@ -308,7 +310,7 @@ fn send_scan(st: &Rc<PanelState>, local: &str, remote: &str) {
     let ignore = crate::settings::mirror_ignore();
     let ui = st.mirror_ui.borrow();
     if let Some(ui) = ui.as_ref() {
-        ui.status.set_text("正在扫描本地与远程目录…");
+        ui.status.set_text(tr("正在扫描本地与远程目录…"));
         ui.start_btn.set_sensitive(false);
     }
     drop(ui);
@@ -334,9 +336,9 @@ pub fn on_scan_result(
     };
     match result {
         Err(e) => {
-            ui.status.set_text(&format!("扫描失败：{e}"));
+            ui.status.set_text(&trf!("扫描失败：{e}", e = e));
             ui.start_btn.set_sensitive(false);
-            ui.summary.set_text("扫描失败");
+            ui.summary.set_text(tr("扫描失败"));
         }
         Ok((l, r)) => {
             ui.status.set_text(&skipped_text(&l, &r));
@@ -350,25 +352,22 @@ pub fn on_scan_result(
 fn skipped_text(l: &Scan, r: &Scan) -> String {
     let mut s = String::new();
     if !l.skipped.is_empty() {
-        s.push_str(&format!("本地跳过 {} 项（忽略规则/软链接）", l.skipped.len()));
+        s.push_str(&trf!("本地跳过 {v0} 项（忽略规则/软链接）", v0 = l.skipped.len()));
     }
     if !r.skipped.is_empty() {
         if !s.is_empty() {
             s.push('，');
         }
-        s.push_str(&format!("远程跳过 {} 项", r.skipped.len()));
+        s.push_str(&trf!("远程跳过 {v0} 项", v0 = r.skipped.len()));
     }
     if !l.too_deep.is_empty() || !r.too_deep.is_empty() {
         if !s.is_empty() {
             s.push('，');
         }
-        s.push_str(&format!(
-            "超过 {} 层未处理",
-            mirror::MAX_DEPTH
-        ));
+        s.push_str(&trf!("超过 {v0} 层未处理", v0 = mirror::MAX_DEPTH));
     }
     if s.is_empty() {
-        "两侧都已完整扫描。".to_string()
+        tr("两侧都已完整扫描。").to_string()
     } else {
         s
     }
@@ -424,7 +423,7 @@ fn fill_preview(ui: &MirrorUi, plan: &Plan, show_same: bool) {
 
 fn display_rel(rel: &str) -> String {
     if rel.is_empty() {
-        "（远程根目录本身）".into()
+        tr("（远程根目录本身）").into()
     } else {
         rel.to_string()
     }
@@ -469,16 +468,11 @@ fn on_start(st: &Rc<PanelState>) {
             .cloned()
             .collect::<Vec<_>>();
         let more = if names.len() > shown.len() {
-            format!("\n… 等共 {} 项", names.len())
+            trf!("\n… 等共 {v0} 项", v0 = names.len())
         } else {
             String::new()
         };
-        let msg = format!(
-            "将在远程删除 {} 项本地没有的文件/目录：\n\n{}{}\n\n确定要删吗？此操作不可撤销。",
-            names.len(),
-            shown.join("\n"),
-            more
-        );
+        let msg = trf!("将在远程删除 {v0} 项本地没有的文件/目录：\n\n{v1}{more}\n\n确定要删吗？此操作不可撤销。", v0 = names.len(), v1 = shown.join("\n"), more = more);
         let st2 = Rc::clone(st);
         crate::panel::dialogs::confirm(st.topwin().as_ref(), &msg, move |ok| {
             if ok {

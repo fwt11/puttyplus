@@ -38,19 +38,19 @@ impl Theme {
 
     pub fn label(self) -> &'static str {
         match self {
-            Theme::System => "跟随系统",
-            Theme::Dark => "深色",
-            Theme::Light => "浅色",
-            Theme::HighContrast => "高对比",
+            Theme::System => tr("跟随系统"),
+            Theme::Dark => tr("深色"),
+            Theme::Light => tr("浅色"),
+            Theme::HighContrast => tr("高对比"),
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            Theme::System => "不覆盖系统 GTK 主题",
-            Theme::Dark => "暗色底，夜间/暗光环境",
-            Theme::Light => "亮色底，白天/投影",
-            Theme::HighContrast => "高对比（黑底白字），投影与弱视场景",
+            Theme::System => tr("不覆盖系统 GTK 主题"),
+            Theme::Dark => tr("暗色底，夜间/暗光环境"),
+            Theme::Light => tr("亮色底，白天/投影"),
+            Theme::HighContrast => tr("高对比（黑底白字），投影与弱视场景"),
         }
     }
 
@@ -179,8 +179,7 @@ fn mix_hex(fg: &str, bg: &str, t: f64) -> String {
         return fg.to_string();
     };
     let c = |f: f64, b: f64| (f + (b - f) * t).round().clamp(0.0, 255.0) as u8;
-    format!(
-        "#{:02x}{:02x}{:02x}",
+    format!("#{:02x}{:02x}{:02x}",
         c(f.0, b.0),
         c(f.1, b.1),
         c(f.2, b.2)
@@ -518,10 +517,10 @@ impl Palette {
 
     pub fn label(self) -> &'static str {
         match self {
-            Palette::Dark => "深色（默认）",
-            Palette::Light => "浅色",
+            Palette::Dark => tr("深色（默认）"),
+            Palette::Light => tr("浅色"),
             Palette::Solarized => "Solarized",
-            Palette::HighContrast => "高对比",
+            Palette::HighContrast => tr("高对比"),
         }
     }
 
@@ -609,6 +608,7 @@ fn saved_theme() -> Theme {
 }
 
 use std::cell::RefCell;
+use crate::i18n::tr;
 
 /// 把主题装到当前 display 上。`Theme::System` = 摘掉 provider，还原成系统样式。
 ///
@@ -739,8 +739,7 @@ fn system_tokens() -> Option<String> {
     let warn = hex("warning_color").unwrap_or_else(|| "#b07d1a".into());
     let err = hex("error_color").unwrap_or_else(|| "#c0392b".into());
 
-    Some(format!(
-        "@define-color pp_bg {bg};\n\
+    Some(format!("@define-color pp_bg {bg};\n\
          @define-color pp_panel {base};\n\
          @define-color pp_fg {fg};\n\
          @define-color pp_dim {dim};\n\

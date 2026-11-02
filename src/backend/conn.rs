@@ -16,6 +16,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::forward::RfwdTable;
 use super::known_hosts::{self, HostKeyCheck};
 use super::{BackendError, BackendResult};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 单步认证（none/密码/键盘交互/公钥）的兜底超时。认证阶段任何一步
 /// 都不能无限等：网关丢弃/不回应认证请求时，UI 至少能在有限时间内
@@ -141,7 +143,7 @@ impl russh::client::Handler for HostKeyHandler {
     ) -> Result<bool, Self::Error> {
         let russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } = server_public_key else {
             *self.decision.lock().unwrap() =
-                Some(Err("服务器出示了证书，暂不支持".into()));
+                Some(Err(tr("服务器出示了证书，暂不支持").into()));
             return Ok(false);
         };
         if is_loopback(&self.host) {
@@ -255,7 +257,7 @@ pub async fn connect(
                 let fut = russh::client::connect_stream(config, stream, handler);
                 tokio::time::timeout(Duration::from_secs(20), fut).await
             }
-            Err(msg) => return Err(BackendError(format!("连接 {host}:{port} 失败: {msg}"))),
+            Err(msg) => return Err(BackendError(trf!("连接 {host}:{port} 失败: {msg}", host = host, port = port, msg = msg))),
         }
     } else {
         let fut = russh::client::connect(config, (host, port_u16), handler);
@@ -263,17 +265,14 @@ pub async fn connect(
     };
     let mut session = match connect_result {
         Err(_) => {
-            return Err(BackendError(format!("连接 {host}:{port} 失败: 超时")));
+            return Err(BackendError(trf!("连接 {host}:{port} 失败: 超时", host = host, port = port)));
         }
         Ok(Err(e)) => {
             // check_server_key 拒绝时给出具体原因，而不是 russh 的笼统错误
             if let Some(Err(msg)) = decision.lock().unwrap().take() {
                 return Err(BackendError(msg));
             }
-            return Err(BackendError(format!(
-                "连接 {host}:{port} 失败: {}",
-                strerror_local(&e)
-            )));
+            return Err(BackendError(trf!("连接 {host}:{port} 失败: {v0}", host = host, port = port, v0 = strerror_local(&e))));
         }
         Ok(Ok(s)) => s,
     };
@@ -284,12 +283,12 @@ pub async fn connect(
     // subsystem 时，不能把 UI 永久卡在「正在连接」。
     let channel = tokio::time::timeout(SETUP_TIMEOUT, session.channel_open_session())
         .await
-        .map_err(|_| BackendError("SFTP 通道初始化失败: 超时（服务器未响应通道请求）".into()))?
-        .map_err(|e| BackendError(format!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）")))?;
+        .map_err(|_| BackendError(tr("SFTP 通道初始化失败: 超时（服务器未响应通道请求）").into()))?
+        .map_err(|e| BackendError(trf!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）", e = e)))?;
     tokio::time::timeout(SETUP_TIMEOUT, channel.request_subsystem(true, "sftp"))
         .await
-        .map_err(|_| BackendError("SFTP 通道初始化失败: 超时（服务器未响应子系统请求）".into()))?
-        .map_err(|e| BackendError(format!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）")))?;
+        .map_err(|_| BackendError(tr("SFTP 通道初始化失败: 超时（服务器未响应子系统请求）").into()))?
+        .map_err(|e| BackendError(trf!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）", e = e)))?;
     // russh-sftp 默认每请求 10s 超时：它一次挂 16 个并发读（预取窗口约 4MB），
     // 慢链路（如 400KB/s 公网小水管）下单请求响应时间会撞线——实测 58MB 文件
     // 首包即 Timeout。libssh（C 版）没有每请求超时；放宽到 300s，
@@ -305,8 +304,8 @@ pub async fn connect(
         ),
     )
     .await
-    .map_err(|_| BackendError("SFTP 通道初始化失败: 超时（服务器未回应 SFTP 协议版本）".into()))?
-    .map_err(|e| BackendError(format!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）")))?;
+    .map_err(|_| BackendError(tr("SFTP 通道初始化失败: 超时（服务器未回应 SFTP 协议版本）").into()))?
+    .map_err(|e| BackendError(trf!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）", e = e)))?;
 
     Ok(SftpBackend {
         session: Arc::new(session),
@@ -379,13 +378,13 @@ async fn authenticate(
         && keyfile.filter(|k| !k.is_empty()).is_none()
     {
         return Err(BackendError(
-            "认证方式是「只用指定的私钥文件」，但这条连接没选私钥".into(),
+            tr("认证方式是「只用指定的私钥文件」，但这条连接没选私钥").into(),
         ));
     }
     let res = tokio::time::timeout(AUTH_STEP_TIMEOUT, session.authenticate_none(user))
         .await
-        .map_err(|_| BackendError("认证失败: 服务器未响应认证请求（超时）".into()))?
-        .map_err(|e| BackendError(format!("认证失败: {e}")))?;
+        .map_err(|_| BackendError(tr("认证失败: 服务器未响应认证请求（超时）").into()))?
+        .map_err(|e| BackendError(trf!("认证失败: {e}", e = e)))?;
     if res.success() {
         return Ok(());
     }
@@ -421,34 +420,28 @@ async fn authenticate(
             }
         };
         let ok = timed.map_err(|_| {
-            BackendError(format!(
-                "认证失败: {}认证超时（服务器未响应）",
-                match step {
-                    AuthStep::Password => "密码",
-                    AuthStep::KeyFile => "私钥文件",
+            BackendError(trf!("认证失败: {v0}认证超时（服务器未响应）", v0 = match step {
+                    AuthStep::Password => tr("密码"),
+                    AuthStep::KeyFile => tr("私钥文件"),
                     AuthStep::Agent => "ssh-agent",
-                    AuthStep::DefaultKeys => "默认私钥",
-                }
-            ))
+                    AuthStep::DefaultKeys => tr("默认私钥"),
+                }))
         })??;
         if ok {
             return Ok(());
         }
     }
 
-    Err(BackendError(format!(
-        "认证失败{}",
-        match method {
-            crate::args::AuthMethod::Password => "（密码认证未通过）",
-            crate::args::AuthMethod::KeyFile => "（私钥认证未通过）",
-            crate::args::AuthMethod::Agent => "（ssh-agent 认证未通过）",
+    Err(BackendError(trf!("认证失败{v0}", v0 = match method {
+            crate::args::AuthMethod::Password => tr("（密码认证未通过）"),
+            crate::args::AuthMethod::KeyFile => tr("（私钥认证未通过）"),
+            crate::args::AuthMethod::Agent => tr("（ssh-agent 认证未通过）"),
             crate::args::AuthMethod::Auto => match (password, keyfile) {
-                (Some(_), _) => "（密码/密钥均未通过）",
-                (None, Some(_)) => "（密钥认证未通过）",
-                (None, None) => "（未提供密码或密码错误）",
+                (Some(_), _) => tr("（密码/密钥均未通过）"),
+                (None, Some(_)) => tr("（密钥认证未通过）"),
+                (None, None) => tr("（未提供密码或密码错误）"),
             },
-        }
-    )))
+        })))
 }
 
 /// 键盘交互认证：所有 prompt 一律应答密码（堡垒机网关常见交互）。
@@ -466,7 +459,7 @@ async fn auth_by_password(
         let r = session
             .authenticate_password(user, pw)
             .await
-            .map_err(|e| BackendError(format!("认证失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("认证失败: {e}", e = e)))?;
         if r.success() {
             return Ok(true);
         }
@@ -499,17 +492,14 @@ async fn auth_by_keyfile(
     let key_pair = match russh::keys::load_secret_key(kf, password) {
         Ok(k) => k,
         Err(_) => {
-            return Err(BackendError(format!(
-                "无法读取私钥 {kf}。\n若是 PuTTY 的 .ppk 格式，请先转换：\n  \
-                 puttygen key.ppk -O private-openssh -o key.openssh"
-            )));
+            return Err(BackendError(trf!("无法读取私钥 {kf}。\n若是 PuTTY 的 .ppk 格式，请先转换：\n  puttygen key.ppk -O private-openssh -o key.openssh", kf = kf)));
         }
     };
     let key = key_with_hash(session, key_pair).await;
     let r = session
         .authenticate_publickey(user, key)
         .await
-        .map_err(|e| BackendError(format!("认证失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("认证失败: {e}", e = e)))?;
     Ok(r.success())
 }
 
@@ -519,7 +509,7 @@ async fn kbdint_auth(
     password: Option<&str>,
 ) -> BackendResult<bool> {
     use russh::client::KeyboardInteractiveAuthResponse as R;
-    let fail = |e: russh::Error| BackendError(format!("键盘交互认证失败: {e}"));
+    let fail = |e: russh::Error| BackendError(trf!("键盘交互认证失败: {e}", e = e));
     let mut resp = session
         .authenticate_keyboard_interactive_start(user, None)
         .await
@@ -625,16 +615,16 @@ impl SftpBackend {
     pub async fn open_sftp(&self) -> BackendResult<SftpSession> {
         let ch = tokio::time::timeout(SETUP_TIMEOUT, self.session.channel_open_session())
             .await
-            .map_err(|_| BackendError("创建 SFTP 通道失败: 超时（服务器未响应通道请求）".into()))?
-            .map_err(|e| BackendError(format!("创建 SFTP 通道失败: {e}")))?;
+            .map_err(|_| BackendError(tr("创建 SFTP 通道失败: 超时（服务器未响应通道请求）").into()))?
+            .map_err(|e| BackendError(trf!("创建 SFTP 通道失败: {e}", e = e)))?;
         tokio::time::timeout(SETUP_TIMEOUT, ch.request_subsystem(true, "sftp"))
             .await
-            .map_err(|_| BackendError("请求 SFTP 子系统失败: 超时（服务器未响应）".into()))?
-            .map_err(|e| BackendError(format!("请求 SFTP 子系统失败: {e}")))?;
+            .map_err(|_| BackendError(tr("请求 SFTP 子系统失败: 超时（服务器未响应）").into()))?
+            .map_err(|e| BackendError(trf!("请求 SFTP 子系统失败: {e}", e = e)))?;
         tokio::time::timeout(SETUP_TIMEOUT, SftpSession::new(ch.into_stream()))
             .await
-            .map_err(|_| BackendError("初始化 SFTP 失败: 超时（服务器未回应 SFTP 协议版本）".into()))?
-            .map_err(|e| BackendError(format!("初始化 SFTP 失败: {e}")))
+            .map_err(|_| BackendError(tr("初始化 SFTP 失败: 超时（服务器未回应 SFTP 协议版本）").into()))?
+            .map_err(|e| BackendError(trf!("初始化 SFTP 失败: {e}", e = e)))
     }
 
     /// 在现有连接上开一条到 `host:port` 的 direct-tcpip 通道，返回双向流。
@@ -656,11 +646,9 @@ impl SftpBackend {
                 .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0),
         )
         .await
-        .map_err(|_| BackendError("打开数据库通道超时（服务器未响应通道请求）".into()))?
+        .map_err(|_| BackendError(tr("打开数据库通道超时（服务器未响应通道请求）").into()))?
         .map_err(|e| {
-            BackendError(format!(
-                "打开数据库通道失败（服务器可能禁止 TCP 转发）: {e}"
-            ))
+            BackendError(trf!("打开数据库通道失败（服务器可能禁止 TCP 转发）: {e}", e = e))
         })?;
         Ok(ch.into_stream())
     }
@@ -699,13 +687,13 @@ impl SftpBackend {
         let rule = super::forward::parse_rules(spec)
             .into_iter()
             .find(|r| r.enabled)
-            .ok_or_else(|| BackendError(format!("无法识别的转发规格：{spec}")))?;
+            .ok_or_else(|| BackendError(trf!("无法识别的转发规格：{spec}", spec = spec)))?;
         let mut forwards = self.forwards.lock().await;
         if forwards
             .iter()
             .any(|e| e.rule.spec == rule.spec && e.rule.kind == rule.kind)
         {
-            return Err(BackendError(format!("该转发已存在：{}", rule.display())));
+            return Err(BackendError(trf!("该转发已存在：{v0}", v0 = rule.display())));
         }
         let mut entry = super::forward::FwdEntry::new(rule);
         entry
@@ -725,7 +713,7 @@ impl SftpBackend {
     ) -> BackendResult<()> {
         let mut forwards = self.forwards.lock().await;
         let Some(idx) = forwards.iter().position(|e| e.key() == key) else {
-            return Err(BackendError(format!("转发规则不存在：{key}")));
+            return Err(BackendError(trf!("转发规则不存在：{key}", key = key)));
         };
         if enabled {
             forwards[idx].rule.enabled = true;
@@ -799,10 +787,10 @@ impl SftpBackend {
             .session
             .channel_open_session()
             .await
-            .map_err(|e| BackendError(format!("创建通道失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("创建通道失败: {e}", e = e)))?;
         let _arm = if forward_agent {
             if let Err(e) = ch.agent_forward(true).await {
-                return Err(BackendError(format!("请求 agent 转发失败: {e}")));
+                return Err(BackendError(trf!("请求 agent 转发失败: {e}", e = e)));
             }
             AGENT_FORWARD_ARMED.fetch_add(1, Ordering::Relaxed);
             Some(AgentArm(true))
@@ -811,7 +799,7 @@ impl SftpBackend {
         };
         ch.exec(true, cmd)
             .await
-            .map_err(|e| BackendError(format!("执行命令失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("执行命令失败: {e}", e = e)))?;
 
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let mut out: Vec<u8> = Vec::new();
@@ -820,12 +808,12 @@ impl SftpBackend {
         loop {
             if cancel.load(Ordering::Relaxed) {
                 let _ = tokio::time::timeout(Duration::from_secs(2), ch.close()).await;
-                return Err(BackendError("已取消".into()));
+                return Err(BackendError(tr("已取消").into()));
             }
             let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remain.is_zero() {
                 let _ = ch.close().await;
-                return Err(BackendError("执行超时".into()));
+                return Err(BackendError(tr("执行超时").into()));
             }
             // 200ms 一轮：既能收输出，也能及时看到取消
             match tokio::time::timeout(remain.min(Duration::from_millis(200)), ch.wait()).await {
@@ -867,10 +855,10 @@ impl SftpBackend {
             .session
             .channel_open_session()
             .await
-            .map_err(|e| BackendError(format!("创建通道失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("创建通道失败: {e}", e = e)))?;
         ch.exec(true, cmd)
             .await
-            .map_err(|e| BackendError(format!("执行命令失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("执行命令失败: {e}", e = e)))?;
 
         let mut out: Vec<u8> = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);

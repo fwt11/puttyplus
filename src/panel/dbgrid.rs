@@ -21,6 +21,8 @@ use gtk::glib::value::ToValue;
 use gtk::prelude::*;
 
 use crate::backend::dbmeta::ColType;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 一份结果集（原始数据 + 列元信息）。
 #[derive(Debug, Clone, Default)]
@@ -98,7 +100,7 @@ pub fn transpose(data: &GridData) -> GridData {
         pk: Vec::new(),
     };
     for i in 0..nrows {
-        out.columns.push(format!("第 {} 行", i + 1));
+        out.columns.push(trf!("第 {v0} 行", v0 = i + 1));
         out.types.push(ColType::Text);
     }
     for c in 0..ncols {
@@ -539,7 +541,7 @@ impl DbGrid {
         let vb = crate::menu::body();
         {
             let weak = self.me.borrow().clone();
-            let b = crate::menu::item("view-sort-ascending-symbolic", "升序排列", None);
+            let b = crate::menu::item("view-sort-ascending-symbolic", tr("升序排列"), None);
             b.connect_clicked(move |_| {
                 if let Some(grid) = weak.upgrade() {
                     grid.sort_by_column(col, true);
@@ -549,7 +551,7 @@ impl DbGrid {
         }
         {
             let weak = self.me.borrow().clone();
-            let b = crate::menu::item("view-sort-descending-symbolic", "降序排列", None);
+            let b = crate::menu::item("view-sort-descending-symbolic", tr("降序排列"), None);
             b.connect_clicked(move |_| {
                 if let Some(grid) = weak.upgrade() {
                     grid.sort_by_column(col, false);
@@ -559,7 +561,7 @@ impl DbGrid {
         }
         vb.append(&crate::menu::sep());
         {
-            let b = crate::menu::item("edit-copy-symbolic", "复制列名", None);
+            let b = crate::menu::item("edit-copy-symbolic", tr("复制列名"), None);
             let nm = name.clone();
             let v2 = view.clone();
             b.connect_clicked(move |_| {
@@ -568,7 +570,7 @@ impl DbGrid {
             vb.append(&b);
         }
         {
-            let b = crate::menu::item("edit-paste-symbolic", "复制这一列的数据", None);
+            let b = crate::menu::item("edit-paste-symbolic", tr("复制这一列的数据"), None);
             let weak = self.me.borrow().clone();
             let v2 = view.clone();
             b.connect_clicked(move |_| {
@@ -590,7 +592,7 @@ impl DbGrid {
         }
         // 隐藏此列：网格自己落不了盘，交给上层（dbui）应用 + 持久化
         if let Some(hook) = self.hide_col_hook.borrow().clone() {
-            let b = crate::menu::item("view-conceal-symbolic", "隐藏这一列", None);
+            let b = crate::menu::item("view-conceal-symbolic", tr("隐藏这一列"), None);
             b.connect_clicked(move |_| {
                 hook(col);
             });
@@ -602,7 +604,7 @@ impl DbGrid {
         // 工具栏上的「列显示设置」按钮。审计说"列设置只保留一个入口"⇒
         // 工具栏那颗撤了，列设置只在这儿。
         if let Some(hook) = self.col_setup_hook.borrow().clone() {
-            let b = crate::menu::item("view-list-symbolic", "列显示设置…", None);
+            let b = crate::menu::item("view-list-symbolic", tr("列显示设置…"), None);
             b.connect_clicked(move |_| {
                 hook();
             });
@@ -611,7 +613,7 @@ impl DbGrid {
         // 类型：菜单底部再写一遍（列头已经有小字，这里是兜底——列头被压窄时
         // 小字会被省略掉，菜单里还能看到）
         if let Some(t) = ty {
-            let l = gtk::Label::new(Some(&format!("类型：{}", t.label())));
+            let l = gtk::Label::new(Some(&trf!("类型：{v0}", v0 = t.label())));
             l.add_css_class("pp-crumb-dim");
             l.set_xalign(0.0);
             l.set_margin_top(4);
@@ -695,10 +697,10 @@ impl DbGrid {
         let body = crate::menu::body();
         // ---- 编辑类（要能改数据）----
         {
-            let b = crate::menu::item("edit-clear-symbolic", "设为 NULL", None);
+            let b = crate::menu::item("edit-clear-symbolic", tr("设为 NULL"), None);
             b.set_sensitive(editable);
             if !editable {
-                b.set_tooltip_text(Some("先点工具栏的「编辑」进入编辑模式"));
+                b.set_tooltip_text(Some(tr("先点工具栏的「编辑」进入编辑模式")));
             }
             let weak = self.me.borrow().clone();
             let c = col;
@@ -709,18 +711,18 @@ impl DbGrid {
                 // ⚠️ **NULL 走文本 "NULL"**：`edit_literal` 本来就认这个
                 // 文本（生成 SQL 的 NULL，不是字符串 'NULL'）。
                 let n = grid.set_edit_rows(&rows, c, "NULL");
-                let msg = format!("已把 {n} 行的该列设为 NULL，点「保存修改」才生效");
+                let msg = trf!("已把 {n} 行的该列设为 NULL，点「保存修改」才生效", n = n);
                 grid.set_status(&msg);
             });
             body.append(&b);
         }
         {
-            let b = crate::menu::item("edit-find-replace-symbolic", "批量修改所选…", None);
+            let b = crate::menu::item("edit-find-replace-symbolic", tr("批量修改所选…"), None);
             b.set_sensitive(editable && nsel > 0);
             if !editable {
-                b.set_tooltip_text(Some("先点工具栏的「编辑」进入编辑模式"));
+                b.set_tooltip_text(Some(tr("先点工具栏的「编辑」进入编辑模式")));
             } else if nsel == 0 {
-                b.set_tooltip_text(Some("先选中要改的行"));
+                b.set_tooltip_text(Some(tr("先选中要改的行")));
             }
             let weak = self.me.borrow().clone();
             let c = col;
@@ -735,10 +737,10 @@ impl DbGrid {
             body.append(&b);
         }
         {
-            let b = crate::menu::item("list-add-symbolic", "克隆为新行", None);
+            let b = crate::menu::item("list-add-symbolic", tr("克隆为新行"), None);
             b.set_sensitive(editable);
             if !editable {
-                b.set_tooltip_text(Some("先点工具栏的「编辑」进入编辑模式"));
+                b.set_tooltip_text(Some(tr("先点工具栏的「编辑」进入编辑模式")));
             }
             let weak = self.me.borrow().clone();
             b.connect_clicked(move |_| {
@@ -746,7 +748,7 @@ impl DbGrid {
                 let rows = grid.selected_display_rows();
                 let Some(r) = rows.first().copied() else { return };
                 if grid.clone_row(r) {
-                    grid.set_status("已克隆为新行（改完点「保存修改」插入）");
+                    grid.set_status(tr("已克隆为新行（改完点「保存修改」插入）"));
                 }
             });
             body.append(&b);
@@ -754,7 +756,7 @@ impl DbGrid {
         body.append(&crate::menu::sep());
         // ---- 查看类 ----
         {
-            let b = crate::menu::item("dialog-information-symbolic", "单元格详情…", None);
+            let b = crate::menu::item("dialog-information-symbolic", tr("单元格详情…"), None);
             let weak = self.me.borrow().clone();
             b.connect_clicked(move |_| {
                 let Some(grid) = weak.upgrade() else { return };
@@ -767,7 +769,7 @@ impl DbGrid {
             body.append(&b);
         }
         {
-            let b = crate::menu::item("format-justify-fill-symbolic", "行详情…", None);
+            let b = crate::menu::item("format-justify-fill-symbolic", tr("行详情…"), None);
             let weak = self.me.borrow().clone();
             b.connect_clicked(move |_| {
                 let Some(grid) = weak.upgrade() else { return };
@@ -779,7 +781,7 @@ impl DbGrid {
             body.append(&b);
         }
         {
-            let b = crate::menu::item("view-list-symbolic", "列详情…", None);
+            let b = crate::menu::item("view-list-symbolic", tr("列详情…"), None);
             let weak = self.me.borrow().clone();
             b.connect_clicked(move |_| {
                 let Some(grid) = weak.upgrade() else { return };
@@ -792,7 +794,7 @@ impl DbGrid {
             body.append(&b);
         }
         {
-            let b = crate::menu::item("view-refresh-symbolic", "转置查看…", None);
+            let b = crate::menu::item("view-refresh-symbolic", tr("转置查看…"), None);
             let weak = self.me.borrow().clone();
             b.connect_clicked(move |_| {
                 let Some(grid) = weak.upgrade() else { return };
@@ -806,7 +808,7 @@ impl DbGrid {
         body.append(&crate::menu::sep());
         // ---- 复制类 ----
         {
-            let b = crate::menu::item("edit-copy-symbolic", "复制单元格", None);
+            let b = crate::menu::item("edit-copy-symbolic", tr("复制单元格"), None);
             let weak = self.me.borrow().clone();
             let v2 = view.clone();
             b.connect_clicked(move |_| {
@@ -818,7 +820,7 @@ impl DbGrid {
             body.append(&b);
         }
         {
-            let b = crate::menu::item("edit-copy-symbolic", "复制整行", None);
+            let b = crate::menu::item("edit-copy-symbolic", tr("复制整行"), None);
             let weak = self.me.borrow().clone();
             let v2 = view.clone();
             b.connect_clicked(move |_| {
@@ -1292,7 +1294,7 @@ impl DbGrid {
         // 「⋮」：这一列的操作菜单（dbx 的列头右侧小三角）
         let tri = gtk::Image::from_icon_name("view-more-symbolic");
         tri.set_pixel_size(12);
-        tri.set_tooltip_text(Some("这一列的操作"));
+        tri.set_tooltip_text(Some(tr("这一列的操作")));
         let tri2 = tri.clone();
         {
             let weak = self.me.borrow().clone();
@@ -2118,8 +2120,8 @@ fn row_matches(row: &[Option<String>], needle: &str) -> bool {
 /// 排序 / 提交用的都是原始值，不受影响。
 fn bool_display(s: &str) -> Option<&'static str> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "t" | "true" => Some("是"),
-        "f" | "false" => Some("否"),
+        "t" | "true" => Some(tr("是")),
+        "f" | "false" => Some(tr("否")),
         _ => None,
     }
 }

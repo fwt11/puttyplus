@@ -13,6 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, LineEnding, PrivateKey};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 密钥生成用的系统 CSPRNG。
 ///
@@ -49,7 +51,7 @@ impl rand_core::TryCryptoRng for SysRng {}
 
 fn sys_fill(dst: &mut [u8]) {
     if let Err(e) = getrandom::fill(dst) {
-        panic!("系统随机数不可用（{e}），拒绝生成私钥");
+        panic!("{}", trf!("系统随机数不可用（{e}），拒绝生成私钥", e = e));
     }
 }
 
@@ -65,9 +67,9 @@ pub enum GenAlgo {
 impl GenAlgo {
     pub fn label(&self) -> &'static str {
         match self {
-            GenAlgo::Ed25519 => "ed25519（默认，快）",
+            GenAlgo::Ed25519 => tr("ed25519（默认，快）"),
             GenAlgo::Rsa2048 => "RSA 2048",
-            GenAlgo::Rsa4096 => "RSA 4096（慢，堡垒机兼容性好）",
+            GenAlgo::Rsa4096 => tr("RSA 4096（慢，堡垒机兼容性好）"),
             GenAlgo::EcdsaP256 => "ECDSA P-256",
         }
     }
@@ -108,11 +110,11 @@ pub fn generate(algo: GenAlgo) -> Result<PrivateKey, String> {
     let bits = rsa_bits(algo);
     if bits > 0 {
         let kp = ssh_key::private::RsaKeypair::random(&mut SysRng, bits)
-            .map_err(|e| format!("生成 RSA {bits} 失败: {e}"))?;
+            .map_err(|e| trf!("生成 RSA {bits} 失败: {e}", bits = bits, e = e))?;
         return PrivateKey::new(kp.into(), "rsa")
-            .map_err(|e| format!("组装 RSA 私钥失败: {e}"));
+            .map_err(|e| trf!("组装 RSA 私钥失败: {e}", e = e));
     }
-    PrivateKey::random(&mut SysRng, algo.to_algorithm()).map_err(|e| format!("生成密钥失败: {e}"))
+    PrivateKey::random(&mut SysRng, algo.to_algorithm()).map_err(|e| trf!("生成密钥失败: {e}", e = e))
 }
 
 /// 生成 + 写盘。返回写出的两个路径（私钥、公钥）。
@@ -134,14 +136,14 @@ pub fn generate_to_files(
         // 设了口令的私钥以明文落盘——静默且要命。
         key = key
             .encrypt(&mut SysRng, pw)
-            .map_err(|e| format!("加口令失败: {e}"))?;
+            .map_err(|e| trf!("加口令失败: {e}", e = e))?;
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| trf!("创建 {v0} 失败: {e}", e = e, v0 = dir.display()))?;
     let priv_path = dir.join(stem);
     let pub_path = dir.join(format!("{stem}.pub"));
     write_private(&priv_path, &key, passphrase.is_some())?;
     std::fs::write(&pub_path, authorized_keys_line(&key))
-        .map_err(|e| format!("写入公钥失败: {e}"))?;
+        .map_err(|e| trf!("写入公钥失败: {e}", e = e))?;
     set_mode(&pub_path, 0o644);
     Ok((priv_path, pub_path))
 }
@@ -149,9 +151,9 @@ pub fn generate_to_files(
 fn write_private(path: &Path, key: &PrivateKey, encrypted: bool) -> Result<(), String> {
     let pem = key
         .to_openssh(LineEnding::LF)
-        .map_err(|e| format!("序列化私钥失败: {e}"))?;
+        .map_err(|e| trf!("序列化私钥失败: {e}", e = e))?;
     std::fs::write(path, pem.as_bytes())
-        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+        .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = path.display()))?;
     // 私钥必须 0600：ssh 客户端会拒绝组/其他可读的私钥
     if set_mode(path, 0o600).is_err() && !encrypted {
         // 加密与否不改变权限要求，这里只在失败时提示
@@ -187,7 +189,7 @@ pub fn authorized_keys_line(key: &PrivateKey) -> String {
 /// `decrypt` 单独处理（ssh-key 读入时不会自动用口令）。
 pub fn read(path: &Path, passphrase: Option<&str>) -> Result<PrivateKey, String> {
     let data =
-        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+        std::fs::read_to_string(path).map_err(|e| trf!("读取 {v0} 失败: {e}", e = e, v0 = path.display()))?;
     parse(&data, passphrase)
 }
 
@@ -195,15 +197,15 @@ pub fn parse(data: &str, passphrase: Option<&str>) -> Result<PrivateKey, String>
     // 先按 PPK 试：它有 "PuTTY-User-Key-File" 头，认错会得到莫名其妙的错
     if data.starts_with("PuTTY-User-Key-File") {
         return PrivateKey::from_ppk(data, passphrase.map(|s| s.to_string()))
-            .map_err(|e| format!("读取 PuTTY .ppk 失败: {e}"));
+            .map_err(|e| trf!("读取 PuTTY .ppk 失败: {e}", e = e));
     }
-    let key = PrivateKey::from_openssh(data).map_err(|e| format!("解析私钥失败: {e}"))?;
+    let key = PrivateKey::from_openssh(data).map_err(|e| trf!("解析私钥失败: {e}", e = e))?;
     if key.is_encrypted() {
         let pw = passphrase
             .filter(|p| !p.is_empty())
-            .ok_or("该私钥有口令保护，需要提供口令")?;
+            .ok_or(tr("该私钥有口令保护，需要提供口令"))?;
         let mut key = key;
-        key.decrypt(pw).map_err(|e| format!("口令错误或算法不支持: {e}"))?;
+        key.decrypt(pw).map_err(|e| trf!("口令错误或算法不支持: {e}", e = e))?;
         return Ok(key);
     }
     Ok(key)
@@ -223,7 +225,7 @@ pub fn ppk_to_openssh(
     if let Some(pw) = passphrase.filter(|p| !p.is_empty()) {
         key = key
             .encrypt(&mut SysRng, pw)
-            .map_err(|e| format!("加口令失败: {e}"))?;
+            .map_err(|e| trf!("加口令失败: {e}", e = e))?;
     }
     write_private(out_path, &key, passphrase.is_some())?;
     Ok(out_path.to_path_buf())
@@ -235,18 +237,15 @@ pub fn ppk_to_openssh(
 /// 带口令的 PEM 需要交互输入口令，应用内不把口令放进 argv，直接拒绝并给出手动命令。
 pub fn convert_pem_to_openssh(path: &Path) -> Result<PathBuf, String> {
     let data = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+        .map_err(|e| trf!("读取 {v0} 失败：{e}", e = e, v0 = path.display()))?;
     if !is_legacy_pem(&data) {
-        return Err("这不是旧式 PEM 私钥（OpenSSH / PPK 不需要转换）".to_string());
+        return Err(tr("这不是旧式 PEM 私钥（OpenSSH / PPK 不需要转换）").to_string());
     }
     if pem_is_encrypted(&data) {
-        return Err(format!(
-            "这是带口令的旧式 PEM，应用内无法安全地输入口令转换。\n请在终端执行：\nssh-keygen -p -f {}",
-            path.display()
-        ));
+        return Err(trf!("这是带口令的旧式 PEM，应用内无法安全地输入口令转换。\n请在终端执行：\nssh-keygen -p -f {v0}", v0 = path.display()));
     }
     let Some(bin) = crate::util::find_program_in_path("ssh-keygen") else {
-        return Err("找不到 ssh-keygen，请先安装 OpenSSH 客户端".to_string());
+        return Err(tr("找不到 ssh-keygen，请先安装 OpenSSH 客户端").to_string());
     };
 
     let mut bak = path.to_path_buf();
@@ -261,7 +260,7 @@ pub fn convert_pem_to_openssh(path: &Path) -> Result<PathBuf, String> {
         bak.set_file_name(format!("{name}.puttyplus.bak.{n}"));
         n += 1;
     }
-    std::fs::copy(path, &bak).map_err(|e| format!("备份失败：{e}"))?;
+    std::fs::copy(path, &bak).map_err(|e| trf!("备份失败：{e}", e = e))?;
 
     // ssh-keygen -p 需要能重写文件；0400 的私钥（ssh-keygen 新生成默认如此）
     // 先补上属主写位，转换后它自己会写成 0600
@@ -284,13 +283,10 @@ pub fn convert_pem_to_openssh(path: &Path) -> Result<PathBuf, String> {
         .args(["-p", "-N", "", "-P", "", "-f"])
         .arg(path)
         .output()
-        .map_err(|e| format!("执行 ssh-keygen 失败：{e}"))?;
+        .map_err(|e| trf!("执行 ssh-keygen 失败：{e}", e = e))?;
     if !out.status.success() {
         let _ = std::fs::copy(&bak, path);
-        return Err(format!(
-            "ssh-keygen 转换失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(trf!("ssh-keygen 转换失败：{v0}", v0 = String::from_utf8_lossy(&out.stderr).trim()));
     }
     // 校验：转换后必须能按 OpenSSH 解析，否则恢复原文件
     let ok = std::fs::read_to_string(path)
@@ -299,7 +295,7 @@ pub fn convert_pem_to_openssh(path: &Path) -> Result<PathBuf, String> {
         .is_some();
     if !ok {
         let _ = std::fs::copy(&bak, path);
-        return Err("转换后仍无法按 OpenSSH 解析，已恢复原文件".to_string());
+        return Err(tr("转换后仍无法按 OpenSSH 解析，已恢复原文件").to_string());
     }
     Ok(bak)
 }
@@ -441,15 +437,15 @@ pub fn inspect(path: &Path, data: &str) -> KeyInfo {
                 info.pem = true;
                 info.encrypted = pem_is_encrypted(data);
                 info.error = Some(if info.encrypted {
-                    "旧式 PEM（带口令）：ssh 可直接使用；管理器不解析元数据".to_string()
+                    tr("旧式 PEM（带口令）：ssh 可直接使用；管理器不解析元数据").to_string()
                 } else {
-                    "旧式 PEM：ssh 可直接使用；管理器不解析元数据".to_string()
+                    tr("旧式 PEM：ssh 可直接使用；管理器不解析元数据").to_string()
                 });
             } else {
                 info.error = Some(if is_ppk {
-                    "无法解析 PuTTY .ppk".to_string()
+                    tr("无法解析 PuTTY .ppk").to_string()
                 } else {
-                    "无法解析私钥".to_string()
+                    tr("无法解析私钥").to_string()
                 });
             }
         }

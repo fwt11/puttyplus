@@ -40,6 +40,8 @@ use super::syntax::{self, Lang, Tok};
 use super::worker::WorkerCmd;
 use crate::findbar;
 use crate::util::{human_size, path_basename};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 内置查看/编辑器的单文件上限。硬编码，不给用户改——调大只会让
 /// `TextView` 卡死，不是"支持大文件"。
@@ -279,10 +281,10 @@ pub fn open_local(st: &Rc<PanelState>, path: &str, readonly: bool) {
     match read_local(path) {
         Ok(data) => {
             if let Err(msg) = apply_bytes(st, id, false, path, readonly, data) {
-                dialogs::show_error(st.topwin().as_ref(), "无法打开文件", &msg);
+                dialogs::show_error(st.topwin().as_ref(), tr("无法打开文件"), &msg);
             }
         }
-        Err(msg) => dialogs::show_error(st.topwin().as_ref(), "无法打开文件", &msg),
+        Err(msg) => dialogs::show_error(st.topwin().as_ref(), tr("无法打开文件"), &msg),
     }
 }
 
@@ -294,8 +296,8 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
     if !st.conn_ok.get() {
         dialogs::show_error(
             st.topwin().as_ref(),
-            "无法打开文件",
-            "SFTP 尚未连接，无法读取远程文件。",
+            tr("无法打开文件"),
+            tr("SFTP 尚未连接，无法读取远程文件。"),
         );
         return;
     }
@@ -312,8 +314,8 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         st.pending_file_reads.borrow_mut().remove(&id);
         dialogs::show_error(
             st.topwin().as_ref(),
-            "无法打开文件",
-            "SFTP 尚未连接，无法读取远程文件。",
+            tr("无法打开文件"),
+            tr("SFTP 尚未连接，无法读取远程文件。"),
         );
     }
 }
@@ -339,7 +341,7 @@ pub fn on_read(st: &Rc<PanelState>, id: u64, path: &str, result: Result<Vec<u8>,
                     .as_ref()
                     .map(|e| e.win.clone())
                     .or_else(|| st.topwin());
-                dialogs::show_error(parent.as_ref(), "无法打开文件", &msg);
+                dialogs::show_error(parent.as_ref(), tr("无法打开文件"), &msg);
             }
         }
         Err(err) => {
@@ -349,7 +351,7 @@ pub fn on_read(st: &Rc<PanelState>, id: u64, path: &str, result: Result<Vec<u8>,
                 .or_else(|| st.topwin());
             dialogs::show_error(
                 parent.as_ref(),
-                "读取远程文件失败",
+                tr("读取远程文件失败"),
                 &format!("{path}\n{err}"),
             );
         }
@@ -379,7 +381,7 @@ pub fn on_written(st: &Rc<PanelState>, id: u64, path: &str, result: Result<(), S
         Err(err) => {
             e.close_after_save.set(false);
             update_ui(&e);
-            dialogs::show_error(Some(&e.win), "保存失败", &format!("{path}\n{err}"));
+            dialogs::show_error(Some(&e.win), tr("保存失败"), &format!("{path}\n{err}"));
             // 保存失败 ⇒ 这次关闭作废：页签留着，用户能救数据（阶段 63）
             super::closeguard::note_save_failed();
         }
@@ -538,10 +540,7 @@ fn apply_bytes(
         return Err(too_large_msg(path, data.len() as u64));
     }
     if looks_binary(&data) {
-        return Err(format!(
-            "{path}\n\n疑似二进制文件（含 NUL 字节或大量控制字符）。\n\
-             内置查看/编辑器只处理文本文件，请下载后用对应的外部程序打开。"
-        ));
+        return Err(trf!("{path}\n\n疑似二进制文件（含 NUL 字节或大量控制字符）。\n内置查看/编辑器只处理文本文件，请下载后用对应的外部程序打开。", path = path));
     }
     let dec = Decoded::decode(&data);
 
@@ -612,13 +611,13 @@ fn attach_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
             return true;
         };
         if e.saving.get() {
-            dialogs::show_error(Some(&e.win), "正在保存", "文件正在写入，请稍候再关闭。");
+            dialogs::show_error(Some(&e.win), tr("正在保存"), tr("文件正在写入，请稍候再关闭。"));
             return false;
         }
         if e.loading.get() && e.dirty.get() {
             // 载入中的回包会覆盖缓冲区，这时保存按钮是禁用的；
             // 让用户等这一拍，别出现"点了保存却什么都没发生"。
-            dialogs::show_error(Some(&e.win), "正在载入", "文件正在读取，请稍候再关闭。");
+            dialogs::show_error(Some(&e.win), tr("正在载入"), tr("文件正在读取，请稍候再关闭。"));
             return false;
         }
         if e.dirty.get() && !e.readonly.get() {
@@ -711,7 +710,7 @@ fn build(
     let title_lbl = gtk::Label::new(None);
     title_lbl.set_xalign(0.0);
     title_lbl.add_css_class("pp-app-title");
-    let who = if remote { "远程" } else { "本地" };
+    let who = if remote { tr("远程") } else { tr("本地") };
     let full = format!("{who} · {path}");
     let sub_lbl = gtk::Label::new(Some(&full));
     sub_lbl.set_xalign(0.0);
@@ -744,27 +743,27 @@ fn build(
     // 后者才是"保存"的老图标，一眼能认。
     let save_btn = crate::a11y::icon_button("media-floppy-symbolic");
     save_btn.add_css_class("flat");
-    save_btn.set_tooltip_text(Some("保存到原文件 (Ctrl+S)"));
+    save_btn.set_tooltip_text(Some(tr("保存到原文件 (Ctrl+S)")));
 
     let reload_btn = crate::a11y::icon_button("view-refresh-symbolic");
     reload_btn.add_css_class("flat");
-    reload_btn.set_tooltip_text(Some("放弃未保存的修改，从磁盘/远程重新载入 (F5)"));
+    reload_btn.set_tooltip_text(Some(tr("放弃未保存的修改，从磁盘/远程重新载入 (F5)")));
 
     let undo_btn = crate::a11y::icon_button("edit-undo-symbolic");
     undo_btn.add_css_class("flat");
-    undo_btn.set_tooltip_text(Some("撤销 (Ctrl+Z)"));
+    undo_btn.set_tooltip_text(Some(tr("撤销 (Ctrl+Z)")));
 
     let redo_btn = crate::a11y::icon_button("edit-redo-symbolic");
     redo_btn.add_css_class("flat");
-    redo_btn.set_tooltip_text(Some("重做 (Ctrl+Shift+Z)"));
+    redo_btn.set_tooltip_text(Some(tr("重做 (Ctrl+Shift+Z)")));
 
     let find_btn = crate::a11y::icon_button("edit-find-symbolic");
     find_btn.add_css_class("flat");
-    find_btn.set_tooltip_text(Some("查找 (Ctrl+F)"));
+    find_btn.set_tooltip_text(Some(tr("查找 (Ctrl+F)")));
 
     let replace_btn = crate::a11y::icon_button("edit-find-replace-symbolic");
     replace_btn.add_css_class("flat");
-    replace_btn.set_tooltip_text(Some("替换 (Ctrl+H)"));
+    replace_btn.set_tooltip_text(Some(tr("替换 (Ctrl+H)")));
 
     // 「自动换行」是个开关，用 ToggleButton（按下=开着）
     let wrap_btn = gtk::ToggleButton::new();
@@ -773,27 +772,27 @@ fn build(
         "format-justify-fill-symbolic",
     )));
     crate::a11y::watch_tooltip(&wrap_btn);
-    wrap_btn.set_tooltip_text(Some("自动换行"));
+    wrap_btn.set_tooltip_text(Some(tr("自动换行")));
 
     let copy_btn = crate::a11y::icon_button("edit-copy-symbolic");
     copy_btn.add_css_class("flat");
-    copy_btn.set_tooltip_text(Some("复制选中的文字 (Ctrl+C)"));
+    copy_btn.set_tooltip_text(Some(tr("复制选中的文字 (Ctrl+C)")));
 
     let paste_btn = crate::a11y::icon_button("edit-paste-symbolic");
     paste_btn.add_css_class("flat");
-    paste_btn.set_tooltip_text(Some("粘贴 (Ctrl+V)"));
+    paste_btn.set_tooltip_text(Some(tr("粘贴 (Ctrl+V)")));
 
     let goto_btn = crate::a11y::icon_button("go-jump-symbolic");
     goto_btn.add_css_class("flat");
-    goto_btn.set_tooltip_text(Some("跳转到行 (Ctrl+G)"));
+    goto_btn.set_tooltip_text(Some(tr("跳转到行 (Ctrl+G)")));
 
     let zoom_in_btn = crate::a11y::icon_button("zoom-in-symbolic");
     zoom_in_btn.add_css_class("flat");
-    zoom_in_btn.set_tooltip_text(Some("放大字号 (Ctrl++)"));
+    zoom_in_btn.set_tooltip_text(Some(tr("放大字号 (Ctrl++)")));
 
     let zoom_out_btn = crate::a11y::icon_button("zoom-out-symbolic");
     zoom_out_btn.add_css_class("flat");
-    zoom_out_btn.set_tooltip_text(Some("缩小字号 (Ctrl+-)"));
+    zoom_out_btn.set_tooltip_text(Some(tr("缩小字号 (Ctrl+-)")));
 
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
@@ -1287,7 +1286,7 @@ fn wire(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
         e.findbar.replace_all_btn.connect_clicked(move |_| {
             let Some(e) = ew.upgrade() else { return };
             let n = replace_all(&e);
-            e.status_note.set(Some(format!("已替换 {n} 处")));
+            e.status_note.set(Some(trf!("已替换 {n} 处", n = n)));
             update_ui(&e);
         });
     }
@@ -1413,7 +1412,7 @@ fn wire(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
 }
 
 fn update_ui(e: &FileEdit) {
-    let mode = if e.base_readonly { "查看" } else { "编辑" };
+    let mode = if e.base_readonly { tr("查看") } else { tr("编辑") };
     let base = path_basename(&e.path);
     let star = if e.dirty.get() { "● " } else { "" };
     let title = format!("{star}{mode} — {base}");
@@ -1425,9 +1424,8 @@ fn update_ui(e: &FileEdit) {
             sub.set_title(e.tab_id.get(), &tab_title(e));
         }
     }
-    e.sub_lbl.set_text(&format!(
-        "{} · {}",
-        if e.remote { "远程" } else { "本地" },
+    e.sub_lbl.set_text(&format!("{} · {}",
+        if e.remote { tr("远程") } else { tr("本地") },
         e.path
     ));
     // 只读（内容不是合法 UTF-8，存不回去）时**不摆保存按钮**：
@@ -1441,27 +1439,26 @@ fn update_ui(e: &FileEdit) {
 
     let eol = if e.crlf.get() { "CRLF" } else { "LF" };
     let state = if e.loading.get() {
-        "正在载入…"
+        tr("正在载入…")
     } else if e.saving.get() {
-        "正在保存…"
+        tr("正在保存…")
     } else if e.readonly.get() {
         // 只读窗口谈不上保存与否，写「已保存」是误导
-        "只读"
+        tr("只读")
     } else if e.dirty.get() {
-        "未保存的修改"
+        tr("未保存的修改")
     } else {
-        "已保存"
+        tr("已保存")
     };
     let lang = e.lang.get();
     let lang_txt = if lang == Lang::Plain {
-        "纯文本".to_string()
+        tr("纯文本").to_string()
     } else if e.hl_on.get() {
-        format!("{} 高亮", lang.label())
+        trf!("{v0} 高亮", v0 = lang.label())
     } else {
-        format!("{}（文件较大，未高亮）", lang.label())
+        trf!("{v0}（文件较大，未高亮）", v0 = lang.label())
     };
-    e.status.set_text(&format!(
-        "{} · {} · UTF-8 · {} · {}",
+    e.status.set_text(&format!("{} · {} · UTF-8 · {} · {}",
         human_size(e.size.get()),
         lang_txt,
         eol,
@@ -1475,10 +1472,10 @@ fn update_ui(e: &FileEdit) {
 
     let mut notes: Vec<&str> = Vec::new();
     if !e.valid_utf8.get() {
-        notes.push("文件不是有效 UTF-8：只读预览，非法字节显示为 �，不能保存。");
+        notes.push(tr("文件不是有效 UTF-8：只读预览，非法字节显示为 �，不能保存。"));
     }
     if e.base_readonly && e.valid_utf8.get() {
-        notes.push("只读查看：不会写回文件。");
+        notes.push(tr("只读查看：不会写回文件。"));
     }
     e.notice.set_text(&notes.join(" "));
     e.notice.set_visible(!notes.is_empty());
@@ -1554,7 +1551,7 @@ fn goto_line(e: &Rc<FileEdit>) {
     let (line, _) = cursor_pos(e);
     let def = line.to_string();
     let ew = Rc::downgrade(e);
-    dialogs::ask_text(Some(&e.win), "跳转到行", &def, move |res| {
+    dialogs::ask_text(Some(&e.win), tr("跳转到行"), &def, move |res| {
         let Some(txt) = res else { return };
         let Ok(n) = txt.trim().parse::<i32>() else {
             return;
@@ -1595,12 +1592,12 @@ fn run_search(e: &Rc<FileEdit>) {
 fn update_match_count(e: &FileEdit) {
     let n = e.matches.borrow().len();
     let txt = if n == 0 {
-        "无匹配".to_string()
+        tr("无匹配").to_string()
     } else {
         let i = e.match_idx.get();
         if i < 0 {
             // 还没选中任何一个：只报"有几处"，别报"1/3"（会让人以为已经选中了）
-            format!("{n} 处")
+            trf!("{n} 处", n = n)
         } else {
             format!("{}/{}", i + 1, n)
         }
@@ -1788,17 +1785,17 @@ pub fn save_btn_visible(e: &FileEdit) -> bool {
 /// 信号，钩子照样"通过"（阶段 42 踩过：e2e 走钩子，从不点真按钮）。
 pub fn toolbar_buttons(e: &FileEdit) -> Vec<(&'static str, gtk::Button)> {
     vec![
-        ("保存", e.save_btn.clone()),
-        ("重载", e.reload_btn.clone()),
-        ("撤销", e.undo_btn.clone()),
-        ("重做", e.redo_btn.clone()),
-        ("复制", e.copy_btn.clone()),
-        ("粘贴", e.paste_btn.clone()),
-        ("查找", e.find_btn.clone()),
-        ("替换", e.replace_btn.clone()),
-        ("跳转到行", e.goto_btn.clone()),
-        ("放大字号", e.zoom_in_btn.clone()),
-        ("缩小字号", e.zoom_out_btn.clone()),
+        (tr("保存"), e.save_btn.clone()),
+        (tr("重载"), e.reload_btn.clone()),
+        (tr("撤销"), e.undo_btn.clone()),
+        (tr("重做"), e.redo_btn.clone()),
+        (tr("复制"), e.copy_btn.clone()),
+        (tr("粘贴"), e.paste_btn.clone()),
+        (tr("查找"), e.find_btn.clone()),
+        (tr("替换"), e.replace_btn.clone()),
+        (tr("跳转到行"), e.goto_btn.clone()),
+        (tr("放大字号"), e.zoom_in_btn.clone()),
+        (tr("缩小字号"), e.zoom_out_btn.clone()),
     ]
 }
 
@@ -1843,11 +1840,11 @@ pub fn wrap_button(e: &FileEdit) -> gtk::ToggleButton {
 /// 查找条上的按钮（点**真按钮**，别直接调内部函数）。
 pub fn findbar_buttons(e: &FileEdit) -> Vec<(&'static str, gtk::Button)> {
     vec![
-        ("上一个", e.findbar.prev_btn.clone()),
-        ("下一个", e.findbar.next_btn.clone()),
-        ("替换", e.findbar.replace_btn.clone()),
-        ("全部替换", e.findbar.replace_all_btn.clone()),
-        ("关闭", e.findbar.close_btn.clone()),
+        (tr("上一个"), e.findbar.prev_btn.clone()),
+        (tr("下一个"), e.findbar.next_btn.clone()),
+        (tr("替换"), e.findbar.replace_btn.clone()),
+        (tr("全部替换"), e.findbar.replace_all_btn.clone()),
+        (tr("关闭"), e.findbar.close_btn.clone()),
     ]
 }
 
@@ -2128,7 +2125,7 @@ fn cursor_pos(e: &Rc<FileEdit>) -> (i32, i32) {
 fn update_cursor(e: &Rc<FileEdit>) {
     let (line, col) = cursor_pos(e);
     let total = e.buffer.line_count().max(1);
-    e.pos_lbl.set_text(&format!("行 {line}/{total} · 列 {col}"));
+    e.pos_lbl.set_text(&trf!("行 {line}/{total} · 列 {col}", line = line, total = total, col = col));
     mark_current_line(e);
 }
 
@@ -2168,10 +2165,7 @@ fn apply_highlight(e: &Rc<FileEdit>) {
         // 守卫保证这里最多是"颜色不对"，不会是"程序冻住"。
         if !e.hl_warned.get() {
             e.hl_warned.set(true);
-            eprintln!(
-                "[高亮] {} 扫描异常（{} 处原地打转），本次不高亮",
-                e.path, hl.stalls
-            );
+            eprintln!("{}", trf!("[高亮] {v0} 扫描异常（{v1} 处原地打转），本次不高亮", v0 = e.path, v1 = hl.stalls));
         }
         e.hl_on.set(false);
         return;
@@ -2256,13 +2250,8 @@ fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
     if data.len() as u64 > MAX_BYTES {
         dialogs::show_error(
             Some(&e.win),
-            "无法保存",
-            &format!(
-                "编辑后的内容为 {}，超过内置查看/编辑上限 {}。\n\
-                 请删掉部分内容，或复制到外部编辑器处理。",
-                human_size(data.len() as u64),
-                human_size(MAX_BYTES)
-            ),
+            tr("无法保存"),
+            &trf!("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", v0 = human_size(data.len() as u64), v1 = human_size(MAX_BYTES)),
         );
         return false;
     }
@@ -2291,8 +2280,8 @@ fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
             update_ui(e);
             dialogs::show_error(
                 Some(&e.win),
-                "保存失败",
-                "SFTP 连接已断开，修改没有写回远程。\n可以先把内容复制出来，重连后再粘贴保存。",
+                tr("保存失败"),
+                tr("SFTP 连接已断开，修改没有写回远程。\n可以先把内容复制出来，重连后再粘贴保存。"),
             );
             super::closeguard::note_save_failed();
             return false;
@@ -2319,7 +2308,7 @@ fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
             e.saving.set(false);
             e.close_after_save.set(false);
             update_ui(e);
-            dialogs::show_error(Some(&e.win), "保存失败", &err);
+            dialogs::show_error(Some(&e.win), tr("保存失败"), &err);
             super::closeguard::note_save_failed();
         }
     }
@@ -2335,8 +2324,8 @@ fn reload(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
         let st2 = Rc::clone(st);
         dialogs::confirm_with(
             Some(&e.win),
-            "放弃未保存的修改并重新载入？",
-            "放弃并重载",
+            tr("放弃未保存的修改并重新载入？"),
+            tr("放弃并重载"),
             move |ok| {
                 if ok {
                     do_reload(&e2, &st2);
@@ -2354,8 +2343,8 @@ fn do_reload(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
         if !st.conn_ok.get() {
             dialogs::show_error(
                 Some(&e.win),
-                "无法重新载入",
-                "SFTP 尚未连接，无法读取远程文件。",
+                tr("无法重新载入"),
+                tr("SFTP 尚未连接，无法读取远程文件。"),
             );
             return;
         }
@@ -2379,17 +2368,17 @@ fn do_reload(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
             e.view.set_editable(!e.readonly.get());
             e.view.set_cursor_visible(!e.readonly.get());
             update_ui(e);
-            dialogs::show_error(Some(&e.win), "无法重新载入", "SFTP 连接已断开。");
+            dialogs::show_error(Some(&e.win), tr("无法重新载入"), tr("SFTP 连接已断开。"));
         }
         return;
     }
     match read_local(&e.path) {
         Ok(data) => {
             if let Err(msg) = apply_bytes(st, e.id, false, &e.path, readonly, data) {
-                dialogs::show_error(Some(&e.win), "无法重新载入", &msg);
+                dialogs::show_error(Some(&e.win), tr("无法重新载入"), &msg);
             }
         }
-        Err(msg) => dialogs::show_error(Some(&e.win), "无法重新载入", &msg),
+        Err(msg) => dialogs::show_error(Some(&e.win), tr("无法重新载入"), &msg),
     }
 }
 
@@ -2398,20 +2387,16 @@ fn do_reload(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
 fn confirm_close(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
     const DISCARD: gtk::ResponseType = gtk::ResponseType::Other(1);
     let dlg = gtk::Dialog::with_buttons(
-        Some("未保存的修改"),
+        Some(tr("未保存的修改")),
         Some(&e.win),
         gtk::DialogFlags::MODAL,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("不保存关闭", DISCARD),
-            ("保存并关闭", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("不保存关闭"), DISCARD),
+            (tr("保存并关闭"), gtk::ResponseType::Ok),
         ],
     );
-    let lbl = gtk::Label::new(Some(&format!(
-        "「{}」有未保存的修改。\n\n保存到{}后再关闭吗？",
-        path_basename(&e.path),
-        if e.remote { "远程" } else { "本地" }
-    )));
+    let lbl = gtk::Label::new(Some(&trf!("「{v0}」有未保存的修改。\n\n保存到{v1}后再关闭吗？", v0 = path_basename(&e.path), v1 = if e.remote { tr("远程") } else { tr("本地") })));
     lbl.set_wrap(true);
     lbl.set_xalign(0.0);
     lbl.set_max_width_chars(48);
@@ -2449,17 +2434,15 @@ fn confirm_close(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
 fn read_local(path: &str) -> Result<Vec<u8>, String> {
     let md = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
     if md.is_dir() {
-        return Err(format!("{path} 是目录，无法用文本查看/编辑器打开"));
+        return Err(trf!("{path} 是目录，无法用文本查看/编辑器打开", path = path));
     }
     if !md.is_file() {
-        return Err(format!(
-            "{path} 不是普通文件，内置查看/编辑器只处理文本文件"
-        ));
+        return Err(trf!("{path} 不是普通文件，内置查看/编辑器只处理文本文件", path = path));
     }
     if md.len() > MAX_BYTES {
         return Err(too_large_msg(path, md.len()));
     }
-    let data = std::fs::read(path).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+    let data = std::fs::read(path).map_err(|e| trf!("读取 {path} 失败: {e}", path = path, e = e))?;
     if data.len() as u64 > MAX_BYTES {
         return Err(too_large_msg(path, data.len() as u64));
     }
@@ -2473,13 +2456,10 @@ fn write_local(path: &str, data: &[u8]) -> Result<(), String> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
     let dir = target
         .parent()
-        .ok_or_else(|| format!("无法确定 {} 所在目录", target.display()))?;
+        .ok_or_else(|| trf!("无法确定 {v0} 所在目录", v0 = target.display()))?;
     if let Ok(md) = std::fs::metadata(&target) {
         if !md.is_file() {
-            return Err(format!(
-                "{} 不是普通文件，无法写入文本内容",
-                target.display()
-            ));
+            return Err(trf!("{v0} 不是普通文件，无法写入文本内容", v0 = target.display()));
         }
     }
     let tmp = temp_path(dir, "puttyplus-edit");
@@ -2495,7 +2475,7 @@ fn write_local(path: &str, data: &[u8]) -> Result<(), String> {
     })();
     if let Err(err) = res {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("写入 {} 失败: {err}", target.display()));
+        return Err(trf!("写入 {v0} 失败: {err}", err = err, v0 = target.display()));
     }
     Ok(())
 }
@@ -2509,12 +2489,7 @@ fn temp_path(dir: &Path, tag: &str) -> PathBuf {
 }
 
 fn too_large_msg(path: &str, size: u64) -> String {
-    format!(
-        "{path}\n\n文件大小 {}，超过内置查看/编辑上限 {}。\n\
-         请先下载到本地，再用外部编辑器打开。",
-        human_size(size),
-        human_size(MAX_BYTES)
-    )
+    trf!("{path}\n\n文件大小 {v0}，超过内置查看/编辑上限 {v1}。\n请先下载到本地，再用外部编辑器打开。", path = path, v0 = human_size(size), v1 = human_size(MAX_BYTES))
 }
 
 #[cfg(test)]
@@ -2571,8 +2546,7 @@ mod tests {
     fn local_save_is_atomic_and_keeps_mode() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!(
-            "pp_fileedit_local_{}_{:?}",
+        let dir = std::env::temp_dir().join(format!("pp_fileedit_local_{}_{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -2639,8 +2613,7 @@ mod tests {
             c.alpha()
         );
         let want = crate::theme::panel_hex();
-        let got = format!(
-            "#{:02x}{:02x}{:02x}",
+        let got = format!("#{:02x}{:02x}{:02x}",
             (c.red() * 255.0).round() as u8,
             (c.green() * 255.0).round() as u8,
             (c.blue() * 255.0).round() as u8

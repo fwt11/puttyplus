@@ -50,6 +50,8 @@ use crate::backend::dbhist;
 use crate::backend::dbmeta::{self, ColType};
 use crate::backend::dbstore::{self, DbProfile};
 use crate::vault;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 每页行数。
 const PAGE_SIZE: usize = 200;
@@ -308,7 +310,7 @@ impl SqlHl {
         if hl.stalls > 0 {
             // 扫描器原地打转被守卫挡下 → 高亮不可信，宁可不上色
             // （守卫保证最坏只是没颜色，不会把窗口冻住）
-            eprintln!("[高亮] SQL 编辑器扫描异常（{} 处原地打转），本次不高亮", hl.stalls);
+            eprintln!("{}", trf!("[高亮] SQL 编辑器扫描异常（{v0} 处原地打转），本次不高亮", v0 = hl.stalls));
             return;
         }
         let tags = self.tags.borrow();
@@ -418,10 +420,10 @@ enum StructPart {
 impl StructPart {
     fn label(self) -> &'static str {
         match self {
-            StructPart::Fields => "字段",
-            StructPart::Indexes => "索引",
-            StructPart::ForeignKeys => "外键",
-            StructPart::Triggers => "触发器",
+            StructPart::Fields => tr("字段"),
+            StructPart::Indexes => tr("索引"),
+            StructPart::ForeignKeys => tr("外键"),
+            StructPart::Triggers => tr("触发器"),
         }
     }
 }
@@ -705,9 +707,9 @@ pub fn cond_chip_text(c: &dbmeta::FilterCond) -> String {
 /// 排序方向按钮上的文字（纯函数，好单测）。
 pub fn order_dir_text(asc: bool) -> &'static str {
     if asc {
-        "↑ 升序"
+        tr("↑ 升序")
     } else {
-        "↓ 降序"
+        tr("↓ 降序")
     }
 }
 
@@ -716,7 +718,7 @@ fn build_cond_bar() -> Rc<CondBar> {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.add_css_class("pp-condbar");
 
-    let lbl = gtk::Label::new(Some("条件"));
+    let lbl = gtk::Label::new(Some(tr("条件")));
     lbl.add_css_class("dim-label");
     row.append(&lbl);
 
@@ -725,17 +727,17 @@ fn build_cond_bar() -> Rc<CondBar> {
     // 第二个是**显示给用户看的文字**。写成 `append("并且", "AND")` 的话，
     // 界面上显示的是 "AND"，而且 `active_id()` 回来的是"并且"，
     // 下面的 "OR" 判断永远不成立 → 「或者」这个选项形同虚设。
-    join.append(Some("AND"), "并且");
-    join.append(Some("OR"), "或者");
+    join.append(Some("AND"), tr("并且"));
+    join.append(Some("OR"), tr("或者"));
     join.set_active_id(Some("AND"));
-    join.set_tooltip_text(Some("与上一条条件的连接方式（第一条用不上）"));
+    join.set_tooltip_text(Some(tr("与上一条条件的连接方式（第一条用不上）")));
     // ⚠️ **限宽**：不定的话它会被挤成只剩一个下拉箭头，"并且 / 或者"
     // 两个字都看不见（用户根本不知道这一格是干什么的）。
     join.set_size_request(74, -1);
     row.append(&join);
 
     let col = gtk::ComboBoxText::new();
-    col.set_tooltip_text(Some("要加条件的列"));
+    col.set_tooltip_text(Some(tr("要加条件的列")));
     // 列名可能是中文（四个字要 8 列宽），窄了会被截成「…」
     col.set_size_request(108, -1);
     row.append(&col);
@@ -745,38 +747,38 @@ fn build_cond_bar() -> Rc<CondBar> {
         op.append(Some(o.label()), o.label());
     }
     op.set_active_id(Some("="));
-    op.set_tooltip_text(Some("比较方式"));
+    op.set_tooltip_text(Some(tr("比较方式")));
     op.set_size_request(72, -1);
     row.append(&op);
 
     let val = gtk::Entry::new();
-    val.set_placeholder_text(Some("值"));
+    val.set_placeholder_text(Some(tr("值")));
     // 限宽：不设的话它会把右边的排序控件挤出可视区
     val.set_width_chars(12);
     row.append(&val);
 
-    let btn_add = gtk::Button::with_label("+ 条件");
-    btn_add.set_tooltip_text(Some("把这个条件加进去，并按它重新查这张表"));
+    let btn_add = gtk::Button::with_label(tr("+ 条件"));
+    btn_add.set_tooltip_text(Some(tr("把这个条件加进去，并按它重新查这张表")));
     row.append(&btn_add);
 
     // ---- 排序那一段 ----
     row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
 
-    let lbl2 = gtk::Label::new(Some("排序"));
+    let lbl2 = gtk::Label::new(Some(tr("排序")));
     lbl2.add_css_class("dim-label");
     row.append(&lbl2);
 
     let order_col = gtk::ComboBoxText::new();
-    order_col.set_tooltip_text(Some("按哪一列排序（不选就不排序）"));
+    order_col.set_tooltip_text(Some(tr("按哪一列排序（不选就不排序）")));
     order_col.set_size_request(108, -1);
     row.append(&order_col);
 
     let btn_dir = gtk::Button::with_label(order_dir_text(true));
-    btn_dir.set_tooltip_text(Some("切换排序方向（升序 / 降序）"));
+    btn_dir.set_tooltip_text(Some(tr("切换排序方向（升序 / 降序）")));
     row.append(&btn_dir);
 
-    let btn_clear = gtk::Button::with_label("清除");
-    btn_clear.set_tooltip_text(Some("清掉全部条件与排序，恢复查整张表"));
+    let btn_clear = gtk::Button::with_label(tr("清除"));
+    btn_clear.set_tooltip_text(Some(tr("清掉全部条件与排序，恢复查整张表")));
     row.append(&btn_clear);
 
     // 已生效条件的 chip 行（空的时候藏起来，别占一行高度）
@@ -814,8 +816,8 @@ pub fn crumb_parts(conn: &str, schema: &str, table: &str, cols: usize) -> Vec<St
     let mut out: Vec<String> = Vec::new();
     if table.is_empty() {
         // 普通查询结果：没有"对象"可言
-        out.push("查询结果".to_string());
-        out.push(format!("{cols} 列"));
+        out.push(tr("查询结果").to_string());
+        out.push(trf!("{cols} 列", cols = cols));
         return out;
     }
     if !conn.is_empty() {
@@ -826,7 +828,7 @@ pub fn crumb_parts(conn: &str, schema: &str, table: &str, cols: usize) -> Vec<St
     } else {
         format!("{table}@{schema}")
     });
-    out.push(format!("{cols} 字段"));
+    out.push(trf!("{cols} 字段", cols = cols));
     out
 }
 
@@ -930,7 +932,7 @@ pub fn mount(st: &Rc<PanelState>) {
                 });
                 let tab_id = sub.add_page_icon_kind(
                     Some("drive-harddisk-symbolic"),
-                    "数据库",
+                    tr("数据库"),
                     super::subtabs::PageKind::Db,
                     ui.page.clone(),
                     Some(on_close),
@@ -965,7 +967,7 @@ pub fn mount(st: &Rc<PanelState>) {
             // 就是「存在但谁也看不见」——用户看到的是"点了没反应"，
             // 截图是一片空白，比直接报错还难查。
             if !ui.mounted.get() {
-                ui.win.set_title(Some("数据库工作台"));
+                ui.win.set_title(Some(tr("数据库工作台")));
                 ui.win.set_default_size(1200, 760);
                 ui.win.set_child(Some(&ui.page.clone()));
                 // 独立窗口路径：关窗口 = 关工作台 → **自动断开**这条连接
@@ -1041,7 +1043,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
      * 已经能新建连接，而**关掉这个页签就自动断开**，不需要再摆一个按钮。
      * 状态行因此只剩一行状态文字。
      */
-    let status = gtk::Label::new(Some("未连接"));
+    let status = gtk::Label::new(Some(tr("未连接")));
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
     status.set_wrap(true);
@@ -1070,20 +1072,20 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     // DB 的「传输」指表数据——两回事共用一个词，用户分不清。
     let btn_transfer = gtk::MenuButton::new();
     {
-        let l = gtk::Label::new(Some("表数据导入/导出…"));
+        let l = gtk::Label::new(Some(tr("表数据导入/导出…")));
         l.set_xalign(0.0);
         btn_transfer.set_child(Some(&l));
     }
     btn_transfer.set_tooltip_text(Some(
-        "把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里",
+        tr("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里"),
     ));
     {
         // ⚠️ `MenuButton::set_popover()` 自己会给弹层设父级 ⇒ 用
         // `popover_detached()`，**别再手动 `pop.set_parent(&btn)`**。
         let pop = crate::menu::popover_detached();
         let vb = crate::menu::body();
-        let b_import = crate::menu::item("document-import-symbolic", "导入数据（CSV）…", None);
-        let b_export = crate::menu::item("document-export-symbolic", "导出表…", None);
+        let b_import = crate::menu::item("document-import-symbolic", tr("导入数据（CSV）…"), None);
+        let b_export = crate::menu::item("document-export-symbolic", tr("导出表…"), None);
         vb.append(&b_import);
         vb.append(&b_export);
         pop.set_child(Some(&vb));
@@ -1122,7 +1124,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     // 「‹」也跟着没了 ⇒ 只剩这里能把树拉回来。
     let btn_tree = gtk::ToggleButton::new();
     btn_tree.set_icon_name("view-list-symbolic");
-    btn_tree.set_tooltip_text(Some("对象树：显示 / 隐藏"));
+    btn_tree.set_tooltip_text(Some(tr("对象树：显示 / 隐藏")));
     btn_tree.set_active(true);
     let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     status_row.append(&status);
@@ -1149,23 +1151,23 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     /* ---- 对象搜索（11.1）---- */
     // 放在对象树正上方：搜到的东西就是树里的东西，顺手就能打开。
     let search_entry = gtk::Entry::new();
-    search_entry.set_placeholder_text(Some("搜索对象…"));
+    search_entry.set_placeholder_text(Some(tr("搜索对象…")));
     search_entry.set_tooltip_text(Some(
-        "在整个库里搜表 / 视图 / 字段 / 函数 / 存储过程 / 触发器 / 事件（回车开始）",
+        tr("在整个库里搜表 / 视图 / 字段 / 函数 / 存储过程 / 触发器 / 事件（回车开始）"),
     ));
     search_entry.set_hexpand(true);
     search_entry.set_icon_from_icon_name(
         gtk::EntryIconPosition::Primary,
         Some("system-search-symbolic"),
     );
-    let search_btn = icon_button("system-search-symbolic", "搜索对象");
+    let search_btn = icon_button("system-search-symbolic", tr("搜索对象"));
     // 刷新对象树（阶段 51）：库里建了表 / 改了结构，刷新一下就能看到。
-    let btn_refresh = icon_button("view-refresh-symbolic", "刷新对象树：重新查一遍这个库");
+    let btn_refresh = icon_button("view-refresh-symbolic", tr("刷新对象树：重新查一遍这个库"));
     // 「收起对象树」（阶段 66）：树就在手边，收起它比去顶部找开关顺手。
     //
     // ⚠️ 收起之后**这一行也跟着没了**（整列都隐藏了）⇒ 把树拉回来只能
     // 靠顶部的开关。
-    let btn_tree_hide = icon_button("go-previous-symbolic", "收起对象树：给主区腾出宽度");
+    let btn_tree_hide = icon_button("go-previous-symbolic", tr("收起对象树：给主区腾出宽度"));
     let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     search_row.append(&search_entry);
     search_row.append(&search_btn);
@@ -1177,7 +1179,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
      * dbx 的对象树面板上有一排小控件（搜索 / 显示已连接 / 列表·详情切换）。
      * 我们这边对应的是「显示哪类对象」+「表节点要不要带行数等信息」。
      */
-    let filter_label = gtk::Label::new(Some("显示"));
+    let filter_label = gtk::Label::new(Some(tr("显示")));
     filter_label.add_css_class("dim-label");
     let filter_combo = gtk::ComboBoxText::new();
     for (id, f) in dbtree::TREE_FILTERS {
@@ -1187,10 +1189,10 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     // 写反了的话 `active_id()` 回来的是显示文字，判断永远不成立
     // （阶段 48 的「并且/或者」就踩过这个坑）。
     filter_combo.set_active_id(Some("all"));
-    filter_combo.set_tooltip_text(Some("对象树里显示哪些类型的对象（改了会重新查一遍）"));
-    let detail_check = gtk::CheckButton::with_label("详细");
+    filter_combo.set_tooltip_text(Some(tr("对象树里显示哪些类型的对象（改了会重新查一遍）")));
+    let detail_check = gtk::CheckButton::with_label(tr("详细"));
     detail_check.set_tooltip_text(Some(
-        "表节点上显示行数 / 占用大小 / 修改时间（行数是数据库的估算值，不是精确行数）",
+        tr("表节点上显示行数 / 占用大小 / 修改时间（行数是数据库的估算值，不是精确行数）"),
     ));
     let tree_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     tree_row.append(&filter_label);
@@ -1263,7 +1265,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     // ⚠️ **Label 不能吃鼠标事件**（`set_can_target(false)`）：不然它盖在
     // 编辑框上面，用户点了却聚焦不进去 ⇒ "编辑器坏了"。
     let sql_ph = gtk::Label::new(Some(
-        "写一条 SQL，按 Ctrl+Enter 执行；选中一段按 Ctrl+Shift+Enter 只跑那段",
+        tr("写一条 SQL，按 Ctrl+Enter 执行；选中一段按 Ctrl+Shift+Enter 只跑那段"),
     ));
     sql_ph.add_css_class("dim-label");
     sql_ph.set_xalign(0.0);
@@ -1288,27 +1290,27 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     // 文字说明挪进 tooltip。
     let btn_run = icon_button(
         "media-playback-start-symbolic",
-        "执行：跑编辑器里的全部 SQL (Ctrl+Enter)",
+        tr("执行：跑编辑器里的全部 SQL (Ctrl+Enter)"),
     );
     btn_run.set_sensitive(false);
     let btn_run_sel = icon_button(
         "edit-select-symbolic",
-        "执行选中：只跑选中的那段 SQL (Ctrl+Shift+Enter)",
+        tr("执行选中：只跑选中的那段 SQL (Ctrl+Shift+Enter)"),
     );
     btn_run_sel.set_sensitive(false);
-    let btn_cancel = icon_button("media-playback-stop-symbolic", "取消：中止正在跑的语句");
+    let btn_cancel = icon_button("media-playback-stop-symbolic", tr("取消：中止正在跑的语句"));
     btn_cancel.set_sensitive(false);
     // 执行历史（11.2）：跑过的 SQL 留档，能翻回去重跑
     let btn_history = icon_button(
         "document-open-recent-symbolic",
-        "历史：看跑过的 SQL（双击一条把它填回编辑器）",
+        tr("历史：看跑过的 SQL（双击一条把它填回编辑器）"),
     );
     let sql_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     sql_row.append(&btn_run);
     sql_row.append(&btn_run_sel);
     sql_row.append(&btn_cancel);
     sql_row.append(&btn_history);
-    let meta = gtk::Label::new(Some("Ctrl+Enter 执行全部 · Ctrl+Shift+Enter 只跑选中的那段"));
+    let meta = gtk::Label::new(Some(tr("Ctrl+Enter 执行全部 · Ctrl+Shift+Enter 只跑选中的那段")));
     meta.add_css_class("dim-label");
     meta.set_xalign(0.0);
     meta.set_hexpand(true);
@@ -1405,7 +1407,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
         // 在 1200 宽下折出「连接…」孤行。
         // ⇒ 句子自然消失：下面那张空态卡上就摆着主 CTA「新建数据库连接…」，
         //   用户看**状态**就够了，**怎么点**由按钮自己说。
-        status.set_text("这个会话下还没有数据库连接");
+        status.set_text(tr("这个会话下还没有数据库连接"));
     }
 
     DbUi {
@@ -1548,7 +1550,7 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
     // ⚠️ **招牌是居中的**：产品名 + 图标居中成一座"牌"，下面才接左对齐的活。
     title.set_xalign(0.5);
     box_.append(&title);
-    let what = gtk::Label::new(Some("数据库工作台"));
+    let what = gtk::Label::new(Some(tr("数据库工作台")));
     what.add_css_class("pp-empty-what");
     what.set_xalign(0.5);
     box_.append(&what);
@@ -1595,9 +1597,9 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
     if connected {
         // ---- 浏览对象：把对象树摆出来 + 聚焦 ----
         {
-            let b = empty_row("view-list-symbolic", "浏览对象");
+            let b = empty_row("view-list-symbolic", tr("浏览对象"));
             b.set_tooltip_text(Some(
-                "展开左侧对象树，按模式找表 / 视图 / 函数；双击表看数据",
+                tr("展开左侧对象树，按模式找表 / 视图 / 函数；双击表看数据"),
             ));
             let weak = Rc::downgrade(st);
             b.connect_clicked(move |_| {
@@ -1616,9 +1618,9 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
         }
         // ---- 写一条查询：清空下面的编辑器并聚焦 ----
         {
-            let b = empty_row("text-x-generic-symbolic", "写一条查询");
+            let b = empty_row("text-x-generic-symbolic", tr("写一条查询"));
             b.set_tooltip_text(Some(
-                "清空下面的 SQL 编辑器并聚焦，直接开始写一条查询（Ctrl+Enter 执行）",
+                tr("清空下面的 SQL 编辑器并聚焦，直接开始写一条查询（Ctrl+Enter 执行）"),
             ));
             let weak = Rc::downgrade(st);
             b.connect_clicked(move |_| {
@@ -1635,15 +1637,15 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
                 sql.grab_focus();
                 let slot = st.db_ui.borrow();
                 if let Some(ui) = slot.as_ref() {
-                    set_status(ui, "写好 SQL 后按 Ctrl+Enter 执行", false);
+                    set_status(ui, tr("写好 SQL 后按 Ctrl+Enter 执行"), false);
                 }
             });
             box_.append(&b);
         }
         // ---- 执行历史：弹出历史窗口 ----
         {
-            let b = empty_row("document-open-recent-symbolic", "执行历史");
-            b.set_tooltip_text(Some("看跑过的 SQL，双击一条把它填回编辑器"));
+            let b = empty_row("document-open-recent-symbolic", tr("执行历史"));
+            b.set_tooltip_text(Some(tr("看跑过的 SQL，双击一条把它填回编辑器")));
             let weak = Rc::downgrade(st);
             b.connect_clicked(move |_| {
                 let Some(st) = weak.upgrade() else { return };
@@ -1669,9 +1671,9 @@ pub fn refresh_empty(st: &Rc<PanelState>, ui: &DbUi) {
     // 而且那行字不换行时自然宽 ~450px ⇒ 把整张卡撑宽（审计 P0-2 的老毛病）。
     // 这里只留**工具栏上没有**的那句。
     let hint = gtk::Label::new(Some(if connected {
-        "左侧双击表看数据"
+        tr("左侧双击表看数据")
     } else {
-        "先在左侧打开一个数据库连接"
+        tr("先在左侧打开一个数据库连接")
     }));
     hint.add_css_class("pp-empty-hint");
     hint.set_xalign(0.0);
@@ -1851,7 +1853,7 @@ fn wire(st: &Rc<PanelState>, ui: &DbUi) {
             tree.reload();
             let slot = st.db_ui.borrow();
             if let Some(ui) = slot.as_ref() {
-                set_status(ui, "已刷新对象树", false);
+                set_status(ui, tr("已刷新对象树"), false);
             }
         });
     }
@@ -1995,7 +1997,7 @@ fn wire(st: &Rc<PanelState>, ui: &DbUi) {
             let slot = st2.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
             if !ui.connected.get() {
-                set_status(ui, "尚未连接数据库", true);
+                set_status(ui, tr("尚未连接数据库"), true);
                 return;
             }
             let doc = find_or_create_doc(&st2, ui, schema, table, false);
@@ -2035,7 +2037,7 @@ fn wire(st: &Rc<PanelState>, ui: &DbUi) {
         ui.tree.set_copy_handler(move |name| {
             if let Some(ui) = st2.db_ui.borrow().as_ref() {
                 ui.win.clipboard().set_text(name);
-                set_status(ui, &format!("已复制：{name}"), false);
+                set_status(ui, &trf!("已复制：{name}", name = name), false);
             }
         });
     }
@@ -2087,7 +2089,7 @@ fn stored_password(key: &str, name: &str) -> Option<zeroize::Zeroizing<String>> 
 /// **带摘要**：同一个会话下可能有两条都叫「本地库」但地址不同的连接，
 /// 光看名字分不清连的是哪个库。
 fn conn_label_of(p: &DbProfile) -> String {
-    format!("{}（{}）", p.name, p.summary())
+    trf!("{v0}（{v1}）", v0 = p.name, v1 = p.summary())
 }
 
 /// 设定「当前连接」。
@@ -2114,7 +2116,7 @@ fn set_current_conn(st: &Rc<PanelState>, ui: &DbUi, key: &str, name: &str) {
     crate::settings::set_last_db_connection(&ui.session_key, &p.name);
     // 页签头写清楚连的是哪条（工作台里不再摆连接信息了）
     update_tab_title(st, ui);
-    set_status(ui, &format!("当前连接：{}", conn_label_of(&p)), false);
+    set_status(ui, &trf!("当前连接：{v0}", v0 = conn_label_of(&p)), false);
     update_buttons(ui);
     // 空态跟着换（阶段 51：副标题写的是"连接 XX"）
     refresh_empty(st, ui);
@@ -2127,8 +2129,8 @@ fn set_current_conn(st: &Rc<PanelState>, ui: &DbUi, key: &str, name: &str) {
 fn update_tab_title(st: &Rc<PanelState>, ui: &DbUi) {
     let name = ui.current.borrow().as_ref().map(|p| p.name.clone());
     let title = match name {
-        Some(n) => format!("数据库 · {n}"),
-        None => "数据库".to_string(),
+        Some(n) => trf!("数据库 · {n}", n = n),
+        None => tr("数据库").to_string(),
     };
     // 没有子标签容器时（老路径 / 单测 / 示例）没有页签头可改，跳过即可
     if let Some(sub) = st.sub_tabs() {
@@ -2147,7 +2149,7 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
     // **连接信息来自「当前连接」**（阶段 13：不在工作台里填表了）。
     // 没有选中连接 → 说清楚下一步该做什么，而不是默默失败。
     let Some(cur) = ui.current.borrow().clone() else {
-        let msg = "还没有选中数据库连接：先在会话树 / 连接管理器里加一个（右键会话树 →「新建数据库连接…」）";
+        let msg = tr("还没有选中数据库连接：先在会话树 / 连接管理器里加一个（右键会话树 →「新建数据库连接…」）");
         set_status(ui, msg, true);
         return Some(msg.to_string());
     };
@@ -2156,17 +2158,17 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
     // 读不到（比如临时连接没落盘）就用缓存的那份。
     let p = dbstore::get(&ui.session_key, &cur.name).unwrap_or(cur);
     if p.host.trim().is_empty() {
-        let msg = "这条连接的数据库地址是空的（去连接管理器里改）";
+        let msg = tr("这条连接的数据库地址是空的（去连接管理器里改）");
         set_status(ui, msg, true);
         return Some(msg.to_string());
     }
     if p.port == 0 {
-        let msg = "这条连接的端口无效（去连接管理器里改）";
+        let msg = tr("这条连接的端口无效（去连接管理器里改）");
         set_status(ui, msg, true);
         return Some(msg.to_string());
     }
     if p.user.trim().is_empty() {
-        let msg = "这条连接的数据库用户是空的（去连接管理器里改）";
+        let msg = tr("这条连接的数据库用户是空的（去连接管理器里改）");
         set_status(ui, msg, true);
         return Some(msg.to_string());
     }
@@ -2204,7 +2206,7 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
     clear_tabs(ui);
     ui.tree.clear();
     update_buttons(ui);
-    set_status(ui, "正在连接数据库…", false);
+    set_status(ui, tr("正在连接数据库…"), false);
     // 空态跟着换（阶段 51）
     refresh_empty(st, ui);
     let tx = st.tx.borrow().clone();
@@ -2212,7 +2214,7 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
         Some(tx) => {
             if tx.send(WorkerCmd::DbConnect { config: cfg }).is_err() {
                 ui.busy.set(false);
-                let msg = "发送连接命令失败（worker 已退出）";
+                let msg = tr("发送连接命令失败（worker 已退出）");
                 set_status(ui, msg, true);
                 update_buttons(ui);
                 return Some(msg.to_string());
@@ -2220,7 +2222,7 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
         }
         None => {
             ui.busy.set(false);
-            let msg = "SSH 连接未就绪";
+            let msg = tr("SSH 连接未就绪");
             set_status(ui, msg, true);
             update_buttons(ui);
             return Some(msg.to_string());
@@ -2248,9 +2250,9 @@ fn report_unmounted(st: &Rc<PanelState>, msg: &str, is_error: bool) {
     }
     let parent = st.topwin();
     if is_error {
-        dialogs::show_error(parent.as_ref(), "数据库", msg);
+        dialogs::show_error(parent.as_ref(), tr("数据库"), msg);
     } else {
-        dialogs::info(parent.as_ref(), "数据库", msg);
+        dialogs::info(parent.as_ref(), tr("数据库"), msg);
     }
 }
 
@@ -2279,7 +2281,7 @@ fn do_run(st: &Rc<PanelState>, ui: &DbUi, only_sel: bool) {
                 (t, true)
             }
             _ => {
-                set_status(ui, "没有选中任何 SQL", true);
+                set_status(ui, tr("没有选中任何 SQL"), true);
                 return;
             }
         }
@@ -2289,7 +2291,7 @@ fn do_run(st: &Rc<PanelState>, ui: &DbUi, only_sel: bool) {
     };
     let _ = ok;
     if sql.trim().is_empty() {
-        set_status(ui, "SQL 为空", true);
+        set_status(ui, tr("SQL 为空"), true);
         return;
     }
     let tab = new_tab(st, ui, &sql);
@@ -2298,7 +2300,7 @@ fn do_run(st: &Rc<PanelState>, ui: &DbUi, only_sel: bool) {
     dbhist::add(&ui.hist_key.borrow(), &sql);
     ui.busy.set(true);
     update_buttons(ui);
-    set_status(ui, "执行中…", false);
+    set_status(ui, tr("执行中…"), false);
     let id = next_id(ui);
     ui.pending.borrow_mut().insert(id, PendingReq::Query { tab_id: tab.id });
     send_cmd(st, ui, WorkerCmd::DbQuery { id, sql, page_size: PAGE_SIZE });
@@ -2318,7 +2320,7 @@ fn conn_key(ui: &DbUi) -> String {
 
 fn open_table(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str, is_view: bool) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     // 阶段 72e：打开一张表 = 打开/切到**它的表文档**（数据 / 结构 / 属性 / ER
@@ -2358,7 +2360,7 @@ fn sql_title(sql: &str) -> String {
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .unwrap_or("查询");
+        .unwrap_or(tr("查询"));
     let t: String = first.chars().take(28).collect();
     if first.chars().count() > 28 {
         format!("{t}…")
@@ -2387,8 +2389,8 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // ⚠️ **名字要和「数据库过滤条件」分清**（阶段 72 / 审计 P1-7、P2-10）：
     // 这个框是**在已经取回的行里**按文字筛（不查库），那个按钮是**生成 WHERE
     // 重新查库**。以前两个都叫"过滤"，用户点错了才发现不是一回事。
-    filter.set_placeholder_text(Some("筛选已加载行"));
-    filter.set_tooltip_text(Some("在已加载的行里按文字筛选（不区分大小写，不查库）"));
+    filter.set_placeholder_text(Some(tr("筛选已加载行")));
+    filter.set_tooltip_text(Some(tr("在已加载的行里按文字筛选（不区分大小写，不查库）")));
     // ⚠️ **宽度按"显示列"算**：一个汉字占两列，「筛选已加载行」是 6 个汉字
     // ⇒ 12 列才放得下，宽度不够会被截成「筛选已加…」。
     filter.set_width_chars(14);
@@ -2402,7 +2404,7 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         Some("system-search-symbolic"),
     );
 
-    let status = gtk::Label::new(Some("就绪"));
+    let status = gtk::Label::new(Some(tr("就绪")));
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -2418,7 +2420,7 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // 工具栏**全用图标按钮**：这一排有下一页 / 导出 / 编辑 / 插入行 /
     // 删除行 / 保存修改 / 放弃，用文字的话右侧会被窗口切掉
     // （截图里「放弃」只剩半颗）。图标 + tooltip 既省地方又看得懂。
-    let btn_next = icon_button("go-next-symbolic", "下一页");
+    let btn_next = icon_button("go-next-symbolic", tr("下一页"));
     btn_next.set_sensitive(false);
     // 导出：**一个**菜单按钮，格式在菜单里选（阶段 21）
     let btn_export = gtk::MenuButton::new();
@@ -2428,34 +2430,34 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         btn_export.set_child(Some(&img));
     }
     crate::a11y::watch_tooltip(&btn_export);
-    btn_export.set_tooltip_text(Some("导出当前结果：CSV / SQL / JSON / XML / HTML"));
+    btn_export.set_tooltip_text(Some(tr("导出当前结果：CSV / SQL / JSON / XML / HTML")));
     btn_export.add_css_class("pp-icon-btn");
-    let btn_edit = icon_button("document-edit-symbolic", "进入编辑模式（开事务，可改单元格）");
+    let btn_edit = icon_button("document-edit-symbolic", tr("进入编辑模式（开事务，可改单元格）"));
     btn_edit.set_sensitive(false);
     // 插入 / 删除行（9.4）：都在编辑模式（事务里）下生效
-    let btn_insert = icon_button("list-add-symbolic", "插入行：在末尾追加一行新记录（没填的列用数据库默认值）");
+    let btn_insert = icon_button("list-add-symbolic", tr("插入行：在末尾追加一行新记录（没填的列用数据库默认值）"));
     btn_insert.set_sensitive(false);
-    let btn_delete = icon_button("list-remove-symbolic", "删除行：把选中的行标记为删除（点保存才真正删）");
+    let btn_delete = icon_button("list-remove-symbolic", tr("删除行：把选中的行标记为删除（点保存才真正删）"));
     btn_delete.set_sensitive(false);
-    let btn_save = icon_button("document-save-symbolic", "保存修改：提交事务（任何一条失败就整体回滚）");
+    let btn_save = icon_button("document-save-symbolic", tr("保存修改：提交事务（任何一条失败就整体回滚）"));
     btn_save.set_sensitive(false);
     // ⚠️ **编辑模式下「保存修改」是主操作**（阶段 44）：dbx 的「提交」也是
     // 实心主按钮。阶段 39 把按钮文字全去掉后，一排图标权重全一样，
     // 用户不知道该点哪个——主操作要自己跳出来。
     btn_save.add_css_class("pp-primary");
-    let btn_discard = icon_button("edit-undo-symbolic", "放弃修改：回滚事务，网格恢复原样");
+    let btn_discard = icon_button("edit-undo-symbolic", tr("放弃修改：回滚事务，网格恢复原样"));
     btn_discard.set_sensitive(false);
     // 数据库过滤条件（9.5，阶段 72 改名）：填 Where 条件后**重新查库**
     // （服务端过滤，不是本地筛行）
     let btn_filter = icon_button(
         "view-filter-symbolic",
-        "数据库过滤条件：生成 WHERE 条件重新查库（不只筛当前这一页）",
+        tr("数据库过滤条件：生成 WHERE 条件重新查库（不只筛当前这一页）"),
     );
     btn_filter.set_sensitive(false);
     // 「只读 / 可编辑」标志（阶段 72c）：先按"只读"造，开了表再改成"可编辑"
-    let mode_chip = gtk::Label::new(Some("只读"));
+    let mode_chip = gtk::Label::new(Some(tr("只读")));
     mode_chip.add_css_class("pp-chip");
-    mode_chip.set_tooltip_text(Some("这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）"));
+    mode_chip.set_tooltip_text(Some(tr("这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）")));
 
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     // ⚠️ **标志放最左边**：它是"这一页能不能改"的唯一说明，埋在工具栏中间
@@ -2519,19 +2521,19 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     let foot_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     foot_spacer.set_hexpand(true);
 
-    let btn_first = icon_button("go-top-symbolic", "首页：回到第一页");
+    let btn_first = icon_button("go-top-symbolic", tr("首页：回到第一页"));
     btn_first.set_sensitive(false);
-    let btn_prev = icon_button("go-previous-symbolic", "上一页");
+    let btn_prev = icon_button("go-previous-symbolic", tr("上一页"));
     btn_prev.set_sensitive(false);
-    let foot_page = gtk::Label::new(Some("第 1 页"));
+    let foot_page = gtk::Label::new(Some(tr("第 1 页")));
     foot_page.add_css_class("dim-label");
     // 每页行数：dbx 有这个下拉，改了立刻重查
     let btn_size = gtk::ComboBoxText::new();
     for n in [100usize, 200, 500, 1000] {
-        btn_size.append(Some(&format!("{n} 行/页")), &n.to_string());
+        btn_size.append(Some(&trf!("{n} 行/页", n = n)), &n.to_string());
     }
     btn_size.set_active_id(Some("200"));
-    btn_size.set_tooltip_text(Some("每页取多少行（改了会重新查）"));
+    btn_size.set_tooltip_text(Some(tr("每页取多少行（改了会重新查）")));
     // 限宽：不设的话它会被旁边的控件挤成只剩一个箭头，文字看不见
     btn_size.set_size_request(96, -1);
 
@@ -2722,7 +2724,7 @@ fn mount_result_tab(ui: &DbUi, tab: &Rc<ResultTab>) {
     close.set_child(Some(&img));
     // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
     crate::a11y::watch_tooltip(&close);
-    close.set_tooltip_text(Some("关闭这个结果页签"));
+    close.set_tooltip_text(Some(tr("关闭这个结果页签")));
     let tab_head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tab_head.append(&label);
     tab_head.append(&close);
@@ -2871,13 +2873,13 @@ fn wire_tab(tab: &Rc<ResultTab>) {
         let vb = crate::menu::body();
         // 每种格式一项：CSV / INSERT SQL / JSON / XML / HTML
         for (icon, label, fmt) in [
-            ("text-x-generic-symbolic", "导出为 CSV…", ExportFormat::Csv),
-            ("document-send-symbolic", "导出为 INSERT SQL 脚本…", ExportFormat::Sql),
-            ("format-justify-fill-symbolic", "导出为 JSON…", ExportFormat::Json),
-            ("text-html-symbolic", "导出为 XML…", ExportFormat::Xml),
+            ("text-x-generic-symbolic", tr("导出为 CSV…"), ExportFormat::Csv),
+            ("document-send-symbolic", tr("导出为 INSERT SQL 脚本…"), ExportFormat::Sql),
+            ("format-justify-fill-symbolic", tr("导出为 JSON…"), ExportFormat::Json),
+            ("text-html-symbolic", tr("导出为 XML…"), ExportFormat::Xml),
             (
                 "x-office-spreadsheet-symbolic",
-                "导出为 HTML 表格…",
+                tr("导出为 HTML 表格…"),
                 ExportFormat::Html,
             ),
         ] {
@@ -3111,13 +3113,13 @@ fn new_table_doc(
         *data.col_key.borrow_mut() = Some((ck, schema.to_string(), table.to_string()));
     }
     update_mode_chip(&data);
-    inner.append_page(&data.box_, Some(&gtk::Label::new(Some("数据"))));
+    inner.append_page(&data.box_, Some(&gtk::Label::new(Some(tr("数据")))));
 
     // ---- 其余三个视图：先放占位，切过去时才真建 ----
     let mut slots: HashMap<i32, gtk::Box> = HashMap::new();
     for (idx, name) in [
-        (DOC_PAGE_STRUCT, "结构"),
-        (DOC_PAGE_PROPS, "属性"),
+        (DOC_PAGE_STRUCT, tr("结构")),
+        (DOC_PAGE_PROPS, tr("属性")),
         (DOC_PAGE_ER, "ER"),
     ] {
         let ph = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -3177,7 +3179,7 @@ fn new_table_doc(
     close.set_child(Some(&img));
     // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
     crate::a11y::watch_tooltip(&close);
-    close.set_tooltip_text(Some("关闭这个表文档"));
+    close.set_tooltip_text(Some(tr("关闭这个表文档")));
     let tab_head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tab_head.append(&label);
     tab_head.append(&close);
@@ -3244,7 +3246,7 @@ fn focus_doc(st: Rc<PanelState>, ui: &DbUi, doc: &Rc<TableDoc>, page: i32) {
 /// 「结构」视图（审计 P1-7："表有五个查看入口……边界对普通用户不清晰"）。
 fn open_structure(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     let doc = find_or_create_doc(st, ui, schema, table, false);
@@ -3298,7 +3300,7 @@ fn new_struct_tab(
 fn mount_struct_tab(ui: &DbUi, tab: &Rc<StructTab>) {
     let table = tab.table.clone();
     // 页签标题：表名 + 关闭按钮
-    let title = format!("{table}（结构）");
+    let title = trf!("{table}（结构）", table = table);
     let label = gtk::Label::new(Some(&title));
     let close = gtk::Button::new();
     close.add_css_class("flat");
@@ -3307,7 +3309,7 @@ fn mount_struct_tab(ui: &DbUi, tab: &Rc<StructTab>) {
     close.set_child(Some(&img));
     // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
     crate::a11y::watch_tooltip(&close);
-    close.set_tooltip_text(Some("关闭这个页签"));
+    close.set_tooltip_text(Some(tr("关闭这个页签")));
     let tab_head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tab_head.append(&label);
     tab_head.append(&close);
@@ -3396,15 +3398,15 @@ fn build_struct_tab(
     // 「保存修改」跑的是**这里字段表**的改动。
     // ⚠️ **纯图标按钮**（用户 2026-10-28：主界面尽量少用文字）：
     // 这一排原本是「+ 加字段 / − 删字段 / 保存修改 / 放弃修改」四个文字按钮。
-    let btn_add_field = icon_button("list-add-symbolic", "加字段：在字段表末尾加一行");
+    let btn_add_field = icon_button("list-add-symbolic", tr("加字段：在字段表末尾加一行"));
     // ⚠️ **主操作要突出**（阶段 44）：dbx 的「新增字段」是实心主按钮，
     // 一眼就知道这是这一页的主要动作。我们所有按钮权重一样，用户不知道
     // 该点哪个。
     btn_add_field.add_css_class("pp-primary");
-    let btn_del_field = icon_button("list-remove-symbolic", "删字段：删掉字段表里选中的那一行");
-    let btn_save_struct = icon_button("document-save-symbolic", "保存修改：把字段表的改动写进库");
-    let btn_discard_struct = icon_button("edit-undo-symbolic", "放弃修改：丢掉字段表里没保存的改动");
-    let struct_tip = gtk::Label::new(Some("改完点工具栏的保存图标才会动库"));
+    let btn_del_field = icon_button("list-remove-symbolic", tr("删字段：删掉字段表里选中的那一行"));
+    let btn_save_struct = icon_button("document-save-symbolic", tr("保存修改：把字段表的改动写进库"));
+    let btn_discard_struct = icon_button("edit-undo-symbolic", tr("放弃修改：丢掉字段表里没保存的改动"));
+    let struct_tip = gtk::Label::new(Some(tr("改完点工具栏的保存图标才会动库")));
     struct_tip.add_css_class("dim-label");
     struct_tip.set_xalign(0.0);
     struct_tip.set_hexpand(true);
@@ -3418,10 +3420,10 @@ fn build_struct_tab(
         type_combo.append(Some(t), t);
     }
     type_combo.set_active_id(Some(dbmeta::common_types(current_proto(ui))[0]));
-    type_combo.set_tooltip_text(Some("常用类型：选中一个字段行，再点「应用」就把它的类型设成这个"));
+    type_combo.set_tooltip_text(Some(tr("常用类型：选中一个字段行，再点「应用」就把它的类型设成这个")));
     type_combo.set_size_request(150, -1);
-    let btn_type_apply = gtk::Button::with_label("应用");
-    btn_type_apply.set_tooltip_text(Some("把选中的那个字段的类型设成下拉里挑的类型"));
+    let btn_type_apply = gtk::Button::with_label(tr("应用"));
+    btn_type_apply.set_tooltip_text(Some(tr("把选中的那个字段的类型设成下拉里挑的类型")));
     let field_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     field_bar.append(&btn_add_field);
     field_bar.append(&btn_del_field);
@@ -3456,7 +3458,7 @@ fn build_struct_tab(
     preview_sw.set_child(Some(&preview));
     preview_sw.add_css_class("frame");
     let preview_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let preview_title = gtk::Label::new(Some("字段改动预览"));
+    let preview_title = gtk::Label::new(Some(tr("字段改动预览")));
     preview_title.add_css_class("dim-label");
     preview_bar.append(&preview_title);
     preview_bar.append(&preview_mark);
@@ -3466,9 +3468,9 @@ fn build_struct_tab(
 
 
     // ---- 索引页的工具栏（阶段 15）----
-    let btn_add_index = icon_button("list-add-symbolic", "加索引：在索引表末尾加一行");
-    let btn_del_index = icon_button("list-remove-symbolic", "删索引：删掉索引表里选中的那一行");
-    let index_tip = gtk::Label::new(Some("列名用逗号分开（如 id, name）；改完点保存图标"));
+    let btn_add_index = icon_button("list-add-symbolic", tr("加索引：在索引表末尾加一行"));
+    let btn_del_index = icon_button("list-remove-symbolic", tr("删索引：删掉索引表里选中的那一行"));
+    let index_tip = gtk::Label::new(Some(tr("列名用逗号分开（如 id, name）；改完点保存图标")));
     index_tip.add_css_class("dim-label");
     index_tip.set_xalign(0.0);
     index_tip.set_hexpand(true);
@@ -3478,9 +3480,9 @@ fn build_struct_tab(
     index_bar.append(&index_tip);
 
     // ---- 外键页的工具栏（阶段 16）----
-    let btn_add_fk = icon_button("list-add-symbolic", "加外键：在外键表末尾加一行");
-    let btn_del_fk = icon_button("list-remove-symbolic", "删外键：删掉外键表里选中的那一行");
-    let fk_tip = gtk::Label::new(Some("引用表和引用列要跟被引用的表对得上"));
+    let btn_add_fk = icon_button("list-add-symbolic", tr("加外键：在外键表末尾加一行"));
+    let btn_del_fk = icon_button("list-remove-symbolic", tr("删外键：删掉外键表里选中的那一行"));
+    let fk_tip = gtk::Label::new(Some(tr("引用表和引用列要跟被引用的表对得上")));
     fk_tip.add_css_class("dim-label");
     fk_tip.set_xalign(0.0);
     fk_tip.set_hexpand(true);
@@ -3489,7 +3491,7 @@ fn build_struct_tab(
     fk_bar.append(&btn_del_fk);
     fk_bar.append(&fk_tip);
 
-    for (title, grid) in [("字段", &fields), ("索引", &indexes), ("外键", &fks)] {
+    for (title, grid) in [(tr("字段"), &fields), (tr("索引"), &indexes), (tr("外键"), &fks)] {
         let sw = gtk::ScrolledWindow::new();
         sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         sw.set_vexpand(true);
@@ -3511,7 +3513,7 @@ fn build_struct_tab(
                 // ⚠️ **字段页下面常驻 DDL 预览**（阶段 50，对标 dbx 底部那个
                 // 一直显示的 SQL 预览区）：改一个字段就能立刻看到会发出什么
                 // ALTER TABLE，以及**这条语句能不能执行**。
-                if title == "字段" {
+                if title == tr("字段") {
                     // ⚠️ **表格要有最小高度**：预览区是固定高度的，它一占
                     // 地方，表格就被挤成只剩一两行（看着像"表里只有一行"）。
                     sw.set_size_request(-1, 200);
@@ -3532,7 +3534,7 @@ fn build_struct_tab(
     // 写的是"可编辑"，本阶段先做到**看得见**：知道这张表上有哪些触发器、
     // 什么时机、什么事件）。
     let trig_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let trig_tip = gtk::Label::new(Some("这张表上的触发器（只读；要改触发器请到对象树里双击它看定义）"));
+    let trig_tip = gtk::Label::new(Some(tr("这张表上的触发器（只读；要改触发器请到对象树里双击它看定义）")));
     trig_tip.add_css_class("dim-label");
     trig_tip.set_xalign(0.0);
     trig_tip.set_hexpand(true);
@@ -3547,7 +3549,7 @@ fn build_struct_tab(
         page.set_vexpand(true);
         page.append(&trig_bar);
         page.append(&sw);
-        inner.add_titled(&page, Some("触发器"), "触发器");
+        inner.add_titled(&page, Some(tr("触发器")), tr("触发器"));
     }
     inner.add_titled(&ddl_sw, Some("DDL"), "DDL");
 
@@ -3563,7 +3565,11 @@ fn build_struct_tab(
     let seg_buttons: Rc<Vec<gtk::ToggleButton>> = {
         let mut v: Vec<gtk::ToggleButton> = Vec::new();
         for name in SEGMENT_NAMES {
-            let b = gtk::ToggleButton::with_label(name);
+            // ⚠️ `SEGMENT_NAMES` 是 **const 表**（编译期求值，不能调 `tr()`）
+            //    ⇒ 显示的时候在这儿翻（英文界面显示 "Fields" / "Indexes"…）。
+            //    ⚠️ 而下面 `stack.set_visible_child_name(&n)` 用的是**中文原名**
+            //    —— 那是 stack 的**内部页名**，两边都用中文才对得上。
+            let b = gtk::ToggleButton::with_label(crate::i18n::tr_dyn(name).as_ref());
             b.add_css_class("pp-seg-btn");
             if let Some(first) = v.first() {
                 // 同组 = 互斥（点一个别的自动弹起来）
@@ -3605,9 +3611,9 @@ fn build_struct_tab(
 
     let btn_exec = icon_button(
         "media-playback-start-symbolic",
-        "执行 DDL：在当前连接上执行上面的 DDL（一条语句）。PG 走事务，MySQL 的 DDL 会自动提交。",
+        tr("执行 DDL：在当前连接上执行上面的 DDL（一条语句）。PG 走事务，MySQL 的 DDL 会自动提交。"),
     );
-    let status = gtk::Label::new(Some("正在读表结构…"));
+    let status = gtk::Label::new(Some(tr("正在读表结构…")));
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -3619,9 +3625,9 @@ fn build_struct_tab(
     // dbx 把"把结构改动写进库"这个动作放在**右下角常驻**，不藏在工具栏里——
     // 改结构是这一页的主要动作，不该跟"加字段/删字段"挤在一排图标里。
     // 它做的是跟工具栏「保存修改」同一件事（`do_save_structure`）。
-    let btn_apply = gtk::Button::with_label("应用变更");
+    let btn_apply = gtk::Button::with_label(tr("应用变更"));
     btn_apply.add_css_class("pp-primary");
-    btn_apply.set_tooltip_text(Some("把字段 / 索引 / 外键的改动写进库"));
+    btn_apply.set_tooltip_text(Some(tr("把字段 / 索引 / 外键的改动写进库")));
     let apply_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     apply_spacer.set_hexpand(true);
     foot.append(&apply_spacer);
@@ -3699,18 +3705,18 @@ fn build_struct_tab(
             let slot = st.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
             let Some(ty) = tab2.type_combo.active_id().map(|s| s.to_string()) else {
-                set_status(ui, "先挑一个类型", true);
+                set_status(ui, tr("先挑一个类型"), true);
                 return;
             };
             let sel = tab2.fields.selected_display_rows();
             let Some(&row) = sel.first() else {
-                set_status(ui, "先选中一个字段行，再点「应用」", true);
+                set_status(ui, tr("先选中一个字段行，再点「应用」"), true);
                 return;
             };
             // ⚠️ **第 1 列是「类型」**（0=字段 / 1=类型 / 2=可空 / 3=主键 /
             // 4=默认值 / 5=操作）
             tab2.fields.set_edit(row, 1, &ty);
-            let msg = format!("第 {} 行的类型改成 {ty}", row + 1);
+            let msg = trf!("第 {v0} 行的类型改成 {ty}", ty = ty, v0 = row + 1);
             tab2.status.set_text(&msg);
             set_status(ui, &msg, false);
         });
@@ -3832,12 +3838,7 @@ fn refresh_struct_ddl(ui: &DbUi, tab: &Rc<StructTab>) {
     // 索引单独列在「索引」页；DDL 里不重复写（PG 的索引语句各家差异大，
     // 硬拼容易拼错，写错了比不写更糟）
     let _ = idx;
-    tab.status.set_text(&format!(
-        "{} 个字段、{} 个索引、{} 个外键",
-        cols.len(),
-        idx.len(),
-        fk.len()
-    ));
+    tab.status.set_text(&trf!("{v0} 个字段、{v1} 个索引、{v2} 个外键", v0 = cols.len(), v1 = idx.len(), v2 = fk.len()));
 }
 
 /// 字段表的**行内操作菜单**（阶段 50）：点「操作」那一格弹出来。
@@ -3853,13 +3854,13 @@ fn show_field_ops_menu(tab: &Rc<StructTab>, row: usize, x: f64, y: f64) {
     let body = crate::menu::body();
     {
         let tab2 = Rc::clone(tab);
-        let b = crate::menu::item("edit-copy-symbolic", "复制这一行", None);
+        let b = crate::menu::item("edit-copy-symbolic", tr("复制这一行"), None);
         b.connect_clicked(move |_| {
             let Some(st) = tab2.st.upgrade() else { return };
             let slot = st.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
             if tab2.fields.clone_row(row) {
-                let msg = format!("已复制第 {} 行（改完点保存修改才生效）", row + 1);
+                let msg = trf!("已复制第 {v0} 行（改完点保存修改才生效）", v0 = row + 1);
                 tab2.status.set_text(&msg);
                 set_status(ui, &msg, false);
             }
@@ -3868,13 +3869,13 @@ fn show_field_ops_menu(tab: &Rc<StructTab>, row: usize, x: f64, y: f64) {
     }
     {
         let tab2 = Rc::clone(tab);
-        let b = crate::menu::item("list-remove-symbolic", "删除这一行", None);
+        let b = crate::menu::item("list-remove-symbolic", tr("删除这一行"), None);
         b.connect_clicked(move |_| {
             let Some(st) = tab2.st.upgrade() else { return };
             let slot = st.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
             if tab2.fields.delete_display_row(row) {
-                let msg = format!("已标记删除第 {} 行（点保存修改才真的删）", row + 1);
+                let msg = trf!("已标记删除第 {v0} 行（点保存修改才真的删）", v0 = row + 1);
                 tab2.status.set_text(&msg);
                 set_status(ui, &msg, false);
             }
@@ -3911,21 +3912,21 @@ fn refresh_field_preview(ui: &DbUi, tab: &Rc<StructTab>) {
         &target,
     ) {
         Ok(None) => (
-            "（字段没有改动）".to_string(),
-            "— 无改动".to_string(),
+            tr("（字段没有改动）").to_string(),
+            tr("— 无改动").to_string(),
             false,
         ),
         Ok(Some(plan)) => {
             let mark = if plan.risks.is_empty() {
-                "✓ 可执行".to_string()
+                tr("✓ 可执行").to_string()
             } else {
-                format!("⚠ 有风险：{}", plan.risks.join("；"))
+                trf!("⚠ 有风险：{v0}", v0 = plan.risks.join(tr("；")))
             };
             (plan.sql.clone(), mark, false)
         }
         Err(e) => (
-            format!("还不能生成语句：{e}"),
-            format!("✗ 不能执行：{e}"),
+            trf!("还不能生成语句：{e}", e = e),
+            trf!("✗ 不能执行：{e}", e = e),
             true,
         ),
     };
@@ -3945,12 +3946,12 @@ fn do_exec_ddl(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>) {
     let buf = tab.ddl.buffer();
     let sql = buf.text(&buf.start_iter(), &buf.end_iter(), true).trim().to_string();
     if sql.is_empty() {
-        set_status(ui, "DDL 是空的，没什么可执行", true);
+        set_status(ui, tr("DDL 是空的，没什么可执行"), true);
         return;
     }
     ui.busy.set(true);
     update_buttons(ui);
-    set_status(ui, "正在执行 DDL…", false);
+    set_status(ui, tr("正在执行 DDL…"), false);
     let id = next_id(ui);
     ui.pending
         .borrow_mut()
@@ -3966,7 +3967,7 @@ fn do_add_field(ui: &DbUi, tab: &Rc<StructTab>) {
         return;
     }
     tab.fields.insert_row();
-    let msg = "已加一行，填上字段名和类型，点「保存修改」才生效";
+    let msg = tr("已加一行，填上字段名和类型，点「保存修改」才生效");
     tab.status.set_text(msg);
     set_status(ui, msg, false);
 }
@@ -3980,11 +3981,11 @@ fn do_del_field(ui: &DbUi, tab: &Rc<StructTab>) {
         return;
     }
     let Some(row) = tab.fields.selected_display_rows().first().copied() else {
-        set_status(ui, "先选中要删的字段", true);
+        set_status(ui, tr("先选中要删的字段"), true);
         return;
     };
     if tab.fields.delete_display_row(row) {
-        let msg = "已标记删除这个字段，点「保存修改」才真的删（列里的数据会一起没了）";
+        let msg = tr("已标记删除这个字段，点「保存修改」才真的删（列里的数据会一起没了）");
         tab.status.set_text(msg);
         set_status(ui, msg, false);
     }
@@ -4007,7 +4008,7 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
         return;
     }
     let Some(cols) = tab.cols.borrow().clone() else {
-        set_status(ui, "表结构还没读出来，稍等一下再保存", true);
+        set_status(ui, tr("表结构还没读出来，稍等一下再保存"), true);
         return;
     };
     let proto = current_proto(ui);
@@ -4020,11 +4021,11 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
     for t in &target {
         if t.orig_index.is_none() {
             if t.name.trim().is_empty() {
-                set_status(ui, "新加的字段还没填名字（不要了就点「放弃修改」）", true);
+                set_status(ui, tr("新加的字段还没填名字（不要了就点「放弃修改」）"), true);
                 return;
             }
             if t.ty.trim().is_empty() {
-                set_status(ui, &format!("新加的字段「{}」还没填类型", t.name), true);
+                set_status(ui, &trf!("新加的字段「{v0}」还没填类型", v0 = t.name), true);
                 return;
             }
         }
@@ -4036,7 +4037,7 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
             risks.extend(plan.risks);
         }
         Err(e) => {
-            let msg = format!("改动有问题，未执行：{e}");
+            let msg = trf!("改动有问题，未执行：{e}", e = e);
             tab.status.set_text(&msg);
             set_status(ui, &msg, true);
             return;
@@ -4049,11 +4050,11 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
     for t in &idx_target {
         if t.orig_name.is_none() {
             if t.name.trim().is_empty() {
-                set_status(ui, "新加的索引还没填名字（不要了就点「放弃修改」）", true);
+                set_status(ui, tr("新加的索引还没填名字（不要了就点「放弃修改」）"), true);
                 return;
             }
             if t.columns.is_empty() {
-                set_status(ui, &format!("新加的索引「{}」还没填列", t.name), true);
+                set_status(ui, &trf!("新加的索引「{v0}」还没填列", v0 = t.name), true);
                 return;
             }
         }
@@ -4064,7 +4065,7 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
             risks.extend(r);
         }
         Err(e) => {
-            let msg = format!("改动有问题，未执行：{e}");
+            let msg = trf!("改动有问题，未执行：{e}", e = e);
             tab.status.set_text(&msg);
             set_status(ui, &msg, true);
             return;
@@ -4077,14 +4078,14 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
     for t in &fk_target {
         if t.orig_name.is_none() {
             if t.name.trim().is_empty() {
-                set_status(ui, "新加的外键还没填约束名（不要了就点「放弃修改」）", true);
+                set_status(ui, tr("新加的外键还没填约束名（不要了就点「放弃修改」）"), true);
                 return;
             }
             if t.column.trim().is_empty()
                 || t.ref_table.trim().is_empty()
                 || t.ref_column.trim().is_empty()
             {
-                set_status(ui, &format!("新加的外键「{}」还没填全（列 / 引用表 / 引用列）", t.name), true);
+                set_status(ui, &trf!("新加的外键「{v0}」还没填全（列 / 引用表 / 引用列）", v0 = t.name), true);
                 return;
             }
         }
@@ -4095,7 +4096,7 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
             risks.extend(r);
         }
         Err(e) => {
-            let msg = format!("改动有问题，未执行：{e}");
+            let msg = trf!("改动有问题，未执行：{e}", e = e);
             tab.status.set_text(&msg);
             set_status(ui, &msg, true);
             return;
@@ -4103,8 +4104,8 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
     }
 
     if sqls.is_empty() {
-        tab.status.set_text("没有要保存的改动");
-        set_status(ui, "没有要保存的改动", true);
+        tab.status.set_text(tr("没有要保存的改动"));
+        set_status(ui, tr("没有要保存的改动"), true);
         return;
     }
 
@@ -4115,12 +4116,8 @@ fn save_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, skip_conf
     // 有风险 → 二次确认
     let st2 = Rc::clone(st);
     let tab2 = Rc::clone(tab);
-    let msg = format!(
-        "要执行这些改动：\n\n{}\n\n⚠️ {}\n\n确定要改吗？",
-        sqls.join(";\n"),
-        risks.join("\n⚠️ ")
-    );
-    crate::panel::dialogs::confirm_with(Some(&ui.win), &msg, "改表结构", move |ok| {
+    let msg = trf!("要执行这些改动：\n\n{v0}\n\n⚠️ {v1}\n\n确定要改吗？", v0 = sqls.join(";\n"), v1 = risks.join("\n⚠️ "));
+    crate::panel::dialogs::confirm_with(Some(&ui.win), &msg, tr("改表结构"), move |ok| {
         if !ok {
             return;
         }
@@ -4135,7 +4132,7 @@ fn do_discard_structure(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>) {
     request_struct(st, ui, tab, StructPart::Fields);
     request_struct(st, ui, tab, StructPart::Indexes);
     request_struct(st, ui, tab, StructPart::ForeignKeys);
-    let msg = "已放弃本地改动";
+    let msg = tr("已放弃本地改动");
     tab.status.set_text(msg);
     set_status(ui, msg, false);
 }
@@ -4160,7 +4157,7 @@ fn exec_sql_queue(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<StructTab>, sqls: Vec
     *tab.sql_queue.borrow_mut() = q;
     ui.busy.set(true);
     update_buttons(ui);
-    let msg = "正在改表结构…";
+    let msg = tr("正在改表结构…");
     tab.status.set_text(msg);
     set_status(ui, msg, false);
     exec_next_sql(st, ui, tab);
@@ -4184,7 +4181,7 @@ fn do_add_index(ui: &DbUi, tab: &Rc<StructTab>) {
         return;
     }
     tab.indexes.insert_row();
-    let msg = "已加一行，填上索引名和列（列名用逗号分开），点「保存修改」才生效";
+    let msg = tr("已加一行，填上索引名和列（列名用逗号分开），点「保存修改」才生效");
     tab.status.set_text(msg);
     set_status(ui, msg, false);
 }
@@ -4195,11 +4192,11 @@ fn do_del_index(ui: &DbUi, tab: &Rc<StructTab>) {
         return;
     }
     let Some(row) = tab.indexes.selected_display_rows().first().copied() else {
-        set_status(ui, "先选中要删的索引", true);
+        set_status(ui, tr("先选中要删的索引"), true);
         return;
     };
     if tab.indexes.delete_display_row(row) {
-        let msg = "已标记删除这个索引，点「保存修改」才真的删（数据不丢，查询会变慢）";
+        let msg = tr("已标记删除这个索引，点「保存修改」才真的删（数据不丢，查询会变慢）");
         tab.status.set_text(msg);
         set_status(ui, msg, false);
     }
@@ -4211,7 +4208,7 @@ fn do_add_fk(ui: &DbUi, tab: &Rc<StructTab>) {
         return;
     }
     tab.fks.insert_row();
-    let msg = "已加一行，填上约束名、本表列、引用表、引用列，点「保存修改」才生效";
+    let msg = tr("已加一行，填上约束名、本表列、引用表、引用列，点「保存修改」才生效");
     tab.status.set_text(msg);
     set_status(ui, msg, false);
 }
@@ -4222,11 +4219,11 @@ fn do_del_fk(ui: &DbUi, tab: &Rc<StructTab>) {
         return;
     }
     let Some(row) = tab.fks.selected_display_rows().first().copied() else {
-        set_status(ui, "先选中要删的外键", true);
+        set_status(ui, tr("先选中要删的外键"), true);
         return;
     };
     if tab.fks.delete_display_row(row) {
-        let msg = "已标记删除这个外键，点「保存修改」才真的删（数据不丢，引用关系没了）";
+        let msg = tr("已标记删除这个外键，点「保存修改」才真的删（数据不丢，引用关系没了）");
         tab.status.set_text(msg);
         set_status(ui, msg, false);
     }
@@ -4333,7 +4330,7 @@ fn open_routine_def(
     is_proc: bool,
 ) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     let kind = if is_proc {
@@ -4371,15 +4368,15 @@ fn open_routine_def(
 /// 用户真正要的是"这个库里有没有一张叫 xxx 的表"。
 fn do_search(st: &Rc<PanelState>, ui: &DbUi) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     let kw = ui.search_entry.text().trim().to_string();
     if kw.is_empty() {
-        set_status(ui, "先写个关键词再搜", true);
+        set_status(ui, tr("先写个关键词再搜"), true);
         return;
     }
-    set_status(ui, &format!("正在搜索「{kw}」…"), false);
+    set_status(ui, &trf!("正在搜索「{kw}」…", kw = kw), false);
     let id = send_meta(
         st,
         ui,
@@ -4426,11 +4423,11 @@ fn show_search_results(st: &Rc<PanelState>, ui: &DbUi, hits: Vec<dbmeta::SearchH
         .collect();
     ui.search_grid.set_data(dbgrid::GridData {
         columns: vec![
-            "类型".into(),
-            "模式".into(),
-            "名称".into(),
-            "所属表".into(),
-            "说明".into(),
+            tr("类型").into(),
+            tr("模式").into(),
+            tr("名称").into(),
+            tr("所属表").into(),
+            tr("说明").into(),
         ],
         types: vec![dbmeta::ColType::Text; 5],
         rows,
@@ -4441,9 +4438,9 @@ fn show_search_results(st: &Rc<PanelState>, ui: &DbUi, hits: Vec<dbmeta::SearchH
     let n = ui.search_grid.row_count();
     if let Some(lbl) = ui.search_status.borrow().as_ref() {
         let text = if n >= dbmeta::search_limit() {
-            format!("找到 {n} 个对象（已达上限，可能还有更多）")
+            trf!("找到 {n} 个对象（已达上限，可能还有更多）", n = n)
         } else {
-            format!("找到 {n} 个对象")
+            trf!("找到 {n} 个对象", n = n)
         };
         lbl.set_text(&text);
     }
@@ -4455,7 +4452,7 @@ fn show_search_results(st: &Rc<PanelState>, ui: &DbUi, hits: Vec<dbmeta::SearchH
 /// 窗口开着就复用（换对象时重填），关掉了再开就新建一个。
 fn open_object_stats(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     // 阶段 72e：切到那张表的**表文档**里的「属性」视图（不再弹独立窗口）。
@@ -4506,12 +4503,12 @@ fn build_stats_grid() -> gtk::Grid {
     // 没有表头的话用户只看到一列名词一列值，分不清哪列是名字、哪列是值。
     // 表头和数据**在同一个 Grid** 里，列宽才天然对齐。
     {
-        let h1 = gtk::Label::new(Some("属性"));
+        let h1 = gtk::Label::new(Some(tr("属性")));
         h1.set_xalign(0.0);
         h1.add_css_class("dim-label");
         h1.add_css_class("heading");
         grid.attach(&h1, 0, 0, 1, 1);
-        let h2 = gtk::Label::new(Some("值"));
+        let h2 = gtk::Label::new(Some(tr("值")));
         h2.set_xalign(0.0);
         h2.add_css_class("dim-label");
         h2.add_css_class("heading");
@@ -4523,7 +4520,7 @@ fn build_stats_grid() -> gtk::Grid {
 /// 属性窗口（属性 | 值 两列）。
 fn build_stats_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     let win = gtk::Window::builder()
-        .title("对象属性")
+        .title(tr("对象属性"))
         .transient_for(&ui.win)
         .default_width(420)
         .default_height(420)
@@ -4536,7 +4533,7 @@ fn build_stats_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
 
     root.append(&build_stats_view(ui));
 
-    let btn_close = gtk::Button::with_label("关闭");
+    let btn_close = gtk::Button::with_label(tr("关闭"));
     wire_tool_close(&win, &btn_close);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.set_halign(gtk::Align::End);
@@ -4602,11 +4599,11 @@ fn build_grid_empty_state() -> (gtk::Box, gtk::Label, gtk::Label, gtk::Button) {
     box_.set_halign(gtk::Align::Center);
     box_.set_valign(gtk::Align::Center);
 
-    let title = gtk::Label::new(Some("还没有结果"));
+    let title = gtk::Label::new(Some(tr("还没有结果")));
     title.add_css_class("pp-empty-title");
     box_.append(&title);
 
-    let desc = gtk::Label::new(Some("执行一条 SQL，结果会显示在这里。"));
+    let desc = gtk::Label::new(Some(tr("执行一条 SQL，结果会显示在这里。")));
     desc.add_css_class("pp-empty-sub");
     desc.set_xalign(0.5);
     desc.set_wrap(true);
@@ -4617,7 +4614,7 @@ fn build_grid_empty_state() -> (gtk::Box, gtk::Label, gtk::Label, gtk::Button) {
     let cta = gtk::Button::new();
     let h = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     h.append(&gtk::Image::from_icon_name("list-add-symbolic"));
-    h.append(&gtk::Label::new(Some("插入一行")));
+    h.append(&gtk::Label::new(Some(tr("插入一行"))));
     cta.set_child(Some(&h));
     cta.add_css_class("pp-empty-btn");
     cta.add_css_class("suggested-action");
@@ -4637,12 +4634,12 @@ fn build_grid_empty_state() -> (gtk::Box, gtk::Label, gtk::Label, gtk::Button) {
 fn grid_empty_text(has_columns: bool, has_target: bool) -> (&'static str, &'static str, bool) {
     if !has_columns {
         // 还没跑过查询：新建的查询页签、刚打开的表文档都是这个状态
-        ("还没有结果", "执行一条 SQL，结果会显示在这里。", false)
+        (tr("还没有结果"), tr("执行一条 SQL，结果会显示在这里。"), false)
     } else if has_target {
         // 表浏览页签：有真动作 ⇒ 给真按钮
-        ("这张表还没有数据", "表里一行都没有。", true)
+        (tr("这张表还没有数据"), tr("表里一行都没有。"), true)
     } else {
-        ("没有结果行", "查询执行成功，但没有返回任何行。", false)
+        (tr("没有结果行"), tr("查询执行成功，但没有返回任何行。"), false)
     }
 }
 
@@ -4686,17 +4683,17 @@ fn update_mode_chip(tab: &Rc<ResultTab>) {
         .map(|t| !t.is_view)
         .unwrap_or(false);
     if editable {
-        tab.mode_chip.set_text("可编辑");
+        tab.mode_chip.set_text(tr("可编辑"));
         // ⚠️ **只换状态类，别摘基础类**：`.pp-chip` 身上带着底色 / 圆角 /
         // 内边距，摘了就变成"一串白字"（看着跟没标志一样）。
         tab.mode_chip.add_css_class("pp-chip-ok");
         tab.mode_chip
-            .set_tooltip_text(Some("这一页是表浏览页签：可以进入编辑模式改数据"));
+            .set_tooltip_text(Some(tr("这一页是表浏览页签：可以进入编辑模式改数据")));
     } else {
-        tab.mode_chip.set_text("只读");
+        tab.mode_chip.set_text(tr("只读"));
         tab.mode_chip.remove_css_class("pp-chip-ok");
         tab.mode_chip.set_tooltip_text(Some(
-            "这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）",
+            tr("这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）"),
         ));
     }
     // 目标变了（查询结果 ↔ 表浏览）⇒ 空结果态的说法也跟着变
@@ -4721,12 +4718,12 @@ fn open_column_dialog(tab: &Rc<ResultTab>) {
     let updating = Rc::new(Cell::new(false));
 
     let dlg = gtk::Dialog::with_buttons(
-        Some("列显示设置"),
+        Some(tr("列显示设置")),
         Some(&tab.win),
         gtk::DialogFlags::MODAL,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("确定", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("确定"), gtk::ResponseType::Ok),
         ],
     );
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -4750,11 +4747,11 @@ fn open_column_dialog(tab: &Rc<ResultTab>) {
     list_sw.set_size_request(260, 320);
     list_sw.set_child(Some(&list));
 
-    let chk = gtk::CheckButton::with_label("显示这一列");
-    let btn_up = gtk::Button::with_label("上移");
-    let btn_down = gtk::Button::with_label("下移");
-    let btn_all = gtk::Button::with_label("全显示");
-    let btn_none = gtk::Button::with_label("全隐藏");
+    let chk = gtk::CheckButton::with_label(tr("显示这一列"));
+    let btn_up = gtk::Button::with_label(tr("上移"));
+    let btn_down = gtk::Button::with_label(tr("下移"));
+    let btn_all = gtk::Button::with_label(tr("全显示"));
+    let btn_none = gtk::Button::with_label(tr("全隐藏"));
 
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.append(&chk);
@@ -4922,7 +4919,7 @@ fn open_column_dialog(tab: &Rc<ResultTab>) {
 /// 造搜索结果窗口。
 fn build_search_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     let win = gtk::Window::builder()
-        .title("对象搜索")
+        .title(tr("对象搜索"))
         .transient_for(&ui.win)
         .default_width(760)
         .default_height(420)
@@ -4936,7 +4933,7 @@ fn build_search_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     root.set_margin_bottom(10);
 
     let hint = gtk::Label::new(Some(
-        "双击一行直接打开：表/视图看数据，字段打开它所在的表，函数/过程/触发器/事件看定义。",
+        tr("双击一行直接打开：表/视图看数据，字段打开它所在的表，函数/过程/触发器/事件看定义。"),
     ));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
@@ -4954,7 +4951,7 @@ fn build_search_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     status.set_hexpand(true);
 
-    let btn_close = gtk::Button::with_label("关闭");
+    let btn_close = gtk::Button::with_label(tr("关闭"));
     wire_tool_close(&win, &btn_close);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.append(&status);
@@ -5043,7 +5040,7 @@ fn refresh_history(st: &Rc<PanelState>, ui: &DbUi) {
         })
         .collect();
     ui.hist_grid.set_data(dbgrid::GridData {
-        columns: vec!["时间".into(), "SQL".into()],
+        columns: vec![tr("时间").into(), "SQL".into()],
         types: vec![ColType::Text; 2],
         rows,
         pk: vec![],
@@ -5096,7 +5093,7 @@ fn wire_tool_close(win: &gtk::Window, btn_close: &gtk::Button) {
 /// 造历史窗口。
 fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     let win = gtk::Window::builder()
-        .title("执行历史")
+        .title(tr("执行历史"))
         .transient_for(&ui.win)
         .default_width(760)
         .default_height(420)
@@ -5112,7 +5109,7 @@ fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     root.set_margin_bottom(10);
 
     let hint = gtk::Label::new(Some(
-        "双击一条（或点「填入编辑器」）把它放回 SQL 编辑器，不自动执行——改完再点「执行」。",
+        tr("双击一条（或点「填入编辑器」）把它放回 SQL 编辑器，不自动执行——改完再点「执行」。"),
     ));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
@@ -5130,9 +5127,9 @@ fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     status.set_hexpand(true);
 
-    let btn_fill = gtk::Button::with_label("填入编辑器");
-    let btn_clear = gtk::Button::with_label("清空历史");
-    let btn_close = gtk::Button::with_label("关闭");
+    let btn_fill = gtk::Button::with_label(tr("填入编辑器"));
+    let btn_clear = gtk::Button::with_label(tr("清空历史"));
+    let btn_close = gtk::Button::with_label(tr("关闭"));
     {
         let st2 = Rc::clone(st);
         btn_fill.connect_clicked(move |_| {
@@ -5180,11 +5177,11 @@ fn build_history_window(st: &Rc<PanelState>, ui: &DbUi) -> gtk::Window {
 /// 看一眼、确认了再点「执行」。
 fn fill_history_into_editor(st: &Rc<PanelState>, ui: &DbUi) {
     let Some(sql) = selected_history_sql(ui) else {
-        set_status(ui, "先选一条历史", true);
+        set_status(ui, tr("先选一条历史"), true);
         return;
     };
     ui.sql.buffer().set_text(&sql);
-    set_status(ui, "已填入编辑器（没有自动执行）", false);
+    set_status(ui, tr("已填入编辑器（没有自动执行）"), false);
     let _ = st;
 }
 
@@ -5201,7 +5198,7 @@ fn selected_history_sql(ui: &DbUi) -> Option<String> {
 fn clear_history(st: &Rc<PanelState>, ui: &DbUi) {
     dbhist::clear(&ui.hist_key.borrow());
     refresh_history(st, ui);
-    set_status(ui, "历史已清空", false);
+    set_status(ui, tr("历史已清空"), false);
 }
 
 /// 打开事件的定义页签。
@@ -5210,7 +5207,7 @@ fn clear_history(st: &Rc<PanelState>, ui: &DbUi) {
 /// 一定是库名——查询语句本身按方言拼（`meta_event_def`）。
 fn open_event_def(st: &Rc<PanelState>, ui: &DbUi, schema: &str, name: &str) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     let tab = new_def_tab(
@@ -5240,7 +5237,7 @@ fn open_event_def(st: &Rc<PanelState>, ui: &DbUi, schema: &str, name: &str) {
 /// 打开触发器的定义页签。
 fn open_trigger_def(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str, name: &str) {
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     let tab = new_def_tab(
@@ -5298,13 +5295,13 @@ fn new_def_tab(
     sw.set_child(Some(&text));
     sw.add_css_class("frame");
 
-    let btn_copy = gtk::Button::with_label("复制定义");
-    btn_copy.set_tooltip_text(Some("把定义文本复制到剪贴板"));
-    let btn_exec = gtk::Button::with_label("执行定义");
+    let btn_copy = gtk::Button::with_label(tr("复制定义"));
+    btn_copy.set_tooltip_text(Some(tr("把定义文本复制到剪贴板")));
+    let btn_exec = gtk::Button::with_label(tr("执行定义"));
     btn_exec.set_tooltip_text(Some(
-        "在当前连接上执行这段定义。触发器与 MySQL 例程会先 DROP 再重建。",
+        tr("在当前连接上执行这段定义。触发器与 MySQL 例程会先 DROP 再重建。"),
     ));
-    let status = gtk::Label::new(Some("正在读定义…"));
+    let status = gtk::Label::new(Some(tr("正在读定义…")));
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -5337,7 +5334,7 @@ fn new_def_tab(
     });
 
     // 页签标题：对象名 + 关闭按钮
-    let label = gtk::Label::new(Some(&format!("{title}（定义）")));
+    let label = gtk::Label::new(Some(&trf!("{title}（定义）", title = title)));
     let close = gtk::Button::new();
     close.add_css_class("flat");
     let img = gtk::Image::from_icon_name("window-close-symbolic");
@@ -5345,7 +5342,7 @@ fn new_def_tab(
     close.set_child(Some(&img));
     // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
     crate::a11y::watch_tooltip(&close);
-    close.set_tooltip_text(Some("关闭这个页签"));
+    close.set_tooltip_text(Some(tr("关闭这个页签")));
     let tab_head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tab_head.append(&label);
     tab_head.append(&close);
@@ -5378,7 +5375,7 @@ fn new_def_tab(
             let buf = tab2.text.buffer();
             let s = buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string();
             tab2.win.clipboard().set_text(&s);
-            tab2.status.set_text("已复制定义");
+            tab2.status.set_text(tr("已复制定义"));
         });
     }
     // 执行定义
@@ -5408,7 +5405,7 @@ fn do_exec_def(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<DefTab>) {
     let buf = tab.text.buffer();
     let text = buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string();
     if text.trim().is_empty() {
-        tab.status.set_text("定义是空的，没什么可执行");
+        tab.status.set_text(tr("定义是空的，没什么可执行"));
         return;
     }
     let proto = current_proto(ui);
@@ -5421,7 +5418,7 @@ fn do_exec_def(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<DefTab>) {
         &text,
     );
     if stmts.is_empty() {
-        tab.status.set_text("定义是空的，没什么可执行");
+        tab.status.set_text(tr("定义是空的，没什么可执行"));
         return;
     }
     let total = stmts.len();
@@ -5433,7 +5430,7 @@ fn do_exec_def(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<DefTab>) {
     });
     ui.busy.set(true);
     update_buttons(ui);
-    tab.status.set_text(&format!("正在执行定义（{total} 条语句）…"));
+    tab.status.set_text(&trf!("正在执行定义（{total} 条语句）…", total = total));
     send_next_def(st, ui);
 }
 
@@ -5446,8 +5443,8 @@ fn send_next_def(st: &Rc<PanelState>, ui: &DbUi) {
         update_buttons(ui);
         let job = ui.def_job.borrow_mut().take();
         let msg = match job {
-            Some(j) => format!("定义已执行（{} 条语句）", j.total),
-            None => "定义已执行".to_string(),
+            Some(j) => trf!("定义已执行（{v0} 条语句）", v0 = j.total),
+            None => tr("定义已执行").to_string(),
         };
         if let Some(j) = job {
             if let Some(tab) = find_def_tab(ui, j.tab_id) {
@@ -5475,7 +5472,7 @@ fn do_next(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     }
     ui.busy.set(true);
     update_buttons(ui);
-    set_status(ui, "加载下一页…", false);
+    set_status(ui, tr("加载下一页…"), false);
     // 页码 / 偏移跟着走（阶段 45）：游标往后翻，偏移同步加一页
     let size = tab.page_size.get().max(1);
     tab.offset.set(tab.offset.get() + size);
@@ -5543,25 +5540,25 @@ fn export_payload(tab: &Rc<ResultTab>, fmt: ExportFormat) -> Option<(String, Str
     let (text, done) = match fmt {
         ExportFormat::Csv => (
             tab.grid.to_csv(true),
-            format!("已导出 {} 行 CSV", tab.grid.visible_count()),
+            trf!("已导出 {v0} 行 CSV", v0 = tab.grid.visible_count()),
         ),
         ExportFormat::Sql => {
             let sql = export_sql_text(tab)?;
             // 行数按**实际导出的**算（SQL 导出走原始行，不含未保存的改动）
             let n = tab.grid.original_rows().len();
-            (sql, format!("已导出 {n} 行 INSERT 语句"))
+            (sql, trf!("已导出 {n} 行 INSERT 语句", n = n))
         }
         ExportFormat::Json => (
             dbexport::to_json(&columns, &rows),
-            format!("已导出 {} 行 JSON", rows.len()),
+            trf!("已导出 {v0} 行 JSON", v0 = rows.len()),
         ),
         ExportFormat::Xml => (
             dbexport::to_xml(&columns, &rows),
-            format!("已导出 {} 行 XML", rows.len()),
+            trf!("已导出 {v0} 行 XML", v0 = rows.len()),
         ),
         ExportFormat::Html => (
             dbexport::to_html(&columns, &rows),
-            format!("已导出 {} 行 HTML", rows.len()),
+            trf!("已导出 {v0} 行 HTML", v0 = rows.len()),
         ),
     };
     Some((text, file_name, done))
@@ -5570,15 +5567,15 @@ fn export_payload(tab: &Rc<ResultTab>, fmt: ExportFormat) -> Option<(String, Str
 /// 导出当前结果为某种格式（弹文件保存框）。
 fn do_export(tab: &Rc<ResultTab>, fmt: ExportFormat) {
     let Some((text, file_name, done)) = export_payload(tab, fmt) else {
-        tab.status.set_text("没有可导出的数据");
+        tab.status.set_text(tr("没有可导出的数据"));
         return;
     };
-    let title = format!("导出为 {}", fmt.label());
+    let title = trf!("导出为 {v0}", v0 = fmt.label());
     let mut b = gtk::FileChooserNative::builder()
         .title(&title)
         .action(gtk::FileChooserAction::Save)
-        .accept_label("导出")
-        .cancel_label("取消")
+        .accept_label(tr("导出"))
+        .cancel_label(tr("取消"))
         .modal(true);
     b = b.transient_for(&tab.win);
     let ch = b.build();
@@ -5589,7 +5586,7 @@ fn do_export(tab: &Rc<ResultTab>, fmt: ExportFormat) {
             if let Some(f) = c.file() {
                 if let Some(p) = f.path() {
                     if let Err(e) = std::fs::write(&p, text.as_bytes()) {
-                        tab2.status.set_text(&format!("导出失败：{e}"));
+                        tab2.status.set_text(&trf!("导出失败：{e}", e = e));
                     } else {
                         tab2.status.set_text(&done);
                     }
@@ -5646,7 +5643,7 @@ fn do_cancel(st: &Rc<PanelState>, ui: &DbUi) {
         return;
     }
     ui.btn_cancel.set_sensitive(false);
-    set_status(ui, "正在取消…", false);
+    set_status(ui, tr("正在取消…"), false);
     if let Some(tx) = st.tx.borrow().as_ref() {
         let _ = tx.send(WorkerCmd::DbCancel);
     }
@@ -5660,7 +5657,7 @@ fn send_cmd(st: &Rc<PanelState>, ui: &DbUi, cmd: WorkerCmd) {
     };
     if !ok {
         ui.busy.set(false);
-        set_status(ui, "发送命令失败（worker 已退出）", true);
+        set_status(ui, tr("发送命令失败（worker 已退出）"), true);
         update_buttons(ui);
     }
 }
@@ -5701,7 +5698,7 @@ pub fn on_import_csv_path(st: &Rc<PanelState>, schema: &str, table: &str, path: 
         let slot = st.db_ui.borrow();
         let Some(ui) = slot.as_ref() else { return };
         if !ui.connected.get() {
-            set_status(ui, "还没连上数据库，没法导入", true);
+            set_status(ui, tr("还没连上数据库，没法导入"), true);
             return;
         }
     }
@@ -5713,7 +5710,7 @@ pub fn on_import_csv_path(st: &Rc<PanelState>, schema: &str, table: &str, path: 
         Err(e) => {
             let slot = st2.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
-            set_status(ui, &format!("导入失败：{e}"), true);
+            set_status(ui, &trf!("导入失败：{e}", e = e), true);
             return;
         }
     };
@@ -5741,7 +5738,7 @@ pub fn on_import_csv_path(st: &Rc<PanelState>, schema: &str, table: &str, path: 
             },
         },
     );
-    set_status(ui, "正在读取表结构…", false);
+    set_status(ui, tr("正在读取表结构…"), false);
 }
 
 /// 列信息到手 → 弹字段映射对话框。
@@ -5761,7 +5758,7 @@ fn show_import_mapping(
         .map(|c| (c.name.clone(), dbmeta::ddl_type(c)))
         .collect();
     if table_cols.is_empty() {
-        set_status(ui, &format!("表 {schema}.{table} 没有列，导不进去"), true);
+        set_status(ui, &trf!("表 {schema}.{table} 没有列，导不进去", schema = schema, table = table), true);
         return;
     }
     // 预先算好「列下标 → (列名, 类型)」：映射回调是 `'static` 闭包，
@@ -5777,7 +5774,7 @@ fn show_import_mapping(
         let parsed = match dbcsv::parse_csv(text, opts.separator) {
             Ok(t) => t,
             Err(e) => {
-                set_status(ui, &format!("导入失败：{e}"), true);
+                set_status(ui, &trf!("导入失败：{e}", e = e), true);
                 return;
             }
         };
@@ -5785,7 +5782,7 @@ fn show_import_mapping(
             (parsed[0].clone(), parsed[1..].to_vec())
         } else {
             let width = parsed.first().map(|r| r.len()).unwrap_or(0);
-            ((1..=width).map(|i| format!("第 {i} 列")).collect(), parsed.clone())
+            ((1..=width).map(|i| trf!("第 {i} 列", i = i)).collect(), parsed.clone())
         };
         let map = dbcsv::auto_map(
             &header,
@@ -5838,7 +5835,7 @@ fn do_import(
         src.push(*csv_idx);
     }
     if names.is_empty() {
-        set_status(ui, "没有映射任何字段，没法导入", true);
+        set_status(ui, tr("没有映射任何字段，没法导入"), true);
         return;
     }
     // 按目标列对齐每一行
@@ -5856,7 +5853,7 @@ fn do_import(
         rows.push(row);
     }
     if rows.is_empty() {
-        set_status(ui, "文件里没有数据行", true);
+        set_status(ui, tr("文件里没有数据行"), true);
         return;
     }
     let proto = current_proto(ui);
@@ -5871,7 +5868,7 @@ fn do_import(
     let id = next_id(ui);
     ui.pending.borrow_mut().insert(id, PendingReq::ImportRun { rows: rows.len() });
     ui.busy.set(true);
-    set_status(ui, &format!("正在导入 {} 行到 {schema}.{table}…", rows.len()), false);
+    set_status(ui, &trf!("正在导入 {v0} 行到 {schema}.{table}…", schema = schema, table = table, v0 = rows.len()), false);
     send_cmd(st, ui, WorkerCmd::DbImport { id, batch });
 }
 
@@ -5892,12 +5889,12 @@ pub fn on_import_result(
     update_buttons(ui);
     match result {
         Ok(rep) => {
-            *ui.last_import.borrow_mut() = Some((true, format!("{} 行", rep.inserted)));
-            set_status(ui, &format!("导入完成：{} 行", rep.inserted), false);
+            *ui.last_import.borrow_mut() = Some((true, trf!("{v0} 行", v0 = rep.inserted)));
+            set_status(ui, &trf!("导入完成：{v0} 行", v0 = rep.inserted), false);
             dialogs::info(
                 Some(&ui.win),
-                "导入完成",
-                &format!("已导入 {} 行。", rep.inserted),
+                tr("导入完成"),
+                &trf!("已导入 {v0} 行。", v0 = rep.inserted),
             );
             // 导入完刷新对象树（表里的行数变了）。
             // **用 reload() 不用 clear()**：clear() 会把根节点也清掉，
@@ -5906,25 +5903,22 @@ pub fn on_import_result(
         }
         Err(e) => {
             *ui.last_import.borrow_mut() = Some((false, e.clone()));
-            set_status(ui, &format!("导入失败：{e}"), true);
+            set_status(ui, &trf!("导入失败：{e}", e = e), true);
             // 用普通 Dialog（不是 `AlertDialog`）：要留住引用才能**主动关掉**
             // ——它不关就一直浮在界面上（挡住截图、挡住用户点别的）。
             // 错误文本用可选择的 Label，用户要能选中复制去查资料。
             let dlg = gtk::Dialog::with_buttons(
-                Some("导入失败"),
+                Some(tr("导入失败")),
                 Some(&ui.win),
                 gtk::DialogFlags::MODAL,
-                &[("关闭", gtk::ResponseType::Close)],
+                &[(tr("关闭"), gtk::ResponseType::Close)],
             );
             let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
             body.set_margin_start(12);
             body.set_margin_end(12);
             body.set_margin_top(10);
             body.set_margin_bottom(10);
-            let lbl = gtk::Label::new(Some(&format!(
-                "导入没有完成，已全部回滚（数据库里一行都没进）。\n\n{e}\n\n\
-                 本次共处理 {rows} 行。"
-            )));
+            let lbl = gtk::Label::new(Some(&trf!("导入没有完成，已全部回滚（数据库里一行都没进）。\n\n{e}\n\n本次共处理 {rows} 行。", e = e, rows = rows)));
             lbl.set_wrap(true);
             lbl.set_selectable(true);
             lbl.set_xalign(0.0);
@@ -5960,7 +5954,7 @@ pub fn open_er(st: &Rc<PanelState>, schema: &str, table: Option<&str>) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     if !ui.connected.get() {
-        set_status(ui, "尚未连接数据库", true);
+        set_status(ui, tr("尚未连接数据库"), true);
         return;
     }
     let tab = build_er_tab(st, ui, schema, table);
@@ -6010,7 +6004,7 @@ fn build_er_tab(
     });
 
     ui.er_tabs.borrow_mut().push(Rc::clone(&tab));
-    view.set_status("正在读表结构…");
+    view.set_status(tr("正在读表结构…"));
     tab
 }
 
@@ -6019,8 +6013,8 @@ fn mount_er_tab(ui: &DbUi, tab: &Rc<ErTab>) {
     let schema = tab.schema.clone();
     // 页签标题 + 关闭按钮（跟表结构页签一个样式）
     let title = match &tab.table {
-        Some(t) => format!("ER 图：{schema}.{t}"),
-        None => format!("ER 图：{schema}"),
+        Some(t) => trf!("ER 图：{schema}.{t}", schema = schema, t = t),
+        None => trf!("ER 图：{schema}", schema = schema),
     };
     let label = gtk::Label::new(Some(&title));
     let close = gtk::Button::new();
@@ -6030,7 +6024,7 @@ fn mount_er_tab(ui: &DbUi, tab: &Rc<ErTab>) {
     close.set_child(Some(&img));
     // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
     crate::a11y::watch_tooltip(&close);
-    close.set_tooltip_text(Some("关闭这个页签"));
+    close.set_tooltip_text(Some(tr("关闭这个页签")));
     let tab_head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tab_head.append(&label);
     tab_head.append(&close);
@@ -6159,7 +6153,7 @@ pub fn start_export(
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     if !ui.connected.get() {
-        set_status(ui, "还没连上数据库，没法导出", true);
+        set_status(ui, tr("还没连上数据库，没法导出"), true);
         return;
     }
     let id = next_id(ui);
@@ -6177,7 +6171,7 @@ pub fn start_export(
     );
     set_status(
         ui,
-        &format!("正在导出 {schema}.{table} 到 {path}…"),
+        &trf!("正在导出 {schema}.{table} 到 {path}…", schema = schema, table = table, path = path),
         false,
     );
 }
@@ -6197,9 +6191,9 @@ pub fn on_export(
         Ok(rep) => {
             // ⚠️ **不弹窗**：导完了只在状态栏写一句（AGENTS.md 的规矩：
             // 传完 / 导完不弹窗，桌面没通知守护进程时弹窗等于"每来一次弹一次"）。
-            set_status(ui, &format!("已导出 {} 行到 {}", rep.rows, rep.path), false);
+            set_status(ui, &trf!("已导出 {v0} 行到 {v1}", v0 = rep.rows, v1 = rep.path), false);
         }
-        Err(e) => set_status(ui, &format!("导出失败：{e}"), true),
+        Err(e) => set_status(ui, &trf!("导出失败：{e}", e = e), true),
     }
 }
 
@@ -6222,11 +6216,11 @@ pub fn on_er(
         Ok(g) => {
             let n = g.tables.len();
             tab.view.set_graph(g);
-            set_status(ui, &format!("ER 图已就绪（{n} 张表）"), false);
+            set_status(ui, &trf!("ER 图已就绪（{n} 张表）", n = n), false);
         }
         Err(e) => {
-            tab.view.set_status(&format!("画 ER 图失败：{e}"));
-            set_status(ui, &format!("画 ER 图失败：{e}"), true);
+            tab.view.set_status(&trf!("画 ER 图失败：{e}", e = e));
+            set_status(ui, &trf!("画 ER 图失败：{e}", e = e), true);
         }
     }
 }
@@ -6258,7 +6252,7 @@ fn is_cancel(err: &str) -> bool {
     low.contains("canceling statement")
         || low.contains("cancelled")
         || low.contains("canceled")
-        || err.contains("已取消")
+        || err.contains(tr("已取消"))
 }
 
 /* ---------------- 数据编辑 ---------------- */
@@ -6279,11 +6273,11 @@ fn do_edit(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
 /// 插入行 / 删除行 / 编辑都走这一关，提示文案统一。
 fn check_editable(ui: &DbUi, tab: &Rc<ResultTab>) -> bool {
     let Some(target) = tab.target.borrow().clone() else {
-        set_status(ui, "这个结果不是表数据，不能编辑", true);
+        set_status(ui, tr("这个结果不是表数据，不能编辑"), true);
         return false;
     };
     if target.is_view {
-        set_status(ui, "视图不能编辑（没有可直接更新的基表）", true);
+        set_status(ui, tr("视图不能编辑（没有可直接更新的基表）"), true);
         return false;
     }
     true
@@ -6338,7 +6332,7 @@ fn do_delete_rows(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     }
     let rows = tab.grid.selected_display_rows();
     if rows.is_empty() {
-        set_status(ui, "先选中要删除的行", true);
+        set_status(ui, tr("先选中要删除的行"), true);
         return;
     }
     delete_rows_at(st, ui, tab, rows);
@@ -6362,8 +6356,8 @@ fn apply_row_action(ui: &DbUi, tab: &Rc<ResultTab>, action: RowAction) {
     match action {
         RowAction::Insert => {
             tab.grid.insert_row();
-            tab.status.set_text("已插入一行（没填的列用数据库默认值），填完点「保存修改」");
-            set_status(ui, "已插入一行，填完点「保存修改」", false);
+            tab.status.set_text(tr("已插入一行（没填的列用数据库默认值），填完点「保存修改」"));
+            set_status(ui, tr("已插入一行，填完点「保存修改」"), false);
         }
         RowAction::Delete(rows) => {
             // ⚠️ **倒着删**：删掉一行会让后面的显示行号往前挪，正着删会漏删。
@@ -6377,11 +6371,11 @@ fn apply_row_action(ui: &DbUi, tab: &Rc<ResultTab>, action: RowAction) {
                 }
             }
             if n == 0 {
-                tab.status.set_text("没有选中可删除的行");
-                set_status(ui, "先选中要删除的行", true);
+                tab.status.set_text(tr("没有选中可删除的行"));
+                set_status(ui, tr("先选中要删除的行"), true);
             } else {
-                tab.status.set_text(&format!("已标记 {n} 行删除，点「保存修改」才真正删"));
-                set_status(ui, &format!("已标记 {n} 行删除，点「保存修改」才真正删"), false);
+                tab.status.set_text(&trf!("已标记 {n} 行删除，点「保存修改」才真正删", n = n));
+                set_status(ui, &trf!("已标记 {n} 行删除，点「保存修改」才真正删", n = n), false);
             }
         }
     }
@@ -6400,7 +6394,7 @@ fn do_save(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     let inserts = tab.grid.pending_inserts();
     let deletes = tab.grid.pending_deletes();
     if edits.is_empty() && inserts.is_empty() && deletes.is_empty() {
-        set_status(ui, "没有要保存的改动", true);
+        set_status(ui, tr("没有要保存的改动"), true);
         return;
     }
     let columns = tab.grid.columns();
@@ -6423,7 +6417,7 @@ fn do_save(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
                 let _ = i;
             }
             Err(e) => {
-                set_status(ui, &format!("改动有问题，未提交：{e}"), true);
+                set_status(ui, &trf!("改动有问题，未提交：{e}", e = e), true);
                 return;
             }
         }
@@ -6440,26 +6434,26 @@ fn do_save(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     ) {
         Ok(v) => sqls.extend(v),
         Err(e) => {
-            set_status(ui, &format!("改动有问题，未提交：{e}"), true);
+            set_status(ui, &trf!("改动有问题，未提交：{e}", e = e), true);
             return;
         }
     }
     for src in &deletes {
         let Some(orig) = rows.get(*src) else {
-            set_status(ui, &format!("第 {} 行不在结果集里", src + 1), true);
+            set_status(ui, &trf!("第 {v0} 行不在结果集里", v0 = src + 1), true);
             return;
         };
         let (pk_cond, fallback) = dbmeta::row_condition(&columns, &pk, orig);
         match dbmeta::build_delete(proto, &target.schema, &target.table, &pk_cond, &fallback) {
             Ok(sql) => sqls.push(sql),
             Err(e) => {
-                set_status(ui, &format!("改动有问题，未提交：{e}"), true);
+                set_status(ui, &trf!("改动有问题，未提交：{e}", e = e), true);
                 return;
             }
         }
     }
     if sqls.is_empty() {
-        set_status(ui, "没有要保存的改动", true);
+        set_status(ui, tr("没有要保存的改动"), true);
         return;
     }
     *ui.save_queue.borrow_mut() = sqls.into_iter().collect();
@@ -6470,7 +6464,7 @@ fn do_save(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     });
     ui.busy.set(true);
     update_buttons(ui);
-    set_status(ui, "正在保存修改…", false);
+    set_status(ui, tr("正在保存修改…"), false);
     send_next_save(st, ui);
 }
 
@@ -6541,14 +6535,14 @@ pub fn on_connected(st: &Rc<PanelState>, result: Result<String, String>) {
                 // 连接早就建好了（阶段 13：连接信息在连接管理器 / 会话树里建），
                 // 这里**不再落配置**——省得"连上了才算数"，用户配错的连接也会
                 // 被悄悄存下来。
-                let msg = format!("已连接：{label}");
+                let msg = trf!("已连接：{label}", label = label);
                 set_status(ui, &msg, false);
             }
             Err(e) => {
                 ui.connected.set(false);
                 *st.db_active.borrow_mut() = None;
                 clear_tabs(ui);
-                let msg = format!("连接失败：{e}");
+                let msg = trf!("连接失败：{e}", e = e);
                 set_status(ui, &msg, true);
                 fail = Some(msg);
             }
@@ -6594,11 +6588,8 @@ pub fn on_need_password(st: &Rc<PanelState>, detail: String) {
     };
     let key = ui.session_key.clone();
     let name = p.name.clone();
-    let msg = format!(
-        "{detail}\n\n请输入这条连接的数据库密码（{}@{}:{}/{}）。",
-        p.user, p.host, p.port, p.dbname
-    );
-    set_status(ui, "数据库要求密码：请在上面对话框里输入", false);
+    let msg = trf!("{detail}\n\n请输入这条连接的数据库密码（{v0}@{v1}:{v2}/{v3}）。", detail = detail, v0 = p.user, v1 = p.host, v2 = p.port, v3 = p.dbname);
+    set_status(ui, tr("数据库要求密码：请在上面对话框里输入"), false);
     update_buttons(ui);
     let st2 = Rc::clone(st);
     // ⚠️ 父窗口用**主窗口**：工作台页面这时还没挂（没连上不许显示），
@@ -6607,7 +6598,7 @@ pub fn on_need_password(st: &Rc<PanelState>, detail: String) {
     let parent = st.topwin();
     dialogs::ask_password_remember(
         parent.as_ref(),
-        "数据库需要密码",
+        tr("数据库需要密码"),
         &msg,
         p.remember,
         move |pw, keep| {
@@ -6623,13 +6614,13 @@ pub fn on_need_password(st: &Rc<PanelState>, detail: String) {
                     // 密码」，并先在顶栏「凭据库…」里解锁…）」——用户自己点的取消，
                     // 知道自己要干什么 ⇒ 这段既占地方（顶栏被撑成两行，把下面的
                     // 内容顶下去），又是说教。
-                    set_status(ui, "没输入密码，连接已取消。", true);
+                    set_status(ui, tr("没输入密码，连接已取消。"), true);
                     update_buttons(ui);
                 }
                 // ⚠️ 页面还没挂（没连上不许显示工作台）⇒ 状态行用户看不见
                 //    ⇒ 弹一句，别让"点了没反应"。
                 //    ⚠️ 必须在**释放借用之后**调（它自己还要借 `st.db_ui`）。
-                report_unmounted(&st2, "没输入密码，连接已取消。", false);
+                report_unmounted(&st2, tr("没输入密码，连接已取消。"), false);
                 return;
             };
             let pw = zeroize::Zeroizing::new(pw);
@@ -6659,29 +6650,29 @@ fn remember_password(key: &str, name: &str, pw: &str) {
     if !crate::vault::exists() {
         dialogs::info(
             None,
-            "密码没有保存",
-            "凭据库还没建，这次的密码没有存住（连接不受影响）。\n\n\
+            tr("密码没有保存"),
+            tr("凭据库还没建，这次的密码没有存住（连接不受影响）。\n\n\
              凭据库是本机存连接密码的地方（用主密码加密）。\
              去顶栏菜单「凭据库…」设个主密码建一个，\
-             之后连库就能记住密码。",
+             之后连库就能记住密码。"),
         );
         return;
     }
     if !crate::vault::is_unlocked() {
         dialogs::info(
             None,
-            "密码没有保存",
-            "凭据库没解锁，这次的密码没有存住（连接不受影响）。\n\n\
-             去顶栏菜单「凭据库…」输入主密码解锁，再连一次就能记住。",
+            tr("密码没有保存"),
+            tr("凭据库没解锁，这次的密码没有存住（连接不受影响）。\n\n\
+             去顶栏菜单「凭据库…」输入主密码解锁，再连一次就能记住。"),
         );
         return;
     }
     if !crate::vault::put(&dbstore::vault_name(key, name), pw) {
         dialogs::info(
             None,
-            "密码没有保存",
-            "写入凭据库失败（凭据库可能已满或被占用）。\n\
-             这次的连接不受影响，下次连还要再输一次。",
+            tr("密码没有保存"),
+            tr("写入凭据库失败（凭据库可能已满或被占用）。\n\
+             这次的连接不受影响，下次连还要再输一次。"),
         );
         return;
     }
@@ -6790,12 +6781,12 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
     // 于表浏览）——SELECT 出一堆宽列时也用得上。
     if !rows.columns.is_empty() {
     }
-    let mut msg = format!("{} 行", rows.rows.len());
+    let mut msg = trf!("{v0} 行", v0 = rows.rows.len());
     if !rows.done {
-        msg.push_str("（还有更多）");
+        msg.push_str(tr("（还有更多）"));
     }
     if rows.truncated {
-        msg.push_str("（已达取数上限）");
+        msg.push_str(tr("（已达取数上限）"));
     }
     msg.push_str(&format!(" · {}", rows.elapsed_ms));
     tab.status.set_text(&msg);
@@ -6806,7 +6797,7 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
     // 面包屑（阶段 43）：列齐了才知道写"N 字段"
     update_crumbs(ui, &tab);
     update_buttons(ui);
-    set_status(ui, &format!("查询完成：{msg}"), false);
+    set_status(ui, &trf!("查询完成：{msg}", msg = msg), false);
 }
 
 pub fn on_error(st: &Rc<PanelState>, err: String) {
@@ -6816,13 +6807,13 @@ pub fn on_error(st: &Rc<PanelState>, err: String) {
     ui.save_queue.borrow_mut().clear();
     *ui.save_job.borrow_mut() = None;
     update_buttons(ui);
-    if err.contains("MySQL 连接已关闭") {
+    if err.contains(tr("MySQL 连接已关闭")) {
         // MySQL 首版取消 = 关会话：把"已断开、请重连"说清楚，别只说已取消
         set_status(ui, &err, true);
     } else if is_cancel(&err) {
-        set_status(ui, "已取消", false);
+        set_status(ui, tr("已取消"), false);
     } else {
-        set_status(ui, &format!("失败：{err}"), true);
+        set_status(ui, &trf!("失败：{err}", err = err), true);
     }
 }
 
@@ -6836,7 +6827,7 @@ pub fn on_closed(st: &Rc<PanelState>) {
     clear_tabs(ui);
     update_buttons(ui);
     // 阶段 22：工作台里没有「连接」按钮了，断开后得告诉用户**怎么再连上**
-    set_status(ui, "已断开（再连：双击会话树 / 连接管理器里的这条连接）", false);
+    set_status(ui, tr("已断开（再连：双击会话树 / 连接管理器里的这条连接）"), false);
 }
 
 /// 元数据应答。
@@ -6856,7 +6847,7 @@ pub fn on_meta(
             Err(e) => {
                 // 占位子节点留在树上会一直显示"载入中…"，改成失败提示并允许重试
                 ui.tree.mark_failed(&r, &e);
-                set_status(ui, &format!("读元数据失败：{e}"), true);
+                set_status(ui, &trf!("读元数据失败：{e}", e = e), true);
             }
         },
         PendingReq::ImportPrep {
@@ -6868,8 +6859,8 @@ pub fn on_meta(
             Ok(DbMetaPayload::Columns(cols)) => {
                 show_import_mapping(st, &schema, &table, &text, &cols, auto);
             }
-            Ok(_) => set_status(ui, "读表结构返回的格式不对", true),
-            Err(e) => set_status(ui, &format!("读表结构失败：{e}"), true),
+            Ok(_) => set_status(ui, tr("读表结构返回的格式不对"), true),
+            Err(e) => set_status(ui, &trf!("读表结构失败：{e}", e = e), true),
         },
         PendingReq::ObjectStats { schema, table } => match result {
             Ok(DbMetaPayload::ObjectStats(Some(stats))) => {
@@ -6880,22 +6871,22 @@ pub fn on_meta(
                     Some(g) => fill_object_stats_into(&g, &stats),
                     None => fill_object_stats(ui, &stats),
                 }
-                set_status(ui, &format!("已读取对象属性：{schema}.{table}"), false);
+                set_status(ui, &trf!("已读取对象属性：{schema}.{table}", schema = schema, table = table), false);
             }
             Ok(DbMetaPayload::ObjectStats(None)) => {
-                set_status(ui, &format!("对象不存在：{schema}.{table}"), true);
+                set_status(ui, &trf!("对象不存在：{schema}.{table}", schema = schema, table = table), true);
             }
-            Ok(_) => set_status(ui, "对象属性格式不对", true),
-            Err(e) => set_status(ui, &format!("读对象属性失败：{e}"), true),
+            Ok(_) => set_status(ui, tr("对象属性格式不对"), true),
+            Err(e) => set_status(ui, &trf!("读对象属性失败：{e}", e = e), true),
         },
         PendingReq::Search => match result {
             Ok(DbMetaPayload::SearchHits(hits)) => {
                 let n = hits.len();
-                set_status(ui, &format!("搜索完成：找到 {n} 个对象"), false);
+                set_status(ui, &trf!("搜索完成：找到 {n} 个对象", n = n), false);
                 show_search_results(st, ui, hits);
             }
-            Ok(_) => set_status(ui, "搜索结果格式不对", true),
-            Err(e) => set_status(ui, &format!("搜索失败：{e}"), true),
+            Ok(_) => set_status(ui, tr("搜索结果格式不对"), true),
+            Err(e) => set_status(ui, &trf!("搜索失败：{e}", e = e), true),
         },
         PendingReq::Struct { tab_id, part } => {
             let Some(tab) = find_struct_tab(ui, tab_id) else { return };
@@ -6907,8 +6898,8 @@ pub fn on_meta(
                             vec![
                                 Some(c.name.clone()),
                                 Some(dbmeta::ddl_type(c)),
-                                Some(if c.nullable { "是".into() } else { "否".into() }),
-                                Some(if c.is_pk { "是".into() } else { "否".into() }),
+                                Some(if c.nullable { tr("是").into() } else { tr("否").into() }),
+                                Some(if c.is_pk { tr("是").into() } else { tr("否").into() }),
                                 // **没有默认值就显示空**，别让网格显示成 "NULL"：
                                 // 那是 SQL 的 NULL 字面量，保存时会被当成"默认值 =
                                 // NULL"，给用户凭空加一条 SET DEFAULT。
@@ -6920,13 +6911,13 @@ pub fn on_meta(
                         .collect();
                     tab.fields.set_data(dbgrid::GridData {
                         columns: vec![
-                            "字段".into(),
-                            "类型".into(),
-                            "可空".into(),
-                            "主键".into(),
-                            "默认值".into(),
+                            tr("字段").into(),
+                            tr("类型").into(),
+                            tr("可空").into(),
+                            tr("主键").into(),
+                            tr("默认值").into(),
                             // 「操作」列（阶段 50）：行内操作入口（复制 / 删除）
-                            "操作".into(),
+                            tr("操作").into(),
                         ],
                         types: vec![ColType::Text; 6],
                         rows,
@@ -6955,12 +6946,12 @@ pub fn on_meta(
                             vec![
                                 Some(i.name.clone()),
                                 Some(i.columns.join(", ")),
-                                Some(if i.unique { "是".into() } else { "否".into() }),
+                                Some(if i.unique { tr("是").into() } else { tr("否").into() }),
                             ]
                         })
                         .collect();
                     tab.indexes.set_data(dbgrid::GridData {
-                        columns: vec!["索引".into(), "列".into(), "唯一".into()],
+                        columns: vec![tr("索引").into(), tr("列").into(), tr("唯一").into()],
                         types: vec![ColType::Text; 3],
                         rows,
                         pk: vec![],
@@ -6982,10 +6973,10 @@ pub fn on_meta(
                         .collect();
                     tab.fks.set_data(dbgrid::GridData {
                         columns: vec![
-                            "约束".into(),
-                            "列".into(),
-                            "引用表".into(),
-                            "引用列".into(),
+                            tr("约束").into(),
+                            tr("列").into(),
+                            tr("引用表").into(),
+                            tr("引用列").into(),
                         ],
                         types: vec![ColType::Text; 4],
                         rows,
@@ -7012,15 +7003,15 @@ pub fn on_meta(
                         })
                         .collect();
                     tab.triggers.set_data(dbgrid::GridData {
-                        columns: vec!["触发器".into(), "时机".into(), "事件".into()],
+                        columns: vec![tr("触发器").into(), tr("时机").into(), tr("事件").into()],
                         types: vec![ColType::Text; 3],
                         rows,
                         pk: vec![],
                     });
                 }
                 (_, Err(e)) => {
-                    tab.status.set_text(&format!("读{}失败：{e}", part.label()));
-                    set_status(ui, &format!("读{}失败：{e}", part.label()), true);
+                    tab.status.set_text(&trf!("读{v0}失败：{e}", e = e, v0 = part.label()));
+                    set_status(ui, &trf!("读{v0}失败：{e}", e = e, v0 = part.label()), true);
                 }
                 _ => {}
             }
@@ -7033,12 +7024,12 @@ pub fn on_meta(
                     tab.text.buffer().set_text(&text);
                     tab.hl.apply();
                     let n = text.chars().count();
-                    tab.status.set_text(&format!("{n} 个字符"));
+                    tab.status.set_text(&trf!("{n} 个字符", n = n));
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tab.status.set_text(&format!("读定义失败：{e}"));
-                    set_status(ui, &format!("读定义失败：{e}"), true);
+                    tab.status.set_text(&trf!("读定义失败：{e}", e = e));
+                    set_status(ui, &trf!("读定义失败：{e}", e = e), true);
                 }
             }
         }
@@ -7084,8 +7075,8 @@ pub fn on_meta(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tab.status.set_text(&format!("读表结构失败：{e}"));
-                    set_status(ui, &format!("读表结构失败：{e}"), true);
+                    tab.status.set_text(&trf!("读表结构失败：{e}", e = e));
+                    set_status(ui, &trf!("读表结构失败：{e}", e = e), true);
                 }
             }
         }
@@ -7105,8 +7096,8 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
             update_buttons(ui);
             let ok = result.is_ok();
             let msg = match &result {
-                Ok(_) => "DDL 已执行".to_string(),
-                Err(e) => format!("DDL 执行失败：{e}"),
+                Ok(_) => tr("DDL 已执行").to_string(),
+                Err(e) => trf!("DDL 执行失败：{e}", e = e),
             };
             if let Some(tab) = find_struct_tab(ui, tab_id) {
                 tab.status.set_text(&msg);
@@ -7127,7 +7118,7 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
             if !ok {
                 // 失败：剩下的不发了；事务里要回滚
                 tab.sql_queue.borrow_mut().clear();
-                let msg = format!("改表结构失败：{}", err.unwrap_or_default());
+                let msg = trf!("改表结构失败：{v0}", v0 = err.unwrap_or_default());
                 if tab.in_tx.get() {
                     tab.in_tx.set(false);
                     // PG 的事务一旦有语句失败就进入 aborted 状态，不显式
@@ -7157,7 +7148,7 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
             tab.in_tx.set(false);
             ui.busy.set(false);
             update_buttons(ui);
-            let msg = "表结构已改".to_string();
+            let msg = tr("表结构已改").to_string();
             tab.status.set_text(&msg);
             set_status(ui, &msg, false);
             request_struct(st, ui, &tab, StructPart::Fields);
@@ -7178,8 +7169,8 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
             update_buttons(ui);
             let ok = result.is_ok();
             let msg = match &result {
-                Ok(_) => format!("{what}，对象树已刷新"),
-                Err(e) => format!("{what}失败：{e}"),
+                Ok(_) => trf!("{what}，对象树已刷新", what = what),
+                Err(e) => trf!("{what}失败：{e}", what = what, e = e),
             };
             set_status(ui, &msg, !ok);
             // 成功才刷新（失败刷新没意义）
@@ -7193,8 +7184,8 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
             update_buttons(ui);
             let ok = result.is_ok();
             let msg = match &result {
-                Ok(n) => format!("执行完成（{n} 行）"),
-                Err(e) => format!("执行失败：{e}"),
+                Ok(n) => trf!("执行完成（{n} 行）", n = n),
+                Err(e) => trf!("执行失败：{e}", e = e),
             };
             set_status(ui, &msg, !ok);
             return;
@@ -7211,8 +7202,8 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
                     update_buttons(ui);
                     let job = ui.def_job.borrow_mut().take();
                     let msg = match &job {
-                        Some(j) => format!("定义已执行（{} 条语句）", j.total),
-                        None => "定义已执行".to_string(),
+                        Some(j) => trf!("定义已执行（{v0} 条语句）", v0 = j.total),
+                        None => tr("定义已执行").to_string(),
                     };
                     if let Some(j) = &job {
                         if let Some(tab) = find_def_tab(ui, j.tab_id) {
@@ -7229,7 +7220,7 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
                     *ui.def_job.borrow_mut() = None;
                     ui.busy.set(false);
                     update_buttons(ui);
-                    let msg = format!("执行定义失败：{e}（已执行的 {sent} 条可能已经生效）");
+                    let msg = trf!("执行定义失败：{e}（已执行的 {sent} 条可能已经生效）", e = e, sent = sent);
                     if let Some(tab) = find_def_tab(ui, tab_id) {
                         tab.status.set_text(&msg);
                     }
@@ -7265,7 +7256,7 @@ pub fn on_exec(st: &Rc<PanelState>, id: u64, result: Result<u64, String>) {
                 },
             );
             send_cmd(st, ui, WorkerCmd::DbTx { id: txid, op: DbTxOp::Rollback });
-            set_status(ui, &format!("保存失败，已回滚：{e}"), true);
+            set_status(ui, &trf!("保存失败，已回滚：{e}", e = e), true);
             update_buttons(ui);
         }
     }
@@ -7294,14 +7285,14 @@ pub fn on_tx(st: &Rc<PanelState>, id: u64, op: DbTxOp, result: Result<(), String
                 if let Some(action) = tab.pending_row_action.take() {
                     apply_row_action(ui, &tab, action);
                 } else {
-                    tab.status.set_text("编辑中（改动未提交）");
-                    set_status(ui, "已进入编辑模式：改完点「保存修改」提交，或「放弃」回滚", false);
+                    tab.status.set_text(tr("编辑中（改动未提交）"));
+                    set_status(ui, tr("已进入编辑模式：改完点「保存修改」提交，或「放弃」回滚"), false);
                 }
             }
             Err(e) => {
                 ui.busy.set(false);
                 update_buttons(ui);
-                set_status(ui, &format!("开启事务失败：{e}"), true);
+                set_status(ui, &trf!("开启事务失败：{e}", e = e), true);
             }
         },
         DbTxOp::Commit => {
@@ -7314,8 +7305,8 @@ pub fn on_tx(st: &Rc<PanelState>, id: u64, op: DbTxOp, result: Result<(), String
                     update_foot(ui, &tab);
                     let affected = ui.save_job.borrow().as_ref().map(|j| j.affected).unwrap_or(0);
                     *ui.save_job.borrow_mut() = None;
-                    tab.status.set_text(&format!("已提交（{affected} 行）"));
-                    set_status(ui, &format!("已提交修改（{affected} 行）"), false);
+                    tab.status.set_text(&trf!("已提交（{affected} 行）", affected = affected));
+                    set_status(ui, &trf!("已提交修改（{affected} 行）", affected = affected), false);
                     // 重新查一次表：**插入行的自增 id、没填的列的默认值，只有
                     // 数据库知道**（本地拼不出来）。不刷新的话用户看到的是
                     // 一行 NULL，不是刚插进去的那条记录。
@@ -7325,7 +7316,7 @@ pub fn on_tx(st: &Rc<PanelState>, id: u64, op: DbTxOp, result: Result<(), String
                 }
                 Err(e) => {
                     leave_edit_mode(&tab);
-                    set_status(ui, &format!("提交失败：{e}"), true);
+                    set_status(ui, &trf!("提交失败：{e}", e = e), true);
                     // 存失败 ⇒ 这次关闭作废（数据还在页面上，用户能救）
                     *ui.save_chain.borrow_mut() = None;
                     super::closeguard::note_save_failed();
@@ -7341,10 +7332,10 @@ pub fn on_tx(st: &Rc<PanelState>, id: u64, op: DbTxOp, result: Result<(), String
                     leave_edit_mode(&tab);
                     // 底栏的「N 项待保存」归零（阶段 45）
                     update_foot(ui, &tab);
-                    tab.status.set_text("已放弃修改");
-                    set_status(ui, "已放弃修改（事务已回滚）", false);
+                    tab.status.set_text(tr("已放弃修改"));
+                    set_status(ui, tr("已放弃修改（事务已回滚）"), false);
                 }
-                Err(e) => set_status(ui, &format!("回滚失败：{e}"), true),
+                Err(e) => set_status(ui, &trf!("回滚失败：{e}", e = e), true),
             }
             update_buttons(ui);
         }
@@ -7407,7 +7398,7 @@ fn apply_filter(
     conds: Vec<dbmeta::FilterCond>,
 ) -> Result<String, String> {
     let Some(target) = tab.target.borrow().clone() else {
-        return Err("这不是表数据页签，用不了数据库过滤条件".to_string());
+        return Err(tr("这不是表数据页签，用不了数据库过滤条件").to_string());
     };
     let m = col_type_map(tab);
     let where_sql = dbmeta::build_where(current_proto(ui), &conds, &m)?;
@@ -7519,7 +7510,7 @@ fn refresh_cond_chips(tab: &Rc<ResultTab>) {
                 img.set_pixel_size(12);
             }
         }
-        del.set_tooltip_text(Some("去掉这个条件"));
+        del.set_tooltip_text(Some(tr("去掉这个条件")));
         {
             // ⚠️ **抓弱引用**：chip 挂在页签上，回调若抓 `Rc<ResultTab>`
             // 就是 `ResultTab → chip → 回调 → ResultTab` 的环，页签永远
@@ -7542,11 +7533,11 @@ fn add_cond_from_bar(tab: &Rc<ResultTab>) {
     let Some(ui) = slot.as_ref() else { return };
     let bar = &tab.cond_bar;
     let Some(column) = bar.col.active_id().map(|s| s.to_string()) else {
-        set_status(ui, "先选一列再加条件", true);
+        set_status(ui, tr("先选一列再加条件"), true);
         return;
     };
     if column.trim().is_empty() {
-        set_status(ui, "先选一列再加条件", true);
+        set_status(ui, tr("先选一列再加条件"), true);
         return;
     }
     let Some(op) = bar
@@ -7554,7 +7545,7 @@ fn add_cond_from_bar(tab: &Rc<ResultTab>) {
         .active_id()
         .and_then(|s| dbmeta::FilterOp::from_label(s.as_str()))
     else {
-        set_status(ui, "先选一个运算符", true);
+        set_status(ui, tr("先选一个运算符"), true);
         return;
     };
     let value = bar.val.text().to_string();
@@ -7573,7 +7564,7 @@ fn add_cond_from_bar(tab: &Rc<ResultTab>) {
         Ok(_) => {
             bar.val.set_text("");
             refresh_cond_chips(tab);
-            set_status(ui, &format!("已加条件：{}", cond_chip_text(&dbmeta::FilterCond {
+            set_status(ui, &trf!("已加条件：{v0}", v0 = cond_chip_text(&dbmeta::FilterCond {
                 join,
                 column: column.clone(),
                 op,
@@ -7597,7 +7588,7 @@ fn remove_cond(tab: &Rc<ResultTab>, idx: usize) {
     match apply_filter(&st, ui, tab, conds) {
         Ok(_) => {
             refresh_cond_chips(tab);
-            set_status(ui, &format!("已去掉条件：{}", cond_chip_text(&gone)), false);
+            set_status(ui, &trf!("已去掉条件：{v0}", v0 = cond_chip_text(&gone)), false);
         }
         Err(e) => set_status(ui, &e, true),
     }
@@ -7609,7 +7600,7 @@ fn set_order(tab: &Rc<ResultTab>, column: &str, asc: bool) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     let Some(target) = tab.target.borrow().clone() else {
-        set_status(ui, "这不是表数据页签，用不了排序", true);
+        set_status(ui, tr("这不是表数据页签，用不了排序"), true);
         return;
     };
     *tab.order_col.borrow_mut() = column.to_string();
@@ -7622,9 +7613,9 @@ fn set_order(tab: &Rc<ResultTab>, column: &str, asc: bool) {
     tab.offset.set(0);
     query_table(&st, ui, tab, &target);
     if ob.is_empty() {
-        set_status(ui, "已去掉排序", false);
+        set_status(ui, tr("已去掉排序"), false);
     } else {
-        set_status(ui, &format!("排序：{ob}"), false);
+        set_status(ui, &trf!("排序：{ob}", ob = ob), false);
     }
 }
 
@@ -7634,7 +7625,7 @@ fn clear_conds(tab: &Rc<ResultTab>) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     let Some(target) = tab.target.borrow().clone() else {
-        set_status(ui, "这不是表数据页签", true);
+        set_status(ui, tr("这不是表数据页签"), true);
         return;
     };
     *tab.filter_conds.borrow_mut() = Vec::new();
@@ -7649,7 +7640,7 @@ fn clear_conds(tab: &Rc<ResultTab>) {
     tab.page.set(1);
     tab.offset.set(0);
     query_table(&st, ui, tab, &target);
-    set_status(ui, "已清掉全部条件与排序", false);
+    set_status(ui, tr("已清掉全部条件与排序"), false);
 }
 
 /// 跳到第 `page` 页（阶段 45）。
@@ -7662,7 +7653,7 @@ fn clear_conds(tab: &Rc<ResultTab>) {
 /// `LIMIT/OFFSET` 可能跟语句里已有的 LIMIT 打架，所以那些页签只能往后翻。
 fn goto_page(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>, page: usize) {
     let Some(target) = tab.target.borrow().clone() else {
-        set_status(ui, "手写查询只能往后翻（要跳页请在表浏览页签里用）", true);
+        set_status(ui, tr("手写查询只能往后翻（要跳页请在表浏览页签里用）"), true);
         return;
     };
     let page = page.max(1);
@@ -7717,13 +7708,13 @@ fn handle_grid_menu(
     match action {
         dbgrid::GridMenuAction::BatchEdit { col } => open_batch_edit_dialog(st, ui, tab, col),
         dbgrid::GridMenuAction::CellDetail { row, col } => {
-            open_grid_detail_window(st, ui, tab, "单元格详情", &detail_cell_rows(tab, row, col))
+            open_grid_detail_window(st, ui, tab, tr("单元格详情"), &detail_cell_rows(tab, row, col))
         }
         dbgrid::GridMenuAction::RowDetail { row } => {
-            open_grid_detail_window(st, ui, tab, "行详情", &detail_row_rows(tab, row))
+            open_grid_detail_window(st, ui, tab, tr("行详情"), &detail_row_rows(tab, row))
         }
         dbgrid::GridMenuAction::ColDetail { col } => {
-            open_grid_detail_window(st, ui, tab, "列详情", &detail_col_rows(tab, col))
+            open_grid_detail_window(st, ui, tab, tr("列详情"), &detail_col_rows(tab, col))
         }
         dbgrid::GridMenuAction::Transpose => open_transpose_window(st, ui, tab),
     }
@@ -7755,11 +7746,11 @@ fn detail_cell_rows(tab: &Rc<ResultTab>, row: usize, col: usize) -> Vec<(String,
         .unwrap_or_else(|| "NULL".to_string());
     let is_pk = d.pk.contains(&col);
     detail_rows(vec![
-        ("列名".to_string(), name),
-        ("类型".to_string(), ty),
-        ("当前值".to_string(), value),
-        ("原始值".to_string(), orig),
-        ("主键".to_string(), if is_pk { "是" } else { "否" }.to_string()),
+        (tr("列名").to_string(), name),
+        (tr("类型").to_string(), ty),
+        (tr("当前值").to_string(), value),
+        (tr("原始值").to_string(), orig),
+        (tr("主键").to_string(), if is_pk { tr("是") } else { tr("否") }.to_string()),
     ])
 }
 
@@ -7804,13 +7795,13 @@ fn detail_col_rows(tab: &Rc<ResultTab>, col: usize) -> Vec<(String, String)> {
     }
     let is_pk = d.pk.contains(&col);
     detail_rows(vec![
-        ("列名".to_string(), name),
-        ("类型".to_string(), ty),
-        ("主键".to_string(), if is_pk { "是" } else { "否" }.to_string()),
-        ("行数".to_string(), d.rows.len().to_string()),
-        ("NULL 数".to_string(), nulls.to_string()),
-        ("不同值个数".to_string(), uniq.len().to_string()),
-        ("样例值".to_string(), sample),
+        (tr("列名").to_string(), name),
+        (tr("类型").to_string(), ty),
+        (tr("主键").to_string(), if is_pk { tr("是") } else { tr("否") }.to_string()),
+        (tr("行数").to_string(), d.rows.len().to_string()),
+        (tr("NULL 数").to_string(), nulls.to_string()),
+        (tr("不同值个数").to_string(), uniq.len().to_string()),
+        (tr("样例值").to_string(), sample),
     ])
 }
 
@@ -7839,12 +7830,12 @@ fn open_grid_detail_window(
     grid.set_column_spacing(12);
     grid.set_hexpand(true);
     {
-        let h1 = gtk::Label::new(Some("属性"));
+        let h1 = gtk::Label::new(Some(tr("属性")));
         h1.set_xalign(0.0);
         h1.add_css_class("dim-label");
         h1.add_css_class("heading");
         grid.attach(&h1, 0, 0, 1, 1);
-        let h2 = gtk::Label::new(Some("值"));
+        let h2 = gtk::Label::new(Some(tr("值")));
         h2.set_xalign(0.0);
         h2.add_css_class("dim-label");
         h2.add_css_class("heading");
@@ -7884,7 +7875,7 @@ fn open_transpose_window(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     let grid = dbgrid::DbGrid::new();
     grid.set_data(t);
     let win = gtk::Window::builder()
-        .title("转置查看")
+        .title(tr("转置查看"))
         .transient_for(&ui.win)
         .default_width(760)
         .default_height(420)
@@ -7894,7 +7885,7 @@ fn open_transpose_window(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     root.set_margin_end(10);
     root.set_margin_top(8);
     root.set_margin_bottom(8);
-    let hint = gtk::Label::new(Some("转置查看：原表的每一行变成一列，只读，不影响数据。"));
+    let hint = gtk::Label::new(Some(tr("转置查看：原表的每一行变成一列，只读，不影响数据。")));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
     root.append(&hint);
@@ -7924,16 +7915,16 @@ fn open_batch_edit_dialog(
     // 选中的行**先快照**：对话框开着的时候网格可能变（用户切页签等）
     let rows = tab.grid.selected_display_rows();
     if rows.is_empty() {
-        set_status(ui, "先选中要改的行", true);
+        set_status(ui, tr("先选中要改的行"), true);
         return;
     }
     let dlg = gtk::Dialog::with_buttons(
-        Some("批量修改所选"),
+        Some(tr("批量修改所选")),
         Some(&ui.win),
         gtk::DialogFlags::MODAL,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("应用", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("应用"), gtk::ResponseType::Ok),
         ],
     );
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -7941,13 +7932,13 @@ fn open_batch_edit_dialog(
     root.set_margin_end(12);
     root.set_margin_top(10);
     root.set_margin_bottom(10);
-    let hint = gtk::Label::new(Some(&format!("把选中的 {} 行一起改掉（改完点「保存修改」才写库）。", rows.len())));
+    let hint = gtk::Label::new(Some(&trf!("把选中的 {v0} 行一起改掉（改完点「保存修改」才写库）。", v0 = rows.len())));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
     root.append(&hint);
 
     let col_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let l1 = gtk::Label::new(Some("列"));
+    let l1 = gtk::Label::new(Some(tr("列")));
     col_box.append(&l1);
     let col_sel = gtk::ComboBoxText::new();
     for name in d.columns.iter() {
@@ -7959,10 +7950,10 @@ fn open_batch_edit_dialog(
     root.append(&col_box);
 
     let val_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let l2 = gtk::Label::new(Some("新值"));
+    let l2 = gtk::Label::new(Some(tr("新值")));
     val_box.append(&l2);
     let val = gtk::Entry::new();
-    val.set_placeholder_text(Some("留空 = 空字符串；填 NULL = 设为空值"));
+    val.set_placeholder_text(Some(tr("留空 = 空字符串；填 NULL = 设为空值")));
     val.set_hexpand(true);
     val_box.append(&val);
     root.append(&val_box);
@@ -7976,7 +7967,7 @@ fn open_batch_edit_dialog(
             let c = col_sel.active().unwrap_or(0) as usize;
             let text = val.text().to_string();
             let n = grid.set_edit_rows(&rows, c, &text);
-            let msg = format!("已修改 {n} 行，点「保存修改」才写库");
+            let msg = trf!("已修改 {n} 行，点「保存修改」才写库", n = n);
             grid.set_status(&msg);
         }
         d.close();
@@ -7994,12 +7985,12 @@ fn update_foot(_ui: &DbUi, tab: &Rc<ResultTab>) {
     let pending = tab.grid.pending_edits().len()
         + tab.grid.pending_inserts().len()
         + tab.grid.pending_deletes().len();
-    let mut info = format!("{} 行 · {} ms", tab.last_rows.get(), tab.last_elapsed.get());
+    let mut info = trf!("{v0} 行 · {v1} ms", v0 = tab.last_rows.get(), v1 = tab.last_elapsed.get());
     if pending > 0 {
-        info.push_str(&format!(" · {pending} 项待保存"));
+        info.push_str(&trf!(" · {pending} 项待保存", pending = pending));
     }
     tab.foot_info.set_text(&info);
-    tab.foot_page.set_text(&format!("第 {page} 页"));
+    tab.foot_page.set_text(&trf!("第 {page} 页", page = page));
     // 首页 / 上一页：只有表浏览页签能跳（手写查询不能重查）
     let can_jump = tab.target.borrow().is_some();
     tab.btn_first.set_sensitive(can_jump && page > 1);
@@ -8029,12 +8020,12 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
         .map(|c| c.title().to_string())
         .collect();
     if cols.is_empty() {
-        set_status(ui, "这张表还没有列信息，过滤条件用不了", true);
+        set_status(ui, tr("这张表还没有列信息，过滤条件用不了"), true);
         return;
     }
 
     let dlg = gtk::Window::builder()
-        .title("数据库过滤条件")
+        .title(tr("数据库过滤条件"))
         .transient_for(&tab.win)
         .modal(true)
         .default_width(620)
@@ -8047,8 +8038,8 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     root.set_margin_bottom(10);
 
     let hint = gtk::Label::new(Some(
-        "条件会拼进 WHERE 重新查库（服务端过滤，不只是筛当前这一页）。\n\
-         上面那个「筛选已加载行」框只筛已经取回的行，两者是两回事。",
+        tr("条件会拼进 WHERE 重新查库（服务端过滤，不只是筛当前这一页）。\n\
+         上面那个「筛选已加载行」框只筛已经取回的行，两者是两回事。"),
     ));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
@@ -8077,10 +8068,10 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
         let rows_box = rows_box.clone();
         let add_row = move |cur: Option<dbmeta::FilterCond>| {
             let join = gtk::ComboBoxText::new();
-            join.append(Some("AND"), "并且");
-            join.append(Some("OR"), "或者");
+            join.append(Some("AND"), tr("并且"));
+            join.append(Some("OR"), tr("或者"));
             join.set_active_id(Some("AND"));
-            join.set_tooltip_text(Some("与上一条条件的连接方式"));
+            join.set_tooltip_text(Some(tr("与上一条条件的连接方式")));
             let col = gtk::ComboBoxText::new();
             for c in &cols {
                 col.append(Some(c.as_str()), c);
@@ -8092,7 +8083,7 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
             op.set_active_id(Some("="));
             let val = gtk::Entry::new();
             val.set_hexpand(true);
-            val.set_placeholder_text(Some("值"));
+            val.set_placeholder_text(Some(tr("值")));
 
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             row.append(&join);
@@ -8133,7 +8124,7 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
         }
         // 「+ 添加条件」
         {
-            let add = gtk::Button::with_label("+ 添加条件");
+            let add = gtk::Button::with_label(tr("+ 添加条件"));
             // 不占满整行宽度
             add.set_halign(gtk::Align::Start);
             add.connect_clicked({
@@ -8146,10 +8137,10 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     actions.set_halign(gtk::Align::End);
-    let btn_apply = gtk::Button::with_label("应用");
+    let btn_apply = gtk::Button::with_label(tr("应用"));
     btn_apply.add_css_class("suggested-action");
-    let btn_clear = gtk::Button::with_label("清除条件");
-    let btn_cancel = gtk::Button::with_label("取消");
+    let btn_clear = gtk::Button::with_label(tr("清除条件"));
+    let btn_cancel = gtk::Button::with_label(tr("取消"));
     actions.append(&btn_clear);
     actions.append(&btn_cancel);
     actions.append(&btn_apply);
@@ -8202,9 +8193,9 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
                 Ok(w) => {
                     err.set_text("");
                     let msg = if w.is_empty() {
-                        "已清除数据库过滤条件".to_string()
+                        tr("已清除数据库过滤条件").to_string()
                     } else {
-                        format!("已按条件重查：{w}")
+                        trf!("已按条件重查：{w}", w = w)
                     };
                     set_status(ui, &msg, false);
                     tab2.status.set_text(&msg);
@@ -8224,7 +8215,7 @@ fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
             let Some(ui) = slot.as_ref() else { return };
             match apply_filter(&st2, ui, &tab2, Vec::new()) {
                 Ok(_) => {
-                    set_status(ui, "已清除数据库过滤条件", false);
+                    set_status(ui, tr("已清除数据库过滤条件"), false);
                     dlg2.close();
                 }
                 Err(e) => err.set_text(&e),
@@ -8262,7 +8253,7 @@ fn exec_tree_ddl(st: &Rc<PanelState>, ui: &DbUi, sql: &str, what: &str, schema: 
 /// 新建表：填表名 + 列定义（每行「名称 类型」），然后建。
 fn open_create_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str) {
     let dlg = gtk::Window::builder()
-        .title("新建表")
+        .title(tr("新建表"))
         .transient_for(&ui.win)
         .modal(true)
         .default_width(520)
@@ -8274,18 +8265,18 @@ fn open_create_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str) {
     root.set_margin_top(10);
     root.set_margin_bottom(10);
 
-    let hint_text = format!("在模式「{schema}」下新建表。");
+    let hint_text = trf!("在模式「{schema}」下新建表。", schema = schema);
     let hint = gtk::Label::new(Some(&hint_text));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
     root.append(&hint);
 
     let name = gtk::Entry::new();
-    name.set_placeholder_text(Some("表名"));
+    name.set_placeholder_text(Some(tr("表名")));
     name.set_text("new_table");
     root.append(&name);
 
-    let cols_label = gtk::Label::new(Some("列（每行一个：名称 类型）"));
+    let cols_label = gtk::Label::new(Some(tr("列（每行一个：名称 类型）")));
     cols_label.set_xalign(0.0);
     root.append(&cols_label);
     let cols = gtk::TextView::new();
@@ -8304,9 +8295,9 @@ fn open_create_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str) {
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     actions.set_halign(gtk::Align::End);
-    let btn_ok = gtk::Button::with_label("创建");
+    let btn_ok = gtk::Button::with_label(tr("创建"));
     btn_ok.add_css_class("suggested-action");
-    let btn_cancel = gtk::Button::with_label("取消");
+    let btn_cancel = gtk::Button::with_label(tr("取消"));
     actions.append(&btn_cancel);
     actions.append(&btn_ok);
     root.append(&actions);
@@ -8321,11 +8312,11 @@ fn open_create_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str) {
             let Some(ui) = slot.as_ref() else { return };
             let tname = name.text().trim().to_string();
             if tname.is_empty() {
-                err.set_text("表名不能为空");
+                err.set_text(tr("表名不能为空"));
                 return;
             }
             if !dbmeta::is_simple_ident(&tname) {
-                err.set_text("表名只能用字母、数字、下划线，且不能以数字开头");
+                err.set_text(tr("表名只能用字母、数字、下划线，且不能以数字开头"));
                 return;
             }
             let text = cols_buf.text(&cols_buf.start_iter(), &cols_buf.end_iter(), false).to_string();
@@ -8337,7 +8328,7 @@ fn open_create_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str) {
                 }
             };
             let sql = dbmeta::build_create_table(current_proto(ui), &schema, &tname, &defs);
-            exec_tree_ddl(&st2, ui, &sql, &format!("已新建表 {tname}"), &schema);
+            exec_tree_ddl(&st2, ui, &sql, &trf!("已新建表 {tname}", tname = tname), &schema);
             dlg2.close();
         });
     }
@@ -8351,7 +8342,7 @@ fn open_create_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str) {
 /// 重命名表：填新名字。
 fn open_rename_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str) {
     let dlg = gtk::Window::builder()
-        .title("重命名表")
+        .title(tr("重命名表"))
         .transient_for(&ui.win)
         .modal(true)
         .default_width(420)
@@ -8362,7 +8353,7 @@ fn open_rename_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table:
     root.set_margin_top(10);
     root.set_margin_bottom(10);
 
-    let hint_text = format!("把表「{table}」改成新名字。");
+    let hint_text = trf!("把表「{table}」改成新名字。", table = table);
     let hint = gtk::Label::new(Some(&hint_text));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
@@ -8379,9 +8370,9 @@ fn open_rename_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table:
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     actions.set_halign(gtk::Align::End);
-    let btn_ok = gtk::Button::with_label("改名");
+    let btn_ok = gtk::Button::with_label(tr("改名"));
     btn_ok.add_css_class("suggested-action");
-    let btn_cancel = gtk::Button::with_label("取消");
+    let btn_cancel = gtk::Button::with_label(tr("取消"));
     actions.append(&btn_cancel);
     actions.append(&btn_ok);
     root.append(&actions);
@@ -8397,15 +8388,15 @@ fn open_rename_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table:
             let Some(ui) = slot.as_ref() else { return };
             let new_name = name.text().trim().to_string();
             if new_name.is_empty() {
-                err.set_text("新名字不能为空");
+                err.set_text(tr("新名字不能为空"));
                 return;
             }
             if !dbmeta::is_simple_ident(&new_name) {
-                err.set_text("表名只能用字母、数字、下划线，且不能以数字开头");
+                err.set_text(tr("表名只能用字母、数字、下划线，且不能以数字开头"));
                 return;
             }
             if new_name == table {
-                err.set_text("新名字跟原来一样");
+                err.set_text(tr("新名字跟原来一样"));
                 return;
             }
             let sql = dbmeta::build_rename_table(current_proto(ui), &schema, &table, &new_name);
@@ -8413,7 +8404,7 @@ fn open_rename_table_dialog(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table:
                 &st2,
                 ui,
                 &sql,
-                &format!("已把 {table} 改名为 {new_name}"),
+                &trf!("已把 {table} 改名为 {new_name}", table = table, new_name = new_name),
                 &schema,
             );
             dlg2.close();
@@ -8433,8 +8424,8 @@ fn drop_table_confirm(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str)
     let table = table.to_string();
     crate::panel::dialogs::confirm_with(
         Some(&ui.win),
-        &format!("删除表「{table}」？\n表里的数据会一起没了，撤不回来。"),
-        "删除",
+        &trf!("删除表「{table}」？\n表里的数据会一起没了，撤不回来。", table = table),
+        tr("删除"),
         move |ok| {
             if !ok {
                 return;
@@ -8442,7 +8433,7 @@ fn drop_table_confirm(st: &Rc<PanelState>, ui: &DbUi, schema: &str, table: &str)
             let slot = st2.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
             let sql = dbmeta::build_drop_table(current_proto(ui), &schema, &table);
-            exec_tree_ddl(&st2, ui, &sql, &format!("已删除表 {table}"), &schema);
+            exec_tree_ddl(&st2, ui, &sql, &trf!("已删除表 {table}", table = table), &schema);
         },
     );
 }
@@ -8537,14 +8528,14 @@ pub fn tree_view(st: &Rc<PanelState>) -> Option<gtk::TreeView> {
 pub fn tree_state(st: &Rc<PanelState>) -> Vec<String> {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else {
-        return vec!["没有数据库工作台".into()];
+        return vec![tr("没有数据库工作台").into()];
     };
     let view = &ui.tree.view;
     let Some(model) = view.model() else {
-        return vec!["树没有 model".into()];
+        return vec![tr("树没有 model").into()];
     };
     let Some(root) = model.iter_first() else {
-        return vec!["模型是空的".into()];
+        return vec![tr("模型是空的").into()];
     };
     // 模型里一共多少行（递归）
     fn walk(model: &gtk::TreeModel, iter: &gtk::TreeIter, n: &mut usize) {
@@ -8570,17 +8561,17 @@ pub fn tree_state(st: &Rc<PanelState>) -> Vec<String> {
             }
         }
     }
-    let mut out = vec![format!("模型 {total} 行"), format!("根行子节点 {kids} 个")];
+    let mut out = vec![trf!("模型 {total} 行", total = total), trf!("根行子节点 {kids} 个", kids = kids)];
     // **可见范围**：屏幕上真的画出来的行（模型里有但没画出来的不算）
     match view.visible_range() {
         Some((first, last)) => {
             let f: Vec<String> = first.indices().iter().map(|i| i.to_string()).collect();
             let l: Vec<String> = last.indices().iter().map(|i| i.to_string()).collect();
-            out.push(format!("可见行 {}..{}", f.join("."), l.join(".")));
+            out.push(trf!("可见行 {v0}..{v1}", v0 = f.join("."), v1 = l.join(".")));
         }
-        None => out.push("可见行：无".into()),
+        None => out.push(tr("可见行：无").into()),
     }
-    out.push(format!("树控件高 {}px", view.allocated_height()));
+    out.push(trf!("树控件高 {v0}px", v0 = view.allocated_height()));
     out
 }
 
@@ -8664,10 +8655,10 @@ pub fn apply_filter_now(
 ) -> Result<String, String> {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else {
-        return Err("数据库窗口没开".to_string());
+        return Err(tr("数据库窗口没开").to_string());
     };
     let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
-        return Err("没有这个结果页签".to_string());
+        return Err(tr("没有这个结果页签").to_string());
     };
     let list: Vec<dbmeta::FilterCond> = conds
         .iter()
@@ -9306,7 +9297,7 @@ pub fn use_profile(st: &Rc<PanelState>, key: &str, name: &str) {
         let Some(ui) = slot.as_ref() else { return };
         // 选中它（工作台里没有下拉了，选中 = 记住"当前连的是哪条"）
         set_current_conn(st, ui, key, name);
-        let msg = format!("正在连接 {}…", p.name);
+        let msg = trf!("正在连接 {v0}…", v0 = p.name);
         set_status(ui, &msg, false);
         // **直接连上**：双击即用，不让用户再点一次
         do_connect(st, ui)
@@ -9541,10 +9532,10 @@ pub fn struct_show_page(st: &Rc<PanelState>, tab_idx: usize, page: usize) {
         return;
     };
     let name = match page {
-        0 => "字段",
-        1 => "索引",
-        2 => "外键",
-        3 => "触发器",
+        0 => tr("字段"),
+        1 => tr("索引"),
+        2 => tr("外键"),
+        3 => tr("触发器"),
         _ => "DDL",
     };
     tab.inner.set_visible_child_name(name);
@@ -9580,8 +9571,8 @@ pub fn make_test_struct_tab(st: &Rc<PanelState>, schema: &str, table: &str) -> O
             vec![
                 Some(c.name.clone()),
                 Some(dbmeta::ddl_type(c)),
-                Some(if c.nullable { "是".into() } else { "否".into() }),
-                Some(if c.is_pk { "是".into() } else { "否".into() }),
+                Some(if c.nullable { tr("是").into() } else { tr("否").into() }),
+                Some(if c.is_pk { tr("是").into() } else { tr("否").into() }),
                 Some(c.default_value.clone().unwrap_or_default()),
                 Some("⧉ ✕".to_string()),
             ]
@@ -9590,12 +9581,12 @@ pub fn make_test_struct_tab(st: &Rc<PanelState>, schema: &str, table: &str) -> O
     *tab.cols.borrow_mut() = Some(cols);
     tab.fields.set_data(dbgrid::GridData {
         columns: vec![
-            "字段".into(),
-            "类型".into(),
-            "可空".into(),
-            "主键".into(),
-            "默认值".into(),
-            "操作".into(),
+            tr("字段").into(),
+            tr("类型").into(),
+            tr("可空").into(),
+            tr("主键").into(),
+            tr("默认值").into(),
+            tr("操作").into(),
         ],
         types: vec![ColType::Text; 6],
         rows,
@@ -9603,7 +9594,7 @@ pub fn make_test_struct_tab(st: &Rc<PanelState>, schema: &str, table: &str) -> O
     });
     tab.fields.set_column_editable(5, false);
     tab.triggers.set_data(dbgrid::GridData {
-        columns: vec!["触发器".into(), "时机".into(), "事件".into()],
+        columns: vec![tr("触发器").into(), tr("时机").into(), tr("事件").into()],
         types: vec![ColType::Text; 3],
         rows: vec![
             vec![
@@ -9682,7 +9673,7 @@ pub fn struct_apply_type(st: &Rc<PanelState>, tab_idx: usize, ty: &str) -> bool 
         let mut kid = p.first_child();
         while let Some(k) = kid {
             if let Some(b) = k.downcast_ref::<gtk::Button>() {
-                if b.label().as_deref() == Some("应用") {
+                if b.label().as_deref() == Some(tr("应用")) {
                     return Some(b.clone());
                 }
             }

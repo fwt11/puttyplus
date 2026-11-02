@@ -26,6 +26,8 @@ use crate::backend::dbstore::DbProfile;
 use crate::backend::dbstore;
 use crate::panel::dialogs;
 use zeroize::Zeroizing;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 一个待保存的数据库连接。
 #[derive(Debug, Clone)]
@@ -71,16 +73,16 @@ impl DbConnDraft {
     /// 校验；返回中文原因（`Ok` 通过）。
     pub fn validate(&self) -> Result<(), String> {
         if self.session_key.is_empty() {
-            return Err("请先选择「在哪个会话上连」".into());
+            return Err(tr("请先选择「在哪个会话上连」").into());
         }
         if self.host.trim().is_empty() {
-            return Err("数据库地址不能为空".into());
+            return Err(tr("数据库地址不能为空").into());
         }
         if self.port == 0 {
-            return Err("端口无效（1-65535）".into());
+            return Err(tr("端口无效（1-65535）").into());
         }
         if self.user.trim().is_empty() {
-            return Err("数据库用户不能为空".into());
+            return Err(tr("数据库用户不能为空").into());
         }
         Ok(())
     }
@@ -119,29 +121,29 @@ pub fn save(draft: &DbConnDraft) -> Option<String> {
     let mut hint = None;
     if profile.remember {
         match &draft.password {
-            None => hint = Some("密码没填，记住密码这次不生效".to_string()),
+            None => hint = Some(tr("密码没填，记住密码这次不生效").to_string()),
             Some(pw) => {
                 if !crate::vault::exists() {
                     // **要说清楚去哪儿办**：光说"没保存"，用户不知道该做什么
                     hint = Some(
-                        "凭据库还没建，密码这次没保存。\n\n\
+                        tr("凭据库还没建，密码这次没保存。\n\n\
                          凭据库是本机存连接密码的地方（用主密码加密）。\
                          去顶栏菜单「凭据库…」设个主密码建一个，\
                          之后勾「记住密码」就能存住。\n\n\
-                         不建也能用——只是每次连库要重新输密码。"
+                         不建也能用——只是每次连库要重新输密码。")
                             .to_string(),
                     );
                 } else if !crate::vault::is_unlocked() {
                     hint = Some(
-                        "凭据库没解锁，密码这次没保存。\n\n\
-                         去顶栏菜单「凭据库…」输入主密码解锁，再保存一次这条连接。"
+                        tr("凭据库没解锁，密码这次没保存。\n\n\
+                         去顶栏菜单「凭据库…」输入主密码解锁，再保存一次这条连接。")
                             .to_string(),
                     );
                 } else if !crate::vault::put(
                     &dbstore::vault_name(&draft.session_key, &profile.name),
                     pw.as_str(),
                 ) {
-                    hint = Some("密码写入凭据库失败（凭据库可能已满或被占用）".to_string());
+                    hint = Some(tr("密码写入凭据库失败（凭据库可能已满或被占用）").to_string());
                 }
             }
         }
@@ -256,9 +258,9 @@ pub fn ui_new(
     // 点了「连接」也连不上。落的是**连接定义**（地址/端口/用户/库名
     // ——数据库侧的东西，堡垒机换 SSH 端口也不影响），不是 SSH 会话。
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
-    let dlg = crate::windows::dialog("新建数据库连接（当前会话）", parent, &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("连接", gtk::ResponseType::Ok),
+    let dlg = crate::windows::dialog(tr("新建数据库连接（当前会话）"), parent, &[
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("连接"), gtk::ResponseType::Ok),
         ]);
     // 会话键要进 'static 的响应闭包 → 先 own 一份（preset_session 只是借用）
     let session_key = preset_session.to_string();
@@ -275,8 +277,8 @@ pub fn ui_new(
     proto.append(Some("pg"), "PostgreSQL");
     proto.append(Some("mysql"), "MySQL");
     proto.set_active_id(Some("pg"));
-    proto.set_tooltip_text(Some("数据库类型；切换会按默认端口补全端口栏"));
-    box_.append(&dialogs::form_row("数据库类型", &proto));
+    proto.set_tooltip_text(Some(tr("数据库类型；切换会按默认端口补全端口栏")));
+    box_.append(&dialogs::form_row(tr("数据库类型"), &proto));
 
     // ---- 2) 在哪个会话上连 ----
     //
@@ -293,9 +295,7 @@ pub fn ui_new(
     //   所有入口（「+」、标签头右键、会话树右键、连接管理器右键）都把
     //   会话**预置死**了 ——"从哪儿来就属于哪儿"。要换会话就切到别的
     //   tab 再点「+」，这才是用户认的规矩。
-    let mut text = format!(
-        "这条连接挂在当前会话上（{preset_session}）。\n数据库通道复用这条 SSH 连接，不新建连接、不占本地端口。"
-    );
+    let mut text = trf!("这条连接挂在当前会话上（{preset_session}）。\n数据库通道复用这条 SSH 连接，不新建连接、不占本地端口。", preset_session = preset_session);
     // 当前会话**没保存在连接列表里**（堡垒机场景：命令行连的、列表被清过了）
     if !session_choices().iter().any(|(k, _)| k == preset_session) {
         // ⚠️ **不要**劝用户去连接管理器把这个会话存一条。
@@ -303,9 +303,9 @@ pub fn ui_new(
         // 过期垃圾）。这条连接跟着**当前这个会话**走就够了：会话在，
         // 工作台里就看得见、用得上；会话没了，它就该跟着一起过期。
         text.push_str(
-            "\n\n当前会话没有保存在连接列表里——不影响使用：\
+            tr("\n\n当前会话没有保存在连接列表里——不影响使用：\
              从这个会话打开工作台就能看到这条连接。\
-             它跟着当前会话走，当前会话不保存，它也不会进连接列表。",
+             它跟着当前会话走，当前会话不保存，它也不会进连接列表。"),
         );
     }
     // ⚠️ 别用 markdown 星号：这是普通 gtk::Label（不是 markup label），
@@ -322,17 +322,17 @@ pub fn ui_new(
 
     // ---- 3) 连接名 ----
     let name = gtk::Entry::new();
-    name.set_placeholder_text(Some("连接名（留空自动生成，同一会话下可存多个）"));
-    box_.append(&dialogs::form_row("连接名", &name));
+    name.set_placeholder_text(Some(tr("连接名（留空自动生成，同一会话下可存多个）")));
+    box_.append(&dialogs::form_row(tr("连接名"), &name));
 
     // ---- 4) 地址 / 端口 ----
     let host = gtk::Entry::new();
     host.set_text("127.0.0.1");
-    host.set_placeholder_text(Some("数据库主机（从跳板机看）"));
+    host.set_placeholder_text(Some(tr("数据库主机（从跳板机看）")));
     let port = gtk::Entry::new();
     port.set_text("5432");
     port.set_width_chars(7);
-    let (hp, _, _) = dialogs::form_pair("地址", &host, "端口", &port);
+    let (hp, _, _) = dialogs::form_pair(tr("地址"), &host, tr("端口"), &port);
     box_.append(&hp);
 
     // ---- 5) 用户 / 数据库 ----
@@ -340,14 +340,14 @@ pub fn ui_new(
     user.set_text("postgres");
     let dbname = gtk::Entry::new();
     dbname.set_text("postgres");
-    let (ud, _, _) = dialogs::form_pair("用户", &user, "数据库", &dbname);
+    let (ud, _, _) = dialogs::form_pair(tr("用户"), &user, tr("数据库"), &dbname);
     box_.append(&ud);
 
     // ---- 6) 密码 / 记住 ----
     let pass = gtk::Entry::new();
     pass.set_visibility(false);
-    pass.set_placeholder_text(Some("密码（可留空）"));
-    let remember = gtk::CheckButton::with_label("记住密码（存进凭据库）");
+    pass.set_placeholder_text(Some(tr("密码（可留空）")));
+    let remember = gtk::CheckButton::with_label(tr("记住密码（存进凭据库）"));
     // ⚠️ 右边**不要再写一遍「记住密码」**（阶段 73b，审计 P1-11）：
     // 勾选框自带文案，再配一个同名标签就是同一行出现两次「记住密码」。
     // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：勾了也存不住
@@ -356,7 +356,7 @@ pub fn ui_new(
     let pol = crate::vaultui::remember_policy(crate::vault::state());
     remember.set_visible(pol.show_checkbox);
     remember.set_sensitive(pol.can_remember);
-    let (pr, _, _) = dialogs::form_pair("密码", &pass, "", &remember);
+    let (pr, _, _) = dialogs::form_pair(tr("密码"), &pass, "", &remember);
     box_.append(&pr);
 
     let hint = gtk::Label::new(Some(""));
@@ -430,7 +430,7 @@ pub fn ui_new(
                     // 用户点的是「连接」——弹个「已保存」既误导（**还没连上**，
                     // 工作台正要开）又挡路（弹窗压在刚打开的工作台上）。
                     // 这里**只说密码那件事**：密码没记住，用户得知道。
-                    dialogs::info(None, "密码没记住", &h);
+                    dialogs::info(None, tr("密码没记住"), &h);
                 }
                 on_done(&draft.session_key, &profile.name);
             },
@@ -483,7 +483,7 @@ pub fn ui_new(
         //    ⇒ **先测通再开工作台**；不通就留在原地、在密码框那儿提示。
         testing.set(true);
         pass.remove_css_class("error");
-        hint.set_text("正在连接…（验证地址与密码）");
+        hint.set_text(tr("正在连接…（验证地址与密码）"));
         let cfg = crate::backend::db::DbConfig {
             proto: draft.proto,
             host: draft.host.clone(),
@@ -513,11 +513,11 @@ pub fn ui_new(
                     // ⚠️ **留在原地**，把原因写在**密码框**那儿
                     let wrong_pw = crate::backend::db::is_password_error(&msg);
                     let tip = if needs_password {
-                        "⚠ 服务器要密码，但这条连接没有密码 —— 请在上面填写密码".to_string()
+                        tr("⚠ 服务器要密码，但这条连接没有密码 —— 请在上面填写密码").to_string()
                     } else if wrong_pw {
-                        format!("⚠ 密码不对：{msg}")
+                        trf!("⚠ 密码不对：{msg}", msg = msg)
                     } else {
-                        format!("⚠ 连接失败：{msg}")
+                        trf!("⚠ 连接失败：{msg}", msg = msg)
                     };
                     hint2.set_text(&tip);
                     if needs_password || wrong_pw {
@@ -540,13 +540,13 @@ pub fn ui_new(
 /// `key` = 会话键，`name` = 连接名。
 pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     let Some(p) = dbstore::get(key, name) else {
-        dialogs::show_error(parent, "数据库连接", &format!("找不到连接「{name}」。"));
+        dialogs::show_error(parent, tr("数据库连接"), &trf!("找不到连接「{name}」。", name = name));
         return;
     };
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
-    let dlg = crate::windows::dialog("编辑数据库连接", parent, &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("保存", gtk::ResponseType::Ok),
+    let dlg = crate::windows::dialog(tr("编辑数据库连接"), parent, &[
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("保存"), gtk::ResponseType::Ok),
         ]);
     dlg.set_default_response(gtk::ResponseType::Ok);
     // ⚠️ 限宽（阶段 73b，审计 P1-11）：与「新建」同一个版式 ⇒ 同样限 520–640
@@ -559,7 +559,7 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     proto.append(Some("pg"), "PostgreSQL");
     proto.append(Some("mysql"), "MySQL");
     proto.set_active_id(Some(p.proto.as_str()));
-    box_.append(&dialogs::form_row("数据库类型", &proto));
+    box_.append(&dialogs::form_row(tr("数据库类型"), &proto));
 
     // 会话不能改：连接属于哪条 SSH 连接是它的"位置"，挪走等于删了重建
     // （历史分组键、凭据库键都跟着会话键走）。
@@ -567,31 +567,31 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     sess_label.set_xalign(0.0);
     sess_label.add_css_class("dim-label");
     sess_label.set_selectable(true);
-    box_.append(&dialogs::form_row("所属会话（不能改）", &sess_label));
+    box_.append(&dialogs::form_row(tr("所属会话（不能改）"), &sess_label));
 
     let name_e = gtk::Entry::new();
     name_e.set_text(&p.name);
-    box_.append(&dialogs::form_row("连接名", &name_e));
+    box_.append(&dialogs::form_row(tr("连接名"), &name_e));
 
     let host = gtk::Entry::new();
     host.set_text(&p.host);
     let port = gtk::Entry::new();
     port.set_text(&p.port.to_string());
     port.set_width_chars(7);
-    let (hp, _, _) = dialogs::form_pair("地址", &host, "端口", &port);
+    let (hp, _, _) = dialogs::form_pair(tr("地址"), &host, tr("端口"), &port);
     box_.append(&hp);
 
     let user = gtk::Entry::new();
     user.set_text(&p.user);
     let dbname = gtk::Entry::new();
     dbname.set_text(&p.dbname);
-    let (ud, _, _) = dialogs::form_pair("用户", &user, "数据库", &dbname);
+    let (ud, _, _) = dialogs::form_pair(tr("用户"), &user, tr("数据库"), &dbname);
     box_.append(&ud);
 
     let pass = gtk::Entry::new();
     pass.set_visibility(false);
-    pass.set_placeholder_text(Some("密码（留空表示不改）"));
-    let remember = gtk::CheckButton::with_label("记住密码（存进凭据库）");
+    pass.set_placeholder_text(Some(tr("密码（留空表示不改）")));
+    let remember = gtk::CheckButton::with_label(tr("记住密码（存进凭据库）"));
     // ⚠️ 右边不要再写一遍「记住密码」（阶段 73b，审计 P1-11）
     // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：同上。
     let pol = crate::vaultui::remember_policy(crate::vault::state());
@@ -599,7 +599,7 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     remember.set_sensitive(pol.can_remember);
     // 存不住的时候不许"带着勾"（看着像已经记住了，其实压根没存）
     remember.set_active(p.remember && pol.can_remember);
-    let (pr, _, _) = dialogs::form_pair("密码", &pass, "", &remember);
+    let (pr, _, _) = dialogs::form_pair(tr("密码"), &pass, "", &remember);
     box_.append(&pr);
 
     let hint = gtk::Label::new(Some(""));
@@ -654,7 +654,7 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
         );
         dlg.close();
         if let Some(h) = saved {
-            dialogs::info(None, "连接已保存", &format!("「{}」已保存。\n\n{}", profile.name, h));
+            dialogs::info(None, tr("连接已保存"), &trf!("「{v0}」已保存。\n\n{h}", v0 = profile.name, h = h));
         }
     });
 }
@@ -663,13 +663,10 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
 ///
 /// 只删这一条连接的配置，不动它下面的表数据。
 pub fn ui_remove(parent: Option<&gtk::Window>, key: &str, name: &str) {
-    let label = format!(
-        "删除数据库连接「{name}」？\n\n只删这条连接的配置（地址、账号、库名），\
-         不会动服务器上的数据。\n\n连接凭据也会一并删掉。"
-    );
+    let label = trf!("删除数据库连接「{name}」？\n\n只删这条连接的配置（地址、账号、库名），不会动服务器上的数据。\n\n连接凭据也会一并删掉。", name = name);
     let key = key.to_string();
     let name = name.to_string();
-    dialogs::confirm_with(parent, &label, "删除", move |ok| {
+    dialogs::confirm_with(parent, &label, tr("删除"), move |ok| {
         if !ok {
             return;
         }

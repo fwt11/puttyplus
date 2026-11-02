@@ -17,6 +17,8 @@ use crate::args::AuthOrder;
 use crate::settings::{self, SessionOverride};
 
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 打开会话选项对话框（工具栏按钮）。
 pub fn open(st: &Rc<PanelState>) {
@@ -25,11 +27,11 @@ pub fn open(st: &Rc<PanelState>) {
 
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        &format!("会话选项 — {key}"),
+        &trf!("会话选项 — {key}", key = key),
         parent.as_ref(),
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("保存", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("保存"), gtk::ResponseType::Ok),
         ],
     );
     dlg.set_default_size(400, -1);
@@ -40,9 +42,9 @@ pub fn open(st: &Rc<PanelState>) {
     let w_keep = gtk::Entry::new();
     w_keep.set_text(&st.keepalive_sec.get().to_string());
     w_keep.set_tooltip_text(Some(
-        "无服务器数据多少秒后发一次 SSH 保活，连续 3 次无应答即断开。\n\
+        tr("无服务器数据多少秒后发一次 SSH 保活，连续 3 次无应答即断开。\n\
          0 = 关闭保活（完全依赖 TCP 超时）。\n\
-         保存后需点「重新建立 SFTP 连接」才生效。",
+         保存后需点「重新建立 SFTP 连接」才生效。"),
     ));
 
     // 字号：空 = 沿用连接的默认值（连接编辑器 →「会话」页）
@@ -57,11 +59,11 @@ pub fn open(st: &Rc<PanelState>) {
             .map(|v| format!("{v:.1}"))
             .unwrap_or_default(),
     );
-    w_font.set_placeholder_text(Some("留空 = 沿用连接的默认值"));
-    w_font.set_tooltip_text(Some("终端字号，立即生效"));
+    w_font.set_placeholder_text(Some(tr("留空 = 沿用连接的默认值")));
+    w_font.set_tooltip_text(Some(tr("终端字号，立即生效")));
 
     // 响铃：默认开
-    let w_bell = gtk::CheckButton::with_label("终端响铃");
+    let w_bell = gtk::CheckButton::with_label(tr("终端响铃"));
     w_bell.set_active(st.opts.bell.unwrap_or(true));
 
     // 终端类型（TERM）：预置几项 + 连接里填的值（不在预置里就临时补一项）
@@ -80,31 +82,31 @@ pub fn open(st: &Rc<PanelState>) {
     }
     w_term.set_active_id(Some(term.as_str()));
     w_term.set_tooltip_text(Some(
-        "决定远程 pty 的 TERM。留空 = xterm-256color。\n改完需重新连接才生效（子进程环境在启动时定下）。",
+        tr("决定远程 pty 的 TERM。留空 = xterm-256color。\n改完需重新连接才生效（子进程环境在启动时定下）。"),
     ));
 
     // 认证优先级（2.2）
     let w_auth = gtk::ComboBoxText::new();
-    w_auth.append(Some("password-first"), "密码优先（默认）");
-    w_auth.append(Some("publickey-first"), "密钥优先");
+    w_auth.append(Some("password-first"), tr("密码优先（默认）"));
+    w_auth.append(Some("publickey-first"), tr("密钥优先"));
     w_auth.set_active_id(Some(st.opts.auth_order.as_str()));
     w_auth.set_tooltip_text(Some(
-        "进程内 SFTP 链路的认证顺序。\n密码优先：少一次无谓的公钥尝试，也避免把本地身份出示给堡垒机网关。\n改完需重新连接才生效。",
+        tr("进程内 SFTP 链路的认证顺序。\n密码优先：少一次无谓的公钥尝试，也避免把本地身份出示给堡垒机网关。\n改完需重新连接才生效。"),
     ));
 
-    root.append(&crate::panel::dialogs::form_section("连接"));
-    root.append(&crate::panel::dialogs::form_row("保活（秒）", &w_keep));
-    root.append(&crate::panel::dialogs::form_row("终端类型（TERM）", &w_term));
-    root.append(&crate::panel::dialogs::form_row("认证优先级", &w_auth));
+    root.append(&crate::panel::dialogs::form_section(tr("连接")));
+    root.append(&crate::panel::dialogs::form_row(tr("保活（秒）"), &w_keep));
+    root.append(&crate::panel::dialogs::form_row(tr("终端类型（TERM）"), &w_term));
+    root.append(&crate::panel::dialogs::form_row(tr("认证优先级"), &w_auth));
 
-    root.append(&crate::panel::dialogs::form_section("终端"));
-    root.append(&crate::panel::dialogs::form_row("终端字号", &w_font));
-    root.append(&crate::panel::dialogs::form_row("响铃", &w_bell));
+    root.append(&crate::panel::dialogs::form_section(tr("终端")));
+    root.append(&crate::panel::dialogs::form_row(tr("终端字号"), &w_font));
+    root.append(&crate::panel::dialogs::form_row(tr("响铃"), &w_bell));
 
     let tip = gtk::Label::new(Some(
-        "这是当前会话的临时覆盖，优先于连接里的默认设置（连接编辑器 →「会话」页）。\n\
+        tr("这是当前会话的临时覆盖，优先于连接里的默认设置（连接编辑器 →「会话」页）。\n\
          字号与响铃保存后立即生效；保活、终端类型、认证优先级需重新建立连接才生效\
-         （子进程环境与认证链都在启动时定下）。配置按会话名保存，同名会话共用一份。",
+         （子进程环境与认证链都在启动时定下）。配置按会话名保存，同名会话共用一份。"),
     ));
     tip.add_css_class("dim-label");
     tip.add_css_class("pp-hint");

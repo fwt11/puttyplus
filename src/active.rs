@@ -9,6 +9,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::theme::State;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 一个会话里**终端**的存活状态（阶段 65 / 审计 P0-4）。
 ///
@@ -30,9 +32,9 @@ impl TermState {
     /// tooltip 里的说法。
     pub fn label(self) -> &'static str {
         match self {
-            TermState::Unknown => "未知",
-            TermState::Alive => "运行中",
-            TermState::Dead => "已结束",
+            TermState::Unknown => tr("未知"),
+            TermState::Alive => tr("运行中"),
+            TermState::Dead => tr("已结束"),
         }
     }
 }
@@ -98,16 +100,16 @@ pub fn aggregate(sftp: Option<State>, term: TermState, db_connected: bool) -> Op
 /// 例：「文件面板：已连接 / 终端：已结束 / 数据库：未连接」。
 pub fn state_tooltip(sftp: Option<State>, term: TermState, db_name: Option<&str>) -> String {
     let s = match sftp {
-        Some(State::Ok) => "已连接",
-        Some(State::Warn) => "连接中…",
-        Some(State::Err) => "未连接",
-        None => "未知",
+        Some(State::Ok) => tr("已连接"),
+        Some(State::Warn) => tr("连接中…"),
+        Some(State::Err) => tr("未连接"),
+        None => tr("未知"),
     };
     let db = match db_name {
-        Some(n) if !n.is_empty() => format!("已连接（{n}）"),
-        _ => "未连接".to_string(),
+        Some(n) if !n.is_empty() => trf!("已连接（{n}）", n = n),
+        _ => tr("未连接").to_string(),
     };
-    format!("文件面板：{s} / 终端：{} / 数据库：{db}", term.label())
+    trf!("文件面板：{s} / 终端：{v0} / 数据库：{db}", s = s, db = db, v0 = term.label())
 }
 
 impl ActiveInfo {
@@ -226,8 +228,7 @@ pub fn dot(state: Option<State>) -> String {
     if c.is_empty() {
         return String::new();
     }
-    format!(
-        "<span foreground='{}'>{}</span> ",
+    format!("<span foreground='{}'>{}</span> ",
         crate::theme::state_hex(state.unwrap()),
         c
     )

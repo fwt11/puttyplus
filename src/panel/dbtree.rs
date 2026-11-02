@@ -24,6 +24,8 @@ use super::worker::{DbMetaPayload, DbMetaReq};
 use crate::backend::db::DbProto;
 use crate::backend::dbmeta;
 use std::cell::Cell;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 树节点的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,16 +64,16 @@ impl NodeKind {
     /// 树里显示的短标签（第一列）。
     pub fn badge(self) -> &'static str {
         match self {
-            NodeKind::Root => "连接",
-            NodeKind::Schema => "模式",
-            NodeKind::Table => "表",
-            NodeKind::View => "视图",
-            NodeKind::Column => "列",
-            NodeKind::Index => "索引",
-            NodeKind::Function => "函数",
-            NodeKind::Procedure => "存储过程",
-            NodeKind::Trigger => "触发器",
-            NodeKind::Event => "事件",
+            NodeKind::Root => tr("连接"),
+            NodeKind::Schema => tr("模式"),
+            NodeKind::Table => tr("表"),
+            NodeKind::View => tr("视图"),
+            NodeKind::Column => tr("列"),
+            NodeKind::Index => tr("索引"),
+            NodeKind::Function => tr("函数"),
+            NodeKind::Procedure => tr("存储过程"),
+            NodeKind::Trigger => tr("触发器"),
+            NodeKind::Event => tr("事件"),
             NodeKind::Placeholder => "",
         }
     }
@@ -166,12 +168,12 @@ impl TreeFilter {
     /// 下拉框里显示的文字。
     pub fn label(self) -> &'static str {
         match self {
-            TreeFilter::All => "全部",
-            TreeFilter::Tables => "表",
-            TreeFilter::Views => "视图",
-            TreeFilter::Routines => "例程",
-            TreeFilter::Triggers => "触发器",
-            TreeFilter::Events => "事件",
+            TreeFilter::All => tr("全部"),
+            TreeFilter::Tables => tr("表"),
+            TreeFilter::Views => tr("视图"),
+            TreeFilter::Routines => tr("例程"),
+            TreeFilter::Triggers => tr("触发器"),
+            TreeFilter::Events => tr("事件"),
         }
     }
 
@@ -415,7 +417,7 @@ impl DbTree {
         // store 里的 COL_KIND 列还在（节点种类要留着给逻辑判断），
         // 只是不作为显示列——TreeViewColumn 绑定的是 store 的列号，
         // 少显示一列不影响按列号取值。
-        for (title, idx) in [("名称", COL_NAME), ("说明", COL_DETAIL)] {
+        for (title, idx) in [(tr("名称"), COL_NAME), (tr("说明"), COL_DETAIL)] {
             let r = gtk::CellRendererText::new();
             r.set_ellipsize(gtk::pango::EllipsizeMode::End);
             let c = gtk::TreeViewColumn::new();
@@ -789,7 +791,7 @@ impl DbTree {
         let Some(parent) = self.node_iter(node_id) else {
             return;
         };
-        let ph = self.append_node(Some(&parent), NodeKind::Placeholder, "载入中…", "", "", "", "");
+        let ph = self.append_node(Some(&parent), NodeKind::Placeholder, tr("载入中…"), "", "", "", "");
         self.nodes.borrow_mut()[node_id].placeholder = Some(ph);
     }
 
@@ -843,7 +845,7 @@ impl DbTree {
         let ph = self.nodes.borrow()[node_id].placeholder;
         if let Some(ph) = ph {
             if let Some(it) = self.node_iter(ph as usize) {
-                let name = "加载失败".to_string();
+                let name = tr("加载失败").to_string();
                 let detail = err.to_string();
                 self.store.set(&it, &[(COL_NAME, &name), (COL_DETAIL, &detail)]);
             }
@@ -1054,7 +1056,7 @@ impl DbTree {
                         Some(&parent),
                         NodeKind::Schema,
                         s,
-                        "模式",
+                        tr("模式"),
                         s,
                         "",
                         "",
@@ -1095,7 +1097,7 @@ impl DbTree {
                         Some(&parent),
                         kind,
                         &t.name,
-                        if t.is_view { "视图" } else { "表" },
+                        if t.is_view { tr("视图") } else { tr("表") },
                         &t.schema,
                         &t.name,
                         "",
@@ -1107,10 +1109,10 @@ impl DbTree {
                 for c in list {
                     let mut detail = c.data_type.clone();
                     if c.is_pk {
-                        detail.push_str(" · 主键");
+                        detail.push_str(tr(" · 主键"));
                     }
                     if !c.nullable {
-                        detail.push_str(" · 非空");
+                        detail.push_str(tr(" · 非空"));
                     }
                     self.append_node(
                         Some(&parent),
@@ -1176,7 +1178,7 @@ impl DbTree {
                         continue;
                     }
                     // 说明列写清楚"什么时候跑、什么状态"（事件本身没有列）
-                    let mut detail = String::from("事件");
+                    let mut detail = String::from(tr("事件"));
                     if !e.schedule.is_empty() {
                         detail.push_str(&format!(" · {}", e.schedule));
                     }
@@ -1211,7 +1213,7 @@ impl DbTree {
                     // 说明列写「列名（唯一）」——索引节点在树上只是给人看的，
                     // 结构页签里才让它可编辑
                     let desc = if i.unique {
-                        format!("{}（唯一）", i.columns.join(", "))
+                        trf!("{v0}（唯一）", v0 = i.columns.join(", "))
                     } else {
                         i.columns.join(", ")
                     };
@@ -1486,27 +1488,27 @@ impl DbTree {
         let pop = crate::menu::popover(&self.view);
         let vb = crate::menu::body();
 
-        let b_view = crate::menu::item("view-list-symbolic", "查看数据", None);
+        let b_view = crate::menu::item("view-list-symbolic", tr("查看数据"), None);
         // 表结构（设计器）：Navicat 里双击表看数据、设计器在右键菜单里
-        let b_struct = crate::menu::item("view-dual-symbolic", "表结构", None);
+        let b_struct = crate::menu::item("view-dual-symbolic", tr("表结构"), None);
         // 查看定义：函数 / 存储过程 / 触发器
-        let b_def = crate::menu::item("text-x-generic-symbolic", "查看定义", None);
-        let b_copy = crate::menu::item("edit-copy-symbolic", "复制名称", None);
+        let b_def = crate::menu::item("text-x-generic-symbolic", tr("查看定义"), None);
+        let b_copy = crate::menu::item("edit-copy-symbolic", tr("复制名称"), None);
         // 对象属性（13.5）：Navicat 的 Details 面板
-        let b_stats = crate::menu::item("dialog-information-symbolic", "对象属性…", None);
+        let b_stats = crate::menu::item("dialog-information-symbolic", tr("对象属性…"), None);
         // 导入 CSV（阶段 18）：Navicat 的 Import Wizard
-        let b_import = crate::menu::item("document-import-symbolic", "导入数据（CSV）…", None);
+        let b_import = crate::menu::item("document-import-symbolic", tr("导入数据（CSV）…"), None);
         // 导出表（阶段 52）：整张表写进本地文件（dbx 那边叫「数据传输」）
-        let b_export = crate::menu::item("document-export-symbolic", "导出表…", None);
+        let b_export = crate::menu::item("document-export-symbolic", tr("导出表…"), None);
         // ER 图（阶段 19）：Navicat 的 Database Model
-        let b_er = crate::menu::item("network-transmit-receive-symbolic", "ER 图…", None);
+        let b_er = crate::menu::item("network-transmit-receive-symbolic", tr("ER 图…"), None);
         // DDL 操作（9.6）：新建表 / 重命名 / 删除表 / 刷新
-        let b_new = crate::menu::item("list-add-symbolic", "新建表…", None);
-        let b_rename = crate::menu::item("document-edit-symbolic", "重命名…", None);
-        let b_drop = crate::menu::item("user-trash-symbolic", "删除表", None);
+        let b_new = crate::menu::item("list-add-symbolic", tr("新建表…"), None);
+        let b_rename = crate::menu::item("document-edit-symbolic", tr("重命名…"), None);
+        let b_drop = crate::menu::item("user-trash-symbolic", tr("删除表"), None);
         // 删除表不可逆：红字 + 红图标（与终端菜单里的「关闭分屏」同一套）
         crate::menu::danger(&b_drop);
-        let b_refresh = crate::menu::item("view-refresh-symbolic", "刷新", None);
+        let b_refresh = crate::menu::item("view-refresh-symbolic", tr("刷新"), None);
         // 分组：看数据 / 数据工具 / DDL / 刷新
         vb.append(&b_view);
         vb.append(&b_struct);

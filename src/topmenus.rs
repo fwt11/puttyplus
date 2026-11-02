@@ -10,6 +10,7 @@
 //!
 //! 菜单项的**观感**（图标 / hover 高亮 / 弹层）统一由 [`crate::menu`] 提供，
 //! 顶栏只是用它搭出来的标题行 + 弹层。
+use crate::i18n::tr;
 
 /// 顶栏菜单栏里的一项。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -500,11 +501,11 @@ impl NewEntry {
     /// 入口的名字（报错 / 测试里用）。
     pub fn name(self) -> &'static str {
         match self {
-            NewEntry::TopBar => "顶栏",
-            NewEntry::Sidebar => "侧栏",
-            NewEntry::SubTab => "子标签栏",
-            NewEntry::Welcome => "欢迎页",
-            NewEntry::FileMenu => "文件菜单",
+            NewEntry::TopBar => tr("顶栏"),
+            NewEntry::Sidebar => tr("侧栏"),
+            NewEntry::SubTab => tr("子标签栏"),
+            NewEntry::Welcome => tr("欢迎页"),
+            NewEntry::FileMenu => tr("文件菜单"),
         }
     }
 
@@ -538,12 +539,12 @@ impl NewEntry {
     pub fn tooltip(self) -> &'static str {
         match self {
             NewEntry::TopBar | NewEntry::Sidebar => {
-                "新建…（连接 / 终端 / 数据库连接 / 导入 PuTTY 会话）"
+                tr("新建…（连接 / 终端 / 数据库连接 / 导入 PuTTY 会话）")
             }
             // 会话内的：说清"只作用于当前会话"
-            NewEntry::SubTab => "新建页（终端 / 数据库连接）——只作用于当前会话",
-            NewEntry::Welcome => "新建连接…（侧栏的「＋」里还能建终端 / 数据库连接）",
-            NewEntry::FileMenu => "新建连接…",
+            NewEntry::SubTab => tr("新建页（终端 / 数据库连接）——只作用于当前会话"),
+            NewEntry::Welcome => tr("新建连接…（侧栏的「＋」里还能建终端 / 数据库连接）"),
+            NewEntry::FileMenu => tr("新建连接…"),
         }
     }
 }

@@ -21,6 +21,8 @@ use gtk::prelude::*;
 
 use crate::active::TermState;
 use crate::theme::State;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 传输维度（第四维）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -37,9 +39,9 @@ pub enum XferState {
 impl XferState {
     pub fn label(self) -> &'static str {
         match self {
-            XferState::Idle => "空闲",
-            XferState::Running => "传输中",
-            XferState::Failed => "有失败",
+            XferState::Idle => tr("空闲"),
+            XferState::Running => tr("传输中"),
+            XferState::Failed => tr("有失败"),
         }
     }
 }
@@ -65,21 +67,21 @@ pub struct SessionStatus {
 /// 顺序一变就变成"自己找"。
 pub fn status_lines(st: &SessionStatus) -> Vec<(&'static str, String)> {
     let sftp = match st.sftp {
-        Some(State::Ok) => "已连接".to_string(),
-        Some(State::Warn) => "连接中…".to_string(),
-        Some(State::Err) => "未连接".to_string(),
-        None => "未知".to_string(),
+        Some(State::Ok) => tr("已连接").to_string(),
+        Some(State::Warn) => tr("连接中…").to_string(),
+        Some(State::Err) => tr("未连接").to_string(),
+        None => tr("未知").to_string(),
     };
     let db = match (&st.db_name, st.db_connected) {
-        (Some(n), true) if !n.is_empty() => format!("已连接（{n}）"),
-        (Some(n), false) if !n.is_empty() => format!("未连接（{n}）"),
-        _ => "未连接".to_string(),
+        (Some(n), true) if !n.is_empty() => trf!("已连接（{n}）", n = n),
+        (Some(n), false) if !n.is_empty() => trf!("未连接（{n}）", n = n),
+        _ => tr("未连接").to_string(),
     };
     vec![
-        ("文件面板", sftp),
-        ("终端", st.term.label().to_string()),
-        ("数据库", db),
-        ("传输", st.xfer.label().to_string()),
+        (tr("文件面板"), sftp),
+        (tr("终端"), st.term.label().to_string()),
+        (tr("数据库"), db),
+        (tr("传输"), st.xfer.label().to_string()),
     ]
 }
 
@@ -89,20 +91,20 @@ pub fn status_lines(st: &SessionStatus) -> Vec<(&'static str, String)> {
 /// 用户会以为连接出了问题 —— 两件事混在一起就都说不清了。
 pub fn chip_text(st: &SessionStatus) -> String {
     match st.sftp {
-        Some(State::Err) => "文件面板未连接".to_string(),
-        Some(State::Warn) => "正在连接".to_string(),
+        Some(State::Err) => tr("文件面板未连接").to_string(),
+        Some(State::Warn) => tr("正在连接").to_string(),
         Some(State::Ok) => {
             if st.term == TermState::Dead {
-                "终端已结束".to_string()
+                tr("终端已结束").to_string()
             } else {
-                "已连接".to_string()
+                tr("已连接").to_string()
             }
         }
         None => {
             if st.term == TermState::Dead {
-                "终端已结束".to_string()
+                tr("终端已结束").to_string()
             } else {
-                "未连接".to_string()
+                tr("未连接").to_string()
             }
         }
     }
@@ -117,7 +119,7 @@ pub fn chip_state(st: &SessionStatus) -> Option<State> {
 pub fn status_tooltip(st: &SessionStatus) -> String {
     status_lines(st)
         .iter()
-        .map(|(k, v)| format!("{k}：{v}"))
+        .map(|(k, v)| trf!("{k}：{v}", k = k, v = v))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -208,7 +210,7 @@ pub fn build(tabs: Rc<crate::tabs::Tabs>) -> gtk::Button {
     row.append(&lbl);
     b.set_child(Some(&row));
 
-    b.set_tooltip_text(Some("当前会话的状态"));
+    b.set_tooltip_text(Some(tr("当前会话的状态")));
     // 没有会话时先藏着
     b.set_visible(false);
 

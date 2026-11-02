@@ -22,6 +22,8 @@ use crate::args::ConnOptions;
 use crate::backend::forward;
 use crate::config::{list_ssh_aliases, resolve_ssh_config_alias};
 use crate::util::atoi_like;
+use crate::i18n::tr;
+use crate::trf;
 
 /* ---------------- 存储层 ---------------- */
 
@@ -757,7 +759,7 @@ pub fn import_putty_sessions(dir: &std::path::Path) -> Result<ImportReport, Stri
         load_all().into_iter().map(|e| e.name).collect();
 
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return Err(format!("读不到会话目录 {}", dir.display()));
+        return Err(trf!("读不到会话目录 {v0}", v0 = dir.display()));
     };
     let mut files: Vec<_> = rd
         .filter_map(|e| e.ok())
@@ -785,8 +787,7 @@ pub fn import_putty_sessions(dir: &std::path::Path) -> Result<ImportReport, Stri
         }
         // 串口条目：把 ConnOptions 的串口参数折回 sercfg 字符串存
         let sercfg = if o.proto == "serial" {
-            Some(format!(
-                "{},{},{},{},{}",
+            Some(format!("{},{},{},{},{}",
                 o.serial_baud, o.serial_data, o.serial_parity, o.serial_stop, o.serial_flow
             ))
         } else {
@@ -808,7 +809,7 @@ pub fn import_putty_sessions(dir: &std::path::Path) -> Result<ImportReport, Stri
             sercfg.as_deref(),
             Some(&fwd),
         ) {
-            return Err(format!("写入条目「{name}」失败"));
+            return Err(trf!("写入条目「{name}」失败", name = name));
         }
         rep.imported.push(name);
     }
@@ -875,15 +876,15 @@ pub fn ui_import_putty(parent: Option<&gtk::Window>) {
     let parent = parent_of(parent);
     let dlg = {
         let mut b = gtk::FileChooserDialog::builder()
-            .title("选择 PuTTY 会话目录")
+            .title(tr("选择 PuTTY 会话目录"))
             .action(gtk::FileChooserAction::SelectFolder);
         if let Some(p) = parent.as_ref() {
             b = b.transient_for(p);
         }
         b.build()
     };
-    dlg.add_button("取消", gtk::ResponseType::Cancel);
-    dlg.add_button("导入", gtk::ResponseType::Accept);
+    dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
+    dlg.add_button(tr("导入"), gtk::ResponseType::Accept);
     dlg.set_default_response(gtk::ResponseType::Accept);
 
     dlg.connect_response(move |dlg, resp| {
@@ -895,17 +896,13 @@ pub fn ui_import_putty(parent: Option<&gtk::Window>) {
         }
         let Some(dir) = dir else { return };
         match import_putty_sessions(&dir) {
-            Err(e) => crate::panel::dialogs::show_error(pwin.as_ref(), "导入失败", &e),
+            Err(e) => crate::panel::dialogs::show_error(pwin.as_ref(), tr("导入失败"), &e),
             Ok(rep) => {
-                let mut msg = format!("已导入 {} 个会话。", rep.imported.len());
+                let mut msg = trf!("已导入 {v0} 个会话。", v0 = rep.imported.len());
                 if !rep.skipped.is_empty() {
-                    msg.push_str(&format!(
-                        "\n跳过（重名已存在）{} 个：{}",
-                        rep.skipped.len(),
-                        rep.skipped.join("、")
-                    ));
+                    msg.push_str(&trf!("\n跳过（重名已存在）{v0} 个：{v1}", v0 = rep.skipped.len(), v1 = rep.skipped.join(tr("、"))));
                 }
-                crate::panel::dialogs::info(pwin.as_ref(), "导入 PuTTY 会话", &msg);
+                crate::panel::dialogs::info(pwin.as_ref(), tr("导入 PuTTY 会话"), &msg);
             }
         }
     });
@@ -918,8 +915,8 @@ pub fn ui_export_putty(parent: Option<&gtk::Window>, names: Vec<String>) {
     if names.is_empty() {
         crate::panel::dialogs::show_error(
             parent,
-            "导出",
-            "没有可导出的连接（自定义连接为空）。",
+            tr("导出"),
+            tr("没有可导出的连接（自定义连接为空）。"),
         );
         return;
     }
@@ -927,15 +924,15 @@ pub fn ui_export_putty(parent: Option<&gtk::Window>, names: Vec<String>) {
     let parent = parent_of(parent);
     let dlg = {
         let mut b = gtk::FileChooserDialog::builder()
-            .title("导出 PuTTY 会话到目录")
+            .title(tr("导出 PuTTY 会话到目录"))
             .action(gtk::FileChooserAction::SelectFolder);
         if let Some(p) = parent.as_ref() {
             b = b.transient_for(p);
         }
         b.build()
     };
-    dlg.add_button("取消", gtk::ResponseType::Cancel);
-    dlg.add_button("导出", gtk::ResponseType::Accept);
+    dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
+    dlg.add_button(tr("导出"), gtk::ResponseType::Accept);
     dlg.set_default_response(gtk::ResponseType::Accept);
 
     dlg.connect_response(move |dlg, resp| {
@@ -947,22 +944,15 @@ pub fn ui_export_putty(parent: Option<&gtk::Window>, names: Vec<String>) {
         }
         let Some(dir) = dir else { return };
         let rep = export_putty_sessions(&dir, &names);
-        let mut msg = format!(
-            "已导出 {} 个会话到 {}。",
-            rep.exported.len(),
-            dir.display()
-        );
+        let mut msg = trf!("已导出 {v0} 个会话到 {v1}。", v0 = rep.exported.len(), v1 = dir.display());
         if !rep.skipped_rules.is_empty() {
-            msg.push_str(&format!(
-                "\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{}",
-                rep.skipped_rules.join("\n")
-            ));
+            msg.push_str(&trf!("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", v0 = rep.skipped_rules.join("\n")));
         }
         if !rep.errors.is_empty() {
-            msg.push_str(&format!("\n\n失败：\n{}", rep.errors.join("\n")));
-            crate::panel::dialogs::show_error(pwin.as_ref(), "导出 PuTTY 会话", &msg);
+            msg.push_str(&trf!("\n\n失败：\n{v0}", v0 = rep.errors.join("\n")));
+            crate::panel::dialogs::show_error(pwin.as_ref(), tr("导出 PuTTY 会话"), &msg);
         } else {
-            crate::panel::dialogs::info(pwin.as_ref(), "导出 PuTTY 会话", &msg);
+            crate::panel::dialogs::info(pwin.as_ref(), tr("导出 PuTTY 会话"), &msg);
         }
     });
     crate::panel::dialogs::style_dialog(dlg.upcast_ref::<gtk::Dialog>());
@@ -1078,41 +1068,41 @@ impl SerialFields {
         let baud = gtk::Entry::new();
         baud.set_width_chars(8);
         baud.set_max_width_chars(12);
-        baud.set_tooltip_text(Some("常用：9600 / 57600 / 115200；可填任意正整数"));
+        baud.set_tooltip_text(Some(tr("常用：9600 / 57600 / 115200；可填任意正整数")));
         let data = gtk::ComboBoxText::new();
         for v in ["5", "6", "7", "8"] {
             data.append(Some(v), v);
         }
-        data.set_tooltip_text(Some("数据位：5–8"));
+        data.set_tooltip_text(Some(tr("数据位：5–8")));
         let parity = gtk::ComboBoxText::new();
-        parity.append(Some("n"), "无 (n)");
-        parity.append(Some("e"), "偶 (e)");
-        parity.append(Some("o"), "奇 (o)");
-        parity.set_tooltip_text(Some("校验位：无 / 偶 / 奇"));
+        parity.append(Some("n"), tr("无 (n)"));
+        parity.append(Some("e"), tr("偶 (e)"));
+        parity.append(Some("o"), tr("奇 (o)"));
+        parity.set_tooltip_text(Some(tr("校验位：无 / 偶 / 奇")));
         let stop = gtk::ComboBoxText::new();
         stop.append(Some("1"), "1");
         stop.append(Some("2"), "2");
-        stop.set_tooltip_text(Some("停止位：1 / 2"));
+        stop.set_tooltip_text(Some(tr("停止位：1 / 2")));
         let flow = gtk::ComboBoxText::new();
-        flow.append(Some("n"), "无 (n)");
+        flow.append(Some("n"), tr("无 (n)"));
         flow.append(Some("x"), "XON/XOFF (x)");
         flow.append(Some("r"), "RTS/CTS (r)");
-        flow.set_tooltip_text(Some("流控：无 / 软件 / 硬件"));
+        flow.set_tooltip_text(Some(tr("流控：无 / 软件 / 硬件")));
 
         let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
         box_.append(&crate::panel::dialogs::form_pair(
-            "波特率",
+            tr("波特率"),
             &baud,
-            "数据位",
+            tr("数据位"),
             &data,
         ).0);
         box_.append(&crate::panel::dialogs::form_pair(
-            "校验位",
+            tr("校验位"),
             &parity,
-            "停止位",
+            tr("停止位"),
             &stop,
         ).0);
-        box_.append(&crate::panel::dialogs::form_row("流控", &flow));
+        box_.append(&crate::panel::dialogs::form_row(tr("流控"), &flow));
 
         let f = SerialFields {
             baud,
@@ -1231,7 +1221,7 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
     let root = crate::panel::dialogs::form_box();
 
     // 非 SSH 连接的说明（协议切到 telnet/串口时显出来）
-    let note = gtk::Label::new(Some("这些设置只对 SSH 连接有意义。"));
+    let note = gtk::Label::new(Some(tr("这些设置只对 SSH 连接有意义。")));
     note.add_css_class("dim-label");
     note.add_css_class("pp-hint");
     note.set_xalign(0.0);
@@ -1252,10 +1242,10 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
     let cur_method = init.map(|e| e.auth_method).unwrap_or_default();
     w_method.set_active_id(Some(cur_method.as_str()));
     w_method.set_tooltip_text(Some(
-        "决定这条连接允许用哪些凭据。\n\
+        tr("决定这条连接允许用哪些凭据。\n\
          自动 = 按认证优先级依次尝试（与以前完全一样）。\n\
          只影响本程序自己的 SFTP 通道；终端里跑的是 ssh 客户端，\
-         它按 ~/.ssh/config 与命令行来。",
+         它按 ~/.ssh/config 与命令行来。"),
     ));
 
     // ---- 用户名 / 密码 ----
@@ -1263,8 +1253,8 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
     let w_pass = gtk::Entry::new();
     w_pass.set_visibility(false);
     w_pass.set_tooltip_text(Some(
-        "可选。留空则连接时在终端里输入。\n\
-         密码不会进命令行参数（ps 看不见），也不会明文进日志。",
+        tr("可选。留空则连接时在终端里输入。\n\
+         密码不会进命令行参数（ps 看不见），也不会明文进日志。"),
     ));
     if let Some(e) = init {
         if let Some(u) = &e.user {
@@ -1281,7 +1271,7 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
         .and_then(|e| e.keyfile.clone())
         .filter(|k| !k.is_empty());
     let w_key = gtk::ComboBoxText::new();
-    w_key.append(Some(NO_KEY_ID), "（不指定私钥）");
+    w_key.append(Some(NO_KEY_ID), tr("（不指定私钥）"));
     // 下拉框里有哪些 id：自己记一份（gtk4 的 StringList 不是 TreeModel，
     // 拿不到 model 就没法反查）
     let key_ids = std::rc::Rc::new(std::cell::RefCell::new(vec![NO_KEY_ID.to_string()]));
@@ -1310,13 +1300,13 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
     }
     w_key.set_active_id(Some(cur_key.as_deref().unwrap_or(NO_KEY_ID)));
     w_key.set_tooltip_text(Some(
-        "这条连接用的私钥文件（列表是 ~/.ssh 里的私钥，私钥管理器列的也是这些）。\n\
-         留空 = 不指定；选了它，认证方式用「只用指定的私钥文件」时才生效。",
+        tr("这条连接用的私钥文件（列表是 ~/.ssh 里的私钥，私钥管理器列的也是这些）。\n\
+         留空 = 不指定；选了它，认证方式用「只用指定的私钥文件」时才生效。"),
     ));
 
     // 「浏览…」：挑一个别的私钥
-    let w_key_browse = gtk::Button::with_label("浏览…");
-    w_key_browse.set_tooltip_text(Some("挑一个不在 ~/.ssh 里的私钥文件。"));
+    let w_key_browse = gtk::Button::with_label(tr("浏览…"));
+    w_key_browse.set_tooltip_text(Some(tr("挑一个不在 ~/.ssh 里的私钥文件。")));
     {
         let w_key = w_key.clone();
         let key_ids = key_ids.clone();
@@ -1325,14 +1315,14 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
                 .root()
                 .and_then(|r| r.downcast::<gtk::Window>().ok());
             let mut dlg = gtk::FileChooserDialog::builder()
-                .title("选择私钥文件")
+                .title(tr("选择私钥文件"))
                 .action(gtk::FileChooserAction::Open);
             if let Some(p) = parent.as_ref() {
                 dlg = dlg.transient_for(p);
             }
             let dlg = dlg.build();
-            dlg.add_button("取消", gtk::ResponseType::Cancel);
-            dlg.add_button("选定", gtk::ResponseType::Accept);
+            dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
+            dlg.add_button(tr("选定"), gtk::ResponseType::Accept);
             dlg.set_default_response(gtk::ResponseType::Accept);
             let w_key = w_key.clone();
             let key_ids = key_ids.clone();
@@ -1383,17 +1373,17 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
         });
     }
 
-    root.append(&crate::panel::dialogs::form_section("凭据"));
-    root.append(&crate::panel::dialogs::form_row("认证方式", &w_method));
-    root.append(&crate::panel::dialogs::form_row("用户名", &w_user));
-    root.append(&crate::panel::dialogs::form_row("密码（可选）", &w_pass));
-    root.append(&crate::panel::dialogs::form_row("私钥文件", &key_row));
+    root.append(&crate::panel::dialogs::form_section(tr("凭据")));
+    root.append(&crate::panel::dialogs::form_row(tr("认证方式"), &w_method));
+    root.append(&crate::panel::dialogs::form_row(tr("用户名"), &w_user));
+    root.append(&crate::panel::dialogs::form_row(tr("密码（可选）"), &w_pass));
+    root.append(&crate::panel::dialogs::form_row(tr("私钥文件"), &key_row));
     root.append(&w_remember);
     root.append(&status_box);
 
     let tip = gtk::Label::new(Some(
-        "「认证方式」决定这条连接允许用哪些凭据：只用密码就不会把本地身份\
-         出示给堡垒机网关；只用私钥文件则不会去翻 ssh-agent。",
+        tr("「认证方式」决定这条连接允许用哪些凭据：只用密码就不会把本地身份\
+         出示给堡垒机网关；只用私钥文件则不会去翻 ssh-agent。"),
     ));
     tip.add_css_class("dim-label");
     tip.add_css_class("pp-hint");
@@ -1471,20 +1461,20 @@ fn fwd_page(init: Option<&ConnEntry>) -> FwdPage {
 
     // ---- 工具栏 ----
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let b_add = gtk::Button::with_label("添加…");
-    b_add.set_tooltip_text(Some("加一条转发规则（类型与机制在弹出的对话框里选）。"));
-    let b_edit = gtk::Button::with_label("编辑…");
-    b_edit.set_tooltip_text(Some("改选中那条的类型与机制（双击表格里的行也行）。"));
-    let b_del = gtk::Button::with_label("删除");
-    b_del.set_tooltip_text(Some("删掉选中那条。"));
+    let b_add = gtk::Button::with_label(tr("添加…"));
+    b_add.set_tooltip_text(Some(tr("加一条转发规则（类型与机制在弹出的对话框里选）。")));
+    let b_edit = gtk::Button::with_label(tr("编辑…"));
+    b_edit.set_tooltip_text(Some(tr("改选中那条的类型与机制（双击表格里的行也行）。")));
+    let b_del = gtk::Button::with_label(tr("删除"));
+    b_del.set_tooltip_text(Some(tr("删掉选中那条。")));
     bar.append(&b_add);
     bar.append(&b_edit);
     bar.append(&b_del);
 
     let hint = gtk::Label::new(Some(
-        "「监听」「目标」两列双击就能改；「启用」点一下就切换。\n\
+        tr("「监听」「目标」两列双击就能改；「启用」点一下就切换。\n\
          终端 = 交给 spawn 出去的 ssh -L/-R/-D；进程内 = 跑在应用自己那条\
-         SSH 连接上（终端标签页关了也照样在）。",
+         SSH 连接上（终端标签页关了也照样在）。"),
     ));
     hint.add_css_class("dim-label");
     hint.add_css_class("pp-hint");
@@ -1499,26 +1489,26 @@ fn fwd_page(init: Option<&ConnEntry>) -> FwdPage {
     let raw_term = gtk::TextView::new();
     raw_term.set_monospace(true);
     raw_term.set_tooltip_text(Some(
-        "一行一条：L:[监听地址:]端口:目标:端口（本地）/ R:监听端口:目标:端口（远程）/ \
+        tr("一行一条：L:[监听地址:]端口:目标:端口（本地）/ R:监听端口:目标:端口（远程）/ \
          D:端口（SOCKS）。行首 ! 表示停用该条规则。\n\
-         这里改了会覆盖上表（粘贴 PuTTY 会话里的规则走这条路）。",
+         这里改了会覆盖上表（粘贴 PuTTY 会话里的规则走这条路）。"),
     ));
     let raw_inproc = gtk::TextView::new();
     raw_inproc.set_monospace(true);
     raw_inproc.set_tooltip_text(Some(
-        "跑在应用自己那条 SSH 连接上（不新建 SSH 连接、终端标签页关了也照样在）。\n\
-         堡垒机场景用它把内网服务映射到本机。格式与上面相同，行首 ! 同样是停用。",
+        tr("跑在应用自己那条 SSH 连接上（不新建 SSH 连接、终端标签页关了也照样在）。\n\
+         堡垒机场景用它把内网服务映射到本机。格式与上面相同，行首 ! 同样是停用。"),
     ));
     raw_term.buffer().set_text(&term_val);
     raw_inproc.buffer().set_text(&inproc_val);
     let synced_term = Rc::new(std::cell::RefCell::new(term_val));
     let synced_inproc = Rc::new(std::cell::RefCell::new(inproc_val));
 
-    let expander = gtk::Expander::new(Some("高级：原始规则（粘贴导入用）"));
+    let expander = gtk::Expander::new(Some(tr("高级：原始规则（粘贴导入用）")));
     let exp_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    exp_box.append(&crate::panel::dialogs::form_section("终端转发"));
+    exp_box.append(&crate::panel::dialogs::form_section(tr("终端转发")));
     exp_box.append(&scroll_of(&raw_term));
-    exp_box.append(&crate::panel::dialogs::form_section("进程内端口映射"));
+    exp_box.append(&crate::panel::dialogs::form_section(tr("进程内端口映射")));
     exp_box.append(&scroll_of(&raw_inproc));
     expander.set_child(Some(&exp_box));
     root.append(&expander);
@@ -1637,57 +1627,57 @@ fn session_page(init: Option<&ConnEntry>) -> (gtk::Box, Rc<dyn Fn() -> SessionOp
     w_keep.set_digits(0);
     w_keep.set_value(f64::from(cur.keepalive_sec.unwrap_or(DEFAULT_KEEPALIVE_SEC)));
     w_keep.set_tooltip_text(Some(
-        "无服务器数据多少秒后发一次 SSH 保活，连续 3 次无应答即断开。\n\
-         0 = 关闭保活（完全依赖 TCP 超时）。",
+        tr("无服务器数据多少秒后发一次 SSH 保活，连续 3 次无应答即断开。\n\
+         0 = 关闭保活（完全依赖 TCP 超时）。"),
     ));
 
     // 终端类型（TERM）：自由填写，常用值写在提示里
     let w_term = gtk::Entry::new();
     w_term.set_text(cur.term_type.as_deref().unwrap_or(""));
-    w_term.set_placeholder_text(Some("留空 = xterm-256color"));
+    w_term.set_placeholder_text(Some(tr("留空 = xterm-256color")));
     w_term.set_tooltip_text(Some(
-        "决定远程 pty 的 TERM。常用：xterm-256color / xterm / screen-256color / vt100 / linux。\n\
-         改完要重新连接才生效（子进程环境在启动时定下）。",
+        tr("决定远程 pty 的 TERM。常用：xterm-256color / xterm / screen-256color / vt100 / linux。\n\
+         改完要重新连接才生效（子进程环境在启动时定下）。"),
     ));
 
     // 认证优先级
     let w_auth = gtk::ComboBoxText::new();
-    w_auth.append(Some("password-first"), "密码优先（默认）");
-    w_auth.append(Some("publickey-first"), "密钥优先");
+    w_auth.append(Some("password-first"), tr("密码优先（默认）"));
+    w_auth.append(Some("publickey-first"), tr("密钥优先"));
     w_auth.set_active_id(Some(cur.auth_order.unwrap_or_default().as_str()));
     w_auth.set_tooltip_text(Some(
-        "进程内 SFTP 链路的认证顺序。\n\
-         密码优先：少一次无谓的公钥尝试，也避免把本地身份出示给堡垒机网关。",
+        tr("进程内 SFTP 链路的认证顺序。\n\
+         密码优先：少一次无谓的公钥尝试，也避免把本地身份出示给堡垒机网关。"),
     ));
 
     // 终端字号：留空 = 跟随首选项中心的全局字号
     let w_font = gtk::Entry::new();
     w_font.set_text(&cur.font_size.map(|v| format!("{v:.1}")).unwrap_or_default());
-    w_font.set_placeholder_text(Some("留空 = 跟随首选项"));
+    w_font.set_placeholder_text(Some(tr("留空 = 跟随首选项")));
     w_font.set_tooltip_text(Some(
-        "终端字号。留空则用首选项中心的全局字号（默认 10.5）。",
+        tr("终端字号。留空则用首选项中心的全局字号（默认 10.5）。"),
     ));
 
     // 响铃：默认开
-    let w_bell = gtk::CheckButton::with_label("终端响铃");
+    let w_bell = gtk::CheckButton::with_label(tr("终端响铃"));
     w_bell.set_active(cur.bell.unwrap_or(true));
 
-    root.append(&crate::panel::dialogs::form_section("连接"));
-    root.append(&crate::panel::dialogs::form_row("保活（秒）", &w_keep));
+    root.append(&crate::panel::dialogs::form_section(tr("连接")));
+    root.append(&crate::panel::dialogs::form_row(tr("保活（秒）"), &w_keep));
     root.append(&crate::panel::dialogs::form_row(
-        "终端类型（TERM）",
+        tr("终端类型（TERM）"),
         &w_term,
     ));
-    root.append(&crate::panel::dialogs::form_row("认证优先级", &w_auth));
+    root.append(&crate::panel::dialogs::form_row(tr("认证优先级"), &w_auth));
 
-    root.append(&crate::panel::dialogs::form_section("终端"));
-    root.append(&crate::panel::dialogs::form_row("终端字号", &w_font));
-    root.append(&crate::panel::dialogs::form_row("响铃", &w_bell));
+    root.append(&crate::panel::dialogs::form_section(tr("终端")));
+    root.append(&crate::panel::dialogs::form_row(tr("终端字号"), &w_font));
+    root.append(&crate::panel::dialogs::form_row(tr("响铃"), &w_bell));
 
     let tip = gtk::Label::new(Some(
-        "这里是这条连接的默认值，新开的会话都按它来。\n\
+        tr("这里是这条连接的默认值，新开的会话都按它来。\n\
          保活、终端类型、认证顺序只对 SSH 连接有意义。\n\
-         已经跑着的会话要单独改，用标签上的「会话选项…」——那是临时覆盖，优先于这里。",
+         已经跑着的会话要单独改，用标签上的「会话选项…」——那是临时覆盖，优先于这里。"),
     ));
     tip.add_css_class("dim-label");
     tip.add_css_class("pp-hint");
@@ -1768,19 +1758,19 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
     // 动作按钮收敛成「取消」+ 一个主操作（阶段 73b）
     let buttons: Vec<(&str, gtk::ResponseType)> = match mode {
         DlgMode::NewConnect => vec![
-            ("取消", gtk::ResponseType::Cancel),
-            ("连接", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("连接"), gtk::ResponseType::Ok),
         ],
         DlgMode::Edit => vec![
-            ("取消", gtk::ResponseType::Cancel),
-            ("保存", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("保存"), gtk::ResponseType::Ok),
         ],
     };
     // ⚠️ 走 `windows::dialog`：**必定**挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
         match mode {
-            DlgMode::NewConnect => "新建连接",
-            DlgMode::Edit => "编辑连接",
+            DlgMode::NewConnect => tr("新建连接"),
+            DlgMode::Edit => tr("编辑连接"),
         },
         parent.as_ref(),
         &buttons,
@@ -1795,7 +1785,7 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
     let w_port = gtk::Entry::new();
     w_port.set_text("22");
     let w_proto = gtk::ComboBoxText::new();
-    for (name, id) in [("SSH", "ssh"), ("Telnet", "telnet"), ("串口", "serial")] {
+    for (name, id) in [("SSH", "ssh"), ("Telnet", "telnet"), (tr("串口"), "serial")] {
         w_proto.append(Some(id), name);
     }
     let proto_default = init
@@ -1809,19 +1799,19 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
     // 转发规则：多行文本，一行一条（内部形）。从 PuTTY 会话文件复制
     // PortForwardings 后经 from_putty_value 转成内部形即可粘贴。
     // ---- 表单版式：标签在上、控件在下；按协议整行显隐 ----
-    root.append(&crate::panel::dialogs::form_section("基本信息"));
-    root.append(&crate::panel::dialogs::form_row("名称", &w_name));
+    root.append(&crate::panel::dialogs::form_section(tr("基本信息")));
+    root.append(&crate::panel::dialogs::form_row(tr("名称"), &w_name));
     // 协议 + 端口并排：表单里最占高度的就是"一行一个字段"
     let (pair_port, _proto_row, port_row) =
-        crate::panel::dialogs::form_pair("协议", &w_proto, "端口", &w_port);
+        crate::panel::dialogs::form_pair(tr("协议"), &w_proto, tr("端口"), &w_port);
     root.append(&pair_port);
-    let (row_host, l_host) = crate::panel::dialogs::form_row_with("主机", &w_host);
+    let (row_host, l_host) = crate::panel::dialogs::form_row_with(tr("主机"), &w_host);
     root.append(&row_host);
 
     // ⚠️ 用户名/密码**不在这一页**了（阶段 70）：它们跟认证方式、私钥、
     // 「记住密码」是一组，搬进「认证」页（那一页整体按协议显隐）。
 
-    let sec_serial = crate::panel::dialogs::form_section("串口参数");
+    let sec_serial = crate::panel::dialogs::form_section(tr("串口参数"));
     let serial_box = serial.box_.clone();
     root.append(&sec_serial);
     root.append(&serial_box);
@@ -1850,10 +1840,10 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
     nb.set_vexpand(true);
     // 「转发」页（阶段 71）：结构化表 + 原始规则折叠区
     let fwd = fwd_page(init);
-    nb.append_page(&root, Some(&gtk::Label::new(Some("常规"))));
-    nb.append_page(&auth.root, Some(&gtk::Label::new(Some("认证"))));
-    nb.append_page(&fwd.root, Some(&gtk::Label::new(Some("转发"))));
-    nb.append_page(&sess_page, Some(&gtk::Label::new(Some("会话"))));
+    nb.append_page(&root, Some(&gtk::Label::new(Some(tr("常规")))));
+    nb.append_page(&auth.root, Some(&gtk::Label::new(Some(tr("认证")))));
+    nb.append_page(&fwd.root, Some(&gtk::Label::new(Some(tr("转发")))));
+    nb.append_page(&sess_page, Some(&gtk::Label::new(Some(tr("会话")))));
 
     // 显隐：串口隐藏端口/转发，显示「设备路径 + 串口参数」；
     // 非 SSH 时整页「认证」置灰（认证方式/私钥只对 SSH 有意义）
@@ -1867,7 +1857,7 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
         std::rc::Rc::new(move |proto: &str| {
             let serial = proto == "serial";
             let ssh = proto == "ssh";
-            l_host.set_text(if serial { "设备路径" } else { "主机" });
+            l_host.set_text(if serial { tr("设备路径") } else { tr("主机") });
             // 只藏"端口"这一半：协议对串口同样有意义
             port_row.set_visible(!serial);
             serial_box.set_visible(serial);
@@ -1934,11 +1924,11 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
     // ⚠️ 默认**勾上**：老对话框回车默认落在「保存并连接」上，默认行为不变。
     let save_flag = std::rc::Rc::new(std::cell::Cell::new(true));
     if mode == DlgMode::NewConnect {
-        let save_to_list = gtk::CheckButton::with_label("保存到连接列表");
+        let save_to_list = gtk::CheckButton::with_label(tr("保存到连接列表"));
         save_to_list.set_active(true);
         save_to_list.set_tooltip_text(Some(
-            "勾上：连接的同时把这条连接写进连接列表（侧栏里能找到）。\n\
-             不勾：只连这一次，不留痕。",
+            tr("勾上：连接的同时把这条连接写进连接列表（侧栏里能找到）。\n\
+             不勾：只连这一次，不留痕。"),
         ));
         {
             let save_flag = save_flag.clone();
@@ -1991,10 +1981,10 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
         };
         if missing {
             let msg = match (save, serial) {
-                (true, true) => "名称和设备路径都不能为空",
-                (true, false) => "名称和主机都不能为空",
-                (false, true) => "设备路径不能为空",
-                (false, false) => "主机不能为空",
+                (true, true) => tr("名称和设备路径都不能为空"),
+                (true, false) => tr("名称和主机都不能为空"),
+                (false, true) => tr("设备路径不能为空"),
+                (false, false) => tr("主机不能为空"),
             };
             let d = gtk::AlertDialog::builder().message(msg).modal(true).build();
             d.show(Some(dlg));
@@ -2090,8 +2080,8 @@ pub fn ui_edit_connection<F: Fn() + 'static>(
         if !save_draft(&draft) {
             crate::panel::dialogs::show_error(
                 None,
-                "保存失败",
-                "写不进 connections.ini（目录权限或磁盘问题）。",
+                tr("保存失败"),
+                tr("写不进 connections.ini（目录权限或磁盘问题）。"),
             );
             return;
         }
@@ -2136,33 +2126,30 @@ pub fn forward_leaves_for(e: &ConnEntry) -> Vec<FwdLeaf> {
     for r in &e.inproc_forwards {
         let text = r.display();
         let meta = if r.enabled {
-            "进程内".to_string()
+            tr("进程内").to_string()
         } else {
-            "进程内 · 已停用".to_string()
+            tr("进程内 · 已停用").to_string()
         };
         out.push(FwdLeaf {
             key: format!("{}:{}", r.kind, r.spec),
             text: text.clone(),
             meta,
-            tip: format!(
-                "进程内转发：跑在应用自己这条 SSH 连接上（终端标签页关了也照样在）\n{text}\n\
-                 来源：连接配置的「进程内端口映射」"
-            ),
+            tip: trf!("进程内转发：跑在应用自己这条 SSH 连接上（终端标签页关了也照样在）\n{text}\n来源：连接配置的「进程内端口映射」", text = text),
             source: FwdSource::InProc,
         });
     }
     for r in &e.forwards {
         let text = r.display();
         let meta = if r.enabled {
-            "终端".to_string()
+            tr("终端").to_string()
         } else {
-            "终端 · 已停用".to_string()
+            tr("终端 · 已停用").to_string()
         };
         out.push(FwdLeaf {
             key: format!("{}:{}", r.kind, r.spec),
             text: text.clone(),
             meta,
-            tip: format!("终端转发：由终端标签页的 ssh/plink 承接（-L/-R/-D）\n{text}"),
+            tip: trf!("终端转发：由终端标签页的 ssh/plink 承接（-L/-R/-D）\n{text}", text = text),
             source: FwdSource::Terminal,
         });
     }
@@ -2207,7 +2194,7 @@ pub fn set_fwd_enabled_to(
         FwdSource::InProc => {
             let mut rules = entry.inproc_forwards.clone();
             if !flip_rule(&mut rules, rule_key, enabled) {
-                return Err("规则不在列表里".into());
+                return Err(tr("规则不在列表里").into());
             }
             let value = forward::to_storage_value(&rules);
             // 自建条目写它自己的组；ssh 别名写 [ssh_alias_forwards] 段（键 = 别名）
@@ -2219,23 +2206,23 @@ pub fn set_fwd_enabled_to(
             if ok {
                 Ok(())
             } else {
-                Err("写回 connections.ini 失败".into())
+                Err(tr("写回 connections.ini 失败").into())
             }
         }
         FwdSource::Terminal => {
             // ssh config 别名的终端转发来自 ~/.ssh/config（只读）——不碰用户的 ssh 配置
             if !entry.custom {
-                return Err("ssh config 别名的转发规则在 ~/.ssh/config 里（只读），改不了".into());
+                return Err(tr("ssh config 别名的转发规则在 ~/.ssh/config 里（只读），改不了").into());
             }
             let mut rules = entry.forwards.clone();
             if !flip_rule(&mut rules, rule_key, enabled) {
-                return Err("规则不在列表里".into());
+                return Err(tr("规则不在列表里").into());
             }
             let value = forward::to_storage_value(&rules);
             if save_forwards_to(path, &entry.name, &value) {
                 Ok(())
             } else {
-                Err("写回 connections.ini 失败".into())
+                Err(tr("写回 connections.ini 失败").into())
             }
         }
     }
@@ -2437,8 +2424,8 @@ fn new_connection_dialog<F: Fn(ConnOptions) + 'static>(
         if save && !save_draft(&draft) {
             crate::panel::dialogs::show_error(
                 None,
-                "保存失败",
-                "写不进 connections.ini（目录权限或磁盘问题）。",
+                tr("保存失败"),
+                tr("写不进 connections.ini（目录权限或磁盘问题）。"),
             );
             return;
         }

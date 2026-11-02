@@ -26,6 +26,8 @@ use zeroize::Zeroizing;
 
 use crate::connmgr::ConnEntry;
 use crate::vault;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 主密码对话框的选项。
 ///
@@ -62,7 +64,7 @@ pub fn ask_master<F: FnOnce(Option<Zeroizing<String>>) + 'static>(
     let dlg = crate::windows::dialog(
         &opts.title,
         parent,
-        &[("取消", gtk::ResponseType::Cancel), ("确定", gtk::ResponseType::Ok)],
+        &[(tr("取消"), gtk::ResponseType::Cancel), (tr("确定"), gtk::ResponseType::Ok)],
     );
     dlg.set_default_size(380, -1);
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -78,23 +80,23 @@ pub fn ask_master<F: FnOnce(Option<Zeroizing<String>>) + 'static>(
 
     let e1 = gtk::Entry::new();
     e1.set_visibility(false);
-    e1.set_placeholder_text(Some("主密码"));
-    vbox.append(&crate::panel::dialogs::form_row("主密码", &e1));
+    e1.set_placeholder_text(Some(tr("主密码")));
+    vbox.append(&crate::panel::dialogs::form_row(tr("主密码"), &e1));
 
     let e2 = gtk::Entry::new();
     if opts.twice {
         e2.set_visibility(false);
-        e2.set_placeholder_text(Some("再输一遍"));
-        vbox.append(&crate::panel::dialogs::form_row("确认主密码", &e2));
+        e2.set_placeholder_text(Some(tr("再输一遍")));
+        vbox.append(&crate::panel::dialogs::form_row(tr("确认主密码"), &e2));
     }
 
     // 「不设主密码」= 不加密。**默认不勾**——这是安全倒退，得用户自己
     // 明确选，不能让"忘了密码"顺手滑到"不加密"上去。
-    let no_pw = gtk::CheckButton::with_label("不设主密码（不加密保存）");
+    let no_pw = gtk::CheckButton::with_label(tr("不设主密码（不加密保存）"));
     let risk = gtk::Label::new(Some(
-        "⚠ 凭据库里的密码将以明文存在本机文件里。\n\
+        tr("⚠ 凭据库里的密码将以明文存在本机文件里。\n\
          任何能读到这个文件的人都能拿到这些密码——\
-         只在自己的机器上用、且清楚这个风险时再选。",
+         只在自己的机器上用、且清楚这个风险时再选。"),
     ));
     risk.add_css_class("pp-error");
     risk.set_xalign(0.0);
@@ -130,7 +132,7 @@ pub fn ask_master<F: FnOnce(Option<Zeroizing<String>>) + 'static>(
     // ⚠️ 主密码忘了不是死路——代价只是"已保存的密码重新输一遍"。
     // 不给这个入口，用户就只能卡在"解锁失败"里，从此再也存不了密码。
     if opts.unlock {
-        let b = gtk::Button::with_label("忘记主密码？重置凭据库");
+        let b = gtk::Button::with_label(tr("忘记主密码？重置凭据库"));
         // 只用 `flat`（透明底、悬停有底色 → 看得出能点），**不**用
         // `pp-hint` 的弱化色：这是用户被堵住时**唯一的出路**，字太淡
         // 会没人注意到，那这入口等于白加。
@@ -166,7 +168,7 @@ pub fn ask_master<F: FnOnce(Option<Zeroizing<String>>) + 'static>(
                 e1.text().to_string()
             };
             if twice && !allow_empty && a != e2.text().to_string() {
-                err.set_text("两次输入的主密码不一致");
+                err.set_text(tr("两次输入的主密码不一致"));
                 err.set_visible(true);
                 return; // 保持对话框打开
             }
@@ -182,10 +184,7 @@ pub fn ask_master<F: FnOnce(Option<Zeroizing<String>>) + 'static>(
                         return;
                     }
                     Err(e) => {
-                        err.set_text(&format!(
-                            "{e}\n\n忘了主密码？点下面的「忘记主密码？」可以重置凭据库——\
-                             已保存的密码会清空、需要重新输入一遍。"
-                        ));
+                        err.set_text(&trf!("{e}\n\n忘了主密码？点下面的「忘记主密码？」可以重置凭据库——已保存的密码会清空、需要重新输入一遍。", e = e));
                         err.set_visible(true);
                         e1.set_text("");
                         e1.grab_focus();
@@ -219,19 +218,19 @@ fn ask_change_master<F: FnOnce(Option<(String, String)>) + 'static>(
 ) {
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        "改主密码",
+        tr("改主密码"),
         parent,
-        &[("取消", gtk::ResponseType::Cancel), ("确定", gtk::ResponseType::Ok)],
+        &[(tr("取消"), gtk::ResponseType::Cancel), (tr("确定"), gtk::ResponseType::Ok)],
     );
     dlg.set_default_size(380, -1);
     let vbox = crate::panel::dialogs::form_box();
 
     let hint = gtk::Label::new(Some(if has_old {
-        "改主密码：先验证当前主密码，再设一个新的。\n\
-         库里的连接密码会原样搬过去，一条都不会丢。"
+        tr("改主密码：先验证当前主密码，再设一个新的。\n\
+         库里的连接密码会原样搬过去，一条都不会丢。")
     } else {
-        "这个凭据库没有主密码（不加密模式）。\n\
-         设一个主密码就会把它变成加密库——库里的连接密码原样保留。"
+        tr("这个凭据库没有主密码（不加密模式）。\n\
+         设一个主密码就会把它变成加密库——库里的连接密码原样保留。")
     }));
     hint.set_xalign(0.0);
     hint.set_wrap(true);
@@ -240,19 +239,19 @@ fn ask_change_master<F: FnOnce(Option<(String, String)>) + 'static>(
 
     let old = gtk::Entry::new();
     old.set_visibility(false);
-    old.set_placeholder_text(Some("当前主密码"));
+    old.set_placeholder_text(Some(tr("当前主密码")));
     if has_old {
-        vbox.append(&crate::panel::dialogs::form_row("当前主密码", &old));
+        vbox.append(&crate::panel::dialogs::form_row(tr("当前主密码"), &old));
     }
 
     let e1 = gtk::Entry::new();
     e1.set_visibility(false);
-    e1.set_placeholder_text(Some("新主密码"));
-    vbox.append(&crate::panel::dialogs::form_row("新主密码", &e1));
+    e1.set_placeholder_text(Some(tr("新主密码")));
+    vbox.append(&crate::panel::dialogs::form_row(tr("新主密码"), &e1));
     let e2 = gtk::Entry::new();
     e2.set_visibility(false);
-    e2.set_placeholder_text(Some("再输一遍"));
-    vbox.append(&crate::panel::dialogs::form_row("确认新主密码", &e2));
+    e2.set_placeholder_text(Some(tr("再输一遍")));
+    vbox.append(&crate::panel::dialogs::form_row(tr("确认新主密码"), &e2));
 
     let err = gtk::Label::new(None);
     err.set_xalign(0.0);
@@ -269,13 +268,13 @@ fn ask_change_master<F: FnOnce(Option<(String, String)>) + 'static>(
         if resp == gtk::ResponseType::Ok {
             let a = e1.text().to_string();
             if a.is_empty() {
-                err.set_text("新主密码不能为空\n\
-                             （想把库改成不加密，请用「重置凭据库」——那里会先说清后果）");
+                err.set_text(tr("新主密码不能为空\n\
+                             （想把库改成不加密，请用「重置凭据库」——那里会先说清后果）"));
                 err.set_visible(true);
                 return;
             }
             if a != e2.text().to_string() {
-                err.set_text("两次输入的新主密码不一致");
+                err.set_text(tr("两次输入的新主密码不一致"));
                 err.set_visible(true);
                 return;
             }
@@ -305,15 +304,15 @@ fn reset_flow(parent: Option<&gtk::Window>) {
         // ⚠️ **别用 markdown 星号**：`dialogs::confirm_with` 里是**普通**
         // `gtk::Label`（不是 markup label），`**` 会**原样显示**出来。
         // 强调靠措辞和分段，不靠星号。
-        "重置凭据库？\n\n\
+        tr("重置凭据库？\n\n\
          主密码是解锁凭据库的唯一钥匙。忘了它（或文件损坏），\
          里面的密码就再也解不开——这里没有后门。\n\n\
          重置会丢弃整个凭据库：已保存的连接密码全部永久丢失，\
          需要重新输入一遍。\n\n\
          不会丢的：连接列表、数据库连接的定义、\
          「记住密码」的勾选都还在。重新连上时弹一次密码框、\
-         勾上「记住密码」，就又存进新库了。",
-        "重置凭据库",
+         勾上「记住密码」，就又存进新库了。"),
+        tr("重置凭据库"),
         move |ok| {
             if !ok {
                 return;
@@ -325,10 +324,10 @@ fn reset_flow(parent: Option<&gtk::Window>) {
             ask_master(
                 p3.as_ref(),
                 MasterOpts {
-                    title: "设置新主密码".into(),
-                    hint: "给重置后的凭据库设一个新主密码。\n\
+                    title: tr("设置新主密码").into(),
+                    hint: tr("给重置后的凭据库设一个新主密码。\n\
                            忘了它同样只能重置，所以别用太随手的主密码。\n\
-                           不设主密码也行——那样就是明文保存（堡垒机场景常用）。"
+                           不设主密码也行——那样就是明文保存（堡垒机场景常用）。")
                         .into(),
                     twice: true,
                     allow_empty: true,
@@ -341,19 +340,19 @@ fn reset_flow(parent: Option<&gtk::Window>) {
                         Ok(()) => {
                             // 重置后直接解锁：设完主密码就能接着用
                             if let Err(e) = vault::unlock(&pw) {
-                                alert(p5.as_ref(), "解锁失败", &e);
+                                alert(p5.as_ref(), tr("解锁失败"), &e);
                                 return;
                             }
                             notify_state_changed();
                             info(
                                 p5.as_ref(),
-                                "凭据库已重置",
-                                "凭据库已用新主密码重建。之前保存的密码已清空——\
-                                 需要时重新输入一次即可（勾「记住密码」会存进新库）。",
+                                tr("凭据库已重置"),
+                                tr("凭据库已用新主密码重建。之前保存的密码已清空——\
+                                 需要时重新输入一次即可（勾「记住密码」会存进新库）。"),
                             );
                             open_vault_window(p5.as_ref());
                         }
-                        Err(e) => alert(p5.as_ref(), "重置凭据库失败", &e),
+                        Err(e) => alert(p5.as_ref(), tr("重置凭据库失败"), &e),
                     }
                 },
             );
@@ -392,10 +391,10 @@ fn setup_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
     ask_master(
         parent,
         MasterOpts {
-            title: "设置主密码".into(),
-            hint: "主密码用于加密本机保存的连接密码。\n\
+            title: tr("设置主密码").into(),
+            hint: tr("主密码用于加密本机保存的连接密码。\n\
                    忘了可以重置（已保存的密码要重新输一遍），但没有找回的办法。\n\
-                   也可以不设主密码——那样就不加密（堡垒机场景常用）。"
+                   也可以不设主密码——那样就不加密（堡垒机场景常用）。")
                 .into(),
             twice: true,
             allow_empty: true,
@@ -406,11 +405,11 @@ fn setup_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
             let pwin = pwin.clone();
             let creds = collect_passwords(&entries);
             if let Err(e) = vault::create(&pw, &creds) {
-                alert(pwin.as_ref(), "创建凭据库失败", &e);
+                alert(pwin.as_ref(), tr("创建凭据库失败"), &e);
                 return;
             }
             if let Err(e) = vault::unlock(&pw) {
-                alert(pwin.as_ref(), "解锁失败", &e);
+                alert(pwin.as_ref(), tr("解锁失败"), &e);
                 return;
             }
             // 明文已进凭据库，ini 里的 password 键删掉。
@@ -418,18 +417,14 @@ fn setup_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
             crate::connmgr::purge_ini_passwords();
             notify_state_changed();
             let mode = if pw.is_empty() {
-                "凭据库已启用（未加密）"
+                tr("凭据库已启用（未加密）")
             } else {
-                "凭据库已启用"
+                tr("凭据库已启用")
             };
             info(
                 pwin.as_ref(),
                 mode,
-                &format!(
-                    "{} 条密码已从 connections.ini 迁入存储，ini 中的明文已删除。\n\n{}",
-                    creds.len(),
-                    status(&entries)
-                ),
+                &trf!("{v0} 条密码已从 connections.ini 迁入存储，ini 中的明文已删除。\n\n{v1}", v0 = creds.len(), v1 = status(&entries)),
             );
             open_vault_window(pwin.as_ref());
         },
@@ -442,8 +437,8 @@ fn unlock_vault(parent: Option<&gtk::Window>) {
     ask_master(
         parent,
         MasterOpts {
-            title: "解锁凭据库".into(),
-            hint: "输入主密码以解密本机保存的连接密码。".into(),
+            title: tr("解锁凭据库").into(),
+            hint: tr("输入主密码以解密本机保存的连接密码。").into(),
             twice: false,
             allow_empty: false,
             unlock: true,
@@ -517,7 +512,7 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
         }
         let names = vault::names();
         if names.is_empty() {
-            let l = gtk::Label::new(Some("库里还没有凭据。\n连上某个连接并勾「记住密码」就会存进来。"));
+            let l = gtk::Label::new(Some(tr("库里还没有凭据。\n连上某个连接并勾「记住密码」就会存进来。")));
             l.set_xalign(0.0);
             l.add_css_class("dim-label");
             list.append(&l);
@@ -551,11 +546,11 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
         // 状态
         let n = vault::names().len();
         let text = if !vault::is_unlocked() {
-            "● 已锁定 —— 要看库里的内容，得先解锁。".to_string()
+            tr("● 已锁定 —— 要看库里的内容，得先解锁。").to_string()
         } else if vault::is_protected() {
-            format!("● 已解锁（主密码保护） · 库内 {n} 条凭据")
+            trf!("● 已解锁（主密码保护） · 库内 {n} 条凭据", n = n)
         } else {
-            format!("● 已解锁（未加密，明文保存） · 库内 {n} 条凭据")
+            trf!("● 已解锁（未加密，明文保存） · 库内 {n} 条凭据", n = n)
         };
         state.set_text(&text);
         // ⚠️ 阶段 79：锁着时给一个**就地解锁**的入口——
@@ -573,7 +568,7 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
 
     // ---- 「改主密码」----
     {
-        let b = gtk::Button::with_label("改主密码…");
+        let b = gtk::Button::with_label(tr("改主密码…"));
         b.add_css_class("flat");
         let w = win.clone();
         let l = list.clone();
@@ -592,12 +587,12 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
                         notify_state_changed();
                         info(
                             Some(&w2),
-                            "主密码已改",
-                            "凭据库已用新主密码重新加密，库里的连接密码一条不少。",
+                            tr("主密码已改"),
+                            tr("凭据库已用新主密码重新加密，库里的连接密码一条不少。"),
                         );
                         refresh(&w2, &l2, &s2, &bu2);
                     }
-                    Err(e) => alert(Some(&w2), "改主密码失败", &e),
+                    Err(e) => alert(Some(&w2), tr("改主密码失败"), &e),
                 }
             });
         });
@@ -606,7 +601,7 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
 
     // ---- 「重置凭据库」----
     {
-        let b = gtk::Button::with_label("重置凭据库…");
+        let b = gtk::Button::with_label(tr("重置凭据库…"));
         b.add_css_class("flat");
         let w = win.clone();
         let l = list.clone();
@@ -626,7 +621,7 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
 
     // ---- 「锁定」----
     {
-        let b = gtk::Button::with_label("锁定");
+        let b = gtk::Button::with_label(tr("锁定"));
         b.add_css_class("flat");
         let w = win.clone();
         let l = list.clone();
@@ -642,7 +637,7 @@ fn open_vault_window(parent: Option<&gtk::Window>) {
 
     // ---- 「关闭」----
     {
-        let b = gtk::Button::with_label("关闭");
+        let b = gtk::Button::with_label(tr("关闭"));
         // ⚠️ 抓**弱引用**：抓强引用就是 窗口 → 按钮 → 闭包 → 窗口 的环，
         // 窗口永远回收不掉。
         let w = win.downgrade();
@@ -710,10 +705,10 @@ pub fn notify_state_changed() {
 /// 状态的短文案（菜单项、标志都用它）。
 pub fn state_short(st: vault::State) -> &'static str {
     match st {
-        vault::State::Off => "未启用",
-        vault::State::Unlocked => "已启用",
-        vault::State::Locked => "已锁定",
-        vault::State::Plain => "未加密",
+        vault::State::Off => tr("未启用"),
+        vault::State::Unlocked => tr("已启用"),
+        vault::State::Locked => tr("已锁定"),
+        vault::State::Plain => tr("未加密"),
     }
 }
 
@@ -756,13 +751,13 @@ pub fn remember_policy(st: vault::State) -> RememberPolicy {
         vault::State::Unlocked => RememberPolicy {
             can_remember: true,
             show_checkbox: true,
-            text: "凭据库已启用并已解锁：勾上「记住密码」= 密码加密存进本机凭据库。",
+            text: tr("凭据库已启用并已解锁：勾上「记住密码」= 密码加密存进本机凭据库。"),
             offer_unlock: false,
         },
         vault::State::Plain => RememberPolicy {
             can_remember: true,
             show_checkbox: true,
-            text: "凭据库已启用但没有主密码：密码明文存在本机文件里。设一个主密码就能加密。",
+            text: tr("凭据库已启用但没有主密码：密码明文存在本机文件里。设一个主密码就能加密。"),
             offer_unlock: false,
         },
         vault::State::Locked => RememberPolicy {
@@ -772,7 +767,7 @@ pub fn remember_policy(st: vault::State) -> RememberPolicy {
             //    （之前只挡住了"没启用"，忘了主密码的用户全落在这一档。）
             //    状态说明 + 「解锁凭据库…」入口照旧 ⇒ 解锁后立刻冒出来。
             show_checkbox: false,
-            text: "凭据库已启用但当前锁定：解锁后才能把密码加密存进本机。",
+            text: tr("凭据库已启用但当前锁定：解锁后才能把密码加密存进本机。"),
             offer_unlock: true,
         },
         vault::State::Off => RememberPolicy {
@@ -780,8 +775,8 @@ pub fn remember_policy(st: vault::State) -> RememberPolicy {
             // ⚠️ **没启用就不显示**（用户 2026-11-02）——
             //    勾了也存不住（存的那头会拦下并说清楚）⇒ 干脆不摆。
             show_checkbox: false,
-            text: "凭据库还没启用：这次的密码只用这一次，不保存。\
-                   想加密保存，先去「工具 → 凭据库…」启用凭据库。",
+            text: tr("凭据库还没启用：这次的密码只用这一次，不保存。\
+                   想加密保存，先去「工具 → 凭据库…」启用凭据库。"),
             offer_unlock: false,
         },
     }
@@ -792,10 +787,10 @@ pub fn remember_policy(st: vault::State) -> RememberPolicy {
 /// 连接表单 / DB 密码提示 / 凭据库管理器共用这一颗：
 /// 用户在哪儿看到"要解锁"，就在那儿能解，不用关掉当前窗口去顶栏菜单里找。
 pub fn unlock_button(parent: Option<&gtk::Window>) -> gtk::Button {
-    let b = gtk::Button::with_label("解锁凭据库…");
+    let b = gtk::Button::with_label(tr("解锁凭据库…"));
     b.set_halign(gtk::Align::Start);
     b.set_tooltip_text(Some(
-        "输入主密码解锁本机凭据库；解锁后就能勾「记住密码」，密码会加密保存。",
+        tr("输入主密码解锁本机凭据库；解锁后就能勾「记住密码」，密码会加密保存。"),
     ));
     let p = parent.cloned();
     b.connect_clicked(move |_| unlock_vault(p.as_ref()));
@@ -815,7 +810,7 @@ pub fn remember_row(
     default_active: bool,
 ) -> (gtk::CheckButton, gtk::Box) {
     let pol = remember_policy(vault::state());
-    let cb = gtk::CheckButton::with_label("记住密码");
+    let cb = gtk::CheckButton::with_label(tr("记住密码"));
     cb.set_sensitive(pol.can_remember);
     cb.set_active(default_active && pol.can_remember);
     // ⚠️ **凭据库存不住密码 ⇒ 整个不显示**（用户 2026-11-02）：
@@ -892,32 +887,32 @@ pub fn badge_button() -> gtk::Button {
         let (icon, text, tip, css) = match st {
             vault::State::Off => (
                 "dialog-password-symbolic",
-                "未启用",
-                "凭据库还没启用：这次的密码只用这一次，不保存。\n\
-                 点这里可以设置主密码（启用后密码加密保存）。",
+                tr("未启用"),
+                tr("凭据库还没启用：这次的密码只用这一次，不保存。\n\
+                 点这里可以设置主密码（启用后密码加密保存）。"),
                 None,
             ),
             vault::State::Unlocked => (
                 "channel-secure-symbolic",
-                "已启用",
-                "凭据库已启用并已解锁：连接密码加密存在本机。\n点这里查看/管理库里的凭据。",
+                tr("已启用"),
+                tr("凭据库已启用并已解锁：连接密码加密存在本机。\n点这里查看/管理库里的凭据。"),
                 Some("pp-chip-ok"),
             ),
             vault::State::Locked => (
                 "dialog-password-symbolic",
-                "已锁定",
-                "凭据库已启用（有主密码），当前处于锁定状态：要用里面的密码得先解锁。\n点这里解锁。",
+                tr("已锁定"),
+                tr("凭据库已启用（有主密码），当前处于锁定状态：要用里面的密码得先解锁。\n点这里解锁。"),
                 Some("pp-chip-warn"),
             ),
             vault::State::Plain => (
                 "dialog-warning-symbolic",
-                "未加密",
-                "⚠ 凭据库已启用，但没有主密码：密码以明文存在本机文件里。\n点这里设一个主密码就能加密。",
+                tr("未加密"),
+                tr("⚠ 凭据库已启用，但没有主密码：密码以明文存在本机文件里。\n点这里设一个主密码就能加密。"),
                 Some("pp-chip-err"),
             ),
         };
         img.set_icon_name(Some(icon));
-        lbl.set_text(&format!("凭据库 {text}"));
+        lbl.set_text(&trf!("凭据库 {text}", text = text));
         b.set_tooltip_text(Some(tip));
         // ⚠️ **基础类 `pp-chip` 始终保留**（它带底色、圆角、内边距），
         //    只换"状态类"。把基础类也摘掉的话，标志就变成一串没底色的
@@ -967,10 +962,10 @@ fn collect_passwords(entries: &[ConnEntry]) -> Vec<(String, Zeroizing<String>)> 
 fn status(entries: &[ConnEntry]) -> String {
     let n = vault::names().len();
     if n == 0 {
-        return "库内暂无凭据。".into();
+        return tr("库内暂无凭据。").into();
     }
     let with_pw = entries.iter().filter(|e| e.password.is_some()).count();
-    format!("库内 {n} 条凭据；当前会话可见 {with_pw} 条连接的密码。")
+    trf!("库内 {n} 条凭据；当前会话可见 {with_pw} 条连接的密码。", n = n, with_pw = with_pw)
 }
 
 /// 结果提示（成功）：标题与正文分开，不走"错误弹窗"的形态。

@@ -256,6 +256,59 @@ def cmd_extract(args):
     print(f"提取到 {len(catalog)} 条含中文的字符串字面量 -> {args.out}")
 
 
+# ── keys（从 tr() / trf!() 调用里抽"真正要查表的 key"）──────────────────
+
+
+def cmd_keys(args):
+    """抽出源码里**真正被 `tr()` / `trf!()` 包住**的中文原文。
+
+    **为什么要有这个子命令**：`extract` 抽的是**所有**中文字面量（包括
+    const 表里的、测试里的、SQL 里的…）⇒ 那不是"要查表的 key"。
+    而**译文表**只该覆盖**会被 `tr()` 查**的那些 ⇒ 词条集合 = 本命令的输出。
+
+    ⚠️ **测试代码要排除**：测试里的 `tr("…")` 是断言的一部分，译文表里
+    **不该**有它（有了反而会让断言挂：断言写的是中文，`tr()` 却返回了英文）。
+    """
+    out = {}
+    for path in args.files:
+        src = open(path, encoding="utf-8").read()
+        toks = tokenize(src)
+        t_ranges = test_ranges(src)
+        n = len(toks)
+        for i, t in enumerate(toks):
+            if t.kind != "ident" or t.text not in ("tr", "trf"):
+                continue
+            j = i + 1
+            if j < n and toks[j].kind == "punct" and toks[j].text == "!":
+                j += 1
+            if j >= n or not (toks[j].kind == "punct" and toks[j].text == "("):
+                continue
+            end = match_paren(toks, j)
+            if end is None:
+                continue
+            k = j + 1
+            while k < end and toks[k].kind == "ws":
+                k += 1
+            if k >= end or toks[k].kind != "str":
+                continue
+            if in_ranges(toks[k].start, toks[k].end, t_ranges):
+                continue
+            key = unescape(toks[k].text[1:-1])
+            if not CJK.search(key):
+                continue
+            e = out.setdefault(key, {"files": set(), "n": 0})
+            e["files"].add(path)
+            e["n"] += 1
+    entries = [
+        {"zh": k, "files": sorted(v["files"]), "n": v["n"]}
+        for k, v in sorted(out.items())
+    ]
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump({"count": len(entries), "entries": entries}, f,
+                  ensure_ascii=False, indent=1)
+    print(f"抽出 {len(entries)} 条 tr() key -> {args.out}")
+
+
 # ── translate ──────────────────────────────────────────────────────────
 
 def load_llm_config():
@@ -856,7 +909,20 @@ def expr_key(toks, expr):
 #   里写死的**命令行契约**（堡垒机那边会看到）；
 # - `src/backend/selftest.rs`：`--sftp-selftest` 的**全流程输出**要跟
 #   C 版**逐字对照**（`tools/compat_check.sh` 第 4 节）。
-NO_TRANSLATE_FILES = {"src/args.rs", "src/backend/selftest.rs"}
+# **绝对不能改写**的文件。
+#
+# - `src/args.rs`：命令行契约（`--print-config` 的输出逐字节固定）。
+# - `src/backend/selftest.rs`：自检输出是对照基准。
+# - `src/i18n.rs`：**i18n 机制本体** —— 里面的 `tr()` / `trf!` 就是定义，
+#   改写它等于"给翻译函数本身套一层翻译"（还会给自己的模块加
+#   `use crate::i18n::tr;` ⇒ "the name `tr` is defined multiple times"）。
+# - `src/i18n_en.rs`：**自动生成**的英文表，不是手写源码。
+NO_TRANSLATE_FILES = {
+    "src/args.rs",
+    "src/backend/selftest.rs",
+    "src/i18n.rs",
+    "src/i18n_en.rs",
+}
 
 # 要求**字面量格式串**的宏（`format!` 之外的那些）。
 #
@@ -1026,10 +1092,64 @@ def const_ranges(src):
     （`tr(item.label)`）。
 
     这里取的是 `=` 之后到**语句末尾的 `;`** 之间的整段（表体和单值都覆盖）。
+
+    ⚠️ **必须用词法 token 扫，不能用正则**（2026-11-03 踩过）：
+    正则里那个 `[^=;]*` 会被**类型标注里的 `;`** 截断 ——
+    `const SEGMENT_NAMES: [&str; 5] = [...]` 的类型里有 `;` ⇒ 正则匹配不到
+    `=` ⇒ 这条 const **没被保护** ⇒ 里面的字面量被包了 `tr()` ⇒
+    编译报 "cannot call non-const function `tr` in constants"。
     """
+    toks = tokenize(src)
     ranges = []
-    for mt in re.finditer(r"\b(?:const|static)\b(?!\s+fn\b)([^=;]*)=([^;]*);", src, re.S):
-        ranges.append((mt.start(2), mt.end(2)))
+    n = len(toks)
+    i = 0
+    while i < n:
+        t = toks[i]
+        if not (t.kind == "ident" and t.text in ("const", "static")):
+            i += 1
+            continue
+        # `const fn` / `static fn` ⇒ 那是函数，不是表
+        j = i + 1
+        while j < n and toks[j].kind == "ws":
+            j += 1
+        if j < n and toks[j].kind == "ident" and toks[j].text == "fn":
+            i += 1
+            continue
+        # 找 `=`（跳过类型标注里的括号/方括号）
+        k = j
+        depth = 0
+        eq = None
+        while k < n:
+            tk = toks[k]
+            if tk.kind == "punct":
+                if tk.text in ("(", "[", "{"):
+                    depth += 1
+                elif tk.text in (")", "]", "}"):
+                    depth -= 1
+                elif tk.text == "=" and depth == 0:
+                    eq = k
+                    break
+            k += 1
+        if eq is None:
+            i += 1
+            continue
+        # 从 `=` 之后扫到语句末尾的 `;`（跳过嵌套括号里的 `;`）
+        m = eq + 1
+        depth = 0
+        while m < n:
+            tm = toks[m]
+            if tm.kind == "punct":
+                if tm.text in ("(", "[", "{"):
+                    depth += 1
+                elif tm.text in (")", "]", "}"):
+                    depth -= 1
+                elif tm.text == ";" and depth == 0:
+                    break
+            m += 1
+        end = toks[m].end if m < n else toks[n - 1].end
+        ranges.append((toks[eq].end, end))
+        i = m
+        continue
     return ranges
 
 
@@ -1375,6 +1495,11 @@ def main(argv):
     p = sub.add_parser("extract")
     p.add_argument("--out", required=True)
     p.set_defaults(func=cmd_extract)
+
+    p = sub.add_parser("keys")
+    p.add_argument("--out", required=True)
+    p.add_argument("--files", nargs="+", required=True)
+    p.set_defaults(func=cmd_keys)
 
     p = sub.add_parser("translate")
     p.add_argument("--catalog", required=True)

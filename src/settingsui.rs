@@ -21,6 +21,7 @@ use crate::density::{self, Density, UiFont};
 use crate::i18n::{tr, Lang};
 use crate::theme::{self, Palette, Theme};
 use crate::windows::ToolKind;
+use crate::trf;
 
 /// 首选项的**六个页**。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -368,7 +369,7 @@ fn appearance_page(root: &gtk::Box) {
     /* ---- 界面主题 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("界面主题"));
+        sec.append(&section(tr("界面主题")));
 
         let list = gtk::ListBox::new();
         // ⚠️ **不能用 GTK 的"选中行"当事实来源**（阶段 89）：
@@ -412,7 +413,7 @@ fn appearance_page(root: &gtk::Box) {
     /* ---- 界面密度 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("界面密度"));
+        sec.append(&section(tr("界面密度")));
 
         let cur = density::density();
         let items = [
@@ -447,7 +448,7 @@ fn appearance_page(root: &gtk::Box) {
     /* ---- 界面字号 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("界面字号"));
+        sec.append(&section(tr("界面字号")));
 
         let fonts = UiFont::ALL;
         let items: [(&str, &str); 3] = [
@@ -476,7 +477,7 @@ fn appearance_page(root: &gtk::Box) {
     }
 
     root.append(&hint_label(
-        "界面主题与终端配色各管各的：界面选浅色不代表终端也要浅色。",
+        tr("界面主题与终端配色各管各的：界面选浅色不代表终端也要浅色。"),
     ));
 }
 
@@ -485,7 +486,7 @@ fn terminal_page(root: &gtk::Box) {
     /* ---- 终端配色 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("终端配色"));
+        sec.append(&section(tr("终端配色")));
 
         let list = gtk::ListBox::new();
         // ⚠️ 同上：不用 GTK 的"选中行"当事实来源（阶段 89 的同一个坑）
@@ -524,14 +525,14 @@ fn terminal_page(root: &gtk::Box) {
     /* ---- 终端字号 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("终端字号"));
+        sec.append(&section(tr("终端字号")));
 
         let spin = gtk::SpinButton::with_range(9.0, 40.0, 0.5);
         spin.set_value(crate::settings::term_font_size().unwrap_or(10.5));
-        spin.set_tooltip_text(Some("新开的终端用这个字号；已经开着的终端不动"));
+        spin.set_tooltip_text(Some(tr("新开的终端用这个字号；已经开着的终端不动")));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         row.append(&spin);
-        let tip = gtk::Label::new(Some("全局默认"));
+        let tip = gtk::Label::new(Some(tr("全局默认")));
         tip.add_css_class("dim-label");
         tip.add_css_class("pp-hint");
         tip.set_xalign(0.0);
@@ -546,34 +547,34 @@ fn terminal_page(root: &gtk::Box) {
     }
 
     root.append(&hint_label(
-        "终端的「终端类型（TERM）/ 响铃 / 保活」是每条会话自己的设置，\
-         在连接编辑器的「会话」页里改；这里管的是所有终端共用的默认。",
+        tr("终端的「终端类型（TERM）/ 响铃 / 保活」是每条会话自己的设置，\
+         在连接编辑器的「会话」页里改；这里管的是所有终端共用的默认。"),
     ));
 }
 
 /// 传输页：断点续传 / 校验 / 并发数（原来在队列窗口顶部）。
 fn transfer_page(root: &gtk::Box) {
-    let b_resume = gtk::CheckButton::with_label("断点续传");
+    let b_resume = gtk::CheckButton::with_label(tr("断点续传"));
     b_resume.set_active(crate::settings::xfer_resume());
-    b_resume.set_tooltip_text(Some("中断后接着传，不从头再来"));
+    b_resume.set_tooltip_text(Some(tr("中断后接着传，不从头再来")));
     b_resume.connect_toggled(|c| {
         crate::settings::set_xfer_resume(c.is_active());
     });
     root.append(&b_resume);
 
-    let b_sum = gtk::CheckButton::with_label("完成后校验 SHA-1");
+    let b_sum = gtk::CheckButton::with_label(tr("完成后校验 SHA-1"));
     b_sum.set_active(crate::settings::xfer_checksum());
-    b_sum.set_tooltip_text(Some("传完比一遍远程文件的摘要；没校验过就显示「未校验」"));
+    b_sum.set_tooltip_text(Some(tr("传完比一遍远程文件的摘要；没校验过就显示「未校验」")));
     b_sum.connect_toggled(|c| {
         crate::settings::set_xfer_checksum(c.is_active());
     });
     root.append(&b_sum);
 
     let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    bbox.append(&gtk::Label::new(Some("并发传输数")));
+    bbox.append(&gtk::Label::new(Some(tr("并发传输数"))));
     let parallel = gtk::SpinButton::with_range(1.0, 16.0, 1.0);
     parallel.set_value(crate::settings::xfer_parallel() as f64);
-    parallel.set_tooltip_text(Some("同一条连接上同时传几个文件"));
+    parallel.set_tooltip_text(Some(tr("同一条连接上同时传几个文件")));
     bbox.append(&parallel);
     root.append(&bbox);
     parallel.connect_value_changed(|s| {
@@ -581,8 +582,8 @@ fn transfer_page(root: &gtk::Box) {
     });
 
     root.append(&hint_label(
-        "这些是全局设置，对之后新建的传输任务生效。\
-         传输队列窗口顶部只显示摘要，点「去设置」回到这里。",
+        tr("这些是全局设置，对之后新建的传输任务生效。\
+         传输队列窗口顶部只显示摘要，点「去设置」回到这里。"),
     ));
 }
 
@@ -591,30 +592,27 @@ fn security_page(root: &gtk::Box) {
     /* ---- 凭据库 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("凭据库"));
+        sec.append(&section(tr("凭据库")));
 
         let st = crate::vault::state();
-        let line = gtk::Label::new(Some(&format!("状态：{}", crate::vaultui::state_short(st))));
+        let line = gtk::Label::new(Some(&trf!("状态：{v0}", v0 = crate::vaultui::state_short(st))));
         line.set_xalign(0.0);
         line.add_css_class("pp-hint");
         sec.append(&line);
 
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let b_open = gtk::Button::with_label("打开凭据库…");
+        let b_open = gtk::Button::with_label(tr("打开凭据库…"));
         b_open.connect_clicked(|_| {
             crate::vaultui::open_manager_vault(None, crate::connmgr::load_all());
         });
         row.append(&b_open);
-        let b_lock = gtk::Button::with_label("立即锁定");
+        let b_lock = gtk::Button::with_label(tr("立即锁定"));
         b_lock.set_sensitive(crate::vault::is_unlocked());
         let b_lock2 = b_lock.clone();
         b_lock.connect_clicked(move |_| {
             crate::vault::lock();
             // 状态就地改写（不用弹窗——改个状态不值得打断用户）
-            let txt = format!(
-                "状态：{}",
-                crate::vaultui::state_short(crate::vault::state())
-            );
+            let txt = trf!("状态：{v0}", v0 = crate::vaultui::state_short(crate::vault::state()));
             line.set_text(&txt);
             b_lock2.set_sensitive(false);
         });
@@ -626,25 +624,25 @@ fn security_page(root: &gtk::Box) {
     /* ---- 私钥 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("私钥"));
+        sec.append(&section(tr("私钥")));
 
         let n = crate::keymgr::ssh_dir()
             .map(|d| crate::keymgr::list_dir(&d).len())
             .unwrap_or(0);
-        let line = gtk::Label::new(Some(&format!("~/.ssh 里找到 {n} 个私钥文件")));
+        let line = gtk::Label::new(Some(&trf!("~/.ssh 里找到 {n} 个私钥文件", n = n)));
         line.set_xalign(0.0);
         line.add_css_class("pp-hint");
         sec.append(&line);
 
-        let b = gtk::Button::with_label("打开私钥管理器…");
+        let b = gtk::Button::with_label(tr("打开私钥管理器…"));
         b.connect_clicked(|_| crate::keyui::open(None));
         sec.append(&b);
         root.append(&sec);
     }
 
     root.append(&hint_label(
-        "连接用哪把私钥、认证方式选哪种，在连接编辑器的「认证」页里设；\
-         凭据库管的是「记住的密码」要不要加密存着。",
+        tr("连接用哪把私钥、认证方式选哪种，在连接编辑器的「认证」页里设；\
+         凭据库管的是「记住的密码」要不要加密存着。"),
     ));
 }
 
@@ -652,7 +650,7 @@ fn security_page(root: &gtk::Box) {
 fn shortcuts_page(root: &gtk::Box) {
     let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
     // ⚠️ 标题写「快捷键一览」——注册表里登记的就是这个名字（冒烟按它核对）
-    sec.append(&section("快捷键一览"));
+    sec.append(&section(tr("快捷键一览")));
 
     let groups = crate::shortcuts::grouped();
     for (title, items) in groups {
@@ -662,7 +660,7 @@ fn shortcuts_page(root: &gtk::Box) {
         t.add_css_class("pp-section");
         g.append(&t);
         for b in items {
-            let line = gtk::Label::new(Some(&format!("{}　{}", b.display, b.desc)));
+            let line = gtk::Label::new(Some(&trf!("{v0}　{v1}", v0 = b.display, v1 = b.desc)));
             line.set_xalign(0.0);
             line.add_css_class("pp-hint");
             g.append(&line);
@@ -671,7 +669,7 @@ fn shortcuts_page(root: &gtk::Box) {
     }
     root.append(&sec);
 
-    let b = gtk::Button::with_label("打开快捷键说明窗口…");
+    let b = gtk::Button::with_label(tr("打开快捷键说明窗口…"));
     b.connect_clicked(|_| crate::shortcutsui::open());
     root.append(&b);
 }
@@ -681,10 +679,10 @@ fn advanced_page(root: &gtk::Box) {
     /* ---- 侧栏宽度 ---- */
     {
         let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some("侧栏宽度")));
+        bbox.append(&gtk::Label::new(Some(tr("侧栏宽度"))));
         let spin = gtk::SpinButton::with_range(160.0, 520.0, 10.0);
         spin.set_value(f64::from(crate::settings::sidebar_width()));
-        spin.set_tooltip_text(Some("会话列表那一列的宽度"));
+        spin.set_tooltip_text(Some(tr("会话列表那一列的宽度")));
         bbox.append(&spin);
         root.append(&bbox);
         spin.connect_value_changed(|s| {
@@ -695,11 +693,11 @@ fn advanced_page(root: &gtk::Box) {
     /* ---- 文件面板宽度 ---- */
     {
         let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some("文件面板宽度")));
+        bbox.append(&gtk::Label::new(Some(tr("文件面板宽度"))));
         let spin = gtk::SpinButton::with_range(180.0, 900.0, 10.0);
         let cur = crate::settings::sftp_pane_pos();
         spin.set_value(if cur > 120 { f64::from(cur) } else { 340.0 });
-        spin.set_tooltip_text(Some("连接页左边文件面板的宽度"));
+        spin.set_tooltip_text(Some(tr("连接页左边文件面板的宽度")));
         bbox.append(&spin);
         root.append(&bbox);
         spin.connect_value_changed(|s| {
@@ -710,8 +708,8 @@ fn advanced_page(root: &gtk::Box) {
     /* ---- 文件列表列显示 ---- */
     {
         let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some("文件列表列显示")));
-        let b = gtk::Button::with_label("选择要显示的列…");
+        bbox.append(&gtk::Label::new(Some(tr("文件列表列显示"))));
+        let b = gtk::Button::with_label(tr("选择要显示的列…"));
         b.connect_clicked(|_| columns_dialog());
         bbox.append(&b);
         root.append(&bbox);
@@ -720,11 +718,11 @@ fn advanced_page(root: &gtk::Box) {
     /* ---- 目录镜像忽略规则 ---- */
     {
         let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some("目录镜像忽略规则")));
+        bbox.append(&gtk::Label::new(Some(tr("目录镜像忽略规则"))));
         let e = gtk::Entry::new();
         e.set_text(&crate::settings::mirror_ignore());
-        e.set_placeholder_text(Some("留空 = 什么都不忽略"));
-        e.set_tooltip_text(Some("一行一条，目录镜像时跳过这些名字/后缀"));
+        e.set_placeholder_text(Some(tr("留空 = 什么都不忽略")));
+        e.set_tooltip_text(Some(tr("一行一条，目录镜像时跳过这些名字/后缀")));
         e.set_hexpand(true);
         bbox.append(&e);
         root.append(&bbox);
@@ -738,10 +736,10 @@ fn advanced_page(root: &gtk::Box) {
         let sw = gtk::Switch::new();
         sw.set_active(crate::settings::db_hide_sftp());
         sw.set_tooltip_text(Some(
-            "进数据库工作台时把左边的文件面板收起来（工作台要宽度）",
+            tr("进数据库工作台时把左边的文件面板收起来（工作台要宽度）"),
         ));
         let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some("数据库页独占宽度")));
+        bbox.append(&gtk::Label::new(Some(tr("数据库页独占宽度"))));
         bbox.append(&sw);
         root.append(&bbox);
         sw.connect_state_set(|_s, state| {
@@ -753,7 +751,7 @@ fn advanced_page(root: &gtk::Box) {
     /* ---- 最近连接 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section("最近连接"));
+        sec.append(&section(tr("最近连接")));
 
         // ---- 条数上限 ----
         let cur_n = crate::settings::recent_max();
@@ -766,17 +764,17 @@ fn advanced_page(root: &gtk::Box) {
         for n in &list {
             let id = n.to_string();
             let text = if *n == 0 {
-                "不限".to_string()
+                tr("不限").to_string()
             } else {
-                format!("{n} 条")
+                trf!("{n} 条", n = n)
             };
             combo.append(Some(&id), &text);
         }
         let cur_id = cur_n.to_string();
         combo.set_active_id(Some(cur_id.as_str()));
-        combo.set_tooltip_text(Some("「最近连接」最多留几条（0 = 不限）"));
+        combo.set_tooltip_text(Some(tr("「最近连接」最多留几条（0 = 不限）")));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let lbl = gtk::Label::new(Some("最近连接条数"));
+        let lbl = gtk::Label::new(Some(tr("最近连接条数")));
         lbl.set_xalign(0.0);
         lbl.set_hexpand(true);
         row.append(&lbl);
@@ -792,11 +790,11 @@ fn advanced_page(root: &gtk::Box) {
         let sw = gtk::Switch::new();
         sw.set_active(crate::settings::record_cli_recent());
         sw.set_tooltip_text(Some(
-            "堡垒机每次拉起都是一条一次性的设备连接 ⇒ 默认不记，\
-             省得把「最近连接」冲垮、自己常用的那条反而找不到。",
+            tr("堡垒机每次拉起都是一条一次性的设备连接 ⇒ 默认不记，\
+             省得把「最近连接」冲垮、自己常用的那条反而找不到。"),
         ));
         let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let lbl2 = gtk::Label::new(Some("命令行启动的连接记入最近连接"));
+        let lbl2 = gtk::Label::new(Some(tr("命令行启动的连接记入最近连接")));
         lbl2.set_xalign(0.0);
         lbl2.set_hexpand(true);
         row2.append(&lbl2);
@@ -809,20 +807,20 @@ fn advanced_page(root: &gtk::Box) {
 
         // ---- 清空 ----
         let row3 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let lbl3 = gtk::Label::new(Some("清空最近连接"));
+        let lbl3 = gtk::Label::new(Some(tr("清空最近连接")));
         lbl3.set_xalign(0.0);
         lbl3.set_hexpand(true);
-        let b = gtk::Button::with_label("清空");
-        b.set_tooltip_text(Some("把「最近连接」里的记录全删掉（连接配置不受影响）"));
+        let b = gtk::Button::with_label(tr("清空"));
+        b.set_tooltip_text(Some(tr("把「最近连接」里的记录全删掉（连接配置不受影响）")));
         row3.append(&lbl3);
         row3.append(&b);
         sec.append(&row3);
         b.connect_clicked(|_| {
             crate::panel::dialogs::confirm_with(
                 None,
-                "清空最近连接？\n\n\
-                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。",
-                "清空",
+                tr("清空最近连接？\n\n\
+                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。"),
+                tr("清空"),
                 |ok| {
                     if ok {
                         crate::recent::clear();
@@ -834,17 +832,17 @@ fn advanced_page(root: &gtk::Box) {
     }
 
     root.append(&hint_label(
-        "这一页放的是「零散但确实得调」的设置：宽度、列、镜像规则。\
-         改完多半要新开窗口才看得出效果。",
+        tr("这一页放的是「零散但确实得调」的设置：宽度、列、镜像规则。\
+         改完多半要新开窗口才看得出效果。"),
     ));
 }
 
 /// 文件列表的列显示对话框（远程 / 本地各一份）。
 fn columns_dialog() {
     let dlg = crate::windows::dialog(
-        "文件列表列显示",
+        tr("文件列表列显示"),
         None,
-        &[("关闭", gtk::ResponseType::Close)],
+        &[(tr("关闭"), gtk::ResponseType::Close)],
     );
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.set_margin_top(12);
@@ -854,9 +852,9 @@ fn columns_dialog() {
 
     for remote in [true, false] {
         let title = if remote {
-            "远程文件"
+            tr("远程文件")
         } else {
-            "本地文件"
+            tr("本地文件")
         };
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let t = gtk::Label::new(Some(title));
@@ -865,9 +863,9 @@ fn columns_dialog() {
         sec.append(&t);
         let cfg = crate::settings::columns(remote);
         for (key, label, on) in [
-            ("size", "大小", cfg.size),
-            ("perm", "权限", cfg.perm),
-            ("mtime", "修改时间", cfg.mtime),
+            ("size", tr("大小"), cfg.size),
+            ("perm", tr("权限"), cfg.perm),
+            ("mtime", tr("修改时间"), cfg.mtime),
         ] {
             let cb = gtk::CheckButton::with_label(label);
             cb.set_active(on);

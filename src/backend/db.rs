@@ -41,6 +41,8 @@ use super::{BackendError, BackendResult};
 use super::dbexport;
 use super::dbmeta;
 use super::ermodel;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 认证 / 建通道的兜底超时：服务器不回应时 UI 不能永远停在"连接中"。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -150,7 +152,7 @@ impl DbOpenError {
 
     /// 缺密码时给用户看的那句话（两种方言共用）。
     fn need_password() -> Self {
-        DbOpenError::NeedPassword("数据库服务器要求密码认证，但这条连接没有密码。".to_string())
+        DbOpenError::NeedPassword(tr("数据库服务器要求密码认证，但这条连接没有密码。").to_string())
     }
 
     /// 把 mysql_async 的错误翻成中文分类。
@@ -259,23 +261,13 @@ const ER_MAX_TABLES: usize = 80;
 fn validate_import(batch: &ImportBatch) -> BackendResult<()> {
     for (r, row) in batch.rows.iter().enumerate() {
         if row.len() != batch.columns.len() {
-            return Err(BackendError(format!(
-                "第 {} 行的列数不对（{} 个 ≠ 表的 {} 个列）",
-                r + 1,
-                row.len(),
-                batch.columns.len()
-            )));
+            return Err(BackendError(trf!("第 {v0} 行的列数不对（{v1} 个 ≠ 表的 {v2} 个列）", v0 = r + 1, v1 = row.len(), v2 = batch.columns.len())));
         }
         for (c, v) in row.iter().enumerate() {
             let Some(s) = v else { continue };
             let ty = batch.types.get(c).copied().unwrap_or(dbmeta::ColType::Text);
             if let Err(e) = dbmeta::edit_literal(batch.proto, ty, s) {
-                return Err(BackendError(format!(
-                    "第 {} 行「{}」：{}",
-                    r + 1,
-                    batch.columns[c],
-                    e
-                )));
+                return Err(BackendError(trf!("第 {v0} 行「{v1}」：{e}", v0 = r + 1, v1 = batch.columns[c], e = e)));
             }
         }
     }
@@ -421,7 +413,7 @@ impl DbSession {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         if cfg.port == 0 {
-            return Err(DbOpenError::Other("数据库端口无效".into()));
+            return Err(DbOpenError::Other(tr("数据库端口无效").into()));
         }
         let mut dir = None;
         let inner = match cfg.proto {
@@ -446,7 +438,7 @@ impl DbSession {
         match self.inner.as_mut() {
             Some(Inner::Pg(p)) => p.query(sql, page_size).await,
             Some(Inner::My(m)) => m.query(sql, page_size).await,
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -456,7 +448,7 @@ impl DbSession {
         match self.inner.as_mut() {
             Some(Inner::Pg(p)) => p.next_page(page_size).await,
             Some(Inner::My(m)) => m.next_page(page_size),
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -672,12 +664,7 @@ impl DbSession {
             None => {
                 let all = self.list_tables(schema).await?;
                 if all.len() > ER_MAX_TABLES {
-                    return Err(BackendError(format!(
-                        "这个模式里有 {} 张表，一次画不下（上限 {} 张）。\
-                         先在对象树里选一张表，看它跟别人的关系。",
-                        all.len(),
-                        ER_MAX_TABLES
-                    )));
+                    return Err(BackendError(trf!("这个模式里有 {v0} 张表，一次画不下（上限 {ER_MAX_TABLES} 张）。先在对象树里选一张表，看它跟别人的关系。", v0 = all.len(), ER_MAX_TABLES = ER_MAX_TABLES)));
                 }
                 all.into_iter().map(|t| t.name).collect()
             }
@@ -703,7 +690,7 @@ impl DbSession {
         match self.inner.as_mut() {
             Some(Inner::Pg(p)) => p.exec(sql).await,
             Some(Inner::My(m)) => m.exec(sql).await,
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -736,7 +723,7 @@ impl DbSession {
             &batch.rows,
         );
         if stmts.is_empty() {
-            return Err(BackendError("没有可导入的数据行".into()));
+            return Err(BackendError(tr("没有可导入的数据行").into()));
         }
         // PG 能合并发；MySQL 一条一条来
         let chunk_size = match self.inner {
@@ -756,13 +743,13 @@ impl DbSession {
                             let row = ci * chunk_size + i + 1;
                             let _ = self.rollback().await;
                             let why = explain_constraint_error(&e2.0).unwrap_or_else(|| e2.0.clone());
-                            return Err(BackendError(format!("第 {row} 行导入失败：{why}")));
+                            return Err(BackendError(trf!("第 {row} 行导入失败：{why}", row = row, why = why)));
                         }
                     }
                 }
                 let _ = self.rollback().await;
                 let row = ci * chunk_size + 1;
-                return Err(BackendError(format!("第 {row} 行附近导入失败：{reason}")));
+                return Err(BackendError(trf!("第 {row} 行附近导入失败：{reason}", row = row, reason = reason)));
             }
             done += chunk.len();
         }
@@ -785,7 +772,7 @@ impl DbSession {
                 }
                 Ok(())
             }
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -798,12 +785,12 @@ impl DbSession {
                 p.client
                     .batch_execute("BEGIN")
                     .await
-                    .map_err(|e| BackendError(format!("开启事务失败: {}", pg_msg(&e))))
+                    .map_err(|e| BackendError(trf!("开启事务失败: {v0}", v0 = pg_msg(&e))))
             }
             Some(Inner::My(m)) => {
                 m.exec("START TRANSACTION").await.map(|_| ())
             }
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -814,9 +801,9 @@ impl DbSession {
                 .client
                 .batch_execute("COMMIT")
                 .await
-                .map_err(|e| BackendError(format!("提交事务失败: {}", pg_msg(&e)))),
+                .map_err(|e| BackendError(trf!("提交事务失败: {v0}", v0 = pg_msg(&e)))),
             Some(Inner::My(m)) => m.exec("COMMIT").await.map(|_| ()),
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -827,9 +814,9 @@ impl DbSession {
                 .client
                 .batch_execute("ROLLBACK")
                 .await
-                .map_err(|e| BackendError(format!("回滚事务失败: {}", pg_msg(&e)))),
+                .map_err(|e| BackendError(trf!("回滚事务失败: {v0}", v0 = pg_msg(&e)))),
             Some(Inner::My(m)) => m.exec("ROLLBACK").await.map(|_| ()),
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -877,8 +864,7 @@ impl DbSession {
         let order = if pk.is_empty() {
             String::new()
         } else {
-            format!(
-                "ORDER BY {}",
+            format!("ORDER BY {}",
                 pk.iter()
                     .map(|c| dbmeta::quote_ident(proto, c))
                     .collect::<Vec<_>>()
@@ -928,7 +914,7 @@ impl DbSession {
         match self.inner.as_mut() {
             Some(Inner::Pg(p)) => pg_rows(&p.client, sql).await,
             Some(Inner::My(m)) => my_rows(&mut m.conn, sql).await,
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 
@@ -943,7 +929,7 @@ impl DbSession {
         match self.inner.as_mut() {
             Some(Inner::Pg(p)) => pg_rows_cols(&p.client, sql).await,
             Some(Inner::My(m)) => my_rows_cols(&mut m.conn, sql).await,
-            None => Err(BackendError("数据库会话已关闭".into())),
+            None => Err(BackendError(tr("数据库会话已关闭").into())),
         }
     }
 }
@@ -1011,11 +997,7 @@ where
 
 fn check_path(path: &std::path::Path) -> BackendResult<()> {
     if path.as_os_str().len() > SOCKET_PATH_MAX {
-        return Err(BackendError(format!(
-            "本地套接字路径过长（{} 字节）：{}",
-            path.as_os_str().len(),
-            path.display()
-        )));
+        return Err(BackendError(trf!("本地套接字路径过长（{v0} 字节）：{v1}", v0 = path.as_os_str().len(), v1 = path.display())));
     }
     Ok(())
 }
@@ -1027,7 +1009,7 @@ where
     let sock = dir.path.join(format!(".s.PGSQL.{}", cfg.port));
     check_path(&sock).map_err(|e| DbOpenError::Other(e.0))?;
     let listener = UnixListener::bind(&sock)
-        .map_err(|e| DbOpenError::Other(format!("创建本地数据库套接字失败: {e}")))?;
+        .map_err(|e| DbOpenError::Other(trf!("创建本地数据库套接字失败: {e}", e = e)))?;
     let bridge = spawn_bridge(listener, stream);
 
     let mut pg = tokio_postgres::Config::new();
@@ -1043,7 +1025,7 @@ where
         Err(_) => {
             bridge.abort();
             return Err(DbOpenError::Other(
-                "数据库认证超时（服务器未完成握手）".into(),
+                tr("数据库认证超时（服务器未完成握手）").into(),
             ));
         }
         Ok(Err(e)) => {
@@ -1092,10 +1074,10 @@ where
     // 只绑回环：不对外暴露，也不占固定端口
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
-        .map_err(|e| DbOpenError::Other(format!("创建本地数据库桥接端口失败: {e}")))?;
+        .map_err(|e| DbOpenError::Other(trf!("创建本地数据库桥接端口失败: {e}", e = e)))?;
     let local_port = listener
         .local_addr()
-        .map_err(|e| DbOpenError::Other(format!("读取本地数据库桥接端口失败: {e}")))?
+        .map_err(|e| DbOpenError::Other(trf!("读取本地数据库桥接端口失败: {e}", e = e)))?
         .port();
     let bridge = spawn_bridge_tcp(listener, stream);
 
@@ -1113,7 +1095,7 @@ where
         Err(_) => {
             bridge.abort();
             return Err(DbOpenError::Other(
-                "数据库认证超时（MySQL 未完成握手）".into(),
+                tr("数据库认证超时（MySQL 未完成握手）").into(),
             ));
         }
         Ok(Err(e)) => {
@@ -1189,11 +1171,11 @@ impl Pg {
         self.client
             .batch_execute("BEGIN")
             .await
-            .map_err(|e| BackendError(format!("开启分页查询失败: {}", pg_msg(&e))))?;
+            .map_err(|e| BackendError(trf!("开启分页查询失败: {v0}", v0 = pg_msg(&e))))?;
         let decl = format!("DECLARE _pp_cursor NO SCROLL CURSOR FOR {sql}");
         if let Err(e) = self.client.batch_execute(&decl).await {
             let _ = self.client.batch_execute("ROLLBACK").await;
-            return Err(BackendError(format!("声明游标失败: {}", pg_msg(&e))));
+            return Err(BackendError(trf!("声明游标失败: {v0}", v0 = pg_msg(&e))));
         }
         Ok(())
     }
@@ -1207,7 +1189,7 @@ impl Pg {
             Ok(s) => s,
             Err(e) => {
                 self.cancel_cursor_after_error().await;
-                return Err(BackendError(format!("读取结果失败: {}", pg_msg(&e))));
+                return Err(BackendError(trf!("读取结果失败: {v0}", v0 = pg_msg(&e))));
             }
         };
         let (cols, rows, truncated, _cmd) = match collect_pg_rows(stream, page_size).await {
@@ -1219,7 +1201,7 @@ impl Pg {
         };
 
         let Some(c) = self.cursor.as_mut() else {
-            return Err(BackendError("分页游标已丢失".into()));
+            return Err(BackendError(tr("分页游标已丢失").into()));
         };
         if c.columns.is_empty() {
             c.columns = cols;
@@ -1250,7 +1232,7 @@ impl Pg {
 
     async fn next_page(&mut self, page_size: usize) -> BackendResult<DbRows> {
         if self.cursor.is_none() {
-            return Err(BackendError("没有更多结果".into()));
+            return Err(BackendError(tr("没有更多结果").into()));
         }
         self.fetch_page(page_size).await
     }
@@ -1266,7 +1248,7 @@ impl Pg {
             .client
             .simple_query_raw(sql)
             .await
-            .map_err(|e| BackendError(format!("查询失败: {}", pg_msg(&e))))?;
+            .map_err(|e| BackendError(trf!("查询失败: {v0}", v0 = pg_msg(&e))))?;
         let (columns, rows, truncated, command) = collect_pg_rows(stream, page_size).await?;
         Ok(DbRows {
             columns,
@@ -1289,7 +1271,7 @@ impl Pg {
             .client
             .simple_query(sql)
             .await
-            .map_err(|e| BackendError(format!("执行失败: {}", pg_msg(&e))))?;
+            .map_err(|e| BackendError(trf!("执行失败: {v0}", v0 = pg_msg(&e))))?;
         let mut affected = 0u64;
         for m in msgs {
             if let SimpleQueryMessage::CommandComplete(n) = m {
@@ -1318,21 +1300,21 @@ fn pg_msg(e: &tokio_postgres::Error) -> String {
 pub fn explain_constraint_error(msg: &str) -> Option<String> {
     let m = msg.to_ascii_lowercase();
     let zh = if m.contains("duplicate key") || m.contains("duplicate entry") {
-        "违反唯一约束（值重复了）"
+        tr("违反唯一约束（值重复了）")
     } else if m.contains("not-null constraint") || m.contains("cannot be null") {
-        "违反非空约束（这一列不能为空）"
+        tr("违反非空约束（这一列不能为空）")
     } else if m.contains("foreign key") {
-        "违反外键约束（引用的行不存在，或还有别的行引用着它）"
+        tr("违反外键约束（引用的行不存在，或还有别的行引用着它）")
     } else if m.contains("value too long") || m.contains("data too long") {
-        "值太长，超出了列的类型长度"
+        tr("值太长，超出了列的类型长度")
     } else if m.contains("invalid input syntax") || m.contains("incorrect integer") {
-        "值的格式不对（跟列的类型对不上）"
+        tr("值的格式不对（跟列的类型对不上）")
     } else if m.contains("division by zero") {
-        "除数为零"
+        tr("除数为零")
     } else {
         return None;
     };
-    Some(format!("{zh}（原文：{msg}）"))
+    Some(trf!("{zh}（原文：{msg}）", zh = zh, msg = msg))
 }
 
 /// 单条 SELECT 类语句才走服务端游标；含分号（多语句）时退回一次性执行。
@@ -1364,7 +1346,7 @@ async fn collect_pg_rows(
     while let Some(msg) = stream
         .try_next()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {}", pg_msg(&e))))?
+        .map_err(|e| BackendError(trf!("读取结果失败: {v0}", v0 = pg_msg(&e))))?
     {
         match msg {
             SimpleQueryMessage::RowDescription(cols) => {
@@ -1385,7 +1367,7 @@ async fn collect_pg_rows(
                 }
             }
             SimpleQueryMessage::CommandComplete(n) => {
-                command = format!("{n} 行");
+                command = trf!("{n} 行", n = n);
             }
             _ => {}
         }
@@ -1446,7 +1428,7 @@ impl My {
             .conn
             .query_iter(sql)
             .await
-            .map_err(|e| BackendError(format!("查询失败: {}", e)))?;
+            .map_err(|e| BackendError(trf!("查询失败: {e}", e = e)))?;
         let columns: Vec<String> = qr
             .columns_ref()
             .iter()
@@ -1474,17 +1456,17 @@ impl My {
                 Ok(None) => break,
                 Err(e) => {
                     let _ = qr.drop_result().await;
-                    return Err(BackendError(format!("读取结果失败: {}", e)));
+                    return Err(BackendError(trf!("读取结果失败: {e}", e = e)));
                 }
             }
         }
         let affected = qr.affected_rows();
         qr.drop_result()
             .await
-            .map_err(|e| BackendError(format!("读取结果失败: {}", e)))?;
+            .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?;
 
         let command = if columns.is_empty() {
-            format!("{affected} 行")
+            trf!("{affected} 行", affected = affected)
         } else {
             String::new()
         };
@@ -1502,7 +1484,7 @@ impl My {
 
     fn next_page(&mut self, page_size: usize) -> BackendResult<DbRows> {
         let Some(b) = self.buf.as_mut() else {
-            return Err(BackendError("没有更多结果".into()));
+            return Err(BackendError(tr("没有更多结果").into()));
         };
         let start = b.page as usize * page_size;
         let end = (start + page_size).min(b.rows.len());
@@ -1535,11 +1517,11 @@ impl My {
             .conn
             .query_iter(sql)
             .await
-            .map_err(|e| BackendError(format!("执行失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("执行失败: {e}", e = e)))?;
         while let Some(row) = qr
             .next()
             .await
-            .map_err(|e| BackendError(format!("读取结果失败: {e}")))?
+            .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?
         {
             // 写语句没有结果集；真出了行（不该有）也把内容吃掉，别留下未读结果
             let _ = row;
@@ -1547,7 +1529,7 @@ impl My {
         let affected = qr.affected_rows();
         qr.drop_result()
             .await
-            .map_err(|e| BackendError(format!("读取结果失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?;
         Ok(affected)
     }
 }
@@ -1560,14 +1542,14 @@ async fn pg_rows_cols(
     let stream = client
         .simple_query_raw(sql)
         .await
-        .map_err(|e| BackendError(format!("查询失败: {}", pg_msg(&e))))?;
+        .map_err(|e| BackendError(trf!("查询失败: {v0}", v0 = pg_msg(&e))))?;
     let mut stream = std::pin::pin!(stream);
     let mut cols: Vec<String> = Vec::new();
     let mut rows = Vec::new();
     while let Some(msg) = stream
         .try_next()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {}", pg_msg(&e))))?
+        .map_err(|e| BackendError(trf!("读取结果失败: {v0}", v0 = pg_msg(&e))))?
     {
         match msg {
             SimpleQueryMessage::RowDescription(desc) => {
@@ -1590,7 +1572,7 @@ async fn my_rows_cols(
     let mut qr = conn
         .query_iter(sql)
         .await
-        .map_err(|e| BackendError(format!("查询失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("查询失败: {e}", e = e)))?;
     // ⚠️ `QueryResult::columns()` 返回的是 **Option**——写 `qr.columns().iter()`
     // 迭代出来的是 `&Arc<[Column]>`（Option 的 iter），列名就取不到了。
     let cols: Vec<String> = match qr.columns() {
@@ -1601,13 +1583,13 @@ async fn my_rows_cols(
     while let Some(row) = qr
         .next()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {e}")))?
+        .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?
     {
         rows.push(my_row(&row));
     }
     qr.drop_result()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?;
     Ok((cols, rows))
 }
 
@@ -1618,13 +1600,13 @@ async fn pg_rows(client: &Client, sql: &str) -> BackendResult<Vec<Vec<Option<Str
     let stream = client
         .simple_query_raw(sql)
         .await
-        .map_err(|e| BackendError(format!("查询失败: {}", pg_msg(&e))))?;
+        .map_err(|e| BackendError(trf!("查询失败: {v0}", v0 = pg_msg(&e))))?;
     let mut stream = std::pin::pin!(stream);
     let mut rows = Vec::new();
     while let Some(msg) = stream
         .try_next()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {}", pg_msg(&e))))?
+        .map_err(|e| BackendError(trf!("读取结果失败: {v0}", v0 = pg_msg(&e))))?
     {
         if let SimpleQueryMessage::Row(row) = msg {
             rows.push((0..row.len()).map(|i| row.get(i).map(ToOwned::to_owned)).collect());
@@ -1638,18 +1620,18 @@ async fn my_rows(conn: &mut Conn, sql: &str) -> BackendResult<Vec<Vec<Option<Str
     let mut qr = conn
         .query_iter(sql)
         .await
-        .map_err(|e| BackendError(format!("查询失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("查询失败: {e}", e = e)))?;
     let mut rows = Vec::new();
     while let Some(row) = qr
         .next()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {e}")))?
+        .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?
     {
         rows.push(my_row(&row));
     }
     qr.drop_result()
         .await
-        .map_err(|e| BackendError(format!("读取结果失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("读取结果失败: {e}", e = e)))?;
     Ok(rows)
 }
 
@@ -1667,11 +1649,9 @@ fn my_value_text(v: &Value) -> Option<String> {
         Value::UInt(u) => Some(u.to_string()),
         Value::Float(f) => Some(f.to_string()),
         Value::Double(d) => Some(d.to_string()),
-        Value::Date(y, mo, d, h, mi, s, us) => Some(format!(
-            "{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}"
+        Value::Date(y, mo, d, h, mi, s, us) => Some(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}"
         )),
-        Value::Time(neg, d, h, mi, s, us) => Some(format!(
-            "{}{d:02} {h:02}:{mi:02}:{s:02}.{us:06}",
+        Value::Time(neg, d, h, mi, s, us) => Some(format!("{}{d:02} {h:02}:{mi:02}:{s:02}.{us:06}",
             if *neg { "-" } else { "" }
         )),
     }
@@ -1695,7 +1675,7 @@ impl SocketDir {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
-            .map_err(|e| BackendError(format!("创建数据库套接字目录失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("创建数据库套接字目录失败: {e}", e = e)))?;
         Ok(Self { path })
     }
 }

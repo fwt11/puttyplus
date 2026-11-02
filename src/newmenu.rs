@@ -15,6 +15,7 @@ use gtk::prelude::*;
 use crate::panel::PanelState;
 use crate::tabs::Tabs;
 use crate::topmenus::{NewEntry, NewItem};
+use crate::i18n::tr;
 
 /// 「新建」动作在**当前上下文**下能不能用。
 ///
@@ -151,7 +152,7 @@ where
         let ok = ctx.allows(it.action);
         b.set_sensitive(ok);
         if !ok {
-            b.set_tooltip_text(Some("当前没有会话，先新建一个连接"));
+            b.set_tooltip_text(Some(tr("当前没有会话，先新建一个连接")));
         }
         let action = it.action;
         let f = on_pick.clone();

@@ -18,6 +18,7 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use crate::backend::forward::{self, FwdRule};
+use crate::i18n::tr;
 
 /// 一条结构化的转发规则。
 #[derive(Debug, Clone, PartialEq)]
@@ -292,15 +293,15 @@ impl FwdTable {
             self.view.append_column(&column);
         };
 
-        add_text("类型", 0, false);
-        add_text("监听", 1, true);
-        add_text("目标", 2, true);
-        add_text("机制", 3, false);
+        add_text(tr("类型"), 0, false);
+        add_text(tr("监听"), 1, true);
+        add_text(tr("目标"), 2, true);
+        add_text(tr("机制"), 3, false);
 
         // 启用：勾选框（点一下就切）
         let renderer = gtk::CellRendererToggle::new();
         let column = gtk::TreeViewColumn::new();
-        column.set_title("启用");
+        column.set_title(tr("启用"));
         column.pack_start(&renderer, true);
         column.add_attribute(&renderer, "active", 4);
         self.view.append_column(&column);
@@ -420,39 +421,39 @@ pub fn edit_dialog<F: FnOnce(Option<FwdRow>) + 'static>(
     done: F,
 ) {
     let dlg = crate::windows::dialog(
-        "转发规则",
+        tr("转发规则"),
         parent,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("确定", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("确定"), gtk::ResponseType::Ok),
         ],
     );
     dlg.set_default_size(420, -1);
     let root = crate::panel::dialogs::form_box();
 
     let w_kind = gtk::ComboBoxText::new();
-    for (id, name) in [("L", "本地"), ("R", "远程"), ("D", "动态")] {
+    for (id, name) in [("L", tr("本地")), ("R", tr("远程")), ("D", tr("动态"))] {
         w_kind.append(Some(id), name);
     }
     w_kind.set_active_id(Some(&row.kind.to_string()));
 
     let w_mech = gtk::ComboBoxText::new();
-    w_mech.append(Some("term"), "终端（spawn 的 ssh -L/-R/-D）");
-    w_mech.append(Some("inproc"), "进程内（应用自己那条 SSH 连接）");
+    w_mech.append(Some("term"), tr("终端（spawn 的 ssh -L/-R/-D）"));
+    w_mech.append(Some("inproc"), tr("进程内（应用自己那条 SSH 连接）"));
     w_mech.set_active_id(Some(if row.in_process { "inproc" } else { "term" }));
 
     let w_listen = gtk::Entry::new();
     w_listen.set_text(&row.listen);
-    w_listen.set_placeholder_text(Some("端口，或 地址:端口"));
+    w_listen.set_placeholder_text(Some(tr("端口，或 地址:端口")));
 
     let w_target = gtk::Entry::new();
     w_target.set_text(&row.target);
-    w_target.set_placeholder_text(Some("主机:端口"));
+    w_target.set_placeholder_text(Some(tr("主机:端口")));
 
-    root.append(&crate::panel::dialogs::form_row("类型", &w_kind));
-    root.append(&crate::panel::dialogs::form_row("机制", &w_mech));
-    root.append(&crate::panel::dialogs::form_row("监听", &w_listen));
-    root.append(&crate::panel::dialogs::form_row("目标", &w_target));
+    root.append(&crate::panel::dialogs::form_row(tr("类型"), &w_kind));
+    root.append(&crate::panel::dialogs::form_row(tr("机制"), &w_mech));
+    root.append(&crate::panel::dialogs::form_row(tr("监听"), &w_listen));
+    root.append(&crate::panel::dialogs::form_row(tr("目标"), &w_target));
 
     dlg.content_area().append(&root);
     crate::panel::dialogs::style_dialog(&dlg);

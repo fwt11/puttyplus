@@ -19,6 +19,8 @@ use vte4::prelude::*;
 use crate::settings::{self, QuickCmd};
 
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 /* ---------------- 占位符 ---------------- */
 
@@ -156,8 +158,8 @@ fn run(st: &Rc<PanelState>, term: &vte4::Terminal, c: &QuickCmd) {
         &c.label,
         parent.as_ref(),
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("发送", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("发送"), gtk::ResponseType::Ok),
         ],
     );
     dlg.set_default_size(420, -1);
@@ -175,7 +177,7 @@ fn run(st: &Rc<PanelState>, term: &vte4::Terminal, c: &QuickCmd) {
         e.set_text(def);
         e.set_hexpand(true);
         if def.is_empty() {
-            e.set_placeholder_text(Some("必填"));
+            e.set_placeholder_text(Some(tr("必填")));
         }
         let l = gtk::Label::new(Some(&format!("{name}")));
         l.set_halign(gtk::Align::End);
@@ -183,10 +185,7 @@ fn run(st: &Rc<PanelState>, term: &vte4::Terminal, c: &QuickCmd) {
         grid.attach(e.upcast_ref::<gtk::Widget>(), 1, i as i32, 1, 1);
         entries.push(e);
     }
-    let tip = gtk::Label::new(Some(&format!(
-        "模板：{}\n\n带空格或 shell 元字符的参数会自动加引号。",
-        c.cmd
-    )));
+    let tip = gtk::Label::new(Some(&trf!("模板：{v0}\n\n带空格或 shell 元字符的参数会自动加引号。", v0 = c.cmd)));
     tip.add_css_class("dim-label");
     tip.set_xalign(0.0);
     tip.set_wrap(true);
@@ -212,8 +211,8 @@ fn run(st: &Rc<PanelState>, term: &vte4::Terminal, c: &QuickCmd) {
         if missing {
             super::dialogs::show_error(
                 st2.topwin().as_ref(),
-                "参数没填全",
-                &format!("「{label}」有必填参数是空的，已取消发送。"),
+                tr("参数没填全"),
+                &trf!("「{label}」有必填参数是空的，已取消发送。", label = label),
             );
             return;
         }
@@ -238,7 +237,7 @@ pub fn open_popover(st: &Rc<PanelState>, term: &vte4::Terminal, anchor: &gtk::Wi
 
     let cmds = settings::quick_commands();
     if cmds.is_empty() {
-        let empty = gtk::Label::new(Some("还没有快速命令"));
+        let empty = gtk::Label::new(Some(tr("还没有快速命令")));
         empty.add_css_class("pp-menu-empty");
         empty.set_xalign(0.0);
         vbox.append(&empty);
@@ -255,10 +254,7 @@ pub fn open_popover(st: &Rc<PanelState>, term: &vte4::Terminal, anchor: &gtk::Wi
             vbox.append(&crate::menu::section(g));
             for c in list {
                 let b = crate::menu::item("utilities-terminal-symbolic", &c.label, None);
-                b.set_tooltip_text(Some(&format!(
-                    "{}\n\n点一下把这行敲进本标签的终端。\n终端里正在跑前台程序时，这行字会进到那个程序。",
-                    c.cmd
-                )));
+                b.set_tooltip_text(Some(&trf!("{v0}\n\n点一下把这行敲进本标签的终端。\n终端里正在跑前台程序时，这行字会进到那个程序。", v0 = c.cmd)));
                 let st2 = Rc::clone(st);
                 let term2 = term.clone();
                 let cmd = (*c).clone();
@@ -276,9 +272,9 @@ pub fn open_popover(st: &Rc<PanelState>, term: &vte4::Terminal, anchor: &gtk::Wi
     let manage = crate::menu::item(
         "preferences-system-symbolic",
         if cmds.is_empty() {
-            "新建快速命令…"
+            tr("新建快速命令…")
         } else {
-            "管理命令…"
+            tr("管理命令…")
         },
         None,
     );
@@ -303,9 +299,9 @@ pub fn open_manager(st: &Rc<PanelState>) {
     let parent = st.topwin();
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        "快速命令",
+        tr("快速命令"),
         parent.as_ref(),
-        &[("关闭", gtk::ResponseType::Close)],
+        &[(tr("关闭"), gtk::ResponseType::Close)],
     );
     dlg.set_default_size(560, 420);
     dlg.connect_response(|dlg, _| dlg.close());
@@ -318,9 +314,9 @@ pub fn open_manager(st: &Rc<PanelState>) {
 
     let hint = gtk::Label::new(None);
     hint.set_markup(
-        "命令点下去会<b>敲进本标签的终端</b>（等同你在终端里敲一遍回车）。\n\
+        tr("命令点下去会<b>敲进本标签的终端</b>（等同你在终端里敲一遍回车）。\n\
          分组按名字归拢；参数占位符写 ${名字} 或 ${名字:默认值}，\n\
-         没有默认值的参数在发送前必填。",
+         没有默认值的参数在发送前必填。"),
     );
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
@@ -341,9 +337,9 @@ pub fn open_manager(st: &Rc<PanelState>) {
         b.set_tooltip_text(Some(tip));
         b
     };
-    let b_new = mk("新建", "新增一条快速命令");
-    let b_edit = mk("编辑", "修改选中的命令");
-    let b_del = mk("删除", "删除选中的命令");
+    let b_new = mk(tr("新建"), tr("新增一条快速命令"));
+    let b_edit = mk(tr("编辑"), tr("修改选中的命令"));
+    let b_del = mk(tr("删除"), tr("删除选中的命令"));
     btns.append(&b_new);
     btns.append(&b_edit);
     btns.append(&b_del);
@@ -361,7 +357,7 @@ pub fn open_manager(st: &Rc<PanelState>) {
             }
             let v = items.borrow();
             if v.is_empty() {
-                let l = gtk::Label::new(Some("（空）点「新建」加第一条"));
+                let l = gtk::Label::new(Some(tr("（空）点「新建」加第一条")));
                 l.add_css_class("dim-label");
                 l.set_margin_top(12);
                 list.append(&l);
@@ -444,14 +440,14 @@ fn edit_dialog<F: Fn(QuickCmd) + 'static>(cur: Option<&QuickCmd>, done: F) {
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
         if cur.is_some() {
-            "编辑快速命令"
+            tr("编辑快速命令")
         } else {
-            "新建快速命令"
+            tr("新建快速命令")
         },
         None::<&gtk::Window>,
         &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("保存", gtk::ResponseType::Ok),
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("保存"), gtk::ResponseType::Ok),
         ],
     );
     dlg.set_default_size(480, -1);
@@ -459,13 +455,13 @@ fn edit_dialog<F: Fn(QuickCmd) + 'static>(cur: Option<&QuickCmd>, done: F) {
 
     let w_group = gtk::Entry::new();
     w_group.set_text(cur.map(|c| c.group.as_str()).unwrap_or(""));
-    w_group.set_placeholder_text(Some("未分组"));
+    w_group.set_placeholder_text(Some(tr("未分组")));
     let w_label = gtk::Entry::new();
     w_label.set_text(cur.map(|c| c.label.as_str()).unwrap_or(""));
-    w_label.set_placeholder_text(Some("按钮上显示的名字"));
+    w_label.set_placeholder_text(Some(tr("按钮上显示的名字")));
     let w_cmd = gtk::Entry::new();
     w_cmd.set_text(cur.map(|c| c.cmd.as_str()).unwrap_or(""));
-    w_cmd.set_placeholder_text(Some("tail -n ${行数:100} ${路径:/var/log/syslog}"));
+    w_cmd.set_placeholder_text(Some(tr("tail -n ${行数:100} ${路径:/var/log/syslog}")));
     w_cmd.set_hexpand(true);
 
     // 命令一改就把识别到的占位符报出来，省得填完保存才发现没认出来
@@ -480,27 +476,24 @@ fn edit_dialog<F: Fn(QuickCmd) + 'static>(cur: Option<&QuickCmd>, done: F) {
         cmd.connect_changed(move |e| {
             let ph = parse_placeholders(&e.text());
             lbl.set_text(&if ph.is_empty() {
-                "没有占位符：点按钮直接发送".to_string()
+                tr("没有占位符：点按钮直接发送").to_string()
             } else {
-                format!(
-                    "参数：{}",
-                    ph.iter()
+                trf!("参数：{v0}", v0 = ph.iter()
                         .map(|(n, d)| if d.is_empty() {
-                            format!("{n}（必填）")
+                            trf!("{n}（必填）", n = n)
                         } else {
                             format!("{n}={d}")
                         })
                         .collect::<Vec<_>>()
-                        .join("、")
-                )
+                        .join(tr("、")))
             });
         });
         cmd.emit_by_name::<()>("changed", &[]);
     }
 
-    root.append(&crate::panel::dialogs::form_row("分组", &w_group));
-    root.append(&crate::panel::dialogs::form_row("名称", &w_label));
-    root.append(&crate::panel::dialogs::form_row("命令", &w_cmd));
+    root.append(&crate::panel::dialogs::form_row(tr("分组"), &w_group));
+    root.append(&crate::panel::dialogs::form_row(tr("名称"), &w_label));
+    root.append(&crate::panel::dialogs::form_row(tr("命令"), &w_cmd));
     root.append(&ph_lbl);
 
     dlg.content_area().append(&root);

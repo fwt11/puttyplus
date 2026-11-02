@@ -11,6 +11,8 @@
 
 use super::db::DbProto;
 use std::io::Write;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 结果集的一行（每个格子 `None` = SQL NULL）。
 pub type Row = Vec<Option<String>>;
@@ -62,8 +64,8 @@ pub fn to_xml(columns: &[String], rows: &[Row]) -> String {
 /// 导成 HTML 表格（能直接在浏览器里看）。
 pub fn to_html(columns: &[String], rows: &[Row]) -> String {
     let mut out = String::from(
-        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
-         <title>导出结果</title>\n</head>\n<body>\n<table>\n",
+        tr("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
+         <title>导出结果</title>\n</head>\n<body>\n<table>\n"),
     );
     out.push_str("  <tr>");
     for col in columns {
@@ -180,11 +182,11 @@ impl ExportWriter {
         schema: &str,
         table: &str,
     ) -> Result<Self, String> {
-        let f = std::fs::File::create(path).map_err(|e| format!("打不开文件「{path}」：{e}"))?;
+        let f = std::fs::File::create(path).map_err(|e| trf!("打不开文件「{path}」：{e}", path = path, e = e))?;
         let mut out = std::io::BufWriter::new(f);
         if fmt == ExportFmt::Csv {
             out.write_all(b"\xEF\xBB\xBF")
-                .map_err(|e| format!("写文件失败：{e}"))?;
+                .map_err(|e| trf!("写文件失败：{e}", e = e))?;
         }
         Ok(ExportWriter {
             fmt,
@@ -214,7 +216,7 @@ impl ExportWriter {
                 // SQL 格式的建表语句由 `write_ddl` 单独写（要现查表结构）
                 Ok(())
             }
-            ExportFmt::Json => self.out.write_all(b"[\n").map_err(|e| format!("写文件失败：{e}")),
+            ExportFmt::Json => self.out.write_all(b"[\n").map_err(|e| trf!("写文件失败：{e}", e = e)),
         }
     }
 
@@ -255,8 +257,7 @@ impl ExportWriter {
                     .map(|v| sql_literal(v.as_deref()))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let stmt = format!(
-                    "INSERT INTO {} ({cols}) VALUES ({vals});",
+                let stmt = format!("INSERT INTO {} ({cols}) VALUES ({vals});",
                     quote_qualified(self.proto, &self.schema, &self.table)
                 );
                 self.write_line(&stmt)
@@ -267,10 +268,10 @@ impl ExportWriter {
                 if let Some(prev) = self.pending.take() {
                     self.out
                         .write_all(prev.as_bytes())
-                        .map_err(|e| format!("写文件失败：{e}"))?;
+                        .map_err(|e| trf!("写文件失败：{e}", e = e))?;
                     self.out
                         .write_all(b",\n")
-                        .map_err(|e| format!("写文件失败：{e}"))?;
+                        .map_err(|e| trf!("写文件失败：{e}", e = e))?;
                 }
                 self.pending = Some(text);
                 Ok(())
@@ -284,16 +285,16 @@ impl ExportWriter {
             if let Some(last) = self.pending.take() {
                 self.out
                     .write_all(last.as_bytes())
-                    .map_err(|e| format!("写文件失败：{e}"))?;
+                    .map_err(|e| trf!("写文件失败：{e}", e = e))?;
                 self.out
                     .write_all(b"\n")
-                    .map_err(|e| format!("写文件失败：{e}"))?;
+                    .map_err(|e| trf!("写文件失败：{e}", e = e))?;
             }
             self.out
                 .write_all(b"]\n")
-                .map_err(|e| format!("写文件失败：{e}"))?;
+                .map_err(|e| trf!("写文件失败：{e}", e = e))?;
         }
-        self.out.flush().map_err(|e| format!("写文件失败：{e}"))?;
+        self.out.flush().map_err(|e| trf!("写文件失败：{e}", e = e))?;
         Ok(ExportReport {
             rows: self.rows,
             path: String::new(),
@@ -304,10 +305,10 @@ impl ExportWriter {
     fn write_line(&mut self, line: &str) -> Result<(), String> {
         self.out
             .write_all(line.as_bytes())
-            .map_err(|e| format!("写文件失败：{e}"))?;
+            .map_err(|e| trf!("写文件失败：{e}", e = e))?;
         self.out
             .write_all(b"\n")
-            .map_err(|e| format!("写文件失败：{e}"))
+            .map_err(|e| trf!("写文件失败：{e}", e = e))
     }
 }
 
@@ -361,8 +362,7 @@ fn quote_ident(proto: DbProto, s: &str) -> String {
 
 /// 限定名（`模式.表`）加引号。
 fn quote_qualified(proto: DbProto, schema: &str, table: &str) -> String {
-    format!(
-        "{}.{}",
+    format!("{}.{}",
         quote_ident(proto, schema),
         quote_ident(proto, table)
     )
@@ -506,8 +506,7 @@ mod tests {
 
     /// 临时文件路径（测试用）。
     fn tmp_path(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "pp-export-{}-{}-{}.out",
+        std::env::temp_dir().join(format!("pp-export-{}-{}-{}.out",
             tag,
             std::process::id(),
             std::time::SystemTime::now()

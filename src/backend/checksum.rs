@@ -13,6 +13,8 @@ use sha1::{Digest, Sha1};
 
 use super::conn::SftpBackend;
 use super::BackendResult;
+use crate::i18n::tr;
+use crate::trf;
 
 /// SHA-1 的十六进制长度。
 const HEX_LEN: usize = 40;
@@ -88,7 +90,7 @@ pub async fn remote_sha1(be: &SftpBackend, path: &str) -> BackendResult<String> 
 
 fn no_tool_err() -> super::BackendError {
     super::BackendError(
-        "服务器上没找到可用的 SHA-1 工具（试过 sha1sum / shasum / openssh dgst）".into(),
+        tr("服务器上没找到可用的 SHA-1 工具（试过 sha1sum / shasum / openssh dgst）").into(),
     )
 }
 
@@ -102,7 +104,7 @@ async fn run_tool(be: &SftpBackend, tool: &str, path: &str) -> BackendResult<Str
             be.exec(&cmd2, 15_000, 4096).await?
         }
     };
-    parse_sha1(&out).ok_or_else(|| super::BackendError(format!("解析 {tool} 输出失败")))
+    parse_sha1(&out).ok_or_else(|| super::BackendError(trf!("解析 {tool} 输出失败", tool = tool)))
 }
 
 #[cfg(test)]

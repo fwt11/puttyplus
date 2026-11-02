@@ -14,6 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::worker::{PanelEvent, XferShared};
 use crate::backend::conn::SftpBackend;
 use crate::util::{path_basename, path_join};
+use crate::i18n::tr;
+use crate::trf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayMode {
@@ -89,7 +91,7 @@ fn set_msg(shared: &Arc<Mutex<XferShared>>, msg: &str) {
 /// 建目录（等价 mkdir -p，已存在则忽略）。
 async fn ensure_dir(sftp: &SftpSession, path: &str) -> Result<(), String> {
     if !path.starts_with('/') {
-        return Err(fail(format!("目标目录必须是绝对路径：{path}")));
+        return Err(fail(trf!("目标目录必须是绝对路径：{path}", path = path)));
     }
     let mut cur = String::new();
     for seg in path.split('/').filter(|s| !s.is_empty()) {
@@ -103,7 +105,7 @@ async fn ensure_dir(sftp: &SftpSession, path: &str) -> Result<(), String> {
             Err(_) => {
                 // 并发/已存在：再看一次
                 if !sftp.metadata(&cur).await.map(|m| m.is_dir()).unwrap_or(false) {
-                    return Err(fail(format!("创建目录失败：{cur}")));
+                    return Err(fail(trf!("创建目录失败：{cur}", cur = cur)));
                 }
             }
         }
@@ -206,17 +208,17 @@ async fn tree_size(sftp: &SftpSession, path: &str) -> u64 {
 /// 单个路径是否适合直接交给源端 shell/scp。
 fn quote_shell(s: &str) -> Result<String, String> {
     if s.contains(['\n', '\r', '\'']) || s.bytes().any(|b| b == 0) {
-        return Err("路径包含换行或单引号，改用本机中转".into());
+        return Err(tr("路径包含换行或单引号，改用本机中转").into());
     }
     if s.chars().any(|c| matches!(c, '*' | '?' | '[' | ']')) {
-        return Err("路径包含通配符，改用本机中转".into());
+        return Err(tr("路径包含通配符，改用本机中转").into());
     }
     Ok(format!("'{s}'"))
 }
 
 fn scp_target(user: &str, host: &str, path: &str) -> Result<String, String> {
     if user.contains([' ', '\t']) || host.contains([' ', '\t']) {
-        return Err("用户名/主机名包含空白".into());
+        return Err(tr("用户名/主机名包含空白").into());
     }
     Ok(format!("{user}@{host}:{path}"))
 }
@@ -226,9 +228,9 @@ pub async fn run(
     spec: RelaySpec,
     ui_tx: &async_channel::Sender<PanelEvent>,
 ) -> Result<(), String> {
-    let conn = conn.ok_or_else(|| "源连接已断开".to_string())?;
+    let conn = conn.ok_or_else(|| tr("源连接已断开").to_string())?;
     if spec.dst_dir.trim().is_empty() {
-        return Err("目标目录为空".into());
+        return Err(tr("目标目录为空").into());
     }
     ensure_dir(&spec.dst_sftp, &spec.dst_dir).await?;
 
@@ -241,7 +243,7 @@ pub async fn run(
             Ok(()) => return Ok(()),
             Err(why) => {
                 if spec.is_cancelled() {
-                    return Err("已取消".into());
+                    return Err(tr("已取消").into());
                 }
                 if spec.mode == RelayMode::DirectOnly {
                     return Err(why);
@@ -261,7 +263,7 @@ async fn direct(
     ui_tx: &async_channel::Sender<PanelEvent>,
 ) -> Result<(), String> {
     if spec.dst_port <= 0 {
-        return Err("目标端口无效".into());
+        return Err(tr("目标端口无效").into());
     }
     // 提前校验目标串，别让带空白的 user/host 进 shell
     let tmp_name = format!(".puttyplus-relay-{}", spec.tag);
@@ -269,8 +271,7 @@ async fn direct(
     let _ = scp_target(&spec.dst_user, &spec.dst_host, &format!("{tmp}/"))?;
 
     // 预检（此时还没碰目标目录）：A 上有 scp/ssh，且能以 BatchMode 登录 B
-    let pre = format!(
-        "command -v scp >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && \
+    let pre = format!("command -v scp >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && \
          ssh -o BatchMode=yes -o ConnectTimeout=5 -p {port} {user}@{host} true",
         port = spec.dst_port,
         user = spec.dst_user,
@@ -285,7 +286,7 @@ async fn direct(
         return Err(if why.is_empty() {
             format!("预检失败（退出码 {:?}）", pre_out.code)
         } else {
-            format!("预检失败：{why}")
+            trf!("预检失败：{why}", why = why)
         });
     }
 
@@ -303,7 +304,7 @@ async fn direct(
     ensure_dir(&spec.dst_sftp, &tmp).await?;
     set_msg(
         &spec.shared,
-        &format!("直连中（源服务器 → {}）", spec.dst_label),
+        &trf!("直连中（源服务器 → {v0}）", v0 = spec.dst_label),
     );
 
     let fut = conn.exec_full(&cmd, spec.allow_agent, spec.cancel.clone(), 24 * 3600 * 1000);
@@ -314,7 +315,7 @@ async fn direct(
             r = &mut fut => break r,
             _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
                 if spec.is_cancelled() {
-                    set_msg(&spec.shared, "已取消");
+                    set_msg(&spec.shared, tr("已取消"));
                 }
                 if last_poll.elapsed() >= std::time::Duration::from_millis(800) {
                     last_poll = Instant::now();
@@ -339,7 +340,7 @@ async fn direct(
         return Err(if why.is_empty() {
             format!("scp 失败（退出码 {:?}）", out.code)
         } else {
-            format!("scp 失败：{why}")
+            trf!("scp 失败：{why}", why = why)
         });
     }
 
@@ -348,7 +349,7 @@ async fn direct(
         .dst_sftp
         .read_dir(&tmp)
         .await
-        .map_err(|e| format!("读取临时目录失败：{e}"))?;
+        .map_err(|e| trf!("读取临时目录失败：{e}", e = e))?;
     let names: Vec<String> = rd.map(|e| e.file_name()).collect();
     let mut touched = 0u64;
     for name in names {
@@ -356,20 +357,20 @@ async fn direct(
         let to = path_join(&spec.dst_dir, &name);
         if spec.dst_sftp.metadata(&to).await.is_ok() {
             if !spec.overwrite {
-                set_msg(&spec.shared, &format!("已跳过（目标已存在）：{name}"));
+                set_msg(&spec.shared, &trf!("已跳过（目标已存在）：{name}", name = name));
                 continue;
             }
             remove_rec(&spec.dst_sftp, to.clone()).await?;
         }
         if let Err(e) = spec.dst_sftp.rename(&from, &to).await {
             let _ = remove_rec(&spec.dst_sftp, tmp.clone()).await;
-            return Err(format!("移动到目标目录失败（{name}）：{e}"));
+            return Err(trf!("移动到目标目录失败（{name}）：{e}", name = name, e = e));
         }
         touched += 1;
     }
     let _ = remove_rec(&spec.dst_sftp, tmp.clone()).await;
     update(&spec.shared, total, total, "");
-    set_msg(&spec.shared, &format!("直连完成（{} 项）", touched));
+    set_msg(&spec.shared, &trf!("直连完成（{touched} 项）", touched = touched));
     Ok(())
 }
 
@@ -382,11 +383,8 @@ async fn relay(
     ui_tx: &async_channel::Sender<PanelEvent>,
 ) -> Result<(), String> {
     let msg = match fallback_reason {
-        Some(why) => format!(
-            "本机中转中（源 → 本机 → {}；直连失败：{why}）",
-            spec.dst_label
-        ),
-        None => format!("本机中转中（源 → 本机 → {}）", spec.dst_label),
+        Some(why) => trf!("本机中转中（源 → 本机 → {v0}；直连失败：{why}）", why = why, v0 = spec.dst_label),
+        None => trf!("本机中转中（源 → 本机 → {v0}）", v0 = spec.dst_label),
     };
     set_msg(&spec.shared, &msg);
     let mut done = 0u64;
@@ -395,7 +393,7 @@ async fn relay(
 
     for e in entries {
         if spec.is_cancelled() {
-            return Err("已取消".into());
+            return Err(tr("已取消").into());
         }
         let dst = path_join(&spec.dst_dir, &e.rel);
         if e.is_dir {
@@ -404,7 +402,7 @@ async fn relay(
         }
         if spec.dst_sftp.metadata(&dst).await.is_ok() {
             if !spec.overwrite {
-                set_msg(&spec.shared, &format!("已跳过（目标已存在）：{}", e.rel));
+                set_msg(&spec.shared, &trf!("已跳过（目标已存在）：{v0}", v0 = e.rel));
                 continue;
             }
             remove_rec(&spec.dst_sftp, dst.clone()).await?;
@@ -418,28 +416,28 @@ async fn relay(
         let mut sf = src
             .open(&source_path(&spec.paths, &e.rel))
             .await
-            .map_err(|err| format!("打开源文件失败（{}）：{err}", e.rel))?;
+            .map_err(|err| trf!("打开源文件失败（{v0}）：{err}", err = err, v0 = e.rel))?;
         let mut df = spec
             .dst_sftp
             .create(&part)
             .await
-            .map_err(|err| format!("创建目标文件失败（{}）：{err}", e.rel))?;
+            .map_err(|err| trf!("创建目标文件失败（{v0}）：{err}", err = err, v0 = e.rel))?;
         loop {
             if spec.is_cancelled() {
                 let _ = spec.dst_sftp.remove_file(&part).await;
-                return Err("已取消".into());
+                return Err(tr("已取消").into());
             }
             let n = match sf.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(err) => {
                     let _ = spec.dst_sftp.remove_file(&part).await;
-                    return Err(format!("读取源文件失败（{}）：{err}", e.rel));
+                    return Err(trf!("读取源文件失败（{v0}）：{err}", err = err, v0 = e.rel));
                 }
             };
             if let Err(err) = df.write_all(&buf[..n]).await {
                 let _ = spec.dst_sftp.remove_file(&part).await;
-                return Err(format!("写入目标文件失败（{}）：{err}", e.rel));
+                return Err(trf!("写入目标文件失败（{v0}）：{err}", err = err, v0 = e.rel));
             }
             done = done.saturating_add(n as u64);
             update(&spec.shared, done, total, &e.rel);
@@ -454,10 +452,10 @@ async fn relay(
         spec.dst_sftp
             .rename(&part, &dst)
             .await
-            .map_err(|err| format!("重命名目标文件失败（{}）：{err}", e.rel))?;
+            .map_err(|err| trf!("重命名目标文件失败（{v0}）：{err}", err = err, v0 = e.rel))?;
     }
     update(&spec.shared, total, total, "");
-    set_msg(&spec.shared, "本机中转完成");
+    set_msg(&spec.shared, tr("本机中转完成"));
     Ok(())
 }
 

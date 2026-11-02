@@ -18,6 +18,8 @@ use crate::backend::db::DbSession;
 use crate::backend::sftp::ProgressSink;
 use crate::backend::SftpEntry;
 use crate::util::{path_basename, path_join};
+use crate::i18n::tr;
+use crate::trf;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SimpleOp {
@@ -407,20 +409,20 @@ impl FwdView {
     /// 运行态文案（状态栏 tooltip 与转发管理窗口共用）。
     pub fn state_text(&self) -> String {
         if let Some(e) = &self.err {
-            return format!("启动失败：{e}");
+            return trf!("启动失败：{e}", e = e);
         }
         if self.active {
-            "活动中".to_string()
+            tr("活动中").to_string()
         } else if self.enabled {
-            "未在运行".to_string()
+            tr("未在运行").to_string()
         } else {
-            "已停用".to_string()
+            tr("已停用").to_string()
         }
     }
 
     /// 一行完整展示：描述（运行态）
     pub fn line_text(&self) -> String {
-        format!("{}（{}）", self.text, self.state_text())
+        trf!("{v0}（{v1}）", v0 = self.text, v1 = self.state_text())
     }
 }
 
@@ -641,7 +643,7 @@ pub fn spawn_worker(
                                         .apply_forward_rules(rules)
                                         .await
                                         .into_iter()
-                                        .map(|(rule, why)| format!("{rule}：{why}"))
+                                        .map(|(rule, why)| trf!("{rule}：{why}", rule = rule, why = why))
                                         .collect();
                                     let c = Arc::new(c);
                                     push_forwards(Some(c.as_ref()), &ui_tx, failed).await;
@@ -658,7 +660,7 @@ pub fn spawn_worker(
                         }
                         WorkerCmd::List { id, path, silent } => {
                             let result = match &conn {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => c.list(&path).await.map_err(|e| e.0),
                             };
                             let dir_mtime = match (&result, &conn) {
@@ -696,7 +698,7 @@ pub fn spawn_worker(
                         }
                         WorkerCmd::Simple { op, path, new_path } => {
                             let result = match &conn {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => {
                                     let r = match op {
                                         SimpleOp::Mkdir => c.mkdir(&path).await,
@@ -712,7 +714,7 @@ pub fn spawn_worker(
                         }
                         WorkerCmd::ReadFile { id, path, max } => {
                             let result = match &conn {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => c
                                     .read_file_limited(&path, max)
                                     .await
@@ -726,7 +728,7 @@ pub fn spawn_worker(
                         }
                         WorkerCmd::WriteFile { id, path, data } => {
                             let result = match &conn {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => c
                                     .write_file_atomic(&path, &data)
                                     .await
@@ -783,17 +785,17 @@ pub fn spawn_worker(
                             match &xfer_tx {
                                 Some(tx) => {
                                     if let Err(err) = tx.send(msg) {
-                                        fail_jobs(err.0.jobs, "传输调度器已停止", &ui_tx);
+                                        fail_jobs(err.0.jobs, tr("传输调度器已停止"), &ui_tx);
                                     }
                                 }
                                 None => {
-                                    fail_jobs(msg.jobs, "连接已断开", &ui_tx);
+                                    fail_jobs(msg.jobs, tr("连接已断开"), &ui_tx);
                                 }
                             }
                         }
                         WorkerCmd::ExportSftp { reply } => {
                             let r = match &conn {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => c.open_sftp().await.map_err(|e| e.0),
                             };
                             let _ = reply.try_send(r);
@@ -806,11 +808,11 @@ pub fn spawn_worker(
                             match &xfer_tx {
                                 Some(tx) => {
                                     if let Err(err) = tx.send(msg) {
-                                        fail_jobs(err.0.jobs, "传输调度器已停止", &ui_tx);
+                                        fail_jobs(err.0.jobs, tr("传输调度器已停止"), &ui_tx);
                                     }
                                 }
                                 None => {
-                                    fail_jobs(msg.jobs, "连接已断开", &ui_tx);
+                                    fail_jobs(msg.jobs, tr("连接已断开"), &ui_tx);
                                 }
                             }
                         }
@@ -830,7 +832,7 @@ pub fn spawn_worker(
                         WorkerCmd::ForwardAdd { spec } => {
                             let mut failed = Vec::new();
                             match conn.as_ref() {
-                                None => failed.push(format!("{spec}: 未连接")),
+                                None => failed.push(trf!("{spec}: 未连接", spec = spec)),
                                 Some(c) => {
                                     if let Err(e) = c.add_forward_rule(&spec).await {
                                         failed.push(format!("{spec}: {}", e.0));
@@ -842,10 +844,10 @@ pub fn spawn_worker(
                         WorkerCmd::ForwardRemove { key } => {
                             let mut failed = Vec::new();
                             match conn.as_ref() {
-                                None => failed.push("未连接".into()),
+                                None => failed.push(tr("未连接").into()),
                                 Some(c) => {
                                     if !c.remove_forward_rule(&key).await {
-                                        failed.push(format!("转发规则已不存在：{key}"));
+                                        failed.push(trf!("转发规则已不存在：{key}", key = key));
                                     }
                                 }
                             }
@@ -860,7 +862,7 @@ pub fn spawn_worker(
                                 &ig,
                             );
                             let rres = match &conn {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => c.walk_dir(&remote, &ig).await,
                             };
                             let result = match (lres, rres) {
@@ -876,7 +878,7 @@ pub fn spawn_worker(
                         WorkerCmd::ForwardSetEnabled { key, enabled } => {
                             let mut failed = Vec::new();
                             match conn.as_ref() {
-                                None => failed.push("未连接".into()),
+                                None => failed.push(tr("未连接").into()),
                                 Some(c) => {
                                     if let Err(e) = c.set_forward_rule_enabled(&key, enabled).await
                                     {
@@ -892,7 +894,7 @@ pub fn spawn_worker(
                             //    拿它当"测试"会把用户的活连接掐了。）
                             let mut needs_password = false;
                             let result = match conn.as_ref() {
-                                None => Err("SSH 连接已断开".to_string()),
+                                None => Err(tr("SSH 连接已断开").to_string()),
                                 Some(c) => {
                                     match c.open_tcp_stream(&config.host, config.port).await {
                                         Err(e) => Err(e.0),
@@ -917,15 +919,14 @@ pub fn spawn_worker(
                             if let Some(d) = db.take() {
                                 d.stop();
                             }
-                            let label = format!(
-                                "{}@{}:{}/{}",
+                            let label = format!("{}@{}:{}/{}",
                                 config.user, config.host, config.port, config.dbname
                             );
                             // 连接失败分两种回包：普通失败 → DbConnected(Err)，
                             // "服务器要密码" → DbNeedPassword（UI 弹密码框）。
                             let mut need_password: Option<String> = None;
                             let result = match conn.as_ref() {
-                                None => Err("连接已断开".into()),
+                                None => Err(tr("连接已断开").into()),
                                 Some(c) => {
                                     match c.open_tcp_stream(&config.host, config.port).await {
                                         Err(e) => Err(e.0),
@@ -934,7 +935,7 @@ pub fn spawn_worker(
                                             Err(e) => {
                                                 if e.needs_password() {
                                                     need_password = Some(e.message());
-                                                    Err("需要密码".to_string())
+                                                    Err(tr("需要密码").to_string())
                                                 } else {
                                                     Err(e.message())
                                                 }
@@ -1086,13 +1087,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbQuery { id, sql, page_size } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Query { id, sql, page_size }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1100,13 +1101,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbNextPage { id, page_size } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::NextPage { id, page_size }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1121,7 +1122,7 @@ pub fn spawn_worker(
                                     }
                                     let _ = ui_tx.try_send(PanelEvent::DbClosed);
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "已取消（MySQL 连接已关闭，请重新连接）".into(),
+                                        tr("已取消（MySQL 连接已关闭，请重新连接）").into(),
                                     ));
                                 }
                                 Some(tok) => {
@@ -1132,7 +1133,7 @@ pub fn spawn_worker(
                                     match conn.as_ref() {
                                         None => {
                                             let _ = ui_tx.try_send(PanelEvent::DbError(
-                                                "取消失败：SSH 连接已断开".into(),
+                                                tr("取消失败：SSH 连接已断开").into(),
                                             ));
                                         }
                                         Some(c) => {
@@ -1149,7 +1150,7 @@ pub fn spawn_worker(
                                                 }
                                                 Err(e) => {
                                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                                        format!("取消失败：{}", e.0),
+                                                        trf!("取消失败：{v0}", v0 = e.0),
                                                     ));
                                                 }
                                             }
@@ -1167,13 +1168,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbMeta { id, req } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Meta { id, req }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1181,13 +1182,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbExec { id, sql } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Exec { id, sql }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1195,13 +1196,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbTx { id, op } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Tx { id, op }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1209,13 +1210,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbImport { id, batch } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Import { id, batch }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1223,13 +1224,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbExport { id, schema, table, path, fmt } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Export { id, schema, table, path, fmt }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1237,13 +1238,13 @@ pub fn spawn_worker(
                         WorkerCmd::DbEr { id, schema, table } => match db.as_ref() {
                             None => {
                                 let _ = ui_tx
-                                    .try_send(PanelEvent::DbError("尚未连接数据库".into()));
+                                    .try_send(PanelEvent::DbError(tr("尚未连接数据库").into()));
                             }
                             Some(d) => {
                                 if d.tx.send(DbCmd::Er { id, schema, table }).is_err() {
                                     db = None;
                                     let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        "数据库连接已断开".into(),
+                                        tr("数据库连接已断开").into(),
                                     ));
                                 }
                             }
@@ -1311,8 +1312,7 @@ async fn push_forwards(
 /// 普通文件传输返回去重键；镜像/删除/跨服务器返回 None（各自单独处理）。
 fn job_key(job: &TransferJob) -> Option<String> {
     match job {
-        TransferJob::File(it) if it.kind == XferKind::Transfer => Some(format!(
-            "{}|{}",
+        TransferJob::File(it) if it.kind == XferKind::Transfer => Some(format!("{}|{}",
             if it.upload { "up" } else { "down" },
             path_join(&it.dst_dir, path_basename(&it.src))
         )),
@@ -1461,7 +1461,7 @@ fn spawn_job(
                 }
                 let res = crate::panel::relay::run(Some(conn.as_ref()), spec, &ui_tx).await;
                 let (ok, msg) = match &res {
-                    Ok(()) => (true, "完成".to_string()),
+                    Ok(()) => (true, tr("完成").to_string()),
                     Err(e) => (false, e.clone()),
                 };
                 if let Ok(mut g) = shared.lock() {
@@ -1486,7 +1486,7 @@ fn relay_name(spec: &crate::panel::relay::RelaySpec) -> String {
     let first = spec.paths.first().map(String::as_str).unwrap_or("");
     let base = crate::util::path_basename(first);
     if spec.paths.len() > 1 {
-        format!("{base} 等 {} 项", spec.paths.len())
+        trf!("{base} 等 {v0} 项", base = base, v0 = spec.paths.len())
     } else {
         base.to_string()
     }
@@ -1555,7 +1555,7 @@ async fn run_transfer(
     let Some(c) = conn else {
         let mut g = it.shared.lock().unwrap();
         g.state = XferState::Err;
-        g.msg = Some("连接已断开".into());
+        g.msg = Some(tr("连接已断开").into());
         return;
     };
     {
@@ -1624,7 +1624,7 @@ async fn run_transfer(
                 g.state = XferState::Cancel;
             } else {
                 g.state = XferState::Err;
-                g.msg = Some(if e.0.is_empty() { "失败".into() } else { e.0 });
+                g.msg = Some(if e.0.is_empty() { tr("失败").into() } else { e.0 });
             }
         }
     }
@@ -1635,8 +1635,7 @@ async fn run_transfer(
 /// 条件 = 当前用户 + pts 终端 + 纯 shell 名（-bash/zsh/...，排除堡垒机菜单程序）
 ///       + 启动时间与我们的 ssh 最接近（与 C 版逐字符一致）
 fn follow_cmd(age_sec: i64) -> String {
-    format!(
-        "P=$(ps -eo pid=,tty=,etimes=,args= 2>/dev/null | awk -v t0={age_sec} \
+    format!("P=$(ps -eo pid=,tty=,etimes=,args= 2>/dev/null | awk -v t0={age_sec} \
          '$2 ~ /^pts\\// && $4 ~ /^-?(ba|z|k|da|fi|c|tc)?sh$/ \
          {{d=$3-t0; if(d<0)d=-d; if(m==\"\"||d<m){{p=$1;m=d}}}} \
          END{{if(p!=\"\")print p}}'); \

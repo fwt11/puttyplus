@@ -48,6 +48,8 @@ use crate::util::{find_program_in_path, path_basename, path_join, path_parent};
 use pane::Pane;
 use queue::{QueueItem, QueueUi};
 use worker::{FwdView, PanelEvent, SimpleOp, WorkerCmd, XferKind, XferSpec, XferState};
+use crate::i18n::tr;
+use crate::trf;
 
 pub struct PanelState {
     pub opts: ConnOptions,
@@ -206,7 +208,7 @@ impl PanelState {
             // 没连上（SSH 都没通）⇒ 没什么可测的，当场回"连不上"
             if let Some((cid, c)) = self.db_test_cb.borrow_mut().take() {
                 if cid == id {
-                    c(Err("SSH 连接还没建好".to_string()), false);
+                    c(Err(tr("SSH 连接还没建好").to_string()), false);
                 }
             }
             return;
@@ -214,7 +216,7 @@ impl PanelState {
         if tx.send(WorkerCmd::DbTest { id, config: cfg }).is_err() {
             if let Some((cid, c)) = self.db_test_cb.borrow_mut().take() {
                 if cid == id {
-                    c(Err("后台连接线程不在了".to_string()), false);
+                    c(Err(tr("后台连接线程不在了").to_string()), false);
                 }
             }
         }
@@ -382,12 +384,12 @@ impl SftpPanel {
             set_remote_status(
                 &st,
                 State::Warn,
-                &format!("正在连接 {}@{}:{}…", opts.user, opts.host, opts.port),
+                &trf!("正在连接 {v0}@{v1}:{v2}…", v0 = opts.user, v1 = opts.host, v2 = opts.port),
             );
             submit_connect(&st);
         } else {
             set_remote_sensitive(&st, false);
-            set_remote_status(&st, State::Err, "仅 SSH 协议支持文件传输");
+            set_remote_status(&st, State::Err, tr("仅 SSH 协议支持文件传输"));
             if let Some(b) = st.rreconnect.borrow().as_ref() {
                 b.set_sensitive(false);
             }
@@ -608,8 +610,7 @@ fn render_status(st: &Rc<PanelState>) {
     };
     let lbl = st.pane(true).status_lbl.clone();
     let esc = glib::markup_escape_text(&text);
-    lbl.set_markup(&format!(
-        "<span foreground='{}'>●</span> {}",
+    lbl.set_markup(&format!("<span foreground='{}'>●</span> {}",
         crate::theme::state_hex(level),
         esc.as_str()
     ));
@@ -626,13 +627,10 @@ fn connected_text(st: &Rc<PanelState>, _detail: &str) -> String {
     // ⚠️ 阶段 76 / 审计 P1-15：**不重复路径**。路径栏就在上面一行，
     // 状态行再抄一遍完整路径 ⇒ 340px 的面板里被截断，什么都看不清。
     // 完整路径挪进 tooltip（悬停能看全）。
-    let base = format!(
-        "已连接 {}@{}:{}",
-        st.opts.user, st.opts.host, st.opts.port
-    );
+    let base = trf!("已连接 {v0}@{v1}:{v2}", v0 = st.opts.user, v1 = st.opts.host, v2 = st.opts.port);
     let n = st.fwd_views.borrow().len();
     if n > 0 {
-        format!("{base}｜转发 {n}")
+        trf!("{base}｜转发 {n}", base = base, n = n)
     } else {
         base
     }
@@ -640,10 +638,7 @@ fn connected_text(st: &Rc<PanelState>, _detail: &str) -> String {
 
 fn connected_tip(st: &Rc<PanelState>, detail: &str) -> String {
     // ⚠️ tooltip 里**保留完整路径**（状态行放不下的东西在这儿能看）
-    let text = format!(
-        "已连接 {}@{}:{} — {detail}",
-        st.opts.user, st.opts.host, st.opts.port
-    );
+    let text = trf!("已连接 {v0}@{v1}:{v2} — {detail}", detail = detail, v0 = st.opts.user, v1 = st.opts.host, v2 = st.opts.port);
     let views = st.fwd_views.borrow();
     if views.is_empty() {
         text
@@ -653,7 +648,7 @@ fn connected_tip(st: &Rc<PanelState>, detail: &str) -> String {
             .map(FwdView::line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        format!("{text}\n\n端口转发：\n{body}")
+        trf!("{text}\n\n端口转发：\n{body}", text = text, body = body)
     }
 }
 
@@ -741,7 +736,7 @@ fn cancel_aborted_xfers(st: &Rc<PanelState>) {
         let mut g = it.shared.lock().unwrap();
         if matches!(g.state, XferState::Wait | XferState::Run) {
             g.state = XferState::Cancel;
-            g.msg = Some("连接已断开或已重建".into());
+            g.msg = Some(tr("连接已断开或已重建").into());
             cancelled.push((
                 crate::util::path_basename(&it.src).to_string(),
                 XferState::Cancel,
@@ -796,37 +791,34 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 .map_or(false, |k| !k.is_empty());
             if !have_pw && !have_key && crate::i18n::looks_like_auth_failure(&err) {
                 // 无凭据且认证失败：询问密码后重试
-                let msg = format!(
-                    "SFTP 连接 {}@{}:{} 需要密码：\n{err}",
-                    st.opts.user, st.opts.host, st.opts.port
-                );
+                let msg = trf!("SFTP 连接 {v0}@{v1}:{v2} 需要密码：\n{err}", err = err, v0 = st.opts.user, v1 = st.opts.host, v2 = st.opts.port);
                 let top = st.topwin();
                 let st = Rc::clone(st);
-                dialogs::ask_password(top.as_ref(), "SFTP 密码", &msg, move |pw| {
+                dialogs::ask_password(top.as_ref(), tr("SFTP 密码"), &msg, move |pw| {
                     let st = st.clone();
                     if let Some(pw) = pw {
                         *st.pw.borrow_mut() = Some(Zeroizing::new(pw));
-                        set_remote_status(&st, State::Warn, "正在连接…");
+                        set_remote_status(&st, State::Warn, tr("正在连接…"));
                         submit_connect(&st);
                     } else {
                         // 状态栏只显示状态词；完整错误在弹窗与 tooltip 里
-                        set_remote_status(&st, State::Err, "未连接");
+                        set_remote_status(&st, State::Err, tr("未连接"));
                     }
                 });
                 return;
             }
-            set_remote_status(&st, State::Err, "未连接");
+            set_remote_status(&st, State::Err, tr("未连接"));
             // ⚠️ 复查 R1 / §4.2「错误恢复不闭环」：以前这个框只有一颗
             // 「关闭」⇒ 用户关掉弹窗只能干瞪眼，而「连接 → 重新连接 SFTP」
             // 就在两步之外，弹窗却不说。⇒ 给一颗**当场重试**的按钮。
             let st2 = Rc::clone(st);
             dialogs::show_error_with_retry(
                 st.topwin().as_ref(),
-                "SFTP 连接失败",
+                tr("SFTP 连接失败"),
                 &err,
-                "重试",
+                tr("重试"),
                 move || {
-                    set_remote_status(&st2, State::Warn, "正在连接…");
+                    set_remote_status(&st2, State::Warn, tr("正在连接…"));
                     submit_connect(&st2);
                 },
             );
@@ -843,7 +835,7 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             if !failed.is_empty() {
                 dialogs::show_error(
                     st.topwin().as_ref(),
-                    "端口转发",
+                    tr("端口转发"),
                     &failed.join("\n"),
                 );
             }
@@ -872,8 +864,8 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             Err(err) if !silent => {
                 dialogs::show_error(
                     st.topwin().as_ref(),
-                    "读取远程目录失败",
-                    &format!("{err}\n目录：{path}"),
+                    tr("读取远程目录失败"),
+                    &trf!("{err}\n目录：{path}", err = err, path = path),
                 );
             }
             _ => {}
@@ -896,7 +888,7 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
         }
         PanelEvent::SimpleDone { path, result } => {
             if let Err(err) = &result {
-                dialogs::show_error(st.topwin().as_ref(), "操作失败", err);
+                dialogs::show_error(st.topwin().as_ref(), tr("操作失败"), err);
             }
             // 上级目录可能被整体删除，列父目录更安全
             let parent = path_parent(&path);
@@ -922,10 +914,8 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                     st.exec_fail.set(n);
                     if n > 15 {
                         st.follow_poll_dead.set(true);
-                        eprintln!(
-                            "PuTTYPlus: 远程 exec 通道不可用，目录跟随轮询已停止\
-                             （shell 若支持 OSC 7 仍可跟随）"
-                        );
+                        eprintln!("{}", tr("PuTTYPlus: 远程 exec 通道不可用，目录跟随轮询已停止\
+                             （shell 若支持 OSC 7 仍可跟随）"));
                     }
                 }
             }
@@ -954,7 +944,7 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             if !ok {
                 super::panel::dialogs::show_error(
                     st.topwin().as_ref(),
-                    "跨服务器传输失败",
+                    tr("跨服务器传输失败"),
                     &msg,
                 );
             }
@@ -1173,8 +1163,8 @@ pub fn on_open_file(st: &Rc<PanelState>, remote: bool, readonly: bool) {
     match sel.as_slice() {
         [] => dialogs::show_error(
             st.topwin().as_ref(),
-            "无法打开文件",
-            "请先在文件列表里选择一个文件。",
+            tr("无法打开文件"),
+            tr("请先在文件列表里选择一个文件。"),
         ),
         [(path, false)] => {
             if remote {
@@ -1185,19 +1175,13 @@ pub fn on_open_file(st: &Rc<PanelState>, remote: bool, readonly: bool) {
         }
         [(path, true)] => dialogs::show_error(
             st.topwin().as_ref(),
-            "无法打开文件",
-            &format!(
-                "「{}」是目录，内置查看/编辑器只处理文本文件。",
-                path_basename(path)
-            ),
+            tr("无法打开文件"),
+            &trf!("「{v0}」是目录，内置查看/编辑器只处理文本文件。", v0 = path_basename(path)),
         ),
         _ => dialogs::show_error(
             st.topwin().as_ref(),
-            "无法打开文件",
-            &format!(
-                "一次只能查看/编辑一个文件（已选中 {} 项）。",
-                sel.len()
-            ),
+            tr("无法打开文件"),
+            &trf!("一次只能查看/编辑一个文件（已选中 {v0} 项）。", v0 = sel.len()),
         ),
     }
 }
@@ -1278,7 +1262,7 @@ pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bo
 
 pub fn on_mkdir(st: &Rc<PanelState>, remote: bool) {
     let top = st.topwin();
-    let title = if remote { "新建远程目录" } else { "新建本地目录" };
+    let title = if remote { tr("新建远程目录") } else { tr("新建本地目录") };
     let st = Rc::clone(st);
     dialogs::ask_text(top.as_ref(), title, "", move |name| {
         let st = st.clone();
@@ -1291,7 +1275,7 @@ pub fn on_mkdir(st: &Rc<PanelState>, remote: bool) {
             if let Err(e) = std::fs::create_dir(&full) {
                 dialogs::show_error(
                     st.topwin().as_ref(),
-                    "创建目录失败",
+                    tr("创建目录失败"),
                     &format!("{e}: {full}"),
                 );
             }
@@ -1308,7 +1292,7 @@ pub fn on_rename(st: &Rc<PanelState>, remote: bool) {
     let (old, _) = sel[0].clone();
     let oldname = path_basename(&old).to_string();
     let top = st.topwin();
-    let title = if remote { "重命名（远程）" } else { "重命名（本地）" };
+    let title = if remote { tr("重命名（远程）") } else { tr("重命名（本地）") };
     let st = Rc::clone(st);
     let defval = oldname.clone();
     dialogs::ask_text(top.as_ref(), title, &defval, move |newname| {
@@ -1323,7 +1307,7 @@ pub fn on_rename(st: &Rc<PanelState>, remote: bool) {
             submit_simple(&st, SimpleOp::Rename, &old, Some(&full_new));
         } else {
             if let Err(e) = std::fs::rename(&old, newname) {
-                dialogs::show_error(st.topwin().as_ref(), "重命名失败", &e.to_string());
+                dialogs::show_error(st.topwin().as_ref(), tr("重命名失败"), &e.to_string());
             }
             fill_local_pane(&st);
         }
@@ -1336,14 +1320,11 @@ pub fn on_delete(st: &Rc<PanelState>, remote: bool) {
         return;
     }
     let n = sel.len();
-    let msg = format!(
-        "确定删除选中的 {n} 项？\n{}",
-        if remote {
-            "远程删除不可恢复，目录将递归删除。"
+    let msg = trf!("确定删除选中的 {n} 项？\n{v0}", n = n, v0 = if remote {
+            tr("远程删除不可恢复，目录将递归删除。")
         } else {
-            "本地文件优先移入回收站（不可用时直接删除）。"
-        }
-    );
+            tr("本地文件优先移入回收站（不可用时直接删除）。")
+        });
     let top = st.topwin();
     let st = Rc::clone(st);
     dialogs::confirm(top.as_ref(), &msg, move |ok| {
@@ -1369,7 +1350,7 @@ pub fn on_delete(st: &Rc<PanelState>, remote: bool) {
                 if let Some(e) = last_err {
                     dialogs::show_error(
                         st.topwin().as_ref(),
-                        "删除失败",
+                        tr("删除失败"),
                         &format!("{p}: {}", e.message()),
                     );
                 }
@@ -1399,7 +1380,7 @@ pub fn on_reconnect(st: &Rc<PanelState>) {
     set_remote_status(
         st,
         State::Warn,
-        &format!("正在连接 {}@{}:{}…", st.opts.user, st.opts.host, st.opts.port),
+        &trf!("正在连接 {v0}@{v1}:{v2}…", v0 = st.opts.user, v1 = st.opts.host, v2 = st.opts.port),
     );
     // worker 侧 Connect 会先关闭旧连接
     submit_connect(st);
@@ -1454,8 +1435,8 @@ fn check_db_channel(st: &Rc<PanelState>) -> bool {
     }
     dialogs::show_error(
         st.topwin().as_ref(),
-        "数据库",
-        "数据库通道只支持 SSH 会话：当前协议没有可复用的 SSH 连接。",
+        tr("数据库"),
+        tr("数据库通道只支持 SSH 会话：当前协议没有可复用的 SSH 连接。"),
     );
     false
 }
@@ -1630,7 +1611,7 @@ fn do_submit(
 
 pub fn start_uploads(st: &Rc<PanelState>, lpaths: Vec<String>) {
     if !st.conn_ok.get() {
-        dialogs::show_error(st.topwin().as_ref(), "未连接", "SFTP 尚未连接，无法上传。");
+        dialogs::show_error(st.topwin().as_ref(), tr("未连接"), tr("SFTP 尚未连接，无法上传。"));
         return;
     }
     let dst = st.remote_cwd.borrow().clone();
@@ -1696,7 +1677,7 @@ pub fn enable_drop_upload(st: &Rc<PanelState>, term: &vte4::Terminal) {
 
 pub fn start_downloads(st: &Rc<PanelState>, rpaths: Vec<String>) {
     if !st.conn_ok.get() {
-        dialogs::show_error(st.topwin().as_ref(), "未连接", "SFTP 尚未连接，无法下载。");
+        dialogs::show_error(st.topwin().as_ref(), tr("未连接"), tr("SFTP 尚未连接，无法下载。"));
         return;
     }
     let dst = st.local_cwd.borrow().clone();
@@ -1727,7 +1708,7 @@ pub fn copy_uris_into_local(st: &Rc<PanelState>, paths: &[String], dstdir: &str)
         }
     }
     if let Some(e) = first_err {
-        dialogs::show_error(st.topwin().as_ref(), "复制文件失败", &e);
+        dialogs::show_error(st.topwin().as_ref(), tr("复制文件失败"), &e);
     }
     fill_local_pane(st);
 }
@@ -1798,8 +1779,8 @@ pub fn fill_local_pane(st: &Rc<PanelState>) {
             pane.set_cwd_entry(&cwd);
             dialogs::show_error(
                 st.topwin().as_ref(),
-                "读取本地目录失败",
-                &format!("{e}\n目录：{cwd}"),
+                tr("读取本地目录失败"),
+                &trf!("{e}\n目录：{cwd}", e = e, cwd = cwd),
             );
         }
     }

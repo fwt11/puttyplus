@@ -17,6 +17,8 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use crate::backend::ermodel::{self, ErGraph};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 缩放档位（几何缩放倍数 ↔ CSS 字号类）。
 const ZOOMS: [f64; 4] = [0.75, 1.0, 1.5, 2.0];
@@ -113,12 +115,12 @@ impl ErView {
 
         // ---- 工具栏 ----
         let btn_relayout = crate::a11y::icon_button("view-refresh-symbolic");
-        btn_relayout.set_tooltip_text(Some("重新排布（表多了不好看了就点它）"));
+        btn_relayout.set_tooltip_text(Some(tr("重新排布（表多了不好看了就点它）")));
         let btn_zoom_out = crate::a11y::icon_button("zoom-out-symbolic");
-        btn_zoom_out.set_tooltip_text(Some("缩小"));
+        btn_zoom_out.set_tooltip_text(Some(tr("缩小")));
         let btn_zoom_in = crate::a11y::icon_button("zoom-in-symbolic");
-        btn_zoom_in.set_tooltip_text(Some("放大"));
-        let status = gtk::Label::new(Some("（还没画图）"));
+        btn_zoom_in.set_tooltip_text(Some(tr("放大")));
+        let status = gtk::Label::new(Some(tr("（还没画图）")));
         status.add_css_class("dim-label");
         status.set_xalign(0.0);
         status.set_hexpand(true);
@@ -189,10 +191,7 @@ impl ErView {
         let n_edges = graph.edges.len();
         *self.graph.borrow_mut() = graph;
         self.rebuild();
-        self.status.set_text(&format!(
-            "{} 张表 · {} 条关系（拖动表框可以挪位置，双击表框看数据）",
-            n_tables, n_edges
-        ));
+        self.status.set_text(&trf!("{n_tables} 张表 · {n_edges} 条关系（拖动表框可以挪位置，双击表框看数据）", n_tables = n_tables, n_edges = n_edges));
     }
 
     /// 状态行（"正在读…" / 失败原因）。

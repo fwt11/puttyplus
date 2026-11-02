@@ -27,6 +27,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use crate::i18n::tr;
+use crate::trf;
 
 /* ==================================================================
  * JSON（asciicast 就是 JSON Lines）
@@ -289,8 +291,7 @@ fn push_delta(out: &mut String, last: &Attrs, want: &Attrs) {
         let lp = params(last);
         let fresh: Vec<&String> = p.iter().filter(|x| !lp.contains(x)).collect();
         if !fresh.is_empty() {
-            out.push_str(&format!(
-                "\x1b[{}m",
+            out.push_str(&format!("\x1b[{}m",
                 fresh
                     .iter()
                     .map(|s| s.as_str())
@@ -488,8 +489,7 @@ pub fn ansi_lines(html: &str) -> Vec<String> {
 pub fn header_line(cols: i64, rows: i64, ts: i64, title: &str) -> String {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let term_type = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
-    format!(
-        "{{\"version\": 3, \"term\": {{\"cols\": {}, \"rows\": {}, \"type\": {}}}, \"timestamp\": {}, \"title\": {}, \"env\": {{\"SHELL\": {}}}}}\n",
+    format!("{{\"version\": 3, \"term\": {{\"cols\": {}, \"rows\": {}, \"type\": {}}}, \"timestamp\": {}, \"title\": {}, \"env\": {{\"SHELL\": {}}}}}\n",
         cols.max(1),
         rows.max(1),
         json_quote(&term_type),
@@ -501,8 +501,7 @@ pub fn header_line(cols: i64, rows: i64, ts: i64, title: &str) -> String {
 
 /// 事件行（`[时间, "类型", "数据"]`）。类型：`o` 输出 / `i` 输入 / `r` 改尺寸 / `m` 标记。
 pub fn event_line(t: f64, kind: &str, data: &str) -> String {
-    format!(
-        "[{:.6}, {}, {}]\n",
+    format!("[{:.6}, {}, {}]\n",
         if t.is_finite() { t.max(0.0) } else { 0.0 },
         json_quote(kind),
         json_quote(data)
@@ -626,9 +625,9 @@ pub fn parse_event(line: &str) -> Option<Event> {
 ///     **距上一条的间隔**（interval）⇒ 读的时候要一路累加。
 pub fn load(path: &Path) -> Result<Cast, String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+        .map_err(|e| trf!("读取 {v0} 失败：{e}", e = e, v0 = path.display()))?;
     let mut lines = text.lines();
-    let head = lines.next().ok_or("文件是空的")?;
+    let head = lines.next().ok_or(tr("文件是空的"))?;
     let ver = json_int(head, "version").unwrap_or(0) as i32;
     let (cols, rows) = match ver {
         2 => (
@@ -641,15 +640,13 @@ pub fn load(path: &Path) -> Result<Cast, String> {
         ),
         1 => {
             return Err(
-                "这是 asciicast v1（2015 年的老格式），本程序只读 v2 / v3。\n\
-                 可用 asciinema rec --format asciicast-v2 重录一遍。"
+                tr("这是 asciicast v1（2015 年的老格式），本程序只读 v2 / v3。\n\
+                 可用 asciinema rec --format asciicast-v2 重录一遍。")
                     .to_string(),
             );
         }
         _ => {
-            return Err(format!(
-                "认不出这个录制文件的格式（version={ver}），只支持 asciicast v2 / v3。"
-            ));
+            return Err(trf!("认不出这个录制文件的格式（version={ver}），只支持 asciicast v2 / v3。", ver = ver));
         }
     };
 

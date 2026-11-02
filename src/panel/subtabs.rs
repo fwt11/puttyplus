@@ -22,6 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
+use crate::i18n::tr;
 
 /// 子标签标题的最大显示列数（超了省略号收尾，完整标题进 tooltip）。
 const MAX_TITLE_CHARS: i32 = 24;
@@ -157,7 +158,7 @@ impl SubTabs {
         // 的文件面板拉回来。**平时隐藏**（只有 DB 页用得上）。
         let toggle = gtk::ToggleButton::new();
         toggle.set_icon_name("view-sidebar-symbolic");
-        toggle.set_tooltip_text(Some("显示文件面板"));
+        toggle.set_tooltip_text(Some(tr("显示文件面板")));
         toggle.set_focusable(false);
         toggle.set_visible(false);
 
@@ -258,9 +259,9 @@ impl SubTabs {
         self.toggle_btn.set_active(on);
         self.updating.set(false);
         self.toggle_btn.set_tooltip_text(Some(if on {
-            "隐藏文件面板"
+            tr("隐藏文件面板")
         } else {
-            "显示文件面板"
+            tr("显示文件面板")
         }));
     }
 
@@ -385,7 +386,7 @@ impl SubTabs {
         close.add_css_class("flat");
         close.set_valign(gtk::Align::Center);
         close.set_focusable(false);
-        close.set_tooltip_text(Some("关闭这个子标签"));
+        close.set_tooltip_text(Some(tr("关闭这个子标签")));
         head.append(&close);
 
         self.nb.append_page(&content, Some(&head));

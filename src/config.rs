@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::args::ConnOptions;
 use crate::util::atoi_like;
+use crate::trf;
 
 /// 把开头的 `~` / `~/` 展开为用户主目录。
 pub fn expand_tilde(p: &str, home: &Path) -> String {
@@ -276,7 +277,7 @@ pub fn load_putty_session_from_dir(
             && !val.is_empty()
             && !val.eq_ignore_ascii_case("none")
         {
-            warnings.push(format!("会话 {name} 配置了代理 ({val})，代理设置不会自动生效"));
+            warnings.push(trf!("会话 {name} 配置了代理 ({val})，代理设置不会自动生效", name = name, val = val));
         }
     }
     true
@@ -345,7 +346,7 @@ pub fn write_putty_session(
     name: &str,
     o: &crate::args::ConnOptions,
 ) -> Result<Vec<String>, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| trf!("创建 {v0} 失败: {e}", e = e, v0 = dir.display()))?;
     let path = dir.join(session_filename_encode(name));
     let rules: Vec<crate::backend::forward::FwdRule> = o
         .forwards
@@ -395,7 +396,7 @@ pub fn write_putty_session(
     if !pf.is_empty() {
         put("PortForwardings", &pf);
     }
-    std::fs::write(&path, out).map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    std::fs::write(&path, out).map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = path.display()))?;
     Ok(skipped)
 }
 

@@ -27,15 +27,15 @@ pub enum Density {
 impl Density {
     pub fn label(self) -> &'static str {
         match self {
-            Density::Normal => "标准",
-            Density::Compact => "紧凑",
+            Density::Normal => tr("标准"),
+            Density::Compact => tr("紧凑"),
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            Density::Normal => "常规留白，工具栏与文件列表舒展",
-            Density::Compact => "压缩留白，同屏显示更多文件行",
+            Density::Normal => tr("常规留白，工具栏与文件列表舒展"),
+            Density::Compact => tr("压缩留白，同屏显示更多文件行"),
         }
     }
 
@@ -68,9 +68,9 @@ impl UiFont {
 
     pub fn label(self) -> &'static str {
         match self {
-            UiFont::Small => "小",
-            UiFont::Normal => "中",
-            UiFont::Large => "大",
+            UiFont::Small => tr("小"),
+            UiFont::Normal => tr("中"),
+            UiFont::Large => tr("大"),
         }
     }
 
@@ -162,6 +162,7 @@ thread_local! {
 }
 
 use std::cell::RefCell;
+use crate::i18n::tr;
 
 /// 给单个窗口套/摘紧凑类。
 fn tag_with(widget: &gtk::Widget, d: Density) {

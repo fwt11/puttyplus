@@ -10,6 +10,8 @@ use super::relay::{RelayMode, RelaySpec};
 use super::worker::{WorkerCmd, XferShared, XferKind};
 use super::{queue, PanelState};
 use crate::util::path_basename;
+use crate::i18n::tr;
+use crate::trf;
 
 pub struct RemoteTarget {
     pub label: String,
@@ -22,8 +24,8 @@ pub fn send_to_server(src: &Rc<PanelState>) {
     if !src.conn_ok.get() {
         super::dialogs::show_error(
             src.topwin().as_ref(),
-            "未连接",
-            "源服务器的 SFTP 尚未连接。",
+            tr("未连接"),
+            tr("源服务器的 SFTP 尚未连接。"),
         );
         return;
     }
@@ -34,27 +36,27 @@ pub fn send_to_server(src: &Rc<PanelState>) {
         .map(|(p, _)| p)
         .collect();
     if paths.is_empty() {
-        super::dialogs::info(src.topwin().as_ref(), "发送到其它服务器", "先选中要发送的文件或目录。");
+        super::dialogs::info(src.topwin().as_ref(), tr("发送到其它服务器"), tr("先选中要发送的文件或目录。"));
         return;
     }
     let targets = crate::tabs::remote_targets(src);
     if targets.is_empty() {
         super::dialogs::info(
             src.topwin().as_ref(),
-            "没有可用的目标",
-            "需要另一个已连接 SFTP 的标签页。先在侧边栏打开目标服务器，再回来发送。",
+            tr("没有可用的目标"),
+            tr("需要另一个已连接 SFTP 的标签页。先在侧边栏打开目标服务器，再回来发送。"),
         );
         return;
     }
 
     let targets = Rc::new(targets);
     let dlg = gtk::Dialog::builder()
-        .title("发送到其它服务器")
+        .title(tr("发送到其它服务器"))
         .transient_for(&src.topwin().unwrap())
         .modal(true)
         .build();
-    dlg.add_button("取消", gtk::ResponseType::Cancel);
-    dlg.add_button("开始传输", gtk::ResponseType::Ok);
+    dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
+    dlg.add_button(tr("开始传输"), gtk::ResponseType::Ok);
     let area = dlg.content_area();
     // 与「新建连接 / 会话选项」共用同一套表单骨架：标签在上、控件在下，
     // 分区标题弱化，短字段并排。以前是裸 label + 8px 间距，跟其它对话框不像一套。
@@ -62,13 +64,13 @@ pub fn send_to_server(src: &Rc<PanelState>) {
 
     let names: Vec<String> = targets.iter().map(|t| t.label.clone()).collect();
     let target_dd = gtk::DropDown::from_strings(&names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-    root.append(&super::dialogs::form_section("目标"));
-    root.append(&super::dialogs::form_row("目标服务器", &target_dd));
+    root.append(&super::dialogs::form_section(tr("目标")));
+    root.append(&super::dialogs::form_row(tr("目标服务器"), &target_dd));
 
     let dst_entry = gtk::Entry::new();
     dst_entry.set_text(&targets[0].cwd);
     dst_entry.set_hexpand(true);
-    root.append(&super::dialogs::form_row("目标目录", &dst_entry));
+    root.append(&super::dialogs::form_row(tr("目标目录"), &dst_entry));
     {
         let targets2 = Rc::clone(&targets);
         let entry = dst_entry.clone();
@@ -79,27 +81,27 @@ pub fn send_to_server(src: &Rc<PanelState>) {
         });
     }
 
-    root.append(&super::dialogs::form_section("传输"));
+    root.append(&super::dialogs::form_section(tr("传输")));
     let mode_dd = gtk::DropDown::from_strings(&[
-        "自动（优先直连，失败转本机中转）",
-        "仅直连（失败即报错）",
-        "仅经本机中转",
+        tr("自动（优先直连，失败转本机中转）"),
+        tr("仅直连（失败即报错）"),
+        tr("仅经本机中转"),
     ]);
     let conflict_dd =
-        gtk::DropDown::from_strings(&["目标已存在时跳过", "目标已存在时覆盖"]);
+        gtk::DropDown::from_strings(&[tr("目标已存在时跳过"), tr("目标已存在时覆盖")]);
     // 方式/同名文件的下拉文字都长，不做并排（半宽会省略号截断）
-    root.append(&super::dialogs::form_row("方式", &mode_dd));
-    root.append(&super::dialogs::form_row("同名文件", &conflict_dd));
+    root.append(&super::dialogs::form_row(tr("方式"), &mode_dd));
+    root.append(&super::dialogs::form_row(tr("同名文件"), &conflict_dd));
 
     let agent_cb = gtk::CheckButton::with_label(
-        "允许把本地 ssh-agent 临时转发给源服务器（直连认证用）",
+        tr("允许把本地 ssh-agent 临时转发给源服务器（直连认证用）"),
     );
     agent_cb.set_active(true);
     root.append(&agent_cb);
 
     let hint = gtk::Label::new(Some(
-        "直连：在源服务器上执行 scp，把文件直接送到目标（需要源能登录目标）。\n\
-         本机中转：读源服务器、写目标服务器，不依赖服务器上的 scp/ssh。",
+        tr("直连：在源服务器上执行 scp，把文件直接送到目标（需要源能登录目标）。\n\
+         本机中转：读源服务器、写目标服务器，不依赖服务器上的 scp/ssh。"),
     ));
     hint.set_halign(gtk::Align::Start);
     hint.set_wrap(true);
@@ -151,13 +153,13 @@ fn start(
     if dst_dir.trim().is_empty() || !dst_dir.starts_with('/') {
         super::dialogs::show_error(
             src.topwin().as_ref(),
-            "目标目录无效",
-            "目标目录必须是以 / 开头的绝对路径。",
+            tr("目标目录无效"),
+            tr("目标目录必须是以 / 开头的绝对路径。"),
         );
         return;
     }
     let Some(dst_tx) = dst.tx.borrow().as_ref().cloned() else {
-        super::dialogs::show_error(src.topwin().as_ref(), "未连接", "目标服务器的连接已断开。");
+        super::dialogs::show_error(src.topwin().as_ref(), tr("未连接"), tr("目标服务器的连接已断开。"));
         return;
     };
 
@@ -166,7 +168,7 @@ fn start(
     let shared = XferShared::new();
     let (tx, rx) = async_channel::bounded::<Result<russh_sftp::client::SftpSession, String>>(1);
     if dst_tx.send(WorkerCmd::ExportSftp { reply: tx }).is_err() {
-        super::dialogs::show_error(src.topwin().as_ref(), "发送失败", "目标 worker 已退出。");
+        super::dialogs::show_error(src.topwin().as_ref(), tr("发送失败"), tr("目标 worker 已退出。"));
         return;
     }
 
@@ -180,7 +182,7 @@ fn start(
             Ok(Err(e)) => {
                 super::dialogs::show_error(
                     src2.topwin().as_ref(),
-                    "目标 SFTP 不可用",
+                    tr("目标 SFTP 不可用"),
                     &e,
                 );
                 return;
@@ -188,8 +190,8 @@ fn start(
             Err(_) => {
                 super::dialogs::show_error(
                     src2.topwin().as_ref(),
-                    "目标 SFTP 不可用",
-                    "导出目标连接失败。",
+                    tr("目标 SFTP 不可用"),
+                    tr("导出目标连接失败。"),
                 );
                 return;
             }
@@ -216,8 +218,7 @@ fn start(
             overwrite,
             shared: shared.clone(),
             cancel,
-            tag: format!(
-                "{}-{}-{}",
+            tag: format!("{}-{}-{}",
                 std::process::id(),
                 id,
                 std::time::SystemTime::now()
@@ -231,7 +232,7 @@ fn start(
             items.push(QueueItem {
                 id,
                 src: if n > 1 {
-                    format!("{first} 等 {n} 项")
+                    trf!("{first} 等 {n} 项", first = first, n = n)
                 } else {
                     first
                 },
@@ -252,8 +253,8 @@ fn start(
         if !sent {
             super::dialogs::show_error(
                 src2.topwin().as_ref(),
-                "发送失败",
-                "源服务器 worker 已退出。",
+                tr("发送失败"),
+                tr("源服务器 worker 已退出。"),
             );
         }
     });

@@ -17,6 +17,7 @@
 
 use gtk::prelude::*;
 use std::cell::Cell;
+use crate::i18n::tr;
 
 /* ---------------- 扫描进度守卫 ---------------- */
 
@@ -197,7 +198,7 @@ impl Lang {
     /// 状态栏里显示的名字（中文，与本项目文案一致）。
     pub fn label(self) -> &'static str {
         match self {
-            Lang::Plain => "纯文本",
+            Lang::Plain => tr("纯文本"),
             Lang::Rust => "Rust",
             Lang::C => "C",
             Lang::Cpp => "C++",
@@ -221,8 +222,8 @@ impl Lang {
             Lang::Css => "CSS",
             Lang::Sql => "SQL",
             Lang::Makefile => "Makefile",
-            Lang::Log => "日志",
-            Lang::Diff => "差异",
+            Lang::Log => tr("日志"),
+            Lang::Diff => tr("差异"),
             Lang::Lua => "Lua",
             Lang::Ruby => "Ruby",
         }

@@ -75,7 +75,7 @@ impl Batch {
         }
         // 全部成功给句好话；有失败就**只报失败数**（失败才是要人管的事）
         if failed_part.is_none() && self.canceled == 0 {
-            trf!("全部完成：{v0}", v0 = parts.join("，"))
+            trf!("全部完成：{v0}", v0 = parts.join(tr("，")))
         } else {
             trf!("{n} 项{v0}", n = self.total(), v0 = failed_part.unwrap_or_default())
         }
@@ -84,13 +84,13 @@ impl Batch {
     /// 通知标题：失败优先，让人一眼分得出要不要管。
     pub fn title(&self) -> &'static str {
         if self.failed > 0 {
-            "传输部分失败"
+            tr("传输部分失败")
         } else if self.canceled > 0 {
-            "传输已取消"
+            tr("传输已取消")
         } else if self.skipped > 0 && self.done == 0 {
-            "传输全部跳过"
+            tr("传输全部跳过")
         } else {
-            "传输完成"
+            tr("传输完成")
         }
     }
 }
@@ -167,8 +167,7 @@ fn notify_params(
         .map(|(k, l)| format!("({}, {})", gv_str(k), gv_str(l)))
         .collect::<Vec<_>>()
         .join(", ");
-    let text = format!(
-        "({}, @u 0, '', {}, {}, @a(ss) [{}], @a{{sv}} {{}}, @i 0)",
+    let text = format!("({}, @u 0, '', {}, {}, @a(ss) [{}], @a{{sv}} {{}}, @i 0)",
         gv_str(app),
         gv_str(summary),
         gv_str(body),
@@ -283,12 +282,12 @@ pub fn open_center(parent: Option<&gtk::Window>) {
         win.set_child(Some(&root));
 
         let head = gtk::Label::new(None);
-        head.set_markup("<b>通知中心</b>");
+        head.set_markup(tr("<b>通知中心</b>"));
         head.set_halign(gtk::Align::Start);
         root.append(&head);
 
         let hint = gtk::Label::new(Some(
-            "这里留着程序发过的每一条通知（最新的在最上面）。桌面通知发不出去时，             这里就是唯一的记录。",
+            tr("这里留着程序发过的每一条通知（最新的在最上面）。桌面通知发不出去时，             这里就是唯一的记录。"),
         ));
         hint.set_halign(gtk::Align::Start);
         hint.set_wrap(true);
@@ -304,7 +303,7 @@ pub fn open_center(parent: Option<&gtk::Window>) {
 
         let entries = history();
         if entries.is_empty() {
-            let empty = gtk::Label::new(Some("还没有通知"));
+            let empty = gtk::Label::new(Some(tr("还没有通知")));
             empty.set_halign(gtk::Align::Start);
             empty.add_css_class("pp-dim");
             list.append(&empty);
@@ -402,7 +401,7 @@ pub fn desktop_action(
                 }
             }
             Err(e) => {
-                eprintln!("[通知] 通知服务未受理（{e}），改走状态栏");
+                eprintln!("{}", trf!("[通知] 通知服务未受理（{e}），改走状态栏", e = e));
                 on_rejected();
             }
         },
@@ -420,7 +419,7 @@ fn notify_batch(
     desktop_action(
         b.title(),
         &notify_body(b),
-        "查看明细",
+        tr("查看明细"),
         on_click,
         on_rejected,
     )
@@ -475,16 +474,16 @@ pub fn report_batch(items: &[(String, XferState)], status: impl Fn(&str) + 'stat
 fn status_text(b: &Batch) -> String {
     let mut parts: Vec<String> = Vec::new();
     if b.done > 0 {
-        parts.push(format!("成功 {}", b.done));
+        parts.push(trf!("成功 {v0}", v0 = b.done));
     }
     if b.failed > 0 {
-        parts.push(format!("失败 {}", b.failed));
+        parts.push(trf!("失败 {v0}", v0 = b.failed));
     }
     if b.skipped > 0 {
-        parts.push(format!("跳过 {}", b.skipped));
+        parts.push(trf!("跳过 {v0}", v0 = b.skipped));
     }
     if b.canceled > 0 {
-        parts.push(format!("取消 {}", b.canceled));
+        parts.push(trf!("取消 {v0}", v0 = b.canceled));
     }
     if parts.is_empty() {
         return b.title().to_string();
@@ -497,9 +496,9 @@ pub fn show_summary(b: &Batch) {
     let parent = QUEUE_WIN.with(|q| q.borrow().clone());
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        "传输汇总",
+        tr("传输汇总"),
         parent.as_ref(),
-        &[("关闭", gtk::ResponseType::Close)],
+        &[(tr("关闭"), gtk::ResponseType::Close)],
     );
     dlg.set_default_size(420, -1);
     dlg.connect_response(|dlg, _| dlg.close());
@@ -511,8 +510,7 @@ pub fn show_summary(b: &Batch) {
     root.set_margin_end(12);
 
     let head = gtk::Label::new(Some(&b.title()));
-    head.set_markup(&format!(
-        "<span size='large' weight='bold'>{}</span>",
+    head.set_markup(&format!("<span size='large' weight='bold'>{}</span>",
         b.title()
     ));
     head.set_xalign(0.0);
@@ -523,10 +521,10 @@ pub fn show_summary(b: &Batch) {
     grid.set_column_spacing(14);
     grid.set_row_spacing(4);
     let rows: [(&str, usize); 4] = [
-        ("成功", b.done),
-        ("失败", b.failed),
-        ("跳过", b.skipped),
-        ("取消", b.canceled),
+        (tr("成功"), b.done),
+        (tr("失败"), b.failed),
+        (tr("跳过"), b.skipped),
+        (tr("取消"), b.canceled),
     ];
     for (i, (name, n)) in rows.iter().enumerate() {
         if *n == 0 {
@@ -575,10 +573,10 @@ pub fn notify_body(b: &Batch) -> String {
     if b.failed_names.is_empty() {
         b.summary()
     } else {
-        let mut s = format!("{}；失败：", b.summary());
-        s.push_str(&b.failed_names.join("、"));
+        let mut s = trf!("{v0}；失败：", v0 = b.summary());
+        s.push_str(&b.failed_names.join(tr("、")));
         if b.failed > b.failed_names.len() {
-            s.push_str(&format!("…等 {} 项", b.failed));
+            s.push_str(&trf!("…等 {v0} 项", v0 = b.failed));
         }
         s
     }

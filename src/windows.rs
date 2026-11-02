@@ -26,6 +26,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gtk::prelude::*;
+use crate::i18n::tr;
 
 /// 工具窗的种类（**同类只开一个**）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,12 +61,12 @@ impl ToolKind {
     /// 窗口标题（**统一在这里改**，别各处手抄——抄本会随改名漂移）。
     pub fn title(self) -> &'static str {
         match self {
-            ToolKind::Forward => "端口转发 — PuTTYPlus",
-            ToolKind::Mirror => "目录镜像 — PuTTYPlus",
-            ToolKind::Vault => "凭据库 — PuTTYPlus",
-            ToolKind::Key => "私钥 — PuTTYPlus",
-            ToolKind::Settings => "首选项 — PuTTYPlus",
-            ToolKind::Notify => "通知中心 — PuTTYPlus",
+            ToolKind::Forward => tr("端口转发 — PuTTYPlus"),
+            ToolKind::Mirror => tr("目录镜像 — PuTTYPlus"),
+            ToolKind::Vault => tr("凭据库 — PuTTYPlus"),
+            ToolKind::Key => tr("私钥 — PuTTYPlus"),
+            ToolKind::Settings => tr("首选项 — PuTTYPlus"),
+            ToolKind::Notify => tr("通知中心 — PuTTYPlus"),
         }
     }
 }

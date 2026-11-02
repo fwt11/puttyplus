@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use gtk::prelude::*;
 
 use crate::shortcuts;
+use crate::i18n::tr;
 
 pub fn set_parent(w: gtk::Window) {
     // ⚠️ 父窗口统一由 `windows` 管（阶段 67）
@@ -18,9 +19,9 @@ pub fn set_parent(w: gtk::Window) {
 pub fn open() {
     // ⚠️ 走 `windows::dialog`：**必定**挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        "快捷键一览",
+        tr("快捷键一览"),
         None,
-        &[("关闭", gtk::ResponseType::Close)],
+        &[(tr("关闭"), gtk::ResponseType::Close)],
     );
     dlg.set_default_size(540, 640);
     dlg.connect_response(|dlg, _| dlg.close());
@@ -67,8 +68,8 @@ pub fn open() {
 
     // 说明为什么 Alt+Shift 而不是 Ctrl+Shift：用户第一个疑问一定是这个
     let tip = gtk::Label::new(Some(
-        "Ctrl+Shift 系列基本被终端占用（复制/粘贴/新标签），所以广播开关用了\n\
-         Alt+Shift+B；单按 Alt 会被终端当成 ESC 前缀，也不敢占。",
+        tr("Ctrl+Shift 系列基本被终端占用（复制/粘贴/新标签），所以广播开关用了\n\
+         Alt+Shift+B；单按 Alt 会被终端当成 ESC 前缀，也不敢占。"),
     ));
     tip.add_css_class("pp-hint");
     tip.set_xalign(0.0);

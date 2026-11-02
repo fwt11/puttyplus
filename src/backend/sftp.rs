@@ -14,6 +14,8 @@ use super::resume::{self, Mark};
 use super::{checksum, BackendError, BackendResult, SftpEntry};
 use crate::panel::worker::XferConflict;
 use crate::util::{human_size, path_basename, path_join, path_parent};
+use crate::i18n::tr;
+use crate::trf;
 
 const XFER_CHUNK: usize = 64 * 1024;
 
@@ -88,7 +90,7 @@ impl SftpBackend {
         self.sftp()
             .canonicalize(".")
             .await
-            .map_err(|e| BackendError(format!("无法获取远程主目录: {e}")))
+            .map_err(|e| BackendError(trf!("无法获取远程主目录: {e}", e = e)))
     }
 
     /// 目录列表；空目录返回空 Vec（对应 C 版“空目录 *ok=TRUE”）。
@@ -97,7 +99,7 @@ impl SftpBackend {
             .sftp()
             .read_dir(path)
             .await
-            .map_err(|e| BackendError(format!("打开目录 {path} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("打开目录 {path} 失败: {e}", path = path, e = e)))?;
         let mut out = Vec::new();
         for entry in rd {
             let name = entry.file_name();
@@ -125,14 +127,14 @@ impl SftpBackend {
         self.sftp()
             .create_dir(path)
             .await
-            .map_err(|e| BackendError(format!("创建目录失败: {e}")))
+            .map_err(|e| BackendError(trf!("创建目录失败: {e}", e = e)))
     }
 
     pub async fn rename(&self, oldpath: &str, newpath: &str) -> BackendResult<()> {
         self.sftp()
             .rename(oldpath, newpath)
             .await
-            .map_err(|e| BackendError(format!("重命名失败: {e}")))
+            .map_err(|e| BackendError(trf!("重命名失败: {e}", e = e)))
     }
 
     /// stat 判断目录；获取失败按“非目录”处理（与 C 版 is_dir_locked 一致）。
@@ -153,46 +155,33 @@ impl SftpBackend {
             .sftp()
             .metadata(path)
             .await
-            .map_err(|e| BackendError(format!("获取 {path} 属性失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("获取 {path} 属性失败: {e}", path = path, e = e)))?;
         if md.is_dir() {
-            return Err(BackendError(format!(
-                "{path} 是目录，无法用文本查看/编辑器打开"
-            )));
+            return Err(BackendError(trf!("{path} 是目录，无法用文本查看/编辑器打开", path = path)));
         }
         // 有些服务器 stat 不回 permissions；那种情况下无法判断类型，
         // 交给后面的 open 自己报错，别把普通文件误判成特殊文件。
         if md.permissions.is_some() && !md.is_regular() {
-            return Err(BackendError(format!(
-                "{path} 不是普通文件，内置查看/编辑器只处理文本文件"
-            )));
+            return Err(BackendError(trf!("{path} 不是普通文件，内置查看/编辑器只处理文本文件", path = path)));
         }
         if let Some(size) = md.size {
             if size > max {
-                return Err(BackendError(format!(
-                    "文件 {} 大小 {}，超过内置查看/编辑上限 {}",
-                    path,
-                    human_size(size),
-                    human_size(max)
-                )));
+                return Err(BackendError(trf!("文件 {path} 大小 {v1}，超过内置查看/编辑上限 {v2}", path = path, v1 = human_size(size), v2 = human_size(max))));
             }
         }
         let f = self
             .sftp()
             .open_with_flags(path, OpenFlags::READ)
             .await
-            .map_err(|e| BackendError(format!("打开远程文件 {path} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("打开远程文件 {path} 失败: {e}", path = path, e = e)))?;
         let mut limited = f.take(max.saturating_add(1));
         let mut data = Vec::new();
         limited
             .read_to_end(&mut data)
             .await
-            .map_err(|e| BackendError(format!("读取远程文件 {path} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("读取远程文件 {path} 失败: {e}", path = path, e = e)))?;
         if data.len() as u64 > max {
-            return Err(BackendError(format!(
-                "文件 {} 超过内置查看/编辑上限 {}",
-                path,
-                human_size(max)
-            )));
+            return Err(BackendError(trf!("文件 {path} 超过内置查看/编辑上限 {v1}", path = path, v1 = human_size(max))));
         }
         Ok(data)
     }
@@ -207,14 +196,10 @@ impl SftpBackend {
         let old = self.sftp().metadata(path).await.ok();
         if let Some(m) = &old {
             if m.is_dir() {
-                return Err(BackendError(format!(
-                    "{path} 是目录，无法写入文本内容"
-                )));
+                return Err(BackendError(trf!("{path} 是目录，无法写入文本内容", path = path)));
             }
             if m.permissions.is_some() && !m.is_regular() {
-                return Err(BackendError(format!(
-                    "{path} 不是普通文件，无法写入文本内容"
-                )));
+                return Err(BackendError(trf!("{path} 不是普通文件，无法写入文本内容", path = path)));
             }
         }
         let perm = old
@@ -233,21 +218,21 @@ impl SftpBackend {
                 attrs,
             )
             .await
-            .map_err(|e| BackendError(format!("创建临时文件 {tmp} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("创建临时文件 {tmp} 失败: {e}", tmp = tmp, e = e)))?;
         if let Err(e) = f.write_all(data).await {
             let _ = f.shutdown().await;
             let _ = self.sftp().remove_file(&tmp).await;
-            return Err(BackendError(format!("写入远程文件 {path} 失败: {e}")));
+            return Err(BackendError(trf!("写入远程文件 {path} 失败: {e}", path = path, e = e)));
         }
         if let Err(e) = f.shutdown().await {
             let _ = self.sftp().remove_file(&tmp).await;
-            return Err(BackendError(format!("写入远程文件 {path} 失败: {e}")));
+            return Err(BackendError(trf!("写入远程文件 {path} 失败: {e}", path = path, e = e)));
         }
         if let Some(p) = perm {
             let mut md = FileAttributes::empty();
             md.permissions = Some(p);
             if let Err(e) = self.sftp().set_metadata(&tmp, md).await {
-                eprintln!("PuTTYPlus: 保留 {path} 的权限位失败（不影响内容）: {e}");
+                eprintln!("{}", trf!("PuTTYPlus: 保留 {path} 的权限位失败（不影响内容）: {e}", path = path, e = e));
             }
         }
         if let Err(e) = self.rename_over(&tmp, path).await {
@@ -265,29 +250,27 @@ impl SftpBackend {
     fn remove_rec_inner<'a>(&'a self, path: &'a str, depth: usize) -> BoxFutU<'a> {
         Box::pin(async move {
             if depth > MAX_DEPTH {
-                return Err(BackendError(format!(
-                    "目录层级过深（超过 {MAX_DEPTH} 层），已中止: {path}"
-                )));
+                return Err(BackendError(trf!("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {path}", MAX_DEPTH = MAX_DEPTH, path = path)));
             }
             let md = self
                 .sftp()
                 .metadata(path)
                 .await
-                .map_err(|e| BackendError(format!("获取 {path} 属性失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("获取 {path} 属性失败: {e}", path = path, e = e)))?;
             let is_dir = (md.permissions.unwrap_or(0) & 0o170000) == 0o040000;
 
             if !is_dir {
                 self.sftp()
                     .remove_file(path)
                     .await
-                    .map_err(|e| BackendError(format!("删除 {path} 失败: {e}")))?;
+                    .map_err(|e| BackendError(trf!("删除 {path} 失败: {e}", path = path, e = e)))?;
                 return Ok(());
             }
             let rd = self
                 .sftp()
                 .read_dir(path)
                 .await
-                .map_err(|e| BackendError(format!("打开目录 {path} 失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("打开目录 {path} 失败: {e}", path = path, e = e)))?;
             for entry in rd {
                 let name = entry.file_name();
                 if name == "." || name == ".." {
@@ -299,7 +282,7 @@ impl SftpBackend {
             self.sftp()
                 .remove_dir(path)
                 .await
-                .map_err(|e| BackendError(format!("删除目录 {path} 失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("删除目录 {path} 失败: {e}", path = path, e = e)))?;
             Ok(())
         })
     }
@@ -329,20 +312,18 @@ impl SftpBackend {
     ) -> BoxFut<'a> {
         Box::pin(async move {
             if depth > MAX_DEPTH {
-                return Err(BackendError(format!(
-                    "目录层级过深（超过 {MAX_DEPTH} 层），已中止: {lsrc}"
-                )));
+                return Err(BackendError(trf!("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {lsrc}", MAX_DEPTH = MAX_DEPTH, lsrc = lsrc)));
             }
             let meta = std::fs::metadata(lsrc)
-                .map_err(|e| BackendError(format!("获取本地 {lsrc} 失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("获取本地 {lsrc} 失败: {e}", lsrc = lsrc, e = e)))?;
             if meta.is_dir() {
                 if let Err(e) = self.sftp().create_dir(rdst).await {
                     if !self.is_dir(rdst).await {
-                        return Err(BackendError(format!("创建远程目录 {rdst} 失败: {e}")));
+                        return Err(BackendError(trf!("创建远程目录 {rdst} 失败: {e}", rdst = rdst, e = e)));
                     }
                 }
                 let mut rd = std::fs::read_dir(lsrc)
-                    .map_err(|e| BackendError(format!("打开本地目录 {lsrc} 失败: {e}")))?;
+                    .map_err(|e| BackendError(trf!("打开本地目录 {lsrc} 失败: {e}", lsrc = lsrc, e = e)))?;
                 while let Some(Ok(ent)) = rd.next() {
                     let name = ent.file_name().to_string_lossy().into_owned();
                     let lsub = path_join(lsrc, &name);
@@ -389,13 +370,11 @@ impl SftpBackend {
     ) -> BoxFut<'a> {
         Box::pin(async move {
             if depth > MAX_DEPTH {
-                return Err(BackendError(format!(
-                    "目录层级过深（超过 {MAX_DEPTH} 层），已中止: {rsrc}"
-                )));
+                return Err(BackendError(trf!("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {rsrc}", MAX_DEPTH = MAX_DEPTH, rsrc = rsrc)));
             }
             if self.is_dir(rsrc).await {
                 tokio::fs::create_dir_all(ldst).await.map_err(|e| {
-                    BackendError(format!("创建本地目录 {} 失败: {e}", ldst.display()))
+                    BackendError(trf!("创建本地目录 {v0} 失败: {e}", e = e, v0 = ldst.display()))
                 })?;
                 let items = self.list(rsrc).await?;
                 for e in items {
@@ -423,7 +402,7 @@ impl SftpBackend {
         note: &XferNote,
     ) -> BackendResult<bool> {
         let meta = std::fs::metadata(lpath)
-            .map_err(|e| BackendError(format!("获取本地 {lpath} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("获取本地 {lpath} 失败: {e}", lpath = lpath, e = e)))?;
         let total = meta.len();
         let src = Mark::new(total, meta_mtime(&meta));
         let part = resume::part_name(rpath);
@@ -432,7 +411,7 @@ impl SftpBackend {
 
         let mut f = tokio::fs::File::open(lpath)
             .await
-            .map_err(|e| BackendError(format!("打开本地文件 {lpath} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("打开本地文件 {lpath} 失败: {e}", lpath = lpath, e = e)))?;
 
         let (offset, flags) = match self.plan_resume(&key, &part, false, src).await {
             Some(off) => (off, OpenFlags::CREATE | OpenFlags::WRITE),
@@ -442,16 +421,16 @@ impl SftpBackend {
             .sftp()
             .open_with_flags(&part, flags)
             .await
-            .map_err(|e| BackendError(format!("创建远程文件 {part} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("创建远程文件 {part} 失败: {e}", part = part, e = e)))?;
         if offset > 0 {
             rf.seek(std::io::SeekFrom::Start(offset))
                 .await
-                .map_err(|e| BackendError(format!("定位远程分片 {part} 失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("定位远程分片 {part} 失败: {e}", part = part, e = e)))?;
         }
         if offset > 0 {
             f.seek(std::io::SeekFrom::Start(offset))
                 .await
-                .map_err(|e| BackendError(format!("定位本地文件 {lpath} 失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("定位本地文件 {lpath} 失败: {e}", lpath = lpath, e = e)))?;
         }
 
         // mark 在开写时就落盘：进程被杀/断电走的不是错误分支，
@@ -465,15 +444,15 @@ impl SftpBackend {
             let n = match f.read(&mut buf).await {
                 Ok(0) => break Ok(()),
                 Ok(n) => n,
-                Err(e) => break Err(BackendError(format!("读取 {lpath} 失败: {e}"))),
+                Err(e) => break Err(BackendError(trf!("读取 {lpath} 失败: {e}", lpath = lpath, e = e))),
             };
             if let Err(e) = rf.write_all(&buf[..n]).await {
-                break Err(BackendError(format!("写入 {part} 失败: {e}")));
+                break Err(BackendError(trf!("写入 {part} 失败: {e}", part = part, e = e)));
             }
             done += n as u64;
             if progress.report(done, total, path_basename(rpath)) {
                 cancelled = true;
-                break Err(BackendError::new("已取消"));
+                break Err(BackendError::new(tr("已取消")));
             }
         };
         let _ = rf.shutdown().await;
@@ -514,16 +493,16 @@ impl SftpBackend {
             Ok(()) => Ok(()),
             Err(e) => {
                 if !self.sftp().try_exists(new).await.unwrap_or(false) {
-                    return Err(BackendError(format!("把 {old} 改名为 {new} 失败: {e}")));
+                    return Err(BackendError(trf!("把 {old} 改名为 {new} 失败: {e}", old = old, new = new, e = e)));
                 }
                 self.sftp()
                     .remove_file(new)
                     .await
-                    .map_err(|x| BackendError(format!("覆盖前删除旧文件 {new} 失败: {x}")))?;
+                    .map_err(|x| BackendError(trf!("覆盖前删除旧文件 {new} 失败: {x}", new = new, x = x)))?;
                 self.sftp()
                     .rename(old, new)
                     .await
-                    .map_err(|x| BackendError(format!("把 {old} 改名为 {new} 失败: {x}")))
+                    .map_err(|x| BackendError(trf!("把 {old} 改名为 {new} 失败: {x}", old = old, new = new, x = x)))
             }
         }
     }
@@ -539,7 +518,7 @@ impl SftpBackend {
             .sftp()
             .metadata(rpath)
             .await
-            .map_err(|e| BackendError(format!("获取 {rpath} 属性失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("获取 {rpath} 属性失败: {e}", rpath = rpath, e = e)))?;
         let total = md.size.unwrap_or(0);
         let src = Mark::new(total, md.mtime.unwrap_or(0));
         let lpart = resume::part_path(lpath);
@@ -553,11 +532,11 @@ impl SftpBackend {
             .sftp()
             .open_with_flags(rpath, OpenFlags::READ)
             .await
-            .map_err(|e| BackendError(format!("打开远程文件 {rpath} 失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("打开远程文件 {rpath} 失败: {e}", rpath = rpath, e = e)))?;
         if offset > 0 {
             rf.seek(std::io::SeekFrom::Start(offset))
                 .await
-                .map_err(|e| BackendError(format!("定位远程文件 {rpath} 失败: {e}")))?;
+                .map_err(|e| BackendError(trf!("定位远程文件 {rpath} 失败: {e}", rpath = rpath, e = e)))?;
         }
         let mut f = tokio::fs::OpenOptions::new()
             .create(true)
@@ -565,14 +544,14 @@ impl SftpBackend {
             .truncate(offset == 0)
             .open(&lpart)
             .await
-            .map_err(|e| BackendError(format!("创建本地分片 {} 失败: {e}", lpart.display())))?;
+            .map_err(|e| BackendError(trf!("创建本地分片 {v0} 失败: {e}", e = e, v0 = lpart.display())))?;
         if offset > 0 {
             // 关键：不定位就等于从 0 开始写，把已下好的前半截覆盖掉。
             // OpenOptions 不带 append 时文件位置在开头。
             f.seek(std::io::SeekFrom::Start(offset))
                 .await
                 .map_err(|e| {
-                    BackendError(format!("定位本地分片 {} 失败: {e}", lpart.display()))
+                    BackendError(trf!("定位本地分片 {v0} 失败: {e}", e = e, v0 = lpart.display()))
                 })?;
         }
 
@@ -585,17 +564,14 @@ impl SftpBackend {
             let n = match rf.read(&mut buf).await {
                 Ok(0) => break Ok(()),
                 Ok(n) => n,
-                Err(e) => break Err(BackendError(format!("读取 {rpath} 失败: {e}"))),
+                Err(e) => break Err(BackendError(trf!("读取 {rpath} 失败: {e}", rpath = rpath, e = e))),
             };
             if let Err(e) = f.write_all(&buf[..n]).await {
-                break Err(BackendError(format!(
-                    "写入本地 {} 失败: {e}",
-                    lpart.display()
-                )));
+                break Err(BackendError(trf!("写入本地 {v0} 失败: {e}", e = e, v0 = lpart.display())));
             }
             done += n as u64;
             if progress.report(done, total, path_basename(rpath)) {
-                break Err(BackendError::new("已取消"));
+                break Err(BackendError::new(tr("已取消")));
             }
         };
         let _ = f.flush().await;
@@ -613,7 +589,7 @@ impl SftpBackend {
         resume::clear_mark(&key);
         tokio::fs::rename(&lpart, lpath)
             .await
-            .map_err(|e| BackendError(format!("把 {} 改名为目标失败: {e}", lpart.display())))?;
+            .map_err(|e| BackendError(trf!("把 {v0} 改名为目标失败: {e}", e = e, v0 = lpart.display())))?;
         Ok(true)
     }
 }
@@ -676,20 +652,18 @@ impl SftpBackend {
             return Ok(());
         }
         let local = checksum::sha1_file(Path::new(local_part))
-            .map_err(|e| BackendError(format!("计算 {local_part} 的校验和失败: {e}")))?;
+            .map_err(|e| BackendError(trf!("计算 {local_part} 的校验和失败: {e}", local_part = local_part, e = e)))?;
         match checksum::remote_sha1(self, remote_part).await {
             Ok(remote) if remote.eq_ignore_ascii_case(&local) => {
-                note.set("已校验 SHA-1");
+                note.set(tr("已校验 SHA-1"));
                 Ok(())
             }
             Ok(remote) => {
                 self.discard_part(key, remote_part, false).await;
-                Err(BackendError(format!(
-                    "校验和不一致（本地 {local} / 远程 {remote}），已删除分片，请重传"
-                )))
+                Err(BackendError(trf!("校验和不一致（本地 {local} / 远程 {remote}），已删除分片，请重传", local = local, remote = remote)))
             }
             Err(e) => {
-                note.set(format!("未校验：{}", e.0));
+                note.set(trf!("未校验：{v0}", v0 = e.0));
                 Ok(())
             }
         }

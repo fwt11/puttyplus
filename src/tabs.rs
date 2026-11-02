@@ -13,6 +13,8 @@ use crate::connmgr;
 use crate::panel;
 use crate::recent;
 use crate::term::{self, TermPane};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 标签头的标题 Label（阶段 75 / 审计 P1-14）。
 ///
@@ -125,8 +127,7 @@ fn update_dot(dot: &gtk::Label, st: &Rc<panel::PanelState>) {
     let (level, tip) = dot_state(st);
     match level {
         // 形状跟着状态走：● 已连 / ◐ 连接中（不只靠颜色，审计 P2-6）
-        Some(level) => dot.set_markup(&format!(
-            "<span foreground='{}'>{}</span>",
+        Some(level) => dot.set_markup(&format!("<span foreground='{}'>{}</span>",
             crate::theme::state_hex(level),
             crate::active::dot_char(Some(level))
         )),
@@ -384,7 +385,7 @@ impl Tabs {
         });
 
         // 欢迎页（零业务标签时的空状态页；开首个标签时移除）
-        let welcome_label = gtk::Label::new(Some("欢迎"));
+        let welcome_label = gtk::Label::new(Some(tr("欢迎")));
         tabs.notebook
             .append_page(&welcome_page(), Some(&welcome_label));
 
@@ -418,8 +419,8 @@ impl Tabs {
         let Some(opts) = connmgr::find_opts_by_session_key(key) else {
             crate::panel::dialogs::show_error(
                 None,
-                "数据库连接",
-                "找不到这条数据库连接对应的 SSH 会话（那条会话不在连接列表里了）。\n\n先在会话树里连上它，再打开数据库工作台。",
+                tr("数据库连接"),
+                tr("找不到这条数据库连接对应的 SSH 会话（那条会话不在连接列表里了）。\n\n先在会话树里连上它，再打开数据库工作台。"),
             );
             return;
         };
@@ -479,7 +480,7 @@ impl Tabs {
         // 自己的图标说（标签头只留状态点 + 标题 + ×）。
         let term_sub_id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
-            "终端",
+            tr("终端"),
             panel::subtabs::PageKind::Terminal,
             term_container(&tp).upcast(),
             None,
@@ -609,7 +610,7 @@ impl Tabs {
         // 右键菜单给关闭其它/重连，中键也能关。
         let dot = gtk::Label::new(None);
         dot.set_markup("<span foreground='#9aa0a6'>●</span>");
-        dot.set_tooltip_text(Some("连接中…"));
+        dot.set_tooltip_text(Some(tr("连接中…")));
 
         let label = tab_title_label(&title);
         label.set_tooltip_text(Some(&title));
@@ -623,7 +624,7 @@ impl Tabs {
         close.add_css_class("flat");
         close.set_valign(gtk::Align::Center);
         close.set_focusable(false);
-        close.set_tooltip_text(Some("关闭标签（Ctrl+Shift+W）"));
+        close.set_tooltip_text(Some(tr("关闭标签（Ctrl+Shift+W）")));
 
         let hb = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         hb.set_margin_start(4);
@@ -742,7 +743,7 @@ impl Tabs {
         };
 
         {
-            let b = mk("view-refresh-symbolic", "重新连接 SFTP");
+            let b = mk("view-refresh-symbolic", tr("重新连接 SFTP"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 if let Some(t) = TABS.with(|w| w.borrow().clone()) {
@@ -756,7 +757,7 @@ impl Tabs {
             // SFTP 走进程内的通道，终端是另起的 ssh 子进程——用户敲了 exit
             // 之后终端已经死了，点「重新连接 SFTP」一点反应都没有，
             // 于是"重建会话"这件事根本没地方做。
-            let b = mk("view-refresh-symbolic", "重新连接终端");
+            let b = mk("view-refresh-symbolic", tr("重新连接终端"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 if let Some(t) = TABS.with(|w| w.borrow().clone()) {
@@ -765,7 +766,7 @@ impl Tabs {
             });
         }
         {
-            let b = mk("network-transmit-receive-symbolic", "端口转发…");
+            let b = mk("network-transmit-receive-symbolic", tr("端口转发…"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 if let Some(st) = TABS
@@ -777,7 +778,7 @@ impl Tabs {
             });
         }
         {
-            let b = mk("drive-harddisk-symbolic", "数据库…");
+            let b = mk("drive-harddisk-symbolic", tr("数据库…"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 if let Some(st) = TABS
@@ -793,7 +794,7 @@ impl Tabs {
             //
             // 阶段 24：会话不一定在列表里（堡垒机场景），列表里没有它就
             // 没地方建连接 —— 这个入口跟着当前标签走。
-            let b = mk("list-add-symbolic", "新建数据库连接…");
+            let b = mk("list-add-symbolic", tr("新建数据库连接…"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 let Some(st) = TABS
@@ -818,7 +819,7 @@ impl Tabs {
             });
         }
         {
-            let b = mk("preferences-system-symbolic", "会话选项…");
+            let b = mk("preferences-system-symbolic", tr("会话选项…"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 if let Some(st) = TABS
@@ -832,7 +833,7 @@ impl Tabs {
 
         vb.append(&crate::menu::sep());
         {
-            let b = mk("window-close-symbolic", "关闭其它标签");
+            let b = mk("window-close-symbolic", tr("关闭其它标签"));
             let pg = page.clone();
             b.connect_clicked(move |_| {
                 if let Some(t) = TABS.with(|w| w.borrow().clone()) {
@@ -841,7 +842,7 @@ impl Tabs {
             });
         }
         {
-            let b = mk("window-close-symbolic", "关闭标签");
+            let b = mk("window-close-symbolic", tr("关闭标签"));
             crate::menu::danger(&b);
             let pg = page.clone();
             b.connect_clicked(move |_| {
@@ -957,7 +958,7 @@ impl Tabs {
         }
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
-            "终端",
+            tr("终端"),
             panel::subtabs::PageKind::Terminal,
             term_container(&tp).upcast(),
             None,
@@ -1108,7 +1109,7 @@ impl Tabs {
 
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
-            "终端",
+            tr("终端"),
             panel::subtabs::PageKind::Terminal,
             term_container(&tp).upcast(),
             None,
@@ -1232,7 +1233,7 @@ impl Tabs {
         self.notebook.remove_page(Some(num));
         // 全部关闭：恢复欢迎页（空状态）
         if self.tabs.borrow().is_empty() {
-            let label = gtk::Label::new(Some("欢迎"));
+            let label = gtk::Label::new(Some(tr("欢迎")));
             self.notebook
                 .insert_page(&welcome_page(), Some(&label), Some(0));
             self.welcome_attached.set(true);
@@ -1491,8 +1492,7 @@ impl Tabs {
             .iter()
             .filter(|t| t.panel_st.conn_ok.get() && !Rc::ptr_eq(&t.panel_st, exclude))
             .map(|t| crate::panel::relayui::RemoteTarget {
-                label: format!(
-                    "{} — {}@{}:{}",
+                label: format!("{} — {}@{}:{}",
                     t.label.text(),
                     t.panel_st.opts.user,
                     t.panel_st.opts.host,
@@ -1806,7 +1806,7 @@ impl Tabs {
         match pane.toggle_log() {
             Ok(_) => self.sync_log_ui(),
             Err(e) => {
-                panel::dialogs::show_error(self.tabs.borrow()[i].panel_st.topwin().as_ref(), "无法记录日志", &e);
+                panel::dialogs::show_error(self.tabs.borrow()[i].panel_st.topwin().as_ref(), tr("无法记录日志"), &e);
                 pane.sync_log_ui(); // 保持未勾选
             }
         }
@@ -1838,7 +1838,7 @@ impl Tabs {
             Err(e) => {
                 panel::dialogs::show_error(
                     self.tabs.borrow()[i].panel_st.topwin().as_ref(),
-                    "无法开始录制",
+                    tr("无法开始录制"),
                     &e,
                 );
                 pane.sync_rec_ui(); // 保持未勾选
@@ -1904,14 +1904,14 @@ pub fn welcome_page() -> gtk::Widget {
     // 阶段 91：定位句**提成标题**（正常色、稍大），下面加一句"下一步干什么"
     // 的副标题 ⇒ 一眼知道这是干什么的、也知道自己该点哪儿。
     let recents = crate::recent::load();
-    let title = gtk::Label::new(Some("SSH 终端 · SFTP 文件 · 数据库工作台"));
+    let title = gtk::Label::new(Some(tr("SSH 终端 · SFTP 文件 · 数据库工作台")));
     title.add_css_class("pp-welcome-title");
     title.set_margin_bottom(4);
     box_.append(&title);
     let sub = gtk::Label::new(Some(if recents.is_empty() {
-        "从左侧建一个连接就能开工"
+        tr("从左侧建一个连接就能开工")
     } else {
-        "选一个最近连接就能开工"
+        tr("选一个最近连接就能开工")
     }));
     sub.add_css_class("dim-label");
     sub.set_margin_bottom(18);
@@ -1929,10 +1929,10 @@ pub fn welcome_page() -> gtk::Widget {
     if !recents.is_empty() {
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         head.set_halign(gtk::Align::Center);
-        let h = gtk::Label::new(Some("最近连接"));
+        let h = gtk::Label::new(Some(tr("最近连接")));
         h.add_css_class("pp-section");
         head.append(&h);
-        let hint = gtk::Label::new(Some("点一下就连接"));
+        let hint = gtk::Label::new(Some(tr("点一下就连接")));
         hint.add_css_class("dim-label");
         head.append(&hint);
         box_.append(&head);
@@ -1951,7 +1951,7 @@ pub fn welcome_page() -> gtk::Widget {
     } else {
         // 没有最近记录：**不摆**「最近连接」块（摆个空块更没用，审计 P2-9），
         // 只留一句提示，让人知道「新建连接」在哪儿。
-        let hint = gtk::Label::new(Some("还没有连接记录 —— 从左侧建一个连接"));
+        let hint = gtk::Label::new(Some(tr("还没有连接记录 —— 从左侧建一个连接")));
         hint.add_css_class("dim-label");
         hint.set_margin_bottom(4);
         box_.append(&hint);
@@ -1979,12 +1979,7 @@ pub fn welcome_page() -> gtk::Widget {
             .map(|b| b.display.to_string())
             .unwrap_or_else(|| k.to_string())
     };
-    let tip = gtk::Label::new(Some(&format!(
-        "常用键位：{} 新建标签 · {} 查找 · {} 快捷键一览",
-        d("Ctrl+Shift+T"),
-        d("Ctrl+F"),
-        d("F1")
-    )));
+    let tip = gtk::Label::new(Some(&trf!("常用键位：{v0} 新建标签 · {v1} 查找 · {v2} 快捷键一览", v0 = d("Ctrl+Shift+T"), v1 = d("Ctrl+F"), v2 = d("F1"))));
     tip.add_css_class("dim-label");
     tip.set_margin_top(22);
     // ⚠️ 必须限宽 + 开 wrap：这一行字挺长，窄窗口里会被**裁掉半截**
@@ -2007,7 +2002,7 @@ fn recent_card(r: &crate::recent::RecentConn, entries: &[crate::connmgr::ConnEnt
 
     let b = gtk::Button::new();
     b.add_css_class("pp-recent-card");
-    b.set_tooltip_text(Some(&format!("连到 {meta} —— 点一下就开")));
+    b.set_tooltip_text(Some(&trf!("连到 {meta} —— 点一下就开", meta = meta)));
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let icon = gtk::Image::from_icon_name("network-server-symbolic");

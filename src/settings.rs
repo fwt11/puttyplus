@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use gtk::glib;
 use gtk::prelude::*;
+use crate::i18n::tr;
 
 /// 某一面板的列显隐（name/icon 列固定显示，不在配置内）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -831,8 +832,8 @@ pub struct QuickCmd {
 impl QuickCmd {
     pub fn new(group: &str, label: &str, cmd: &str) -> QuickCmd {
         QuickCmd {
-            group: sanitize(group, "未分组"),
-            label: sanitize(label, "命令"),
+            group: sanitize(group, tr("未分组")),
+            label: sanitize(label, tr("命令")),
             cmd: cmd.trim_end().to_string(),
         }
     }
@@ -870,10 +871,9 @@ pub fn serialize_quick_cmds(v: &[QuickCmd]) -> String {
     v.iter()
         .filter(|c| !c.cmd.trim().is_empty())
         .map(|c| {
-            format!(
-                "{}\t{}\t{}",
-                sanitize(&c.group, "未分组"),
-                sanitize(&c.label, "命令"),
+            format!("{}\t{}\t{}",
+                sanitize(&c.group, tr("未分组")),
+                sanitize(&c.label, tr("命令")),
                 c.cmd.replace(['\t', '\r', '\n'], " ")
             )
         })

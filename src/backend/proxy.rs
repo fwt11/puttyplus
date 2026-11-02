@@ -9,6 +9,8 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 展开代理命令中的 OpenSSH 令牌：%h=主机 %p=端口 %r=用户。
 fn expand(cmd: &str, host: &str, port: u16, user: &str) -> String {
@@ -41,18 +43,18 @@ impl ProxyStream {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("代理命令启动失败（{expanded}）: {e}"))?;
+            .map_err(|e| trf!("代理命令启动失败（{expanded}）: {e}", expanded = expanded, e = e))?;
 
         let mut child = child;
         let rx = child
             .stdout
             .take()
-            .ok_or_else(|| "代理命令无 stdout".to_string())?;
+            .ok_or_else(|| tr("代理命令无 stdout").to_string())?;
         let tx = child
             .stdin
             .take()
-            .ok_or_else(|| "代理命令无 stdin".to_string())?;
-        let stderr_pipe = child.stderr.take().ok_or_else(|| "代理命令无 stderr".to_string())?;
+            .ok_or_else(|| tr("代理命令无 stdin").to_string())?;
+        let stderr_pipe = child.stderr.take().ok_or_else(|| tr("代理命令无 stderr").to_string())?;
 
         // 收集代理进程 stderr，连接失败时给用户看原因（代理工具都往 stderr 写诊断）
         let stderr = Arc::new(Mutex::new(String::new()));

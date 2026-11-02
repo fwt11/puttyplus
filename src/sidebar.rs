@@ -19,6 +19,8 @@ use crate::args::ConnOptions;
 use crate::connmgr::{self, ConnEntry};
 use crate::recent;
 use crate::tabs::Tabs;
+use crate::i18n::tr;
+use crate::trf;
 
 const COL_TEXT: i32 = 0;
 const COL_ICON: i32 = 1;
@@ -157,7 +159,7 @@ pub fn row_menu_items(ctx: &RowMenuCtx) -> Vec<RowMenuItem> {
     if ctx.kind == 0 {
         if ctx.group.as_deref() == Some(RECENT_GROUP) {
             v.push(Act {
-                label: "清空最近连接",
+                label: tr("清空最近连接"),
                 icon: "edit-clear-all-symbolic",
             });
         }
@@ -166,71 +168,71 @@ pub fn row_menu_items(ctx: &RowMenuCtx) -> Vec<RowMenuItem> {
     // 连接 / 打开数据库 / 打开端口转发（三行共用第一个项）
     v.push(Act {
         label: match ctx.kind {
-            3 => "打开数据库",
-            4 => "打开端口转发",
-            _ => "连接",
+            3 => tr("打开数据库"),
+            4 => tr("打开端口转发"),
+            _ => tr("连接"),
         },
         icon: "go-next-symbolic",
     });
     if ctx.fwd.is_some() {
         v.push(Act {
-            label: "启用转发",
+            label: tr("启用转发"),
             icon: "network-transmit-receive-symbolic",
         });
     }
     if ctx.kind == 2 {
         v.push(Act {
-            label: "在新窗口打开",
+            label: tr("在新窗口打开"),
             icon: "window-new-symbolic",
         });
     }
     if ctx.custom {
         v.push(Sep);
         v.push(Act {
-            label: "编辑…",
+            label: tr("编辑…"),
             icon: "document-edit-symbolic",
         });
         v.push(Act {
-            label: "删除",
+            label: tr("删除"),
             icon: "edit-delete-symbolic",
         });
         v.push(Act {
-            label: "导出为 PuTTY 会话…",
+            label: tr("导出为 PuTTY 会话…"),
             icon: "document-save-symbolic",
         });
     }
     if ctx.kind == 1 || ctx.kind == 2 {
         v.push(Sep);
         v.push(Act {
-            label: "重新连接终端",
+            label: tr("重新连接终端"),
             icon: "view-refresh-symbolic",
         });
         v.push(Act {
-            label: "新建数据库连接…",
+            label: tr("新建数据库连接…"),
             icon: "list-add-symbolic",
         });
     }
     if ctx.has_db {
         v.push(Sep);
         v.push(Act {
-            label: "编辑这个数据库连接…",
+            label: tr("编辑这个数据库连接…"),
             icon: "document-edit-symbolic",
         });
         v.push(Act {
-            label: "删除这个数据库连接",
+            label: tr("删除这个数据库连接"),
             icon: "edit-delete-symbolic",
         });
     }
     if ctx.kind == 1 {
         v.push(Sep);
         v.push(Act {
-            label: "从最近中移除",
+            label: tr("从最近中移除"),
             icon: "list-remove-symbolic",
         });
     }
     v.push(Sep);
     v.push(Act {
-        label: "复制地址",
+        label: tr("复制地址"),
         icon: "edit-copy-symbolic",
     });
     v
@@ -253,7 +255,7 @@ impl Sidebar {
         // ⚠️ 阶段 81（审计 P2-8）：侧栏列的是**连接**（最近 / 自定义 /
         // ssh config 三组都是连接），叫「会话」跟菜单里的「连接」对不上
         // （用户得自己猜这俩是不是一回事）⇒ 统一叫「连接」。
-        title.set_markup("<b>连接</b>");
+        title.set_markup(tr("<b>连接</b>"));
         title.set_halign(gtk::Align::Start);
         title.set_hexpand(true);
         // ⚠️ 阶段 93：标题要能**省略**。侧栏窄的时候（用户存的是 203px）
@@ -280,7 +282,7 @@ impl Sidebar {
         // 「＋ 新建连接…」同一个字形，又粗又显眼，各主题下都一样。
         let b_plus = gtk::Button::new();
         {
-            let lbl = gtk::Label::new(Some("＋"));
+            let lbl = gtk::Label::new(Some(tr("＋")));
             lbl.add_css_class("pp-plus");
             b_plus.set_child(Some(&lbl));
         }
@@ -299,7 +301,7 @@ impl Sidebar {
         plus_pop.set_position(gtk::PositionType::Right);
 
         let b_refresh = crate::a11y::icon_button("view-refresh-symbolic");
-        b_refresh.set_tooltip_text(Some("重新加载连接列表"));
+        b_refresh.set_tooltip_text(Some(tr("重新加载连接列表")));
         b_refresh.add_css_class("flat");
         head.append(&b_refresh);
 
@@ -324,7 +326,7 @@ impl Sidebar {
 
         // ---- 过滤框（带搜索图标 + 清空按钮）----
         let filter_entry = gtk::Entry::new();
-        filter_entry.set_placeholder_text(Some("过滤连接…"));
+        filter_entry.set_placeholder_text(Some(tr("过滤连接…")));
         filter_entry.set_icon_from_icon_name(
             gtk::EntryIconPosition::Primary,
             Some("system-search-symbolic"),
@@ -646,7 +648,7 @@ impl Sidebar {
                 RECENT_GROUP,
                 "document-open-recent-symbolic",
                 n_recent,
-                "同一个 用户/主机/端口 只保留最近一次（双击重开）",
+                tr("同一个 用户/主机/端口 只保留最近一次（双击重开）"),
             ))
         } else {
             None
@@ -682,7 +684,7 @@ impl Sidebar {
         let g_custom = if n_custom > 0 {
             Some(add_group(
                 &self.store,
-                "自定义",
+                tr("自定义"),
                 "user-bookmarks-symbolic",
                 n_custom,
                 "",
@@ -805,9 +807,9 @@ impl Sidebar {
             let it = self.store.append(Some(parent));
             // 连着库就点亮（阶段 57）
             let live = act.db_connected(&key, &name);
-            let meta = crate::active::meta_with(&meta, live, "已连接");
+            let meta = crate::active::meta_with(&meta, live, tr("已连接"));
             let tip = if live {
-                format!("{meta}\n已连接")
+                trf!("{meta}\n已连接", meta = meta)
             } else {
                 meta.clone()
             };
@@ -862,9 +864,9 @@ impl Sidebar {
             // 运行态不在本应用里）；规则键碰巧相同也不能混（阶段 57）。
             let running = leaf.source == connmgr::FwdSource::InProc
                 && act.fwd_running(&key, &leaf.key);
-            let meta = crate::active::meta_with(&leaf.meta, running, "运行中");
+            let meta = crate::active::meta_with(&leaf.meta, running, tr("运行中"));
             let tip = if running {
-                format!("{}\n运行中", leaf.tip)
+                trf!("{v0}\n运行中", v0 = leaf.tip)
             } else {
                 leaf.tip.clone()
             };
@@ -1031,8 +1033,7 @@ impl Sidebar {
                 entry.as_ref().map(connmgr::entry_session_key)
             } else {
                 recent.as_ref().map(|r| {
-                    format!(
-                        "{}@{}:{}",
+                    format!("{}@{}:{}",
                         r.user,
                         r.host,
                         if r.port > 0 { r.port } else { 22 }
@@ -1045,8 +1046,7 @@ impl Sidebar {
             } else if let Some((_, name, _)) = &db_item {
                 name.clone()
             } else if let Some(r) = &recent {
-                format!(
-                    "{}@{}:{}",
+                format!("{}@{}:{}",
                     r.user,
                     r.host,
                     if r.port > 0 { r.port } else { 22 }
@@ -1079,8 +1079,8 @@ impl Sidebar {
                             connmgr::fwd_enabled(&e, leaf.source, &leaf.key).unwrap_or(false);
                         let t = crate::menu::toggle(icon, label, None, enabled);
                         t.set_tooltip_text(Some(
-                            "勾选 = 这条转发已启用（连接时自动带上）。点一下切换。\n\
-                             进程内规则当场生效；终端承接的规则要下次连接才生效。",
+                            tr("勾选 = 这条转发已启用（连接时自动带上）。点一下切换。\n\
+                             进程内规则当场生效；终端承接的规则要下次连接才生效。"),
                         ));
                         let pop2 = pop.clone();
                         let sb2 = Rc::clone(&sb);
@@ -1094,7 +1094,7 @@ impl Sidebar {
                                 Err(err) => {
                                     crate::panel::dialogs::show_error(
                                         parent2.as_ref(),
-                                        "启停转发失败",
+                                        tr("启停转发失败"),
                                         &err,
                                     );
                                 }
@@ -1107,7 +1107,7 @@ impl Sidebar {
                     }
                     _ => {
                         let b = crate::menu::item(icon, label, None);
-                        if label == "删除" || label == "删除这个数据库连接" {
+                        if label == "删除" || label == tr("删除这个数据库连接") {
                             crate::menu::danger(&b);
                         }
                         b
@@ -1131,7 +1131,7 @@ impl Sidebar {
                                 if let Err(err) = connmgr::spawn_entry(&e) {
                                     crate::panel::dialogs::show_error(
                                         parent2.as_ref(),
-                                        "启动新窗口失败",
+                                        tr("启动新窗口失败"),
                                         &err,
                                     );
                                 }
@@ -1167,11 +1167,8 @@ impl Sidebar {
                                 let sb3 = Rc::clone(&sb2);
                                 crate::panel::dialogs::confirm_with(
                                     parent2.as_ref(),
-                                    &format!(
-                                        "删除连接「{name}」？\n\n此操作不可撤销；该条目在 \
-                                         connections.ini 里的配置（含端口转发规则）会一并删除。"
-                                    ),
-                                    "删除",
+                                    &trf!("删除连接「{name}」？\n\n此操作不可撤销；该条目在 connections.ini 里的配置（含端口转发规则）会一并删除。", name = name),
+                                    tr("删除"),
                                     move |ok| {
                                         if ok && connmgr::delete_entry(&name2) {
                                             sb3.reload();
@@ -1258,11 +1255,8 @@ impl Sidebar {
                                 let sb3 = Rc::clone(&sb2);
                                 crate::panel::dialogs::confirm_with(
                                     parent2.as_ref(),
-                                    &format!(
-                                        "删除数据库连接「{name2}」？\n\n只删这条连接的配置（地址、账号、\
-                                         记住的密码），不动 SSH 连接，也不动库里的数据。"
-                                    ),
-                                    "删除",
+                                    &trf!("删除数据库连接「{name2}」？\n\n只删这条连接的配置（地址、账号、记住的密码），不动 SSH 连接，也不动库里的数据。", name2 = name2),
+                                    tr("删除"),
                                     move |ok| {
                                         if ok && crate::backend::dbstore::remove(&key2, &name2) {
                                             sb3.reload();
@@ -1293,9 +1287,9 @@ impl Sidebar {
                             let sb3 = Rc::clone(&sb2);
                             crate::panel::dialogs::confirm_with(
                                 parent2.as_ref(),
-                                "清空最近连接？\n\n\
-                                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。",
-                                "清空",
+                                tr("清空最近连接？\n\n\
+                                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。"),
+                                tr("清空"),
                                 move |ok| {
                                     if ok {
                                         crate::recent::clear();
@@ -1712,8 +1706,7 @@ fn row_markup_st(
 ) -> String {
     let name = glib::markup_escape_text(name);
     let sub = glib::markup_escape_text(sub);
-    format!(
-        "{}<span foreground='{fg}'>{name}</span><span size='small' foreground='{dim}'>{SEP}{sub}</span>",
+    format!("{}<span foreground='{fg}'>{name}</span><span size='small' foreground='{dim}'>{SEP}{sub}</span>",
         crate::active::dot(state)
     )
 }
@@ -1727,8 +1720,7 @@ fn group_markup(title: &str, n: usize, chip_bg: &str, fg: &str) -> String {
     if n == 0 {
         format!("<b>{title}</b>")
     } else {
-        format!(
-            "<b>{title}</b> <span size='small' foreground='{fg}' background='{chip_bg}'> {n} </span>"
+        format!("<b>{title}</b> <span size='small' foreground='{fg}' background='{chip_bg}'> {n} </span>"
         )
     }
 }

@@ -20,6 +20,8 @@ use gtk::prelude::*;
 
 use super::worker::{FwdView, WorkerCmd};
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 pub struct FwdUi {
     pub win: gtk::Window,
@@ -62,7 +64,7 @@ pub fn toggle_rule(
     rule_key: &str,
 ) -> Result<bool, String> {
     let cur = crate::connmgr::fwd_enabled(entry, source, rule_key)
-        .ok_or_else(|| "规则不在列表里".to_string())?;
+        .ok_or_else(|| tr("规则不在列表里").to_string())?;
     let next = !cur;
     crate::connmgr::set_fwd_enabled(entry, source, rule_key, next)?;
     if source == crate::connmgr::FwdSource::InProc {
@@ -118,15 +120,13 @@ pub fn probe(st: &Rc<PanelState>) -> Vec<String> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    out.push(format!(
-        "kind={}",
+    out.push(format!("kind={}",
         ui.kind_box
             .active_id()
             .map(|s| s.to_string())
             .unwrap_or_default()
     ));
-    out.push(format!(
-        "page={}",
+    out.push(format!("page={}",
         ui.stack
             .visible_child_name()
             .map(|s| s.to_string())
@@ -222,7 +222,7 @@ fn grid2(
 
 fn build(st: &Rc<PanelState>) -> FwdUi {
     let win = gtk::Window::new();
-    win.set_title(Some("端口转发 — PuTTYPlus"));
+    win.set_title(Some(tr("端口转发 — PuTTYPlus")));
     let (fw, fh) = crate::settings::window_size("fwd").unwrap_or((640, 520));
     win.set_default_size(fw, fh);
 
@@ -233,10 +233,10 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
     vbox.set_margin_bottom(8);
 
     let hint = gtk::Label::new(Some(
-        "进程内端口映射：全部跑在应用自己这条 SSH 连接上（不新建 SSH 连接，终端标签页关了也照样在）。\n\
+        tr("进程内端口映射：全部跑在应用自己这条 SSH 连接上（不新建 SSH 连接，终端标签页关了也照样在）。\n\
          本地（-L）本机监听 → 服务器侧目标；远程（-R）远程监听 → 本机侧目标；动态（-D）本机 SOCKS5 代理。\n\
          停用只在本次会话有效；要长期保留，点列表右上角的「保存列表到连接配置」\n\
-         （ssh config 别名也可以，规则存进 PuTTYPlus 自己的配置，不动 ~/.ssh/config）。",
+         （ssh config 别名也可以，规则存进 PuTTYPlus 自己的配置，不动 ~/.ssh/config）。"),
     ));
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
@@ -264,21 +264,21 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
     let list_head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     // CSS 类给冒烟用：从按钮往上找这个类，断言它确实在列表区里
     list_head.add_css_class("pp-fwd-list-head");
-    let list_title = gtk::Label::new(Some("当前会话的转发规则"));
+    let list_title = gtk::Label::new(Some(tr("当前会话的转发规则")));
     list_title.set_xalign(0.0);
     list_title.set_hexpand(true);
     list_head.append(&list_title);
-    let list_note = gtk::Label::new(Some("（保存按钮保存的就是这份列表）"));
+    let list_note = gtk::Label::new(Some(tr("（保存按钮保存的就是这份列表）")));
     list_note.add_css_class("dim-label");
     list_note.set_xalign(0.0);
     list_head.append(&list_note);
 
     // 「保存到连接配置」按钮（冒烟要点**真按钮**，见 [`save_button`]）
-    let save_cfg = gtk::Button::with_label("保存列表到连接配置");
+    let save_cfg = gtk::Button::with_label(tr("保存列表到连接配置"));
     save_cfg.set_tooltip_text(Some(
-        "把上面列表里的规则整份存进这条连接的配置（覆盖式）：\n\
+        tr("把上面列表里的规则整份存进这条连接的配置（覆盖式）：\n\
          下次连接自动带上。\n\
-         保存的是列表，不是下面表单里填的内容。",
+         保存的是列表，不是下面表单里填的内容。"),
     ));
     list_head.append(&save_cfg);
     vbox.append(&list_head);
@@ -300,9 +300,9 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
     // - 动态（-D）：本机 SOCKS5，目标由客户端自己说
     // 所以用 Stack 按类型换页，别用一堆 sensitive 开关。
     let kind_box = gtk::ComboBoxText::new();
-    kind_box.append(Some("L"), "本地（-L）：本机监听 → 服务器侧目标");
-    kind_box.append(Some("R"), "远程（-R）：远程监听 → 本机侧目标");
-    kind_box.append(Some("D"), "动态（-D）：本机 SOCKS5 代理");
+    kind_box.append(Some("L"), tr("本地（-L）：本机监听 → 服务器侧目标"));
+    kind_box.append(Some("R"), tr("远程（-R）：远程监听 → 本机侧目标"));
+    kind_box.append(Some("D"), tr("动态（-D）：本机 SOCKS5 代理"));
     // ComboBoxText 一个都不选会显示空白：默认选中第一项
     kind_box.set_active_id(Some("L"));
     vbox.append(&kind_box);
@@ -310,22 +310,22 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
 
-    let e_lhost = entry("监听地址（默认 127.0.0.1）");
-    let e_lport = entry("监听端口");
-    let e_thost = entry("目标主机（服务器侧解析）");
-    let e_tport = entry("目标端口");
+    let e_lhost = entry(tr("监听地址（默认 127.0.0.1）"));
+    let e_lport = entry(tr("监听端口"));
+    let e_thost = entry(tr("目标主机（服务器侧解析）"));
+    let e_tport = entry(tr("目标端口"));
     let g_local = grid2(&e_lhost, &e_lport, &e_thost, &e_tport);
     stack.add_named(&g_local, Some("L"));
 
-    let e_bhost = entry("远程绑定地址（默认 127.0.0.1）");
-    let e_bport = entry("远程监听端口");
-    let e_rthost = entry("目标主机（本机侧解析）");
-    let e_rtport = entry("目标端口");
+    let e_bhost = entry(tr("远程绑定地址（默认 127.0.0.1）"));
+    let e_bport = entry(tr("远程监听端口"));
+    let e_rthost = entry(tr("目标主机（本机侧解析）"));
+    let e_rtport = entry(tr("目标端口"));
     let g_remote = grid2(&e_bhost, &e_bport, &e_rthost, &e_rtport);
     stack.add_named(&g_remote, Some("R"));
 
-    let e_shost = entry("监听地址（默认 127.0.0.1）");
-    let e_sport = entry("SOCKS 端口");
+    let e_shost = entry(tr("监听地址（默认 127.0.0.1）"));
+    let e_sport = entry(tr("SOCKS 端口"));
     let g_socks = gtk::Grid::new();
     g_socks.set_row_spacing(6);
     g_socks.set_column_spacing(6);
@@ -348,7 +348,7 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
         });
     }
 
-    let add = gtk::Button::with_label("添加转发");
+    let add = gtk::Button::with_label(tr("添加转发"));
     {
         let st2 = Rc::clone(st);
         let kind_box = kind_box.clone();
@@ -377,8 +377,8 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
                     if bp.is_empty() || th.is_empty() || tp.is_empty() {
                         crate::panel::dialogs::show_error(
                             None,
-                            "转发规则不完整",
-                            "远程转发（-R）要填：远程监听端口、目标主机、目标端口。",
+                            tr("转发规则不完整"),
+                            tr("远程转发（-R）要填：远程监听端口、目标主机、目标端口。"),
                         );
                         return;
                     }
@@ -389,8 +389,8 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
                     if sp.is_empty() {
                         crate::panel::dialogs::show_error(
                             None,
-                            "转发规则不完整",
-                            "动态转发（-D）要填：SOCKS 端口。",
+                            tr("转发规则不完整"),
+                            tr("动态转发（-D）要填：SOCKS 端口。"),
                         );
                         return;
                     }
@@ -409,8 +409,8 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
                     if lp.is_empty() || th.is_empty() || tp.is_empty() {
                         crate::panel::dialogs::show_error(
                             None,
-                            "转发规则不完整",
-                            "本地转发（-L）要填：监听端口、目标主机、目标端口。",
+                            tr("转发规则不完整"),
+                            tr("本地转发（-L）要填：监听端口、目标主机、目标端口。"),
                         );
                         return;
                     }
@@ -438,23 +438,18 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
                 Err(crate::connmgr::FwdTargetErr::NoEntry) => {
                     crate::panel::dialogs::show_error(
                         None,
-                        "保存失败",
-                        "这条会话不是从连接管理器里的条目连上的（命令行直接开的），\n\
+                        tr("保存失败"),
+                        tr("这条会话不是从连接管理器里的条目连上的（命令行直接开的），\n\
                          没有地方写回配置。\n\
-                         先在连接管理器里建一个条目，或从已有的条目连上再来保存。",
+                         先在连接管理器里建一个条目，或从已有的条目连上再来保存。"),
                     );
                     return;
                 }
                 Err(crate::connmgr::FwdTargetErr::Ambiguous(names)) => {
                     crate::panel::dialogs::show_error(
                         None,
-                        "保存失败",
-                        &format!(
-                            "有多个 ssh 别名指向这台机器（{}），\n\
-                             说不清规则该存哪一条。\n\
-                             请在连接管理器里建一个自建条目，再从它连接。",
-                            names.join("、")
-                        ),
+                        tr("保存失败"),
+                        &trf!("有多个 ssh 别名指向这台机器（{v0}），\n说不清规则该存哪一条。\n请在连接管理器里建一个自建条目，再从它连接。", v0 = names.join(tr("、"))),
                     );
                     return;
                 }
@@ -478,11 +473,11 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
             // 别名的规则存在 ini 的单独一段里，文案要说清楚落在哪
             let (name, where_) = match &target {
                 crate::connmgr::FwdSaveTarget::Custom(n) => {
-                    (n.clone(), "的「进程内端口映射」".to_string())
+                    (n.clone(), tr("的「进程内端口映射」").to_string())
                 }
                 crate::connmgr::FwdSaveTarget::Alias(a) => (
                     a.clone(),
-                    "的「进程内端口映射」（ssh 别名，存 PuTTYPlus 自己的配置）".to_string(),
+                    tr("的「进程内端口映射」（ssh 别名，存 PuTTYPlus 自己的配置）").to_string(),
                 ),
             };
             // ⚠️ **列表是空的，别直接写**：这时点「保存」等于把已存的规则清空。
@@ -492,15 +487,8 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
             if n == 0 {
                 crate::panel::dialogs::confirm_with(
                     None,
-                    &format!(
-                        "当前列表里没有规则。\n\
-                         点「保存」等于把连接「{name}」里已存的转发规则「清空」\n\
-                         （下次连接不再自动带上）。\n\
-                         要清空吗？\n\
-                         如果你是想保存规则：先在上面的列表里添加规则，\n\
-                         列表有内容了再保存。"
-                    ),
-                    "清空已存规则",
+                    &trf!("当前列表里没有规则。\n点「保存」等于把连接「{name}」里已存的转发规则「清空」\n（下次连接不再自动带上）。\n要清空吗？\n如果你是想保存规则：先在上面的列表里添加规则，\n列表有内容了再保存。", name = name),
+                    tr("清空已存规则"),
                     move |ok| {
                         if !ok {
                             return;
@@ -508,14 +496,14 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
                         if crate::connmgr::save_inproc_forwards_to_target(&target, "") {
                             crate::panel::dialogs::info(
                                 None,
-                                "已清空",
-                                &format!("已把连接「{name}」里存的转发规则清空。\n下次连接不再自动带上。"),
+                                tr("已清空"),
+                                &trf!("已把连接「{name}」里存的转发规则清空。\n下次连接不再自动带上。", name = name),
                             );
                         } else {
                             crate::panel::dialogs::show_error(
                                 None,
-                                "清空失败",
-                                "写不进 connections.ini（目录权限或磁盘问题）。",
+                                tr("清空失败"),
+                                tr("写不进 connections.ini（目录权限或磁盘问题）。"),
                             );
                         }
                     },
@@ -525,16 +513,14 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
             if crate::connmgr::save_inproc_forwards_to_target(&target, &value) {
                 crate::panel::dialogs::info(
                     None,
-                    "已保存",
-                    &format!(
-                        "已把 {n} 条规则写进连接「{name}」{where_}。\n下次连接自动生效。"
-                    ),
+                    tr("已保存"),
+                    &trf!("已把 {n} 条规则写进连接「{name}」{where_}。\n下次连接自动生效。", n = n, name = name, where_ = where_),
                 );
             } else {
                 crate::panel::dialogs::show_error(
                     None,
-                    "保存失败",
-                    "写不进 connections.ini（目录权限或磁盘问题）。",
+                    tr("保存失败"),
+                    tr("写不进 connections.ini（目录权限或磁盘问题）。"),
                 );
             }
         });
@@ -571,9 +557,9 @@ fn build(st: &Rc<PanelState>) -> FwdUi {
 /// 这种反话，猜不出真正的原因。
 fn set_conn_hint(st: &Rc<PanelState>, lbl: &gtk::Label) {
     let text = match crate::panel::current_state(st) {
-        Some(crate::theme::State::Ok) => "会话已连接：可以添加转发规则。".to_string(),
-        _ => "会话还没连上：此时添加规则会失败（提示「未连接」），\n\
-              规则列表要等连接建立后才有内容。"
+        Some(crate::theme::State::Ok) => tr("会话已连接：可以添加转发规则。").to_string(),
+        _ => tr("会话还没连上：此时添加规则会失败（提示「未连接」），\n\
+              规则列表要等连接建立后才有内容。")
             .to_string(),
     };
     lbl.set_text(&text);
@@ -586,7 +572,7 @@ fn rebuild(st: &Rc<PanelState>, list: &gtk::ListBox) {
     }
     let views = st.fwd_views.borrow();
     if views.is_empty() {
-        let l = gtk::Label::new(Some("（无转发规则）"));
+        let l = gtk::Label::new(Some(tr("（无转发规则）")));
         l.add_css_class("dim-label");
         l.set_margin_top(12);
         l.set_margin_bottom(12);
@@ -613,14 +599,14 @@ fn row(st: &Rc<PanelState>, v: &FwdView) -> gtk::ListBoxRow {
         lbl.add_css_class("dim-label");
     }
     if let Some(e) = &v.err {
-        lbl.set_tooltip_text(Some(&format!("启动失败：{e}")));
+        lbl.set_tooltip_text(Some(&trf!("启动失败：{e}", e = e)));
     }
     row.append(&lbl);
 
     let (icon, tip) = if v.enabled {
-        ("media-playback-pause-symbolic", "停用该转发（规则保留，可再启用）")
+        ("media-playback-pause-symbolic", tr("停用该转发（规则保留，可再启用）"))
     } else {
-        ("media-playback-start-symbolic", "启用该转发")
+        ("media-playback-start-symbolic", tr("启用该转发"))
     };
     let toggle = icon_btn(icon, tip);
     {
@@ -642,7 +628,7 @@ fn row(st: &Rc<PanelState>, v: &FwdView) -> gtk::ListBoxRow {
     }
     row.append(&toggle);
 
-    let del = icon_btn("user-trash-symbolic", "停止并移除该转发");
+    let del = icon_btn("user-trash-symbolic", tr("停止并移除该转发"));
     {
         let st2 = Rc::clone(st);
         let key = v.key.clone();

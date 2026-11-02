@@ -13,6 +13,8 @@ use crate::util::{human_size, mtime_full_str, mtime_str, path_join, utf8_sanitiz
 
 use super::worker::{XferKind, XferState};
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 pub const COL_ICON: i32 = 0;
 pub const COL_NAME: i32 = 1;
@@ -100,7 +102,7 @@ fn setup_trailing(col: &gtk::TreeViewColumn, min_width: i32, r: &gtk::CellRender
 /// 横向 `Automatic`，长文件名靠横向滚动看全。
 pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     let col_name = gtk::TreeViewColumn::new();
-    col_name.set_title("名称");
+    col_name.set_title(tr("名称"));
     col_name.set_resizable(true);
     col_name.set_expand(true);
     // ⚠️ 阶段 76 / 审计 P1-15：原来 90px ⇒ 340px 宽的面板里名称列实际
@@ -123,7 +125,7 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     view.append_column(&col_name);
 
     let col_size = gtk::TreeViewColumn::new();
-    col_size.set_title("大小");
+    col_size.set_title(tr("大小"));
     let r_txt2 = gtk::CellRendererText::new();
     // ⚠️ 阶段 76 / 审计 P1-15：大小**右对齐**（数字按位对齐，好读）。
     gtk::prelude::CellRendererExt::set_alignment(&r_txt2, 1.0, 0.5);
@@ -135,7 +137,7 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     let mut col_perm: Option<gtk::TreeViewColumn> = None;
     if remote {
         let col = gtk::TreeViewColumn::new();
-        col.set_title("权限");
+        col.set_title(tr("权限"));
         let r = gtk::CellRendererText::new();
         setup_trailing(&col, 72, &r);
         col.pack_start(&r, false);
@@ -145,7 +147,7 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     }
 
     let col_mtime = gtk::TreeViewColumn::new();
-    col_mtime.set_title("修改时间");
+    col_mtime.set_title(tr("修改时间"));
     let r = gtk::CellRendererText::new();
     // 原来这里写死 min_width(108)：一个不可压缩的下限，正好是把横向滚动条
     // 逼出来的帮凶之一。现在改成"可收缩 + 小下限"。
@@ -278,7 +280,7 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
             "text-x-generic-symbolic"
         };
         let name = utf8_sanitize(r.name.as_bytes());
-        let size_h = if r.is_dir { "目录".to_string() } else { human_size(r.size) };
+        let size_h = if r.is_dir { tr("目录").to_string() } else { human_size(r.size) };
         let perm = r.perm.clone();
         let mtime = mtime_str(r.mtime);
         let mtime_full = mtime_full_str(r.mtime);
@@ -391,7 +393,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     ]);
     let view = gtk::TreeView::new();
     let entry = gtk::Entry::new();
-    entry.set_placeholder_text(Some(if remote { "远程路径" } else { "本地路径" }));
+    entry.set_placeholder_text(Some(if remote { tr("远程路径") } else { tr("本地路径") }));
     entry.set_width_chars(8);
     entry.set_hexpand(true);
     entry.add_css_class("pp-path");
@@ -433,20 +435,20 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     header.set_margin_end(6);
 
     let title = gtk::Label::new(None);
-    title.set_markup(if remote { "<b>远程</b>" } else { "<b>本地</b>" });
+    title.set_markup(if remote { tr("<b>远程</b>") } else { tr("<b>本地</b>") });
     title.set_halign(gtk::Align::Start);
     header.append(&title);
 
     if remote {
         // 圆点由状态行自己画（带主题色），这里只留文字
-        status_lbl.set_text("未连接");
+        status_lbl.set_text(tr("未连接"));
         status_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
         status_lbl.set_halign(gtk::Align::Start);
         status_lbl.set_hexpand(true);
         status_lbl.set_xalign(0.0);
         header.append(&status_lbl);
     } else {
-        let hint = gtk::Label::new(Some("本机文件"));
+        let hint = gtk::Label::new(Some(tr("本机文件")));
         hint.add_css_class("dim-label");
         hint.add_css_class("pp-hint");
         hint.set_halign(gtk::Align::Start);
@@ -461,9 +463,9 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     let transfer = icon_btn(
         if remote { "go-down-symbolic" } else { "go-up-symbolic" },
         if remote {
-            "下载选中的远程文件到本地当前目录（也可以直接拖到本地面板）"
+            tr("下载选中的远程文件到本地当前目录（也可以直接拖到本地面板）")
         } else {
-            "上传选中的本地文件到远程当前目录"
+            tr("上传选中的本地文件到远程当前目录")
         },
     );
     transfer.set_sensitive(false); // 有选中项才可用
@@ -478,7 +480,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     toolbar.append(&entry);
 
     if remote {
-        let rreconnect = icon_btn("network-transmit-receive-symbolic", "重新建立 SFTP 连接");
+        let rreconnect = icon_btn("network-transmit-receive-symbolic", tr("重新建立 SFTP 连接"));
         {
             let st2 = Rc::clone(st);
             rreconnect.connect_clicked(move |_| super::on_reconnect(&st2));
@@ -487,19 +489,19 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         st.rreconnect.replace(Some(rreconnect));
     }
 
-    let home = icon_btn("go-home-symbolic", "主目录");
+    let home = icon_btn("go-home-symbolic", tr("主目录"));
     {
         let st2 = Rc::clone(st);
         home.connect_clicked(move |_| super::on_home(&st2, remote));
     }
     toolbar.append(&home);
-    let refresh = icon_btn("view-refresh-symbolic", "刷新目录");
+    let refresh = icon_btn("view-refresh-symbolic", tr("刷新目录"));
     {
         let st2 = Rc::clone(st);
         refresh.connect_clicked(move |_| super::on_refresh(&st2, remote));
     }
     toolbar.append(&refresh);
-    let hidden = icon_toggle("view-conceal-symbolic", "显示/隐藏 隐藏文件");
+    let hidden = icon_toggle("view-conceal-symbolic", tr("显示/隐藏 隐藏文件"));
     hidden.set_active(false);
     {
         let st2 = Rc::clone(st);
@@ -513,7 +515,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     if remote {
         let follow_btn = icon_toggle(
             "emblem-synchronizing-symbolic",
-            "跟随终端目录（约 2 秒一次轮询，OSC 7 即时）\n按下 = 开启",
+            tr("跟随终端目录（约 2 秒一次轮询，OSC 7 即时）\n按下 = 开启"),
         );
         follow_btn.set_active(true);
         {
@@ -525,7 +527,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
 
         // 传输队列：会话级窗口，但传东西时经常要看，直接放按钮不藏进 ⋯。
         // 目录镜像放在**本地面板**（源目录在本地，推送方向本地 → 远端）。
-        let queue = icon_btn("view-list-symbolic", "传输队列");
+        let queue = icon_btn("view-list-symbolic", tr("传输队列"));
         {
             let st2 = Rc::clone(st);
             queue.connect_clicked(move |_| super::on_open_queue(&st2));
@@ -536,7 +538,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         // 入口跟着源走（以前挂在远程面板的 ⋯ 里，语义是反的）。
         let mirror = icon_btn(
             "document-send-symbolic",
-            "目录镜像（本地 → 远程）\n扫描差异、先预览再执行；删除远程多余文件需另行确认",
+            tr("目录镜像（本地 → 远程）\n扫描差异、先预览再执行；删除远程多余文件需另行确认"),
         );
         {
             let st2 = Rc::clone(st);
@@ -604,10 +606,10 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
                 let mtime: String = model.get(&it, COL_MTIME_FULL);
                 let mut lines = vec![name];
                 if !size.is_empty() {
-                    lines.push(format!("大小：{size}"));
+                    lines.push(trf!("大小：{size}", size = size));
                 }
                 if !mtime.is_empty() {
-                    lines.push(format!("修改时间：{mtime}"));
+                    lines.push(trf!("修改时间：{mtime}", mtime = mtime));
                 }
                 tooltip.set_text(Some(&lines.join("\n")));
                 return true;
@@ -683,7 +685,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     let name_adj = gtk::Adjustment::new(0.0, 0.0, 0.0, 1.0, 10.0, 10.0);
     let name_bar = gtk::Scrollbar::new(gtk::Orientation::Horizontal, Some(&name_adj));
     name_bar.add_css_class("pp-name-scroll");
-    name_bar.set_tooltip_text(Some("拖动查看完整文件名"));
+    name_bar.set_tooltip_text(Some(tr("拖动查看完整文件名")));
     name_bar.set_visible(false);
     name_bar.set_margin_bottom(1);
     box_.append(&name_bar);
@@ -826,7 +828,7 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
         // 「打开」＝内置编辑器（可改可存）。原来这里还有一项「查看…」
         // （只读打开），用户嫌两项重复，已去掉：非法 UTF-8 之类确实读不了
         // 又存不回去的文件，编辑器自己会降级成只读并给出说明。
-        let b = add("document-open-symbolic", "打开", false);
+        let b = add("document-open-symbolic", tr("打开"), false);
         b.set_visible(false);
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::on_open_file(&st2, remote, false));
@@ -838,7 +840,7 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
         //
         // **只对远程面板有**：本地目录开终端没意义——本程序的终端全是
         // 远程 SSH 会话，没有本地 shell。
-        let b = add("utilities-terminal-symbolic", "在此处打开终端", false);
+        let b = add("utilities-terminal-symbolic", tr("在此处打开终端"), false);
         if !remote {
             b.set_visible(false);
         }
@@ -860,7 +862,7 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
     vb.append(&file_sep);
 
     // 只对“选中项里确实有在排队/在传的源文件”显示；目录递归传输也认
-    let cancel_btn = add("process-stop-symbolic", "取消传输", false);
+    let cancel_btn = add("process-stop-symbolic", tr("取消传输"), false);
     cancel_btn.set_visible(false);
     {
         let st2 = Rc::clone(st);
@@ -881,38 +883,38 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
             } else {
                 "go-up-symbolic"
             },
-            if remote { "下载…" } else { "上传…" },
+            if remote { tr("下载…") } else { tr("上传…") },
             false,
         );
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::on_transfer_btn(&st2, remote));
     }
     if remote {
-        let b = add("send-to-symbolic", "发送到其它服务器…", false);
+        let b = add("send-to-symbolic", tr("发送到其它服务器…"), false);
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::relayui::send_to_server(&st2));
     }
 
     vb.append(&crate::menu::sep());
     {
-        let b = add("folder-new-symbolic", "新建文件夹", false);
+        let b = add("folder-new-symbolic", tr("新建文件夹"), false);
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::on_mkdir(&st2, remote));
     }
     {
-        let b = add("document-edit-symbolic", "改名…", false);
+        let b = add("document-edit-symbolic", tr("改名…"), false);
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::on_rename(&st2, remote));
     }
     {
-        let b = add("edit-delete-symbolic", "删除", true);
+        let b = add("edit-delete-symbolic", tr("删除"), true);
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::on_delete(&st2, remote));
     }
 
     vb.append(&crate::menu::sep());
     {
-        let b = add("view-refresh-symbolic", "刷新", false);
+        let b = add("view-refresh-symbolic", tr("刷新"), false);
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::on_refresh(&st2, remote));
     }
@@ -962,7 +964,7 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
     let cols_pop = {
         let pop = crate::menu::popover(view);
         let vb = crate::menu::body();
-        vb.append(&crate::menu::section("显示列"));
+        vb.append(&crate::menu::section(tr("显示列")));
 
         // (key, 行按钮)——右键弹出前同步勾选态用
         let rows: std::cell::RefCell<Vec<(&'static str, gtk::ToggleButton)>> =
@@ -1003,10 +1005,10 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
         };
 
         let cfg = crate::settings::columns(remote);
-        mk(&vb, &rows, "大小", "size", cfg.size);
-        mk(&vb, &rows, "修改时间", "mtime", cfg.mtime);
+        mk(&vb, &rows, tr("大小"), "size", cfg.size);
+        mk(&vb, &rows, tr("修改时间"), "mtime", cfg.mtime);
         if remote {
-            mk(&vb, &rows, "权限", "perm", cfg.perm);
+            mk(&vb, &rows, tr("权限"), "perm", cfg.perm);
         }
 
         pop.set_child(Some(&vb));

@@ -35,6 +35,8 @@ use super::dbimport;
 use super::dbui;
 use super::dialogs;
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 最近一次打开的向导（测试钩子）。
 ///
@@ -152,9 +154,9 @@ pub fn open_export(
     preset: Option<(String, String)>,
 ) {
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
-    let dlg = crate::windows::dialog("导出表数据", parent, &[
-        ("取消", gtk::ResponseType::Cancel),
-        ("开始", gtk::ResponseType::Ok),
+    let dlg = crate::windows::dialog(tr("导出表数据"), parent, &[
+        (tr("取消"), gtk::ResponseType::Cancel),
+        (tr("开始"), gtk::ResponseType::Ok),
     ]);
     dlg.set_default_response(gtk::ResponseType::Ok);
     dialogs::style_dialog(&dlg);
@@ -166,11 +168,11 @@ pub fn open_export(
     //
     // **为什么不摆连接下拉**：工作台的连接是**一个**（阶段 13 起连接归
     // 连接层管），换连接要回连接管理器。这里摆下拉框只会让人以为能切。
-    let conn_text = dbui::current_conn_label(st).unwrap_or_else(|| "（还没连上数据库）".into());
+    let conn_text = dbui::current_conn_label(st).unwrap_or_else(|| tr("（还没连上数据库）").into());
     let conn = gtk::Label::new(Some(&conn_text));
     conn.add_css_class("dim-label");
     conn.set_xalign(0.0);
-    box_.append(&dialogs::form_row("连接", &conn));
+    box_.append(&dialogs::form_row(tr("连接"), &conn));
 
     // ---- 对象（表 / 视图） ----
     //
@@ -182,7 +184,7 @@ pub fn open_export(
     for (schema, name, is_view) in &objects {
         let id = format!("{schema}{SEP}{name}");
         let text = if *is_view {
-            format!("{schema}.{name}（视图）")
+            trf!("{schema}.{name}（视图）", schema = schema, name = name)
         } else {
             format!("{schema}.{name}")
         };
@@ -191,7 +193,7 @@ pub fn open_export(
     let objects_empty = objects.is_empty();
     if objects_empty {
         // 一张表都没有 → 摆个占位说明，别留个**空下拉框**（看着像坏了）
-        obj.append(Some(""), "（左边对象树里还没有表，先展开一个模式）");
+        obj.append(Some(""), tr("（左边对象树里还没有表，先展开一个模式）"));
         obj.set_sensitive(false);
     } else {
         // ⚠️ **默认选中第一个**：ComboBoxText 一个都不选的话显示的是**空白**
@@ -203,7 +205,7 @@ pub fn open_export(
             None => obj.set_active(Some(0)),
         }
     }
-    box_.append(&dialogs::form_row("对象", &obj));
+    box_.append(&dialogs::form_row(tr("对象"), &obj));
 
     // ---- 格式 ----
     let fmt = gtk::ComboBoxText::new();
@@ -211,24 +213,24 @@ pub fn open_export(
         fmt.append(Some(id), f.label());
     }
     fmt.set_active_id(Some("csv"));
-    box_.append(&dialogs::form_row("格式", &fmt));
+    box_.append(&dialogs::form_row(tr("格式"), &fmt));
 
     // ---- 文件 ----
     let path_entry = gtk::Entry::new();
-    path_entry.set_placeholder_text(Some("要写到哪个文件（也可以点「选择…」）"));
+    path_entry.set_placeholder_text(Some(tr("要写到哪个文件（也可以点「选择…」）")));
     path_entry.set_hexpand(true);
     let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     path_row.append(&path_entry);
     path_row.append(&file_pick_button(parent, &path_entry));
-    box_.append(&dialogs::form_row("文件", &path_row));
+    box_.append(&dialogs::form_row(tr("文件"), &path_row));
 
     // ---- 提示 ----
     //
     // ⚠️ **别写 markdown 星号**：这是普通 gtk::Label（不是 markup label），
     // 星号会**原样显示**出来。
     let hint = gtk::Label::new(Some(
-        "导出会把整张表都写进文件（不止当前这一页）。\
-         SQL 格式会连建表语句一起写出去，搬到空库也能跑。",
+        tr("导出会把整张表都写进文件（不止当前这一页）。\
+         SQL 格式会连建表语句一起写出去，搬到空库也能跑。"),
     ));
     hint.add_css_class("pp-hint");
     hint.set_xalign(0.0);
@@ -250,13 +252,13 @@ pub fn open_export(
             if objects_empty {
                 dialogs::show_error(
                     parent2.as_ref(),
-                    "导出表数据",
-                    "左边对象树里还没有表。\n先展开一个模式，选中要导出的表再来。",
+                    tr("导出表数据"),
+                    tr("左边对象树里还没有表。\n先展开一个模式，选中要导出的表再来。"),
                 );
                 return;
             }
             let Some(id) = obj.active_id() else {
-                dialogs::show_error(parent2.as_ref(), "导出表数据", "先选一个要导出的表。");
+                dialogs::show_error(parent2.as_ref(), tr("导出表数据"), tr("先选一个要导出的表。"));
                 return;
             };
             let (schema, table) = split_id(&id);
@@ -264,8 +266,8 @@ pub fn open_export(
             if path.is_empty() {
                 dialogs::show_error(
                     parent2.as_ref(),
-                    "导出表数据",
-                    "先选一个要写出的文件（点「选择…」）。",
+                    tr("导出表数据"),
+                    tr("先选一个要写出的文件（点「选择…」）。"),
                 );
                 return;
             }
@@ -286,7 +288,7 @@ pub fn open_export(
         .map(|(schema, name, is_view)| {
             let id = format!("{schema}{SEP}{name}");
             let text = if *is_view {
-                format!("{schema}.{name}（视图）")
+                trf!("{schema}.{name}（视图）", schema = schema, name = name)
             } else {
                 format!("{schema}.{name}")
             };
@@ -324,9 +326,9 @@ pub fn open_import(
     parent: Option<&gtk::Window>,
     preset: Option<(String, String)>,
 ) {
-    let dlg = crate::windows::dialog("导入数据（CSV）…", parent, &[
-        ("取消", gtk::ResponseType::Cancel),
-        ("开始", gtk::ResponseType::Ok),
+    let dlg = crate::windows::dialog(tr("导入数据（CSV）…"), parent, &[
+        (tr("取消"), gtk::ResponseType::Cancel),
+        (tr("开始"), gtk::ResponseType::Ok),
     ]);
     dlg.set_default_response(gtk::ResponseType::Ok);
     dialogs::style_dialog(&dlg);
@@ -335,11 +337,11 @@ pub fn open_import(
     let box_ = dialogs::form_box();
 
     // ---- 当前连接（只读显示） ----
-    let conn_text = dbui::current_conn_label(st).unwrap_or_else(|| "（还没连上数据库）".into());
+    let conn_text = dbui::current_conn_label(st).unwrap_or_else(|| tr("（还没连上数据库）").into());
     let conn = gtk::Label::new(Some(&conn_text));
     conn.add_css_class("dim-label");
     conn.set_xalign(0.0);
-    box_.append(&dialogs::form_row("连接", &conn));
+    box_.append(&dialogs::form_row(tr("连接"), &conn));
 
     // ---- 目标表 ----
     let objects = dbui::tree_objects(st);
@@ -347,7 +349,7 @@ pub fn open_import(
     for (schema, name, is_view) in &objects {
         let id = format!("{schema}{SEP}{name}");
         let text = if *is_view {
-            format!("{schema}.{name}（视图）")
+            trf!("{schema}.{name}（视图）", schema = schema, name = name)
         } else {
             format!("{schema}.{name}")
         };
@@ -355,7 +357,7 @@ pub fn open_import(
     }
     let objects_empty = objects.is_empty();
     if objects_empty {
-        obj.append(Some(""), "（左边对象树里还没有表，先展开一个模式）");
+        obj.append(Some(""), tr("（左边对象树里还没有表，先展开一个模式）"));
         obj.set_sensitive(false);
     } else {
         match &preset {
@@ -365,17 +367,17 @@ pub fn open_import(
             None => obj.set_active(Some(0)),
         }
     }
-    box_.append(&dialogs::form_row("目标表", &obj));
+    box_.append(&dialogs::form_row(tr("目标表"), &obj));
 
     // ---- 文件 ----
     let path_entry = gtk::Entry::new();
-    path_entry.set_placeholder_text(Some("要导入哪个 CSV 文件（也可以点「选择…」）"));
+    path_entry.set_placeholder_text(Some(tr("要导入哪个 CSV 文件（也可以点「选择…」）")));
     path_entry.set_hexpand(true);
     let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     path_row.append(&path_entry);
     {
         // 导入用**带过滤器**的选择器（只放行 CSV / 文本）——跟老向导一样。
-        let pick = gtk::Button::with_label("选择…");
+        let pick = gtk::Button::with_label(tr("选择…"));
         let entry = path_entry.clone();
         let parent2 = parent.cloned();
         pick.connect_clicked(move |_| {
@@ -383,12 +385,12 @@ pub fn open_import(
         });
         path_row.append(&pick);
     }
-    box_.append(&dialogs::form_row("文件", &path_row));
+    box_.append(&dialogs::form_row(tr("文件"), &path_row));
 
     // ---- 提示 ----
     let hint = gtk::Label::new(Some(
-        "点「开始」后会打开字段映射：左边是表的列，右边选 CSV 里对应的列。\
-         整批数据在一个事务里执行，失败整体回滚。",
+        tr("点「开始」后会打开字段映射：左边是表的列，右边选 CSV 里对应的列。\
+         整批数据在一个事务里执行，失败整体回滚。"),
     ));
     hint.add_css_class("pp-hint");
     hint.set_xalign(0.0);
@@ -409,16 +411,16 @@ pub fn open_import(
             if objects_empty {
                 dialogs::show_error(
                     parent2.as_ref(),
-                    "导入数据（CSV）…",
-                    "左边对象树里还没有表。\n先展开一个模式，选中要导入的表再来。",
+                    tr("导入数据（CSV）…"),
+                    tr("左边对象树里还没有表。\n先展开一个模式，选中要导入的表再来。"),
                 );
                 return;
             }
             let Some(id) = obj.active_id() else {
                 dialogs::show_error(
                     parent2.as_ref(),
-                    "导入数据（CSV）…",
-                    "先选一个要导入到的表。",
+                    tr("导入数据（CSV）…"),
+                    tr("先选一个要导入到的表。"),
                 );
                 return;
             };
@@ -427,8 +429,8 @@ pub fn open_import(
             if path.is_empty() {
                 dialogs::show_error(
                     parent2.as_ref(),
-                    "导入数据（CSV）…",
-                    "先选一个要导入的文件（点「选择…」）。",
+                    tr("导入数据（CSV）…"),
+                    tr("先选一个要导入的文件（点「选择…」）。"),
                 );
                 return;
             }
@@ -444,7 +446,7 @@ pub fn open_import(
         .map(|(schema, name, is_view)| {
             let id = format!("{schema}{SEP}{name}");
             let text = if *is_view {
-                format!("{schema}.{name}（视图）")
+                trf!("{schema}.{name}（视图）", schema = schema, name = name)
             } else {
                 format!("{schema}.{name}")
             };
@@ -472,15 +474,15 @@ pub fn open_import(
 /// （选完要等回调），而这里要把选到的路径**填回输入框**给用户看——所以得
 /// 自己拿回调把路径写回 `entry`。
 fn file_pick_button(parent: Option<&gtk::Window>, entry: &gtk::Entry) -> gtk::Button {
-    let pick = gtk::Button::with_label("选择…");
+    let pick = gtk::Button::with_label(tr("选择…"));
     let path_entry = entry.clone();
     let parent2 = parent.cloned();
     pick.connect_clicked(move |_| {
         let ch = gtk::FileChooserNative::builder()
-            .title("选择要写出的文件")
+            .title(tr("选择要写出的文件"))
             .action(gtk::FileChooserAction::Save)
-            .accept_label("选定")
-            .cancel_label("取消")
+            .accept_label(tr("选定"))
+            .cancel_label(tr("取消"))
             .modal(true)
             .build();
         ch.set_transient_for(parent2.as_ref());

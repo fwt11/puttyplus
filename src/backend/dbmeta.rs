@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 
 use super::db::DbProto;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 列的逻辑类型：决定用户填的值怎么转成 SQL 字面量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,10 +97,10 @@ impl ColType {
     /// 类型名（UI 提示用）。
     pub fn label(self) -> &'static str {
         match self {
-            ColType::Int => "整数",
-            ColType::Float => "数字",
-            ColType::Bool => "布尔",
-            ColType::Text => "文本",
+            ColType::Int => tr("整数"),
+            ColType::Float => tr("数字"),
+            ColType::Bool => tr("布尔"),
+            ColType::Text => tr("文本"),
             // 类型不知道就**说不知道**：写"文本"是在骗人（用户会以为这一列
             // 真的就是字符串，改的时候会按字符串规则转义）。
             ColType::Other => "—",
@@ -137,8 +139,7 @@ pub fn quote_qualified(proto: DbProto, schema: &str, table: &str) -> String {
     if schema.is_empty() {
         quote_ident(proto, table)
     } else {
-        format!(
-            "{}.{}",
+        format!("{}.{}",
             quote_ident(proto, schema),
             quote_ident(proto, table)
         )
@@ -163,22 +164,22 @@ pub fn edit_literal(proto: DbProto, ty: ColType, text: &str) -> Result<String, S
     match ty {
         ColType::Int => match t.parse::<i64>() {
             Ok(v) => Ok(v.to_string()),
-            Err(_) => Err("应为整数".to_string()),
+            Err(_) => Err(tr("应为整数").to_string()),
         },
         ColType::Float => match t.parse::<f64>() {
             Ok(v) => {
                 if v.is_finite() {
                     Ok(format!("{v}"))
                 } else {
-                    Err("应为有限数字".to_string())
+                    Err(tr("应为有限数字").to_string())
                 }
             }
-            Err(_) => Err("应为数字".to_string()),
+            Err(_) => Err(tr("应为数字").to_string()),
         },
         ColType::Bool => match t.to_ascii_lowercase().as_str() {
             "true" | "t" | "1" | "yes" | "y" | "是" | "真" => Ok("TRUE".to_string()),
             "false" | "f" | "0" | "no" | "n" | "否" | "假" => Ok("FALSE".to_string()),
-            _ => Err("应为布尔值（true/false）".to_string()),
+            _ => Err(tr("应为布尔值（true/false）").to_string()),
         },
         ColType::Text | ColType::Other => Ok(quote_str(proto, &t)),
     }
@@ -202,8 +203,7 @@ pub fn where_value(proto: DbProto, value: Option<&str>) -> String {
 
 /// 打开一张表的数据：`SELECT * FROM 表 LIMIT n`。
 pub fn build_select_table(proto: DbProto, schema: &str, table: &str, limit: usize) -> String {
-    format!(
-        "SELECT * FROM {} LIMIT {}",
+    format!("SELECT * FROM {} LIMIT {}",
         quote_qualified(proto, schema, table),
         limit.max(1)
     )
@@ -221,8 +221,8 @@ pub enum FilterJoin {
 impl FilterJoin {
     pub fn label(self) -> &'static str {
         match self {
-            FilterJoin::And => "并且",
-            FilterJoin::Or => "或者",
+            FilterJoin::And => tr("并且"),
+            FilterJoin::Or => tr("或者"),
         }
     }
 
@@ -347,7 +347,7 @@ pub fn build_where(
                 let ty = col_types.get(c.column.trim()).copied().unwrap_or(ColType::Text);
                 let v = c.value.trim();
                 if v.is_empty() {
-                    return Err(format!("条件「{}」没填值", c.column));
+                    return Err(trf!("条件「{v0}」没填值", v0 = c.column));
                 }
                 match c.op {
                     FilterOp::Like | FilterOp::NotLike => {
@@ -362,7 +362,7 @@ pub fn build_where(
                             .map(|s| edit_literal(proto, ty, s))
                             .collect::<Result<Vec<_>, _>>()?;
                         if items.is_empty() {
-                            return Err(format!("条件「{}」的 IN 列表是空的", c.column));
+                            return Err(trf!("条件「{v0}」的 IN 列表是空的", v0 = c.column));
                         }
                         format!("{col} IN ({})", items.join(", "))
                     }
@@ -515,8 +515,7 @@ pub fn build_create_table(
         .iter()
         .map(|(n, t)| format!("{} {t}", quote_ident(proto, n)))
         .collect();
-    format!(
-        "CREATE TABLE {} ({})",
+    format!("CREATE TABLE {} ({})",
         quote_qualified(proto, schema, table),
         cols.join(", ")
     )
@@ -528,13 +527,11 @@ pub fn build_create_table(
 /// MySQL 是 `RENAME TABLE … TO …`（新名可以带模式，但这里固定留在原模式）。
 pub fn build_rename_table(proto: DbProto, schema: &str, from: &str, to: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "ALTER TABLE {} RENAME TO {}",
+        DbProto::Postgres => format!("ALTER TABLE {} RENAME TO {}",
             quote_qualified(proto, schema, from),
             quote_ident(proto, to)
         ),
-        DbProto::MySql => format!(
-            "RENAME TABLE {} TO {}",
+        DbProto::MySql => format!("RENAME TABLE {} TO {}",
             quote_qualified(proto, schema, from),
             quote_qualified(proto, schema, to)
         ),
@@ -565,16 +562,16 @@ pub fn parse_ddl_columns(text: &str) -> Result<Vec<(String, String)>, String> {
         let Some(name) = parts.next() else { continue };
         let ty: String = parts.collect::<Vec<_>>().join(" ");
         if !is_simple_ident(name) {
-            return Err(format!("第 {} 行的列名「{name}」不合法", i + 1));
+            return Err(trf!("第 {v0} 行的列名「{name}」不合法", name = name, v0 = i + 1));
         }
         if ty.is_empty() {
-            return Err(format!("第 {} 行没写类型", i + 1));
+            return Err(trf!("第 {v0} 行没写类型", v0 = i + 1));
         }
         if !ty
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_(), ".contains(c))
         {
-            return Err(format!("第 {} 行的类型里有非法字符", i + 1));
+            return Err(trf!("第 {v0} 行的类型里有非法字符", v0 = i + 1));
         }
         out.push((name.to_string(), ty));
     }
@@ -619,11 +616,11 @@ pub fn build_update(
     fallback: &[(String, Option<String>)],
 ) -> Result<String, String> {
     if sets.is_empty() {
-        return Err("没有要保存的改动".to_string());
+        return Err(tr("没有要保存的改动").to_string());
     }
     let cond = if !pk.is_empty() { pk } else { fallback };
     if cond.is_empty() {
-        return Err("无法定位行：既没有主键，也不知道原始值".to_string());
+        return Err(tr("无法定位行：既没有主键，也不知道原始值").to_string());
     }
     let set_sql: Vec<String> = sets
         .iter()
@@ -633,8 +630,7 @@ pub fn build_update(
         .iter()
         .map(|(c, v)| format!("{} {}", quote_ident(proto, c), where_value(proto, v.as_deref())))
         .collect();
-    Ok(format!(
-        "UPDATE {} SET {} WHERE {}",
+    Ok(format!("UPDATE {} SET {} WHERE {}",
         quote_qualified(proto, schema, table),
         set_sql.join(", "),
         where_sql.join(" AND ")
@@ -651,14 +647,13 @@ pub fn build_delete(
 ) -> Result<String, String> {
     let cond = if !pk.is_empty() { pk } else { fallback };
     if cond.is_empty() {
-        return Err("无法定位行：既没有主键，也不知道原始值".to_string());
+        return Err(tr("无法定位行：既没有主键，也不知道原始值").to_string());
     }
     let where_sql: Vec<String> = cond
         .iter()
         .map(|(c, v)| format!("{} {}", quote_ident(proto, c), where_value(proto, v.as_deref())))
         .collect();
-    Ok(format!(
-        "DELETE FROM {} WHERE {}",
+    Ok(format!("DELETE FROM {} WHERE {}",
         quote_qualified(proto, schema, table),
         where_sql.join(" AND ")
     ))
@@ -719,7 +714,7 @@ pub fn build_updates(
     for row in row_ids {
         let cols = &edits[&row];
         let Some(orig) = rows.get(row) else {
-            return Err(format!("第 {} 行不在结果集里", row + 1));
+            return Err(trf!("第 {v0} 行不在结果集里", v0 = row + 1));
         };
         // 定位条件：主键优先；没有主键就用整行原值
         let (pk_cond, fallback) = row_condition(columns, pk, orig);
@@ -729,11 +724,11 @@ pub fn build_updates(
         for c in col_ids {
             let text = &cols[&c];
             let Some(name) = columns.get(c) else {
-                return Err(format!("第 {} 行引用了不存在的列", row + 1));
+                return Err(trf!("第 {v0} 行引用了不存在的列", v0 = row + 1));
             };
             let ty = types.get(c).copied().unwrap_or(ColType::Text);
             let lit = edit_literal(proto, ty, text)
-                .map_err(|e| format!("第 {} 行的「{name}」：{e}", row + 1))?;
+                .map_err(|e| trf!("第 {v0} 行的「{name}」：{e}", name = name, e = e, v0 = row + 1))?;
             sets.push((name.clone(), lit));
         }
         if sets.is_empty() {
@@ -762,8 +757,7 @@ pub fn meta_schemas() -> String {
 
 /// 列出表与视图。
 pub fn meta_tables(proto: DbProto, schema: &str) -> String {
-    format!(
-        "SELECT table_name, table_type FROM information_schema.tables \
+    format!("SELECT table_name, table_type FROM information_schema.tables \
          WHERE table_schema = {} ORDER BY table_name",
         quote_str(proto, schema)
     )
@@ -783,8 +777,7 @@ pub fn meta_columns(proto: DbProto, schema: &str, table: &str) -> String {
         DbProto::Postgres => "c.udt_name",
         DbProto::MySql => "''",
     };
-    format!(
-        "SELECT c.column_name, c.data_type, c.is_nullable, c.ordinal_position, \
+    format!("SELECT c.column_name, c.data_type, c.is_nullable, c.ordinal_position, \
          EXISTS (SELECT 1 FROM information_schema.key_column_usage k \
                  JOIN information_schema.table_constraints t \
                    ON t.constraint_name = k.constraint_name \
@@ -815,8 +808,7 @@ pub fn meta_columns(proto: DbProto, schema: &str, table: &str) -> String {
 /// `referenced_column_name`）。
 pub fn meta_foreign_keys(proto: DbProto, schema: &str, table: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT tc.constraint_name, kcu.column_name, ccu.table_name, ccu.column_name \
+        DbProto::Postgres => format!("SELECT tc.constraint_name, kcu.column_name, ccu.table_name, ccu.column_name \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
                ON tc.constraint_name = kcu.constraint_name \
@@ -830,8 +822,7 @@ pub fn meta_foreign_keys(proto: DbProto, schema: &str, table: &str) -> String {
             quote_str(proto, schema),
             quote_str(proto, table)
         ),
-        DbProto::MySql => format!(
-            "SELECT tc.constraint_name, kcu.column_name, \
+        DbProto::MySql => format!("SELECT tc.constraint_name, kcu.column_name, \
                     kcu.referenced_table_name, kcu.referenced_column_name \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
@@ -876,8 +867,7 @@ pub struct SchemaForeignKey {
 /// 复合外键（两列）会叉乘成 4 行、列名还可能配错，ER 图上会画出错的线。
 pub fn meta_schema_foreign_keys(proto: DbProto, schema: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT tc.table_name, tc.constraint_name, kcu.column_name, \
+        DbProto::Postgres => format!("SELECT tc.table_name, tc.constraint_name, kcu.column_name, \
                     ccu.table_name, ccu.column_name \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
@@ -895,8 +885,7 @@ pub fn meta_schema_foreign_keys(proto: DbProto, schema: &str) -> String {
              ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position",
             quote_str(proto, schema)
         ),
-        DbProto::MySql => format!(
-            "SELECT table_name, constraint_name, column_name, \
+        DbProto::MySql => format!("SELECT table_name, constraint_name, column_name, \
                     referenced_table_name, referenced_column_name \
              FROM information_schema.key_column_usage \
              WHERE table_schema = {} AND referenced_table_name IS NOT NULL \
@@ -966,7 +955,7 @@ pub fn build_fk_sqls(
     for t in target {
         check_ident(&t.name)?;
         if seen.contains(&t.name.as_str()) {
-            return Err(format!("约束名「{}」重复了", t.name));
+            return Err(trf!("约束名「{v0}」重复了", v0 = t.name));
         }
         seen.push(&t.name);
         check_ident(&t.column)?;
@@ -985,10 +974,7 @@ pub fn build_fk_sqls(
     // 删掉的
     for f in &dropped {
         sqls.push(drop_fk_sql(proto, schema, table, &f.name));
-        risks.push(format!(
-            "删外键「{}」——数据不丢，但引用关系没了",
-            f.name
-        ));
+        risks.push(trf!("删外键「{v0}」——数据不丢，但引用关系没了", v0 = f.name));
     }
     for t in target {
         let old = t
@@ -998,10 +984,7 @@ pub fn build_fk_sqls(
         match old {
             None => {
                 sqls.push(add_fk_sql(proto, schema, table, t));
-                risks.push(format!(
-                    "加外键「{}」——被引用的列上必须有值，否则加不上",
-                    t.name
-                ));
+                risks.push(trf!("加外键「{v0}」——被引用的列上必须有值，否则加不上", v0 = t.name));
             }
             Some(o) => {
                 let same_ref = o.column == t.column
@@ -1014,8 +997,7 @@ pub fn build_fk_sqls(
                     // 只改了个名字
                     if proto == DbProto::Postgres {
                         // PG 支持直接改名
-                        sqls.push(format!(
-                            "ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
+                        sqls.push(format!("ALTER TABLE {} RENAME CONSTRAINT {} TO {}",
                             quote_qualified(proto, schema, table),
                             quote_ident(proto, &o.name),
                             quote_ident(proto, &t.name)
@@ -1030,10 +1012,7 @@ pub fn build_fk_sqls(
                 // 引用变了 → 删了重建
                 sqls.push(drop_fk_sql(proto, schema, table, &o.name));
                 sqls.push(add_fk_sql(proto, schema, table, t));
-                risks.push(format!(
-                    "重建外键「{}」——引用关系变了",
-                    o.name
-                ));
+                risks.push(trf!("重建外键「{v0}」——引用关系变了", v0 = o.name));
             }
         }
     }
@@ -1043,13 +1022,11 @@ pub fn build_fk_sqls(
 /// 删一条外键的语句。
 fn drop_fk_sql(proto: DbProto, schema: &str, table: &str, name: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "ALTER TABLE {} DROP CONSTRAINT {}",
+        DbProto::Postgres => format!("ALTER TABLE {} DROP CONSTRAINT {}",
             quote_qualified(proto, schema, table),
             quote_ident(proto, name)
         ),
-        DbProto::MySql => format!(
-            "ALTER TABLE {} DROP FOREIGN KEY {}",
+        DbProto::MySql => format!("ALTER TABLE {} DROP FOREIGN KEY {}",
             quote_qualified(proto, schema, table),
             quote_ident(proto, name)
         ),
@@ -1058,8 +1035,7 @@ fn drop_fk_sql(proto: DbProto, schema: &str, table: &str, name: &str) -> String 
 
 /// 加一条外键的语句。
 fn add_fk_sql(proto: DbProto, schema: &str, table: &str, t: &FkSpec) -> String {
-    format!(
-        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+    format!("ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         quote_qualified(proto, schema, table),
         quote_ident(proto, &t.name),
         quote_ident(proto, &t.column),
@@ -1079,8 +1055,7 @@ fn add_fk_sql(proto: DbProto, schema: &str, table: &str, t: &FkSpec) -> String {
 /// MySQL 的 `information_schema.STATISTICS` 一行一列，本来就是摊平的。
 pub fn meta_index_defs(proto: DbProto, schema: &str, table: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT i.relname, ix.indisunique, ix.indisprimary, a.attname \
+        DbProto::Postgres => format!("SELECT i.relname, ix.indisunique, ix.indisprimary, a.attname \
              FROM pg_index ix \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_class t ON t.oid = ix.indrelid \
@@ -1092,8 +1067,7 @@ pub fn meta_index_defs(proto: DbProto, schema: &str, table: &str) -> String {
             quote_str(proto, schema),
             quote_str(proto, table)
         ),
-        DbProto::MySql => format!(
-            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE FROM information_schema.STATISTICS \
+        DbProto::MySql => format!("SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
             quote_str(proto, schema),
@@ -1251,24 +1225,21 @@ pub fn build_index_sqls(
     for t in target {
         check_ident(&t.name)?;
         if seen.contains(&t.name.as_str()) {
-            return Err(format!("索引名「{}」重复了", t.name));
+            return Err(trf!("索引名「{v0}」重复了", v0 = t.name));
         }
         seen.push(&t.name);
         if t.columns.is_empty() {
-            return Err(format!("索引「{}」没有列", t.name));
+            return Err(trf!("索引「{v0}」没有列", v0 = t.name));
         }
         for c in &t.columns {
             check_ident(&c.name)?;
             if let Some(n) = c.prefix {
                 // PG 的索引不支持前缀长度（那是 MySQL 的 TEXT 列专用的写法）
                 if proto == DbProto::Postgres {
-                    return Err(format!(
-                        "索引「{}」的列「{}」写了长度，PG 不支持前缀索引（去掉长度试试）",
-                        t.name, c.name
-                    ));
+                    return Err(trf!("索引「{v0}」的列「{v1}」写了长度，PG 不支持前缀索引（去掉长度试试）", v0 = t.name, v1 = c.name));
                 }
                 if n == 0 {
-                    return Err(format!("索引「{}」的列「{}」长度不能是 0", t.name, c.name));
+                    return Err(trf!("索引「{v0}」的列「{v1}」长度不能是 0", v0 = t.name, v1 = c.name));
                 }
             }
         }
@@ -1284,10 +1255,7 @@ pub fn build_index_sqls(
     // 删掉的索引
     for i in &dropped {
         sqls.push(drop_index_sql(proto, schema, table, &i.name));
-        risks.push(format!(
-            "删索引「{}」——数据不丢，但查这张表会变慢",
-            i.name
-        ));
+        risks.push(trf!("删索引「{v0}」——数据不丢，但查这张表会变慢", v0 = i.name));
     }
     // 改过或新增的索引
     for t in target {
@@ -1308,18 +1276,12 @@ pub fn build_index_sqls(
         if let Some(o) = old {
             if o.name != t.name || !same_index_cols(&o.columns, &t.columns) || o.unique != t.unique {
                 sqls.push(drop_index_sql(proto, schema, table, &o.name));
-                risks.push(format!(
-                    "重建索引「{}」——数据不丢，但重建期间查询会变慢",
-                    o.name
-                ));
+                risks.push(trf!("重建索引「{v0}」——数据不丢，但重建期间查询会变慢", v0 = o.name));
             }
         }
         sqls.push(create_index_sql(proto, schema, table, t));
         if t.unique {
-            risks.push(format!(
-                "加唯一索引「{}」——现有数据里有重复值就会失败",
-                t.name
-            ));
+            risks.push(trf!("加唯一索引「{v0}」——现有数据里有重复值就会失败", v0 = t.name));
         }
     }
     Ok((sqls, risks))
@@ -1331,8 +1293,7 @@ fn drop_index_sql(proto: DbProto, schema: &str, table: &str, name: &str) -> Stri
         // PG：索引是独立的 schema 对象，要带上 schema
         DbProto::Postgres => format!("DROP INDEX {}", quote_qualified(proto, schema, name)),
         // MySQL：索引属于表，只能用 ALTER TABLE 删
-        DbProto::MySql => format!(
-            "ALTER TABLE {} DROP INDEX {}",
+        DbProto::MySql => format!("ALTER TABLE {} DROP INDEX {}",
             quote_qualified(proto, schema, table),
             quote_ident(proto, name)
         ),
@@ -1353,13 +1314,11 @@ fn create_index_sql(proto: DbProto, schema: &str, table: &str, t: &IndexSpec) ->
         .join(", ");
     let unique = if t.unique { "UNIQUE " } else { "" };
     match proto {
-        DbProto::Postgres => format!(
-            "CREATE {unique}INDEX {} ON {} ({cols})",
+        DbProto::Postgres => format!("CREATE {unique}INDEX {} ON {} ({cols})",
             quote_ident(proto, &t.name),
             quote_qualified(proto, schema, table)
         ),
-        DbProto::MySql => format!(
-            "ALTER TABLE {} ADD {unique}INDEX {} ({cols})",
+        DbProto::MySql => format!("ALTER TABLE {} ADD {unique}INDEX {} ({cols})",
             quote_qualified(proto, schema, table),
             quote_ident(proto, &t.name)
         ),
@@ -1381,14 +1340,12 @@ fn same_index_cols(a: &[String], b: &[IndexCol]) -> bool {
 /// `information_schema.STATISTICS`），这里按方言分派。
 pub fn meta_indexes(proto: DbProto, schema: &str, table: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT indexname, indexdef FROM pg_indexes \
+        DbProto::Postgres => format!("SELECT indexname, indexdef FROM pg_indexes \
              WHERE schemaname = {} AND tablename = {} ORDER BY indexname",
             quote_str(proto, schema),
             quote_str(proto, table)
         ),
-        DbProto::MySql => format!(
-            "SELECT DISTINCT index_name, column_name FROM information_schema.STATISTICS \
+        DbProto::MySql => format!("SELECT DISTINCT index_name, column_name FROM information_schema.STATISTICS \
              WHERE table_schema = {} AND table_name = {} ORDER BY index_name",
             quote_str(proto, schema),
             quote_str(proto, table)
@@ -1408,8 +1365,8 @@ pub enum RoutineKind {
 impl RoutineKind {
     pub fn label(self) -> &'static str {
         match self {
-            RoutineKind::Function => "函数",
-            RoutineKind::Procedure => "存储过程",
+            RoutineKind::Function => tr("函数"),
+            RoutineKind::Procedure => tr("存储过程"),
         }
     }
     /// SQL 里的标记（PG 的 prokind / MySQL 的 routine_type）。
@@ -1446,8 +1403,7 @@ pub struct Routine {
 /// 才能按位置取。
 pub fn meta_routines(proto: DbProto, schema: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT p.proname, \
+        DbProto::Postgres => format!("SELECT p.proname, \
                     CASE WHEN p.prokind = 'p' THEN 'P' ELSE 'F' END, \
                     pg_get_function_identity_arguments(p.oid), \
                     CASE WHEN p.prokind = 'p' THEN '' ELSE pg_get_function_result(p.oid) END \
@@ -1456,8 +1412,7 @@ pub fn meta_routines(proto: DbProto, schema: &str) -> String {
              ORDER BY 1",
             quote_str(proto, schema)
         ),
-        DbProto::MySql => format!(
-            "SELECT routine_name, \
+        DbProto::MySql => format!("SELECT routine_name, \
                     CASE WHEN routine_type = 'PROCEDURE' THEN 'P' ELSE 'F' END, \
                     '', '' \
              FROM information_schema.ROUTINES \
@@ -1470,8 +1425,7 @@ pub fn meta_routines(proto: DbProto, schema: &str) -> String {
 
 /// 列出触发器（两家的 `information_schema.triggers` 都有这几列）。
 pub fn meta_triggers(proto: DbProto, schema: &str) -> String {
-    format!(
-        "SELECT trigger_name, event_object_table, action_timing, event_manipulation \
+    format!("SELECT trigger_name, event_object_table, action_timing, event_manipulation \
          FROM information_schema.triggers \
          WHERE trigger_schema = {} \
          ORDER BY trigger_name, event_object_table",
@@ -1491,8 +1445,7 @@ pub fn meta_routine_def(
     is_proc: bool,
 ) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT pg_get_functiondef(p.oid) \
+        DbProto::Postgres => format!("SELECT pg_get_functiondef(p.oid) \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = {} AND p.proname = {} \
                AND pg_get_function_identity_arguments(p.oid) = {} \
@@ -1512,8 +1465,7 @@ pub fn meta_routine_def(
 /// 取触发器的定义。
 pub fn meta_trigger_def(proto: DbProto, schema: &str, table: &str, name: &str) -> String {
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT pg_get_triggerdef(t.oid) \
+        DbProto::Postgres => format!("SELECT pg_get_triggerdef(t.oid) \
              FROM pg_trigger t \
              JOIN pg_class c ON c.oid = t.tgrelid \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -1522,8 +1474,7 @@ pub fn meta_trigger_def(proto: DbProto, schema: &str, table: &str, name: &str) -
             quote_str(proto, table),
             quote_str(proto, name)
         ),
-        DbProto::MySql => format!(
-            "SHOW CREATE TRIGGER {}",
+        DbProto::MySql => format!("SHOW CREATE TRIGGER {}",
             quote_qualified(proto, schema, name)
         ),
     }
@@ -1566,15 +1517,17 @@ pub fn meta_events(proto: DbProto, schema: &str) -> Option<String> {
     // **只用各版本都有的列**：`SCHEDULING_TYPE`（MySQL 5.7/8.0）与
     // `EVENT_TYPE`（新版本）列名不一样，跨版本不通用；`INTERVAL_VALUE` +
     // `INTERVAL_FIELD` + `STATUS` 从 5.7 到新版本一直都在。
+    // ⚠️ **i18n:keep**：这是**发给数据库的 SQL**，里面的中文是**数据值**
+    //    （`'一次'` 是 MySQL 事件状态的显示值）⇒ **翻了 SQL 就查不到东西**。
+    //    改写脚本本来会把它包成 `trf!()` ⇒ 用 `i18n:keep` 挡住。
+    // i18n:keep
     Some(format!(
-        "SELECT EVENT_NAME, STATUS, \
-                CASE WHEN INTERVAL_VALUE IS NULL THEN '一次' \
-                     ELSE CONCAT(INTERVAL_VALUE, ' ', INTERVAL_FIELD) END \
-         FROM information_schema.EVENTS \
-         WHERE EVENT_SCHEMA = {} \
-         ORDER BY EVENT_NAME",
+        "SELECT EVENT_NAME, STATUS, CASE WHEN INTERVAL_VALUE IS NULL THEN '一次' \
+         ELSE CONCAT(INTERVAL_VALUE, ' ', INTERVAL_FIELD) END \
+         FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {} ORDER BY EVENT_NAME",
         quote_str(proto, schema)
     ))
+    // i18n:end
 }
 
 /// 取事件的定义。方言没有这个功能时返回 `None`（见 `proto_supports_events`）。
@@ -1582,8 +1535,7 @@ pub fn meta_event_def(proto: DbProto, schema: &str, name: &str) -> Option<String
     if !proto_supports_events(proto) {
         return None;
     }
-    Some(format!(
-        "SHOW CREATE EVENT {}",
+    Some(format!("SHOW CREATE EVENT {}",
         quote_qualified(proto, schema, name)
     ))
 }
@@ -1631,16 +1583,16 @@ impl ObjectStats {
             None => "—".to_string(),
         };
         vec![
-            ("行数（估算）".to_string(), n(self.rows)),
-            ("占用空间".to_string(), match self.size_bytes {
+            (tr("行数（估算）").to_string(), n(self.rows)),
+            (tr("占用空间").to_string(), match self.size_bytes {
                 Some(b) => fmt_bytes(b),
                 None => "—".to_string(),
             }),
-            ("列数".to_string(), n(self.columns)),
-            ("索引数".to_string(), n(self.indexes)),
-            ("外键数".to_string(), n(self.foreign_keys)),
+            (tr("列数").to_string(), n(self.columns)),
+            (tr("索引数").to_string(), n(self.indexes)),
+            (tr("外键数").to_string(), n(self.foreign_keys)),
             (
-                "类型".to_string(),
+                tr("类型").to_string(),
                 if self.engine.is_empty() {
                     "—".to_string()
                 } else {
@@ -1648,7 +1600,7 @@ impl ObjectStats {
                 },
             ),
             (
-                "排序规则".to_string(),
+                tr("排序规则").to_string(),
                 if self.collation.is_empty() {
                     "—".to_string()
                 } else {
@@ -1656,7 +1608,7 @@ impl ObjectStats {
                 },
             ),
             (
-                "字符集".to_string(),
+                tr("字符集").to_string(),
                 if self.charset.is_empty() {
                     "—".to_string()
                 } else {
@@ -1664,7 +1616,7 @@ impl ObjectStats {
                 },
             ),
             (
-                "创建时间".to_string(),
+                tr("创建时间").to_string(),
                 if self.created.is_empty() {
                     "—".to_string()
                 } else {
@@ -1672,7 +1624,7 @@ impl ObjectStats {
                 },
             ),
             (
-                "自增当前值".to_string(),
+                tr("自增当前值").to_string(),
                 if self.auto_increment.is_empty() {
                     "—".to_string()
                 } else {
@@ -1680,7 +1632,7 @@ impl ObjectStats {
                 },
             ),
             (
-                "注释".to_string(),
+                tr("注释").to_string(),
                 if self.comment.is_empty() {
                     "—".to_string()
                 } else {
@@ -1717,8 +1669,7 @@ pub fn meta_object_stats(proto: DbProto, schema: &str, table: &str) -> String {
     let s = quote_str(proto, schema);
     let t = quote_str(proto, table);
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT GREATEST(c.reltuples, 0)::bigint, \
+        DbProto::Postgres => format!("SELECT GREATEST(c.reltuples, 0)::bigint, \
                     pg_total_relation_size(c.oid), \
                     COALESCE(obj_description(c.oid, 'pg_class'), ''), \
                     (SELECT count(*) FROM information_schema.columns col \
@@ -1735,8 +1686,7 @@ pub fn meta_object_stats(proto: DbProto, schema: &str, table: &str) -> String {
             s = s,
             t = t
         ),
-        DbProto::MySql => format!(
-            "SELECT t.TABLE_ROWS, \
+        DbProto::MySql => format!("SELECT t.TABLE_ROWS, \
                     COALESCE(t.DATA_LENGTH,0) + COALESCE(t.INDEX_LENGTH,0), \
                     COALESCE(t.TABLE_COMMENT,''), \
                     (SELECT count(*) FROM information_schema.columns c \
@@ -1831,8 +1781,7 @@ pub struct TableStat {
 pub fn meta_table_stats(proto: DbProto, schema: &str) -> String {
     let s = quote_str(proto, schema);
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT c.relname, \
+        DbProto::Postgres => format!("SELECT c.relname, \
                     GREATEST(c.reltuples, 0)::bigint, \
                     CASE WHEN c.relkind IN ('r','p') THEN pg_total_relation_size(c.oid) ELSE 0 END, \
                     '' \
@@ -1840,8 +1789,7 @@ pub fn meta_table_stats(proto: DbProto, schema: &str) -> String {
              WHERE n.nspname = {s} AND c.relkind IN ('r','p','v','m')",
             s = s
         ),
-        DbProto::MySql => format!(
-            "SELECT t.TABLE_NAME, \
+        DbProto::MySql => format!("SELECT t.TABLE_NAME, \
                     COALESCE(t.TABLE_ROWS, 0), \
                     COALESCE(t.DATA_LENGTH, 0) + COALESCE(t.INDEX_LENGTH, 0), \
                     COALESCE(CAST(t.UPDATE_TIME AS CHAR), '') \
@@ -1928,7 +1876,7 @@ pub fn fmt_table_detail(base: &str, st: &TableStat) -> String {
     let mut s = String::from(base);
     s.push_str(" · ≈");
     s.push_str(&fmt_rows(st.rows));
-    s.push_str(" 行");
+    s.push_str(tr(" 行"));
     if st.size_bytes > 0 {
         s.push_str(" · ");
         s.push_str(&fmt_bytes(st.size_bytes));
@@ -1984,13 +1932,13 @@ impl SearchKind {
     /// 列表里显示的名字。
     pub fn label(self) -> &'static str {
         match self {
-            SearchKind::Table => "表",
-            SearchKind::View => "视图",
-            SearchKind::Column => "字段",
-            SearchKind::Function => "函数",
-            SearchKind::Procedure => "存储过程",
-            SearchKind::Trigger => "触发器",
-            SearchKind::Event => "事件",
+            SearchKind::Table => tr("表"),
+            SearchKind::View => tr("视图"),
+            SearchKind::Column => tr("字段"),
+            SearchKind::Function => tr("函数"),
+            SearchKind::Procedure => tr("存储过程"),
+            SearchKind::Trigger => tr("触发器"),
+            SearchKind::Event => tr("事件"),
         }
     }
 
@@ -2067,8 +2015,7 @@ fn like_pattern(keyword: &str) -> String {
 pub fn meta_search_objects(proto: DbProto, keyword: &str) -> String {
     let kw = quote_str(proto, &like_pattern(keyword));
     match proto {
-        DbProto::Postgres => format!(
-            "SELECT 'table' AS kind, n.nspname AS sch, c.relname AS nm, '' AS own, '' AS ext \
+        DbProto::Postgres => format!("SELECT 'table' AS kind, n.nspname AS sch, c.relname AS nm, '' AS own, '' AS ext \
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE c.relkind IN ('r','p') AND c.relname ILIKE {kw} \
                AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' \
@@ -2100,8 +2047,7 @@ pub fn meta_search_objects(proto: DbProto, keyword: &str) -> String {
                AND t.trigger_schema NOT LIKE 'pg_%' AND t.trigger_schema <> 'information_schema' \
              ORDER BY 1, 2, 3 LIMIT {SEARCH_LIMIT}"
         ),
-        DbProto::MySql => format!(
-            "SELECT 'table' AS kind, table_schema AS sch, table_name AS nm, '' AS own, '' AS ext \
+        DbProto::MySql => format!("SELECT 'table' AS kind, table_schema AS sch, table_name AS nm, '' AS own, '' AS ext \
              FROM information_schema.TABLES \
              WHERE table_type = 'BASE TABLE' AND table_name LIKE {kw} \
                AND table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
@@ -2204,10 +2150,10 @@ impl DefKind {
     /// 这一类对象的统称（页面标题用）。
     pub fn label(self) -> &'static str {
         match self {
-            DefKind::Function => "函数",
-            DefKind::Procedure => "存储过程",
-            DefKind::Trigger => "触发器",
-            DefKind::Event => "事件",
+            DefKind::Function => tr("函数"),
+            DefKind::Procedure => tr("存储过程"),
+            DefKind::Trigger => tr("触发器"),
+            DefKind::Event => tr("事件"),
         }
     }
 }
@@ -2258,28 +2204,23 @@ pub fn prepare_def_exec(
     let drop = match (proto, kind) {
         // PG 的 CREATE OR REPLACE 已经幂等，不用先删
         (DbProto::Postgres, DefKind::Function | DefKind::Procedure) => None,
-        (DbProto::Postgres, DefKind::Trigger) => Some(format!(
-            "DROP TRIGGER IF EXISTS {} ON {}",
+        (DbProto::Postgres, DefKind::Trigger) => Some(format!("DROP TRIGGER IF EXISTS {} ON {}",
             quote_ident(proto, name),
             quote_qualified(proto, schema, table)
         )),
-        (DbProto::MySql, DefKind::Function) => Some(format!(
-            "DROP FUNCTION IF EXISTS {}",
+        (DbProto::MySql, DefKind::Function) => Some(format!("DROP FUNCTION IF EXISTS {}",
             quote_ident(proto, name)
         )),
-        (DbProto::MySql, DefKind::Procedure) => Some(format!(
-            "DROP PROCEDURE IF EXISTS {}",
+        (DbProto::MySql, DefKind::Procedure) => Some(format!("DROP PROCEDURE IF EXISTS {}",
             quote_ident(proto, name)
         )),
-        (DbProto::MySql, DefKind::Trigger) => Some(format!(
-            "DROP TRIGGER IF EXISTS {}",
+        (DbProto::MySql, DefKind::Trigger) => Some(format!("DROP TRIGGER IF EXISTS {}",
             quote_ident(proto, name)
         )),
         // 事件：MySQL 的 `CREATE EVENT` 不覆盖同名 → 得先删。
         // （PG 压根没有定时事件，走不到这一支；留着只为 match 穷尽）
         (DbProto::Postgres, DefKind::Event) => None,
-        (DbProto::MySql, DefKind::Event) => Some(format!(
-            "DROP EVENT IF EXISTS {}",
+        (DbProto::MySql, DefKind::Event) => Some(format!("DROP EVENT IF EXISTS {}",
             quote_qualified(proto, schema, name)
         )),
     };
@@ -2609,7 +2550,7 @@ pub fn build_alter_table(
             check_default(d)?;
         }
         if seen.contains(&t.name.as_str()) {
-            return Err(format!("列名「{}」重复了", t.name));
+            return Err(trf!("列名「{v0}」重复了", v0 = t.name));
         }
         seen.push(&t.name);
     }
@@ -2618,7 +2559,7 @@ pub fn build_alter_table(
     let kept: Vec<usize> = target.iter().filter_map(|t| t.orig_index).collect();
     for &i in &kept {
         if i >= orig.len() {
-            return Err("结构数据对不上（列号越界），请重新打开表结构".into());
+            return Err(tr("结构数据对不上（列号越界），请重新打开表结构").into());
         }
     }
     let dropped: Vec<&ColumnDef> = orig
@@ -2661,10 +2602,7 @@ pub fn build_alter_table(
         DbProto::Postgres => {
             for c in &dropped {
                 acts.push(format!("DROP COLUMN {}", quote_ident(proto, &c.name)));
-                risks.push(format!(
-                    "删列「{}」——列里的数据会一起没了，撤不回来",
-                    c.name
-                ));
+                risks.push(trf!("删列「{v0}」——列里的数据会一起没了，撤不回来", v0 = c.name));
             }
             for t in target {
                 let q = quote_ident(proto, &t.name);
@@ -2675,20 +2613,14 @@ pub fn build_alter_table(
                     Some(i) => {
                         let o = &orig[i];
                         if o.name != t.name {
-                            acts.push(format!(
-                                "RENAME COLUMN {} TO {}",
+                            acts.push(format!("RENAME COLUMN {} TO {}",
                                 quote_ident(proto, &o.name),
                                 q
                             ));
                         }
                         if !same_type(&ddl_type(o), &t.ty) {
                             acts.push(format!("ALTER COLUMN {q} TYPE {}", t.ty.trim()));
-                            risks.push(format!(
-                                "改列「{}」的类型（{} → {}）——现有数据转不过去语句会失败，转过去了也可能被截断",
-                                t.name,
-                                ddl_type(o),
-                                t.ty.trim()
-                            ));
+                            risks.push(trf!("改列「{v0}」的类型（{v1} → {v2}）——现有数据转不过去语句会失败，转过去了也可能被截断", v0 = t.name, v1 = ddl_type(o), v2 = t.ty.trim()));
                         }
                         if o.nullable != t.nullable {
                             acts.push(if t.nullable {
@@ -2697,10 +2629,7 @@ pub fn build_alter_table(
                                 format!("ALTER COLUMN {q} SET NOT NULL")
                             });
                             if !t.nullable {
-                                risks.push(format!(
-                                    "把列「{}」改成 NOT NULL——现有 NULL 值会让语句失败",
-                                    t.name
-                                ));
+                                risks.push(trf!("把列「{v0}」改成 NOT NULL——现有 NULL 值会让语句失败", v0 = t.name));
                             }
                         }
                         if !same_default(o.default_value.as_deref(), t.default_value.as_deref()) {
@@ -2721,8 +2650,7 @@ pub fn build_alter_table(
                     acts.push(format!("DROP CONSTRAINT {}", quote_ident(proto, &name)));
                 }
                 if !new_pk_names.is_empty() {
-                    acts.push(format!(
-                        "ADD PRIMARY KEY ({})",
+                    acts.push(format!("ADD PRIMARY KEY ({})",
                         new_pk_names
                             .iter()
                             .map(|n| quote_ident(proto, n))
@@ -2730,16 +2658,13 @@ pub fn build_alter_table(
                             .join(", ")
                     ));
                 }
-                risks.push("改主键——引用这张表的外键可能因此失效".to_string());
+                risks.push(tr("改主键——引用这张表的外键可能因此失效").to_string());
             }
         }
         DbProto::MySql => {
             for c in &dropped {
                 acts.push(format!("DROP COLUMN {}", quote_ident(proto, &c.name)));
-                risks.push(format!(
-                    "删列「{}」——列里的数据会一起没了，撤不回来",
-                    c.name
-                ));
+                risks.push(trf!("删列「{v0}」——列里的数据会一起没了，撤不回来", v0 = c.name));
             }
             for t in target {
                 let q = quote_ident(proto, &t.name);
@@ -2770,18 +2695,10 @@ pub fn build_alter_table(
                             };
                             acts.push(format!("{verb} {target_ref} {}{}", t.ty.trim(), col_attrs(t)));
                             if type_changed {
-                                risks.push(format!(
-                                    "改列「{}」的类型（{} → {}）——现有数据转不过去语句会失败，转过去了也可能被截断",
-                                    t.name,
-                                    ddl_type(o),
-                                    t.ty.trim()
-                                ));
+                                risks.push(trf!("改列「{v0}」的类型（{v1} → {v2}）——现有数据转不过去语句会失败，转过去了也可能被截断", v0 = t.name, v1 = ddl_type(o), v2 = t.ty.trim()));
                             }
                             if null_changed && !t.nullable {
-                                risks.push(format!(
-                                    "把列「{}」改成 NOT NULL——现有 NULL 值会让语句失败",
-                                    t.name
-                                ));
+                                risks.push(trf!("把列「{v0}」改成 NOT NULL——现有 NULL 值会让语句失败", v0 = t.name));
                             }
                         }
                     }
@@ -2791,8 +2708,7 @@ pub fn build_alter_table(
                 // MySQL 的主键没有名字，就是 `PRIMARY`。
                 acts.push("DROP PRIMARY KEY".to_string());
                 if !new_pk_names.is_empty() {
-                    acts.push(format!(
-                        "ADD PRIMARY KEY ({})",
+                    acts.push(format!("ADD PRIMARY KEY ({})",
                         new_pk_names
                             .iter()
                             .map(|n| quote_ident(proto, n))
@@ -2800,7 +2716,7 @@ pub fn build_alter_table(
                             .join(", ")
                     ));
                 }
-                risks.push("改主键——引用这张表的外键可能因此失效".to_string());
+                risks.push(tr("改主键——引用这张表的外键可能因此失效").to_string());
             }
         }
     }
@@ -2809,8 +2725,7 @@ pub fn build_alter_table(
         return Ok(None);
     }
     Ok(Some(AlterPlan {
-        sql: format!(
-            "ALTER TABLE {} {}",
+        sql: format!("ALTER TABLE {} {}",
             quote_qualified(proto, schema, table),
             acts.join(", ")
         ),
@@ -2845,20 +2760,20 @@ fn col_attrs(t: &ColumnSpec) -> String {
 fn check_ident(name: &str) -> Result<(), String> {
     let n = name.trim();
     if n.is_empty() {
-        return Err("列名不能为空".into());
+        return Err(tr("列名不能为空").into());
     }
     // PG 标识符上限 63 字节，MySQL 64 —— 取小的那个
     if n.len() > 63 {
-        return Err(format!("列名「{n}」太长（最多 63 个字符）"));
+        return Err(trf!("列名「{n}」太长（最多 63 个字符）", n = n));
     }
     let mut chars = n.chars();
     let first = chars.next().unwrap_or(' ');
     if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(format!("列名「{n}」不合法：要以字母或下划线开头"));
+        return Err(trf!("列名「{n}」不合法：要以字母或下划线开头", n = n));
     }
     for c in n.chars() {
         if !(c.is_ascii_alphanumeric() || c == '_' || c == '$') {
-            return Err(format!("列名「{n}」不合法：只能有字母、数字、下划线和 $"));
+            return Err(trf!("列名「{n}」不合法：只能有字母、数字、下划线和 $", n = n));
         }
     }
     Ok(())
@@ -2868,10 +2783,10 @@ fn check_ident(name: &str) -> Result<(), String> {
 fn check_type(ty: &str) -> Result<(), String> {
     let t = ty.trim();
     if t.is_empty() {
-        return Err("类型不能为空".into());
+        return Err(tr("类型不能为空").into());
     }
     if t.len() > 64 {
-        return Err("类型写法太长".into());
+        return Err(tr("类型写法太长").into());
     }
     for c in t.chars() {
         if c.is_ascii_alphanumeric()
@@ -2887,7 +2802,7 @@ fn check_type(ty: &str) -> Result<(), String> {
         {
             continue;
         }
-        return Err(format!("类型「{t}」里有不认识的字符「{c}」"));
+        return Err(trf!("类型「{t}」里有不认识的字符「{c}」", t = t, c = c));
     }
     Ok(())
 }
@@ -2902,10 +2817,10 @@ fn check_default(d: &str) -> Result<(), String> {
         return Ok(());
     }
     if t.len() > 200 {
-        return Err("默认值太长".into());
+        return Err(tr("默认值太长").into());
     }
     if t.contains(';') {
-        return Err("默认值里不能有分号（一条语句只准一个默认值）".into());
+        return Err(tr("默认值里不能有分号（一条语句只准一个默认值）").into());
     }
     Ok(())
 }
@@ -2966,23 +2881,20 @@ pub fn build_ddl(
         .map(|c| quote_ident(proto, &c.name))
         .collect();
     if !pk.is_empty() {
-        parts.push(format!(
-            "  CONSTRAINT {} PRIMARY KEY ({})",
+        parts.push(format!("  CONSTRAINT {} PRIMARY KEY ({})",
             quote_ident(proto, &format!("{table}_pkey")),
             pk.join(", ")
         ));
     }
     for fk in fks {
-        parts.push(format!(
-            "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        parts.push(format!("  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
             quote_ident(proto, &fk.name),
             quote_ident(proto, &fk.column),
             quote_ident(proto, &fk.ref_table),
             quote_ident(proto, &fk.ref_column)
         ));
     }
-    format!(
-        "CREATE TABLE {} (\n{}\n);",
+    format!("CREATE TABLE {} (\n{}\n);",
         quote_qualified(proto, schema, table),
         parts.join(",\n")
     )
@@ -3014,15 +2926,14 @@ pub fn build_insert(
             continue;
         };
         let ty = types.get(i).copied().unwrap_or(ColType::Text);
-        let lit = edit_literal(proto, ty, text).map_err(|e| format!("「{name}」：{e}"))?;
+        let lit = edit_literal(proto, ty, text).map_err(|e| trf!("「{name}」：{e}", name = name, e = e))?;
         cols.push(quote_ident(proto, name));
         vals.push(lit);
     }
     if cols.is_empty() {
-        return Err("这一行还没有填任何值".to_string());
+        return Err(tr("这一行还没有填任何值").to_string());
     }
-    Ok(format!(
-        "INSERT INTO {} ({}) VALUES ({})",
+    Ok(format!("INSERT INTO {} ({}) VALUES ({})",
         quote_qualified(proto, schema, table),
         cols.join(", "),
         vals.join(", ")
@@ -3045,10 +2956,7 @@ pub fn build_inserts(
         return String::new();
     }
     let mut out = String::new();
-    out.push_str(&format!(
-        "-- 从 PuTTYPlus 导出的数据（{} 行）\n",
-        rows.len()
-    ));
+    out.push_str(&trf!("-- 从 PuTTYPlus 导出的数据（{v0} 行）\n", v0 = rows.len()));
     for stmt in build_insert_rows(proto, schema, table, columns, types, rows) {
         out.push_str(&stmt);
         out.push('\n');
@@ -3092,8 +3000,7 @@ pub fn build_insert_rows(
                 }
             })
             .collect();
-        out.push(format!(
-            "INSERT INTO {} ({}) VALUES ({});",
+        out.push(format!("INSERT INTO {} ({}) VALUES ({});",
             quote_qualified(proto, schema, table),
             cols.join(", "),
             vals.join(", ")

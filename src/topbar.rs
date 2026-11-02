@@ -12,6 +12,7 @@ use gtk::prelude::*;
 
 use crate::menu;
 use crate::topmenus::MenuEntry;
+use crate::trf;
 
 /// 动作表：action 名 → action 本体。
 ///
@@ -106,10 +107,7 @@ pub fn build_body(
                 // 看得见（用户最容易忘的就是"我到底开没开凭据库"）。
                 let b = menu::item(
                     "dialog-password-symbolic",
-                    &format!(
-                        "凭据库…（{}）",
-                        crate::vaultui::state_short(crate::vault::state())
-                    ),
+                    &trf!("凭据库…（{v0}）", v0 = crate::vaultui::state_short(crate::vault::state())),
                     None,
                 );
                 let acts2 = acts.clone();
@@ -127,7 +125,7 @@ pub fn build_body(
                     let Some(b) = w.upgrade() else { return };
                     menu::set_item_label(
                         &b,
-                        &format!("凭据库…（{}）", crate::vaultui::state_short(st)),
+                        &trf!("凭据库…（{v0}）", v0 = crate::vaultui::state_short(st)),
                     );
                 });
                 // 窗口关了就把这条回调注销（否则死回调一直留在列表里）

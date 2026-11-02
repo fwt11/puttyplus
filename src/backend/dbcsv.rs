@@ -11,6 +11,7 @@
 //! - 包裹字段里的 `""` 表示一个 `"`；
 //! - 行分隔支持 `\n` 与 `\r\n`；
 //! - 文件开头的 UTF-8 BOM 会被去掉（Excel 导出的 CSV 常常带）。
+use crate::i18n::tr;
 
 /// 一份解析好的 CSV：行 × 列（短行的缺列补空串）。
 pub type CsvTable = Vec<Vec<String>>;
@@ -76,7 +77,7 @@ pub fn parse_csv(text: &str, sep: char) -> Result<CsvTable, String> {
         rows.push(std::mem::take(&mut row));
     }
     if in_quotes {
-        return Err("CSV 引号没有闭合（最后一行少一个 `\"`）".into());
+        return Err(tr("CSV 引号没有闭合（最后一行少一个 `\"`）").into());
     }
     // 短行补空串：真实 CSV 里"某行少一个逗号"很常见，
     // 整体失败不如补齐——补齐之后用户能在映射界面看到哪几行是空的。

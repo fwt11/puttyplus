@@ -17,6 +17,8 @@ use gtk::prelude::*;
 use vte4::prelude::*;
 
 use crate::replay::{self, Cast, EventKind};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 倍速档位。
 const SPEEDS: [f64; 6] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0];
@@ -43,17 +45,17 @@ pub fn pick_and_open() {
     let parent = parent();
     // builder 的 transient_for 收 &W 不收 Option，没父窗口就别设
     let mut b = gtk::FileChooserNative::builder()
-        .title("打开会话录制")
+        .title(tr("打开会话录制"))
         .action(gtk::FileChooserAction::Open)
-        .accept_label("回放")
-        .cancel_label("取消")
+        .accept_label(tr("回放"))
+        .cancel_label(tr("取消"))
         .modal(true);
     if let Some(p) = parent.as_ref() {
         b = b.transient_for(p);
     }
     let dlg = b.build();
     let filter = gtk::FileFilter::new();
-    filter.set_name(Some("会话录制（asciicast v2 / v3）"));
+    filter.set_name(Some(tr("会话录制（asciicast v2 / v3）")));
     filter.add_pattern("*.cast");
     filter.add_mime_type("application/x-asciicast");
     dlg.add_filter(&filter);
@@ -84,7 +86,7 @@ fn latest_dir() -> Option<PathBuf> {
 /// 回放最近一次录制（录制目录下时间最新的那个 `.cast`）。
 pub fn replay_latest() -> Result<(), String> {
     let p = latest()
-        .ok_or_else(|| format!("{} 下还没有录制文件。", crate::term::default_capture_dir().display()))?;
+        .ok_or_else(|| trf!("{v0} 下还没有录制文件。", v0 = crate::term::default_capture_dir().display()))?;
     open(&p)
 }
 
@@ -142,17 +144,16 @@ impl Player {
 
     fn sync_play_btn(&self) {
         self.play_btn.set_label(if self.playing.get() {
-            "⏸ 暂停"
+            tr("⏸ 暂停")
         } else {
-            "▶ 播放"
+            tr("▶ 播放")
         });
     }
 
     fn refresh(&self) {
         let pos = self.pos.get();
         let total = self.total();
-        self.pos_lbl.set_text(&format!(
-            "{} / {}",
+        self.pos_lbl.set_text(&format!("{} / {}",
             replay::fmt_time(pos.min(total)),
             replay::fmt_time(total)
         ));
@@ -193,9 +194,9 @@ impl Player {
                 EventKind::Exit => {
                     let code = ev.data.trim();
                     let txt = if code == "0" {
-                        "会话已正常退出".to_string()
+                        tr("会话已正常退出").to_string()
                     } else {
-                        format!("会话已退出（退出码 {code}）")
+                        trf!("会话已退出（退出码 {code}）", code = code)
                     };
                     self.input_lbl.set_text(&txt);
                     self.input_lbl.set_tooltip_text(Some(&txt));
@@ -349,12 +350,9 @@ fn parse_size(s: &str) -> Option<(i64, i64)> {
 fn build(path: &Path, cast: Cast) {
     let (rw, rh) = crate::settings::window_size("replay").unwrap_or((900, 600));
     let win = gtk::ApplicationWindow::builder()
-        .title(format!(
-            "回放 {} — PuTTYPlus",
-            path.file_name()
+        .title(trf!("回放 {v0} — PuTTYPlus", v0 = path.file_name()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "录制".into())
-        ))
+                .unwrap_or_else(|| tr("录制").into())))
         .default_width(rw)
         .default_height(rh)
         .build();
@@ -370,7 +368,7 @@ fn build(path: &Path, cast: Cast) {
     crate::term::set_appearance(&term, None, None);
     term.set_size(cast.cols, cast.rows);
 
-    let play_btn = gtk::Button::with_label("▶ 播放");
+    let play_btn = gtk::Button::with_label(tr("▶ 播放"));
     let pos_lbl = gtk::Label::new(None);
     pos_lbl.add_css_class("monospace");
     let input_lbl = gtk::Label::new(None);
@@ -386,7 +384,7 @@ fn build(path: &Path, cast: Cast) {
     let speed_dd =
         gtk::DropDown::from_strings(&speed_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     speed_dd.set_selected(2); // 默认 1×
-    speed_dd.set_tooltip_text(Some("回放速度"));
+    speed_dd.set_tooltip_text(Some(tr("回放速度")));
 
     let player = Rc::new(Player {
         cast,
@@ -409,14 +407,14 @@ fn build(path: &Path, cast: Cast) {
     bar_box.set_margin_bottom(4);
     bar_box.set_margin_start(8);
     bar_box.set_margin_end(8);
-    let b_restart = gtk::Button::with_label("⏮ 重播");
-    b_restart.set_tooltip_text(Some("从头播放"));
-    let b_skip = gtk::Button::with_label("⏭ 下一处输出");
-    b_skip.set_tooltip_text(Some("跳到下一次输出或标记（复盘时跳过等待）"));
+    let b_restart = gtk::Button::with_label(tr("⏮ 重播"));
+    b_restart.set_tooltip_text(Some(tr("从头播放")));
+    let b_skip = gtk::Button::with_label(tr("⏭ 下一处输出"));
+    b_skip.set_tooltip_text(Some(tr("跳到下一次输出或标记（复盘时跳过等待）")));
     bar_box.append(&b_restart);
     bar_box.append(&play_btn);
     bar_box.append(&b_skip);
-    bar_box.append(&gtk::Label::new(Some("速度")));
+    bar_box.append(&gtk::Label::new(Some(tr("速度"))));
     bar_box.append(&speed_dd);
     bar_box.append(&pos_lbl);
 
@@ -456,8 +454,8 @@ fn build(path: &Path, cast: Cast) {
     root.append(&input_lbl);
 
     let tip = gtk::Label::new(Some(
-        "回放只是把录到的内容重放一遍：颜色是按屏幕还原的；\
-         输出快过采样间隔、滚动缓冲被挤爆时会缺；输入事件不录（文件里不会有你敲的密码）。",
+        tr("回放只是把录到的内容重放一遍：颜色是按屏幕还原的；\
+         输出快过采样间隔、滚动缓冲被挤爆时会缺；输入事件不录（文件里不会有你敲的密码）。"),
     ));
     tip.add_css_class("dim-label");
     tip.set_xalign(0.0);

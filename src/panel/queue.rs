@@ -12,6 +12,8 @@ use crate::util::{human_size, path_basename, path_parent};
 
 use super::worker::{XferKind, XferShared, XferState};
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 pub const QCOL_DIR: i32 = 0;
 pub const QCOL_FILE: i32 = 1;
@@ -47,12 +49,7 @@ pub struct QueueUi {
 /// ⚠️ 真正的设置在**首选项中心 →「传输」页**（阶段 69 / 审计 P1-4）——
 /// 这里只把当前值说清楚，不让用户在这儿改（改设置的地方只留一处）。
 pub fn xfer_summary() -> String {
-    format!(
-        "断点续传 {}　校验 SHA-1 {}　并发 {}",
-        if crate::settings::xfer_resume() { "开" } else { "关" },
-        if crate::settings::xfer_checksum() { "开" } else { "关" },
-        crate::settings::xfer_parallel()
-    )
+    trf!("断点续传 {v0}　校验 SHA-1 {v1}　并发 {v2}", v0 = if crate::settings::xfer_resume() { tr("开") } else { tr("关") }, v1 = if crate::settings::xfer_checksum() { tr("开") } else { tr("关") }, v2 = crate::settings::xfer_parallel())
 }
 
 pub fn ensure(st: &Rc<PanelState>) {
@@ -60,7 +57,7 @@ pub fn ensure(st: &Rc<PanelState>) {
         return;
     }
     let win = gtk::Window::new();
-    win.set_title(Some("传输队列 — PuTTYPlus"));
+    win.set_title(Some(tr("传输队列 — PuTTYPlus")));
     let (qw, qh) = crate::settings::window_size("queue").unwrap_or((720, 320));
     win.set_default_size(qw, qh);
 
@@ -68,14 +65,14 @@ pub fn ensure(st: &Rc<PanelState>) {
 
     let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let bc = crate::a11y::icon_button("process-stop-symbolic");
-    bc.set_tooltip_text(Some("取消选中的传输"));
+    bc.set_tooltip_text(Some(tr("取消选中的传输")));
     bc.add_css_class("flat");
     {
         let st2 = Rc::clone(st);
         bc.connect_clicked(move |_| cancel_selected(&st2));
     }
     let bcl = crate::a11y::icon_button("edit-clear-all-symbolic");
-    bcl.set_tooltip_text(Some("清除已完成/已取消/失败的项"));
+    bcl.set_tooltip_text(Some(tr("清除已完成/已取消/失败的项")));
     bcl.add_css_class("flat");
     {
         let st2 = Rc::clone(st);
@@ -94,12 +91,12 @@ pub fn ensure(st: &Rc<PanelState>) {
     summary.add_css_class("dim-label");
     summary.add_css_class("pp-hint");
     summary.set_tooltip_text(Some(
-        "这些是全局设置，对之后新建的传输任务生效。\n\
-         要改点「去设置」——设置只在首选项中心里改一处。",
+        tr("这些是全局设置，对之后新建的传输任务生效。\n\
+         要改点「去设置」——设置只在首选项中心里改一处。"),
     ));
     bbox.append(&summary);
-    let b_set = gtk::Button::with_label("去设置…");
-    b_set.set_tooltip_text(Some("打开首选项中心的「传输」页"));
+    let b_set = gtk::Button::with_label(tr("去设置…"));
+    b_set.set_tooltip_text(Some(tr("打开首选项中心的「传输」页")));
     b_set.connect_clicked(|_| {
         crate::settingsui::open(crate::settingsui::Page::Transfer);
     });
@@ -120,11 +117,11 @@ pub fn ensure(st: &Rc<PanelState>) {
 
     let view = gtk::TreeView::with_model(&model);
     let cols: [(&str, bool, bool); 5] = [
-        ("方向", false, false),
-        ("文件", true, false),
-        ("进度", false, true),
-        ("大小", false, false),
-        ("速度", false, false),
+        (tr("方向"), false, false),
+        (tr("文件"), true, false),
+        (tr("进度"), false, true),
+        (tr("大小"), false, false),
+        (tr("速度"), false, false),
     ];
     for (i, (title, expand, progress)) in cols.iter().enumerate() {
         let col = gtk::TreeViewColumn::new();
@@ -152,7 +149,7 @@ pub fn ensure(st: &Rc<PanelState>) {
         view.append_column(&col);
     }
     let col_state = gtk::TreeViewColumn::new();
-    col_state.set_title("状态");
+    col_state.set_title(tr("状态"));
     let rs = gtk::CellRendererText::new();
     col_state.pack_start(&rs, true);
     col_state.add_attribute(&rs, "text", QCOL_STATE);
@@ -201,20 +198,20 @@ pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
     // 所以这里要按 kind 显示，别一律写成"上传"
     let (dir, file) = match it_ui.kind {
         XferKind::Transfer => (
-            if it_ui.upload { "⬆ 上传" } else { "⬇ 下载" },
+            if it_ui.upload { tr("⬆ 上传") } else { tr("⬇ 下载") },
             format!("{} → {}", it_ui.src, it_ui.dst_dir),
         ),
-        XferKind::Mkdir => ("＋ 建目录", it_ui.src.clone()),
-        XferKind::Remove => ("－ 删除", it_ui.src.clone()),
-        XferKind::MirrorUpload => ("⬆ 镜像", format!("{} → {}", it_ui.src, it_ui.dst_dir)),
+        XferKind::Mkdir => (tr("＋ 建目录"), it_ui.src.clone()),
+        XferKind::Remove => (tr("－ 删除"), it_ui.src.clone()),
+        XferKind::MirrorUpload => (tr("⬆ 镜像"), format!("{} → {}", it_ui.src, it_ui.dst_dir)),
         XferKind::Relay => (
-            "⇄ 跨服务器",
+            tr("⇄ 跨服务器"),
             format!("{} → {}", it_ui.src, it_ui.dst_dir),
         ),
     };
     let pct: i32 = 0;
     let dash = "-";
-    let waiting = "等待";
+    let waiting = tr("等待");
     let id = it_ui.id;
     let iter = qu.model.append();
     qu.model.set(
@@ -269,16 +266,16 @@ pub fn flush(st: &Rc<PanelState>) {
         };
         let state = match g.state {
             XferState::Done => match &g.msg {
-                Some(m) => format!("完成（{m}）"),
-                None => "完成".to_string(),
+                Some(m) => trf!("完成（{m}）", m = m),
+                None => tr("完成").to_string(),
             },
-            XferState::Skip => "已跳过".to_string(),
-            XferState::Err => g.msg.clone().unwrap_or_else(|| "错误".into()),
-            XferState::Cancel => "已取消".to_string(),
+            XferState::Skip => tr("已跳过").to_string(),
+            XferState::Err => g.msg.clone().unwrap_or_else(|| tr("错误").into()),
+            XferState::Cancel => tr("已取消").to_string(),
             XferState::Run => {
-                if g.cur.is_empty() { "传输中".into() } else { g.cur.clone() }
+                if g.cur.is_empty() { tr("传输中").into() } else { g.cur.clone() }
             }
-            XferState::Wait => "等待".to_string(),
+            XferState::Wait => tr("等待").to_string(),
         };
         // 失败色跟着主题走（CellRenderer 只吃颜色字符串，不经过 CSS）
         let fail = if g.state == XferState::Err {
@@ -304,12 +301,12 @@ pub fn flush(st: &Rc<PanelState>) {
             let cwd = st.pane_cwd(remote_src);
             if path_parent(&it.src) == cwd {
                 let (ppct, ptext) = match g.state {
-                    XferState::Wait => (0, "等待".to_string()),
+                    XferState::Wait => (0, tr("等待").to_string()),
                     XferState::Run => (pct, format!("{pct}%")),
-                    XferState::Done => (100, "完成".to_string()),
-                    XferState::Skip => (0, "跳过".to_string()),
-                    XferState::Err => (0, "失败".to_string()),
-                    XferState::Cancel => (0, "取消".to_string()),
+                    XferState::Done => (100, tr("完成").to_string()),
+                    XferState::Skip => (0, tr("跳过").to_string()),
+                    XferState::Err => (0, tr("失败").to_string()),
+                    XferState::Cancel => (0, tr("取消").to_string()),
                 };
                 super::pane::set_progress(
                     &st.pane(remote_src),
@@ -430,7 +427,7 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
     let pop = crate::menu::popover(view);
     let vb = crate::menu::body();
 
-    let b_cancel = crate::menu::item("process-stop-symbolic", "取消", None);
+    let b_cancel = crate::menu::item("process-stop-symbolic", tr("取消"), None);
     crate::menu::danger(&b_cancel);
     {
         let st2 = Rc::clone(st);
@@ -442,7 +439,7 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
     }
     vb.append(&b_cancel);
 
-    let b_remove = crate::menu::item("edit-delete-symbolic", "删除", None);
+    let b_remove = crate::menu::item("edit-delete-symbolic", tr("删除"), None);
     crate::menu::danger(&b_remove);
     {
         let st2 = Rc::clone(st);
@@ -456,7 +453,7 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
 
     vb.append(&crate::menu::sep());
 
-    let b_clear = crate::menu::item("edit-clear-all-symbolic", "清除已完成", None);
+    let b_clear = crate::menu::item("edit-clear-all-symbolic", tr("清除已完成"), None);
     {
         let st2 = Rc::clone(st);
         let pop2 = pop.clone();

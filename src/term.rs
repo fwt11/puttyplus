@@ -16,6 +16,8 @@ use vte4::prelude::*;
 use crate::args::ConnOptions;
 use crate::menu;
 use crate::util::find_program_in_path;
+use crate::i18n::tr;
+use crate::trf;
 
 const AUTOFEEED_MAX: i32 = 3;
 const AUTOFEEED_MS: u64 = 30_000;
@@ -186,8 +188,7 @@ fn build_bridge_argv(o: &ConnOptions) -> Option<Vec<String>> {
         ]),
         "serial" => {
             // sercfg 与 PuTTY -sercfg 兼容：波特率[,数据位[,校验[,停止位[,流控]]]]
-            let sercfg = format!(
-                "{},{},{},{},{}",
+            let sercfg = format!("{},{},{},{},{}",
                 o.serial_baud, o.serial_data, o.serial_parity, o.serial_stop, o.serial_flow
             );
             Some(vec![selfs, "--bridge-serial".into(), o.host.clone(), sercfg])
@@ -363,8 +364,8 @@ impl TermPane {
     /// ⚠️ 以前只能靠回车跳上一个，鼠标用户没辙（阶段 84 补的）。
     pub fn find_nav_buttons(&self) -> Vec<(&'static str, gtk::Button)> {
         vec![
-            ("上一个", self.inner.search_prev_btn.clone()),
-            ("下一个", self.inner.search_next_btn.clone()),
+            (tr("上一个"), self.inner.search_prev_btn.clone()),
+            (tr("下一个"), self.inner.search_next_btn.clone()),
         ]
     }
 
@@ -415,7 +416,7 @@ impl TermPane {
         // 也没有"替换"（回滚缓冲改不了）。
         let fb = crate::findbar::build(crate::findbar::FindOpts::minimal());
         let search_entry = fb.find_entry.clone();
-        search_entry.set_placeholder_text(Some("在终端中查找…"));
+        search_entry.set_placeholder_text(Some(tr("在终端中查找…")));
         {
             let term2 = term.clone();
             search_entry.connect_changed(move |e| {
@@ -436,12 +437,7 @@ impl TermPane {
             {
                 let e = search_entry.clone();
                 if let Some(b) = crate::shortcuts::by_display("Shift+Enter") {
-                    e.set_tooltip_text(Some(&format!(
-                        "回车：下一个（{}
-{}：上一个）",
-                        next_hint(),
-                        b.display
-                    )));
+                    e.set_tooltip_text(Some(&trf!("回车：下一个（{v0}\n{v1}：上一个）", v0 = next_hint(), v1 = b.display)));
                 }
             }
         }
@@ -502,7 +498,7 @@ impl TermPane {
         banner_bc.add_css_class("pp-chip");
         banner_bc.add_css_class("pp-chip-warn");
         banner_bc.set_valign(gtk::Align::Center);
-        banner_bc.set_tooltip_text(Some("点击停止广播（Alt+Shift+B）"));
+        banner_bc.set_tooltip_text(Some(tr("点击停止广播（Alt+Shift+B）")));
         banner_bc.connect_clicked(|_| crate::tabs::set_broadcast(false));
         let banner_log = gtk::Label::new(None);
         banner_log.add_css_class("pp-chip");
@@ -521,9 +517,9 @@ impl TermPane {
         banner_re.add_css_class("pp-chip");
         banner_re.add_css_class("pp-chip-warn");
         banner_re.set_valign(gtk::Align::Center);
-        banner_re.set_label("会话已结束 · 点此重新连接");
+        banner_re.set_label(tr("会话已结束 · 点此重新连接"));
         banner_re.set_tooltip_text(Some(
-            "重新建立这条 SSH 会话（和右键菜单里的「重新连接终端」是同一个动作）",
+            tr("重新建立这条 SSH 会话（和右键菜单里的「重新连接终端」是同一个动作）"),
         ));
         let banner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         banner.set_margin_top(4);
@@ -735,9 +731,9 @@ impl TermPane {
     /// 广播状态同步到本面板的 UI：状态条 + 右键菜单里的勾选项。
     pub fn sync_broadcast_ui(&self, on: bool, targets: usize) {
         let text = if targets > 0 {
-            format!("⤷ 广播中 · 按键同时发往其它 {targets} 个终端（点击停用）")
+            trf!("⤷ 广播中 · 按键同时发往其它 {targets} 个终端（点击停用）", targets = targets)
         } else {
-            "⤷ 广播中 · 暂无其它终端可接收（点击停用）".to_string()
+            tr("⤷ 广播中 · 暂无其它终端可接收（点击停用）").to_string()
         };
         self.inner.banner_bc.set_label(&text);
         self.inner.banner_bc.set_visible(on);
@@ -890,7 +886,7 @@ fn log_write(log: &mut TermLog, lines: &[String]) {
         return;
     }
     if log.file.write_all(buf.as_bytes()).and_then(|_| log.file.flush()).is_err() {
-        eprintln!("[日志] 写入 {} 失败，已停止记录", log.path.display());
+        eprintln!("{}", trf!("[日志] 写入 {v0} 失败，已停止记录", v0 = log.path.display()));
     }
 }
 
@@ -931,9 +927,8 @@ impl TermPane {
 
     fn start_log(&self) -> Result<(), String> {
         let dir = default_log_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
-        let path = dir.join(format!(
-            "{}-{}.log",
+        std::fs::create_dir_all(&dir).map_err(|e| trf!("创建日志目录失败：{e}", e = e))?;
+        let path = dir.join(format!("{}-{}.log",
             log_stem(&session_stem(&self.inner.opts)),
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         ));
@@ -941,12 +936,8 @@ impl TermPane {
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|e| format!("打开日志文件失败：{e}"))?;
-        let head = format!(
-            "# PuTTYPlus 终端日志\n# 会话: {}\n# 开始: {}\n",
-            session_stem(&self.inner.opts),
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        );
+            .map_err(|e| trf!("打开日志文件失败：{e}", e = e))?;
+        let head = trf!("# PuTTYPlus 终端日志\n# 会话: {v0}\n# 开始: {v1}\n", v0 = session_stem(&self.inner.opts), v1 = chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
         use std::io::Write;
         let _ = file.write_all(head.as_bytes());
 
@@ -986,10 +977,10 @@ impl TermPane {
     pub fn sync_log_ui(&self) {
         match self.log_path() {
             Some(p) => {
-                self.inner.banner_log.set_text(&format!("⤷ 记录中 → {p}"));
+                self.inner.banner_log.set_text(&trf!("⤷ 记录中 → {p}", p = p));
                 self.inner.banner_log.set_tooltip_text(Some(
-                    "终端屏幕文字逐行落盘。同一行被反复改写会记多行；\
-                     两次采样之间滚过一屏以上或被清屏会漏记——抓的是屏幕，不是原始字节流。",
+                    tr("终端屏幕文字逐行落盘。同一行被反复改写会记多行；\
+                     两次采样之间滚过一屏以上或被清屏会漏记——抓的是屏幕，不是原始字节流。"),
                 ));
                 self.inner.banner_log.set_visible(true);
             }
@@ -1076,13 +1067,11 @@ impl TermInner {
                 // 丢了行就明说：录制横幅最怕"看着在录、其实啥也没录到"
                 let lost = self.rec_lost();
                 let lost_note = if lost > 0 {
-                    format!("· 已丢 {lost} 行")
+                    trf!("· 已丢 {lost} 行", lost = lost)
                 } else {
                     String::new()
                 };
-                let l = gtk::Label::new(Some(&format!(
-                    "● 录制中 → {p}（点此停止）{lost_note}"
-                )));
+                let l = gtk::Label::new(Some(&trf!("● 录制中 → {p}（点此停止）{lost_note}", p = p, lost_note = lost_note)));
                 l.add_css_class("pp-hint");
                 l.set_xalign(0.0);
                 l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -1361,7 +1350,7 @@ fn rec_poll(inner: &Rc<TermInner>) -> glib::ControlFlow {
         }
         r.lost += lost_now;
         if r.rec.is_broken() {
-            eprintln!("[录制] 写入 {} 失败，已停止记录", r.rec.path().display());
+            eprintln!("{}", trf!("[录制] 写入 {v0} 失败，已停止记录", v0 = r.rec.path().display()));
         }
     }
     // 丢行了就把横幅上的「已丢 N 行」刷新出来
@@ -1391,9 +1380,8 @@ impl TermPane {
 
     fn start_recording(&self) -> Result<(), String> {
         let dir = default_capture_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建录制目录失败：{e}"))?;
-        let path = dir.join(format!(
-            "{}-{}.cast",
+        std::fs::create_dir_all(&dir).map_err(|e| trf!("创建录制目录失败：{e}", e = e))?;
+        let path = dir.join(format!("{}-{}.cast",
             log_stem(&session_stem(&self.inner.opts)),
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         ));
@@ -1408,7 +1396,7 @@ impl TermPane {
             rows,
             &session_stem(&self.inner.opts),
         )
-        .map_err(|e| format!("打开录制文件失败：{e}"))?;
+        .map_err(|e| trf!("打开录制文件失败：{e}", e = e))?;
         // 起手就打个标记：回放时一眼看出这段录的是什么
         let mut rec = rec;
         rec.marker(&session_stem(&self.inner.opts));
@@ -1493,7 +1481,7 @@ fn connect_signals(inner: &Rc<TermInner>) {
                 r.rec.exit(status as i64);
             }
             inner.term.feed(
-                "\r\n\x1b[1;33m== 会话已结束（状态码见上）。点上方「重新连接」可重建会话 ==\x1b[0m\r\n"
+                tr("\r\n\x1b[1;33m== 会话已结束（状态码见上）。点上方「重新连接」可重建会话 ==\x1b[0m\r\n")
                     .as_bytes(),
             );
             // 阶段 25：会话一断就把「重新连接」摆出来。
@@ -1702,34 +1690,25 @@ pub(crate) fn encode_key(keyval: gdk::Key, mods: gdk::ModifierType) -> Option<Ve
 /// 根本不录**（明文密码不落盘）⇒ 照旧说会让人以为文件里存着自己敲的
 /// 密码；而且写出的是 **asciicast v3**（只有**读入**才兼容 v2）。
 pub fn rec_menu_tooltip(dir: &std::path::Path) -> String {
-    format!(
-        "把这个终端录成 asciicast v3（{} 下的 会话名-时间戳.cast）。\n\
-         录的是屏幕渲染出来的行（带颜色），不是原始字节流：\n\
-         · 你敲的命令会一个个敲出来（光标行逐次重写）；\n\
-         · 输入事件不录，所以文件里不会有你敲的密码；\n\
-         · 已经输出完的行被反复改写只留最后一次（进度条这类）；\n\
-         · 终端被清屏会漏；输出快过采样间隔时可能丢行（横幅上会写丢了多少行）。\n\
-         分屏的两个终端各自录制；互不影响。",
-        dir.display()
-    )
+    trf!("把这个终端录成 asciicast v3（{v0} 下的 会话名-时间戳.cast）。\n录的是屏幕渲染出来的行（带颜色），不是原始字节流：\n· 你敲的命令会一个个敲出来（光标行逐次重写）；\n· 输入事件不录，所以文件里不会有你敲的密码；\n· 已经输出完的行被反复改写只留最后一次（进度条这类）；\n· 终端被清屏会漏；输出快过采样间隔时可能丢行（横幅上会写丢了多少行）。\n分屏的两个终端各自录制；互不影响。", v0 = dir.display())
 }
 
 /// 「打开 .cast 回放…」右键菜单项的说明。
 pub fn replay_menu_tooltip() -> &'static str {
-    "挑一个 asciicast v2 / v3 文件回放（也可以直接用 asciinema play 播）。\n\
-     回放只是把录下来的屏幕重放一遍，不会真的把按键发出去。"
+    tr("挑一个 asciicast v2 / v3 文件回放（也可以直接用 asciinema play 播）。\n\
+     回放只是把录下来的屏幕重放一遍，不会真的把按键发出去。")
 }
 
 /// 录制指示条（横幅）的说明。
 pub fn rec_banner_tooltip() -> &'static str {
-    "把会话录成 asciicast v3（.cast），右键终端「打开 .cast 回放」可回放。\n\
+    tr("把会话录成 asciicast v3（.cast），右键终端「打开 .cast 回放」可回放。\n\
      录的是屏幕渲染出来的行（带颜色），不是原始字节流：\n\
      · 你敲的命令会一个个敲出来（光标行逐次重写）；\n\
      · 输入事件不录，所以文件里不会有你敲的密码；\n\
      · 已经输出完的行被反复改写只留最后一次（进度条这类）；\n\
      · 终端被清屏会漏；\n\
      · 输出快过采样间隔、把滚动缓冲挤爆时会丢（横幅上会写丢了多少行）。\n\
-     Ctrl+Shift+O 随时打开回放窗口。"
+     Ctrl+Shift+O 随时打开回放窗口。")
 }
 
 /* ---------------- 右键菜单 / 中键粘贴 ---------------- */
@@ -1761,7 +1740,7 @@ fn install_context_menu(inner: &Rc<TermInner>) {
     };
     // 菜单按钮也只抓 Weak<TermInner>：抓终端本身会连成环
     let weak_btns = Rc::downgrade(inner);
-    let b_copy = plain("edit-copy-symbolic", "复制", Some("Ctrl+Shift+C"));
+    let b_copy = plain("edit-copy-symbolic", tr("复制"), Some("Ctrl+Shift+C"));
     {
         let w = weak_btns.clone();
         b_copy.connect_clicked(move |_| {
@@ -1770,7 +1749,7 @@ fn install_context_menu(inner: &Rc<TermInner>) {
             }
         });
     }
-    let b_paste = plain("edit-paste-symbolic", "粘贴", Some("Ctrl+Shift+V"));
+    let b_paste = plain("edit-paste-symbolic", tr("粘贴"), Some("Ctrl+Shift+V"));
     {
         let w = weak_btns.clone();
         b_paste.connect_clicked(move |_| {
@@ -1780,10 +1759,10 @@ fn install_context_menu(inner: &Rc<TermInner>) {
         });
     }
     vbox.append(&menu::sep());
-    let b_re = plain("view-refresh-symbolic", "重新连接终端", None);
+    let b_re = plain("view-refresh-symbolic", tr("重新连接终端"), None);
     b_re.set_tooltip_text(Some(
-        "把这个终端的会话断开重连一次（ssh 子进程会被杀掉再起一个）。\n\
-         会话已经断了的话，屏幕上那条「会话已结束」也可以直接点。",
+        tr("把这个终端的会话断开重连一次（ssh 子进程会被杀掉再起一个）。\n\
+         会话已经断了的话，屏幕上那条「会话已结束」也可以直接点。"),
     ));
     {
         let inner2 = Rc::clone(inner);
@@ -1915,9 +1894,9 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
             });
             vbox.append(&b);
         };
-        split("view-dual-symbolic", "左右分屏", false, false);
-        split("view-continuous-symbolic", "上下分屏", true, false);
-        split("window-close-symbolic", "关闭当前终端", false, true);
+        split("view-dual-symbolic", tr("左右分屏"), false, false);
+        split("view-continuous-symbolic", tr("上下分屏"), true, false);
+        split("window-close-symbolic", tr("关闭当前终端"), false, true);
 
         // 快速命令：往**这个**终端里敲一行预设命令。
         //
@@ -1927,12 +1906,12 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
         {
             let b = menu::item(
                 "utilities-terminal-symbolic",
-                "快速命令…",
+                tr("快速命令…"),
                 Some("Ctrl+Shift+K"),
             );
             b.set_tooltip_text(Some(
-                "挑一条预设命令，直接敲进「这个」终端（不是当前焦点那个）。\n\
-                 预设命令在「工具 → 快速命令」里维护。",
+                tr("挑一条预设命令，直接敲进「这个」终端（不是当前焦点那个）。\n\
+                 预设命令在「工具 → 快速命令」里维护。"),
             ));
             let pg = page.clone();
             let po = pop_owner.clone();
@@ -1959,15 +1938,15 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
         // 3.2 输入广播（勾选标记在右侧，点击整行即开关）
         let cb = menu::toggle(
             "network-transmit-receive-symbolic",
-            "按键广播到其它终端",
+            tr("按键广播到其它终端"),
             Some("Alt+Shift+B"),
             crate::tabs::broadcast_on(),
         );
         cb.set_tooltip_text(Some(
-            "打开后，在任意终端里敲的按键会同时发给其它终端（Alt+Shift+B 开关）。\n\
+            tr("打开后，在任意终端里敲的按键会同时发给其它终端（Alt+Shift+B 开关）。\n\
              分屏的两个终端是各自独立的会话，所以也会互相转发——\n\
              不想同步时随时关掉即可。\n\
-             目标终端若开了应用光标键（vi/less），方向键仍按 ESC [ A 发送。",
+             目标终端若开了应用光标键（vi/less），方向键仍按 ESC [ A 发送。"),
         ));
         {
             let po = pop_owner.clone();
@@ -1983,18 +1962,11 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
         // 3.4 终端日志
         let cb = menu::toggle(
             "document-save-symbolic",
-            "记录终端到日志文件",
+            tr("记录终端到日志文件"),
             None,
             inner.log_path().is_some(),
         );
-        cb.set_tooltip_text(Some(&format!(
-            "把这个终端的屏幕文字逐行写进 {} 下的文件（会话名-时间戳.log）。\n\
-             抓的是屏幕而不是原始字节流：同一行被反复改写会记多行，\
-             滚过一屏以上或被清屏会漏记。\n\
-             文件里是纯文字、不含颜色（要颜色、能回放请用「录制会话到 .cast」）。\n\
-             分屏的两个终端各自开关、各自记；互不影响。",
-            default_log_dir().display()
-        )));
+        cb.set_tooltip_text(Some(&trf!("把这个终端的屏幕文字逐行写进 {v0} 下的文件（会话名-时间戳.log）。\n抓的是屏幕而不是原始字节流：同一行被反复改写会记多行，滚过一屏以上或被清屏会漏记。\n文件里是纯文字、不含颜色（要颜色、能回放请用「录制会话到 .cast」）。\n分屏的两个终端各自开关、各自记；互不影响。", v0 = default_log_dir().display())));
         let pane_log = pane_menu.clone();
         let po_log = pop_owner.clone();
         cb.connect_clicked(move |c| {
@@ -2003,7 +1975,7 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
             }
             if c.is_active() {
                 if let Err(e) = pane_log.toggle_log() {
-                    crate::panel::dialogs::show_error(None, "无法记录日志", &e);
+                    crate::panel::dialogs::show_error(None, tr("无法记录日志"), &e);
                 }
             } else {
                 pane_log.stop_log();
@@ -2015,7 +1987,7 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
         // 6.1 会话录制
         let cb = menu::toggle(
             "media-record-symbolic",
-            "录制会话到 .cast",
+            tr("录制会话到 .cast"),
             None,
             inner.rec_path().is_some(),
         );
@@ -2028,7 +2000,7 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
             }
             if c.is_active() {
                 if let Err(e) = pane_rec.toggle_recording() {
-                    crate::panel::dialogs::show_error(None, "无法录制会话", &e);
+                    crate::panel::dialogs::show_error(None, tr("无法录制会话"), &e);
                 }
             } else {
                 pane_rec.stop_recording();
@@ -2041,7 +2013,7 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
 
         let b_play = menu::item(
             "media-playback-start-symbolic",
-            "打开 .cast 回放…",
+            tr("打开 .cast 回放…"),
             Some("Ctrl+Shift+O"),
         );
         b_play.set_tooltip_text(Some(replay_menu_tooltip()));
@@ -2049,13 +2021,13 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
         b_play.connect_clicked(|_| crate::replayui::pick_and_open());
         vbox.append(&b_play);
 
-        let b_last = menu::item("document-open-recent-symbolic", "回放最近一次录制", None);
+        let b_last = menu::item("document-open-recent-symbolic", tr("回放最近一次录制"), None);
         let has_last = crate::term::latest_capture_name().is_some();
         b_last.set_sensitive(has_last);
         b_last.set_tooltip_text(Some(if has_last {
-            "直接打开录制目录里时间最新的那个 .cast"
+            tr("直接打开录制目录里时间最新的那个 .cast")
         } else {
-            "录制目录里还没有 .cast 文件"
+            tr("录制目录里还没有 .cast 文件")
         }));
         close_menu(&b_last, pop_owner.clone());
         b_last.connect_clicked(|_| {
@@ -2093,7 +2065,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
     if argv.is_empty() {
         alert::<gtk::Window>(
             None,
-            "找不到可用的客户端程序（ssh/plink/telnet/nc）。\n请安装 openssh-client。",
+            tr("找不到可用的客户端程序（ssh/plink/telnet/nc）。\n请安装 openssh-client。"),
         );
         return;
     }
@@ -2114,7 +2086,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
     let pty = match vte::Pty::new_sync(vte::PtyFlags::empty(), None::<&gio::Cancellable>) {
         Ok(p) => p,
         Err(e) => {
-            alert::<gtk::Window>(None, &format!("创建 PTY 失败：{e}"));
+            alert::<gtk::Window>(None, &trf!("创建 PTY 失败：{e}", e = e));
             return;
         }
     };
@@ -2159,9 +2131,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 inner_cb.sync_banner_visibility();
                 alert::<gtk::Window>(
                     None,
-                    &format!(
-                        "启动 SSH 客户端失败：{e}\n\n可点终端上方的「重新连接」，或安装 openssh-client / putty。"
-                    ),
+                    &trf!("启动 SSH 客户端失败：{e}\n\n可点终端上方的「重新连接」，或安装 openssh-client / putty。", e = e),
                 );
             }
         },

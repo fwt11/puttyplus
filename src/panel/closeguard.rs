@@ -23,6 +23,8 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use super::PanelState;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 关闭前的脏状态统计。
 ///
@@ -72,28 +74,16 @@ impl DirtyInfo {
     pub fn describe(&self) -> String {
         let mut s = String::new();
         if self.edited_files > 0 {
-            s.push_str(&format!(
-                "· {} 个文件有未保存的修改\n",
-                self.edited_files
-            ));
+            s.push_str(&trf!("· {v0} 个文件有未保存的修改\n", v0 = self.edited_files));
         }
         if self.db_edits > 0 {
-            s.push_str(&format!(
-                "· {} 张数据表有待保存的改动\n",
-                self.db_edits
-            ));
+            s.push_str(&trf!("· {v0} 张数据表有待保存的改动\n", v0 = self.db_edits));
         }
         if self.db_struct_edits > 0 {
-            s.push_str(&format!(
-                "· {} 张表的结构有待保存的改动\n",
-                self.db_struct_edits
-            ));
+            s.push_str(&trf!("· {v0} 张表的结构有待保存的改动\n", v0 = self.db_struct_edits));
         }
         if self.running_xfers > 0 {
-            s.push_str(&format!(
-                "· 会取消 {} 个正在进行的传输\n",
-                self.running_xfers
-            ));
+            s.push_str(&trf!("· 会取消 {v0} 个正在进行的传输\n", v0 = self.running_xfers));
         }
         s
     }
@@ -243,16 +233,16 @@ const SAVE: gtk::ResponseType = gtk::ResponseType::Other(2);
 /// 弹统一确认框（**同步**：模态 + 嵌套主循环）。
 pub fn ask(parent: Option<&gtk::Window>, info: &DirtyInfo) -> CloseChoice {
     let mut buttons: Vec<(&str, gtk::ResponseType)> =
-        vec![("取消", gtk::ResponseType::Cancel)];
+        vec![(tr("取消"), gtk::ResponseType::Cancel)];
     if info.savable() {
-        buttons.push(("不保存关闭", DISCARD));
-        buttons.push(("保存并关闭", SAVE));
+        buttons.push((tr("不保存关闭"), DISCARD));
+        buttons.push((tr("保存并关闭"), SAVE));
     } else {
-        buttons.push(("关闭", DISCARD));
+        buttons.push((tr("关闭"), DISCARD));
     }
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
-    let dlg = crate::windows::dialog("确认关闭", parent, &buttons);
-    let body = format!("有未保存的工作：\n\n{}", info.describe());
+    let dlg = crate::windows::dialog(tr("确认关闭"), parent, &buttons);
+    let body = trf!("有未保存的工作：\n\n{v0}", v0 = info.describe());
     let lbl = gtk::Label::new(Some(&body));
     lbl.set_wrap(true);
     lbl.set_xalign(0.0);

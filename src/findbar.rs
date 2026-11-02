@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
+use crate::i18n::tr;
 
 /// 查找/替换条。
 ///
@@ -97,23 +98,23 @@ pub fn build(opts: FindOpts) -> FindBar {
 
     // ---- 查找行 ----
     let find_entry = gtk::Entry::new();
-    find_entry.set_placeholder_text(Some("查找…"));
+    find_entry.set_placeholder_text(Some(tr("查找…")));
     find_entry.set_hexpand(true);
 
     // 「区分大小写」：用文字 "Aa"（业界通用写法，没有对应的标准图标）
     let case_btn = gtk::ToggleButton::new();
     case_btn.set_label("Aa");
-    case_btn.set_tooltip_text(Some("区分大小写"));
+    case_btn.set_tooltip_text(Some(tr("区分大小写")));
     // 默认**区分**大小写：编辑器的主要用途是看代码，大小写不同就是不同的东西
     case_btn.set_active(true);
     case_btn.set_visible(opts.with_case);
 
     let prev_btn = crate::a11y::icon_button("go-up-symbolic");
-    prev_btn.set_tooltip_text(Some("上一个匹配 (Shift+Enter)"));
+    prev_btn.set_tooltip_text(Some(tr("上一个匹配 (Shift+Enter)")));
     let next_btn = crate::a11y::icon_button("go-down-symbolic");
-    next_btn.set_tooltip_text(Some("下一个匹配 (Enter)"));
+    next_btn.set_tooltip_text(Some(tr("下一个匹配 (Enter)")));
     let close_btn = crate::a11y::icon_button("window-close-symbolic");
-    close_btn.set_tooltip_text(Some("关闭查找条 (Esc)"));
+    close_btn.set_tooltip_text(Some(tr("关闭查找条 (Esc)")));
     close_btn.set_visible(opts.with_close);
 
     let count_lbl = gtk::Label::new(Some("—"));
@@ -135,13 +136,13 @@ pub fn build(opts: FindOpts) -> FindBar {
     // 「替换 / 全部替换」**保留文字**：两个都是替换动作，光看图标分不出
     // 「替换一个」和「替换全部」——这跟弹窗里的表单按钮一个道理。
     let replace_entry = gtk::Entry::new();
-    replace_entry.set_placeholder_text(Some("替换为…"));
+    replace_entry.set_placeholder_text(Some(tr("替换为…")));
     replace_entry.set_hexpand(true);
 
-    let replace_btn = gtk::Button::with_label("替换");
-    replace_btn.set_tooltip_text(Some("替换当前这一个匹配"));
-    let replace_all_btn = gtk::Button::with_label("全部替换");
-    replace_all_btn.set_tooltip_text(Some("替换所有匹配"));
+    let replace_btn = gtk::Button::with_label(tr("替换"));
+    replace_btn.set_tooltip_text(Some(tr("替换当前这一个匹配")));
+    let replace_all_btn = gtk::Button::with_label(tr("全部替换"));
+    replace_all_btn.set_tooltip_text(Some(tr("替换所有匹配")));
 
     let replace_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     replace_row.append(&replace_entry);

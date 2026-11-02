@@ -29,6 +29,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::conn::SftpBackend;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 递归深度上限（与传输侧一致）。超了记成冲突，不静默截断。
 pub const MAX_DEPTH: usize = 32;
@@ -145,7 +147,7 @@ pub fn walk_local(root: &Path, ig: &Ignore) -> Result<Scan, String> {
         ..Default::default()
     };
     if !root.is_dir() {
-        return Err(format!("本地目录 {} 不存在或不是目录", root.display()));
+        return Err(trf!("本地目录 {v0} 不存在或不是目录", v0 = root.display()));
     }
     let mut stack: Vec<(std::path::PathBuf, String, usize)> =
         vec![(root.to_path_buf(), String::new(), 0)];
@@ -155,9 +157,9 @@ pub fn walk_local(root: &Path, ig: &Ignore) -> Result<Scan, String> {
             continue;
         }
         let rd = std::fs::read_dir(&dir)
-            .map_err(|e| format!("打开本地目录 {} 失败：{e}", dir.display()))?;
+            .map_err(|e| trf!("打开本地目录 {v0} 失败：{e}", e = e, v0 = dir.display()))?;
         for e in rd {
-            let e = e.map_err(|x| format!("读取 {} 失败：{x}", dir.display()))?;
+            let e = e.map_err(|x| trf!("读取 {v0} 失败：{x}", x = x, v0 = dir.display()))?;
             let name = e.file_name().to_string_lossy().into_owned();
             if ig.hit(&name) {
                 scan.skipped.push(join(&rel, &name));
@@ -166,13 +168,13 @@ pub fn walk_local(root: &Path, ig: &Ignore) -> Result<Scan, String> {
             let md = match e.metadata() {
                 Ok(m) => m,
                 Err(x) => {
-                    scan.skipped.push(format!("{}（读不到属性：{x}）", join(&rel, &name)));
+                    scan.skipped.push(trf!("{v0}（读不到属性：{x}）", x = x, v0 = join(&rel, &name)));
                     continue;
                 }
             };
             // 软链一律不跟、不传：跟进去可能绕成环，指到远端的软链更是另一套语义
             if md.file_type().is_symlink() {
-                scan.skipped.push(format!("{}（软链接）", join(&rel, &name)));
+                scan.skipped.push(trf!("{v0}（软链接）", v0 = join(&rel, &name)));
                 continue;
             }
             let r = join(&rel, &name);
@@ -226,11 +228,11 @@ pub enum Action {
 impl Action {
     pub fn label(self) -> &'static str {
         match self {
-            Action::Mkdir => "建目录",
-            Action::Upload => "上传",
-            Action::Delete => "删除",
-            Action::Conflict => "冲突（不动）",
-            Action::Same => "无变化",
+            Action::Mkdir => tr("建目录"),
+            Action::Upload => tr("上传"),
+            Action::Delete => tr("删除"),
+            Action::Conflict => tr("冲突（不动）"),
+            Action::Same => tr("无变化"),
         }
     }
 
@@ -299,20 +301,14 @@ impl Plan {
     pub fn summary(&self, root_missing: bool) -> String {
         let mut s = String::new();
         if root_missing {
-            s.push_str("远程目录不存在，将新建；");
+            s.push_str(tr("远程目录不存在，将新建；"));
         }
-        s.push_str(&format!(
-            "上传 {} 个（{}）、建目录 {} 个、删除 {} 个",
-            self.n_upload,
-            crate::util::human_size(self.upload_bytes),
-            self.n_mkdir,
-            self.n_delete
-        ));
+        s.push_str(&trf!("上传 {v0} 个（{v1}）、建目录 {v2} 个、删除 {v3} 个", v0 = self.n_upload, v1 = crate::util::human_size(self.upload_bytes), v2 = self.n_mkdir, v3 = self.n_delete));
         if !self.remote_only.is_empty() {
-            s.push_str(&format!("；远程另有 {} 个本地没有的（未勾选删除，不动）", self.remote_only.len()));
+            s.push_str(&trf!("；远程另有 {v0} 个本地没有的（未勾选删除，不动）", v0 = self.remote_only.len()));
         }
         if self.n_conflict > 0 {
-            s.push_str(&format!("；{} 项类型冲突，不动", self.n_conflict));
+            s.push_str(&trf!("；{v0} 项类型冲突，不动", v0 = self.n_conflict));
         }
         s
     }
@@ -490,7 +486,7 @@ impl SftpBackend {
                 }
                 // 软链接不跟：本地侧也跳，两边才对称
                 if it.is_link {
-                    scan.skipped.push(format!("{r}（软链接）"));
+                    scan.skipped.push(trf!("{r}（软链接）", r = r));
                     continue;
                 }
                 scan.entries.push(Entry {
@@ -537,7 +533,7 @@ impl SftpBackend {
                 ..Default::default()
             };
             if self.sftp().set_metadata(rpath, attrs).await.is_err() {
-                note.append("远程时间未对齐（服务器不允许改 mtime）");
+                note.append(tr("远程时间未对齐（服务器不允许改 mtime）"));
             }
         }
         Ok(true)

@@ -15,6 +15,8 @@
 use gtk::prelude::*;
 
 use crate::backend::dbcsv;
+use crate::i18n::tr;
+use crate::trf;
 
 /// 导入选项。
 #[derive(Debug, Clone)]
@@ -59,18 +61,18 @@ pub struct ImportMapping {
 /// 「打开」才知道选了哪个文件——所以只能回调。
 pub fn pick_csv_into(parent: Option<&gtk::Window>, entry: &gtk::Entry) {
     let mut b = gtk::FileChooserDialog::builder()
-        .title("选择要导入的 CSV 文件")
+        .title(tr("选择要导入的 CSV 文件"))
         .action(gtk::FileChooserAction::Open);
     if let Some(p) = parent {
         b = b.transient_for(p);
     }
     let dlg = b.build();
-    dlg.add_button("取消", gtk::ResponseType::Cancel);
-    dlg.add_button("打开", gtk::ResponseType::Accept);
+    dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
+    dlg.add_button(tr("打开"), gtk::ResponseType::Accept);
     dlg.set_default_response(gtk::ResponseType::Accept);
     // 只放行常见的数据文件（用户也可以在对话框里手动输入别的名字）
     let filters = gtk::FileFilter::new();
-    filters.set_name(Some("CSV / 文本文件"));
+    filters.set_name(Some(tr("CSV / 文本文件")));
     filters.add_mime_type("text/csv");
     filters.add_mime_type("text/plain");
     filters.add_pattern("*.csv");
@@ -92,7 +94,7 @@ pub fn pick_csv_into(parent: Option<&gtk::Window>, entry: &gtk::Entry) {
 /// 选分隔符（对话框里的下拉）。
 fn separator_combo() -> gtk::ComboBoxText {
     let c = gtk::ComboBoxText::new();
-    for (id, label) in [(",", "逗号（,）"), ("\t", "制表符（Tab）"), (";", "分号（;）")] {
+    for (id, label) in [(",", tr("逗号（,）")), ("\t", tr("制表符（Tab）")), (";", tr("分号（;）"))] {
         c.append(Some(id), label);
     }
     c.set_active_id(Some(","));
@@ -122,9 +124,9 @@ pub fn show_mapping(
     on_ok: impl Fn(ImportMapping) + 'static,
 ) {
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
-    let dlg = crate::windows::dialog(&format!("导入数据到 {target}"), parent, &[
-            ("取消", gtk::ResponseType::Cancel),
-            ("开始导入", gtk::ResponseType::Ok),
+    let dlg = crate::windows::dialog(&trf!("导入数据到 {target}", target = target), parent, &[
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("开始导入"), gtk::ResponseType::Ok),
         ]);
     dlg.set_default_response(gtk::ResponseType::Ok);
     crate::panel::dialogs::style_dialog(&dlg);
@@ -142,12 +144,12 @@ pub fn show_mapping(
     // ---- 顶部：文件信息 + 解析选项 ----
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let sep = separator_combo();
-    let chk_header = gtk::CheckButton::with_label("首行是列名");
+    let chk_header = gtk::CheckButton::with_label(tr("首行是列名"));
     chk_header.set_active(true);
-    let chk_null = gtk::CheckButton::with_label("空字段当作 NULL");
+    let chk_null = gtk::CheckButton::with_label(tr("空字段当作 NULL"));
     chk_null.set_active(true);
-    let btn_reload = gtk::Button::with_label("重新读取");
-    btn_reload.set_tooltip_text(Some("改了分隔符 / 表头设置后重新解析这个文件"));
+    let btn_reload = gtk::Button::with_label(tr("重新读取"));
+    btn_reload.set_tooltip_text(Some(tr("改了分隔符 / 表头设置后重新解析这个文件")));
     top.append(&sep);
     top.append(&chk_header);
     top.append(&chk_null);
@@ -205,7 +207,7 @@ pub fn show_mapping(
             let parsed = match dbcsv::parse_csv(&csv_text, opts.separator) {
                 Ok(t) => t,
                 Err(e) => {
-                    info.set_text(&format!("⚠ 解析失败：{e}"));
+                    info.set_text(&trf!("⚠ 解析失败：{e}", e = e));
                     return;
                 }
             };
@@ -214,7 +216,7 @@ pub fn show_mapping(
             } else {
                 // 没有表头：列名按位置编
                 let width = parsed.first().map(|r| r.len()).unwrap_or(0);
-                let header = (1..=width).map(|i| format!("第 {i} 列")).collect();
+                let header = (1..=width).map(|i| trf!("第 {i} 列", i = i)).collect();
                 (header, parsed.clone())
             };
             // 自动映射（不覆盖用户已经手工改过的）
@@ -243,7 +245,7 @@ pub fn show_mapping(
                 tyl.set_xalign(0.0);
                 tyl.add_css_class("dim-label");
                 let combo = gtk::ComboBoxText::new();
-                combo.append(None, "不导入");
+                combo.append(None, tr("不导入"));
                 for (j, h) in header.iter().enumerate() {
                     combo.append(Some(&j.to_string()), h);
                 }
@@ -256,11 +258,7 @@ pub fn show_mapping(
                 grid.attach(&combo, 2, i as i32, 1, 1);
                 combos.borrow_mut().push(combo);
             }
-            info.set_text(&format!(
-                "文件解析出 {} 列 × {} 行待导入",
-                header.len(),
-                rows.len()
-            ));
+            info.set_text(&trf!("文件解析出 {v0} 列 × {v1} 行待导入", v0 = header.len(), v1 = rows.len()));
             let preview_txt = rows
                 .iter()
                 .take(3)
@@ -268,9 +266,9 @@ pub fn show_mapping(
                 .collect::<Vec<_>>()
                 .join("\n");
             preview.set_text(&if preview_txt.is_empty() {
-                "（没有数据行）".to_string()
+                tr("（没有数据行）").to_string()
             } else {
-                format!("预览（前 3 行）：\n{preview_txt}")
+                trf!("预览（前 3 行）：\n{preview_txt}", preview_txt = preview_txt)
             });
         }
     };
@@ -325,10 +323,10 @@ pub fn show_mapping(
 /// **为什么自己读而不是让 GTK 读**：文件选择器只给路径；真读文件要处理
 /// 编码与 IO 错误，这些在选择器回调里做不得（会卡住 UI）。
 pub fn read_text(path: &std::path::Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读取文件失败：{e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| trf!("读取文件失败：{e}", e = e))?;
     String::from_utf8(bytes).map_err(|_| {
-        "文件不是 UTF-8 编码。\n\n\
-         请在 Excel 里另存为「CSV UTF-8（逗号分隔）」再试。"
+        tr("文件不是 UTF-8 编码。\n\n\
+         请在 Excel 里另存为「CSV UTF-8（逗号分隔）」再试。")
             .to_string()
     })
 }

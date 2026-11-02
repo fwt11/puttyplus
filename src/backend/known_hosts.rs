@@ -12,6 +12,8 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use russh::keys::ssh_key::PublicKey;
 use sha1::Sha1;
+use crate::i18n::tr;
+use crate::trf;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -128,12 +130,12 @@ pub fn verify_and_learn(
     } else {
         format!("[{host}]:{port}")
     };
-    let (kt, b64) = key_wire(key).ok_or("无法编码主机公钥")?;
+    let (kt, b64) = key_wire(key).ok_or(tr("无法编码主机公钥"))?;
 
     let data = match std::fs::read_to_string(kh_path) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("主机密钥校验出错: {e}")),
+        Err(e) => return Err(trf!("主机密钥校验出错: {e}", e = e)),
     };
     let entries = parse_file(&data);
 
@@ -170,7 +172,7 @@ pub fn verify_and_learn(
     // 首次见到：追加写入
     let line = format!("{target} {kt} {b64}\n");
     std::fs::write(kh_path, format!("{data}{line}")).map_err(|e| {
-        format!("无法写入 {}: {e}（可手动把主机条目加入 known_hosts）", kh_path.display())
+        trf!("无法写入 {v0}: {e}（可手动把主机条目加入 known_hosts）", e = e, v0 = kh_path.display())
     })?;
     Ok(HostKeyCheck::Learned)
 }
@@ -270,8 +272,7 @@ mod tests {
         let mut mac = HmacSha1::new_from_slice(&salt).unwrap();
         mac.update(b"srv");
         let tag = mac.finalize().into_bytes();
-        let line = format!(
-            "|1|{}|{} {KEY_A}\n",
+        let line = format!("|1|{}|{} {KEY_A}\n",
             B64.encode(salt),
             B64.encode(tag)
         );

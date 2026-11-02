@@ -15,6 +15,8 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use vte4::prelude::*;
+use puttyplus::i18n::tr;
+use puttyplus::trf;
 
 const APP_TITLE: &str = "PuTTYPlus";
 
@@ -68,8 +70,7 @@ fn main() {
             // i18n:keep
             // ⚠️ 这句是**命令行契约**（C 版逐字相同，compat_check 要对照）
             // ⇒ 保持中文，不翻译。
-            eprintln!(
-                "用法: {} --sftp-selftest <host> <port> <user> [password]",
+            eprintln!("用法: {} --sftp-selftest <host> <port> <user> [password]",
                 argv[0]
             );
             // i18n:end
@@ -111,10 +112,7 @@ fn main() {
         // 无参启动：直接显示主界面（欢迎页）。侧栏由
         // 标签「+」/侧边栏「管理」按需打开，不再自动弹出
         if !warnings.is_empty() {
-            let msg = format!(
-                "以下 PuTTY 参数被忽略或需要留意：\n\n{}",
-                warnings.join("\n")
-            );
+            let msg = trf!("以下 PuTTY 参数被忽略或需要留意：\n\n{v0}", v0 = warnings.join("\n"));
             term::alert(None::<&gtk::Window>, &msg);
         }
     });
@@ -178,7 +176,7 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
 
         let b_side = puttyplus::a11y::icon_button("sidebar-show-symbolic");
         b_side.add_css_class("flat");
-        b_side.set_tooltip_text(Some("显示/隐藏 会话列表 (Ctrl+Shift+B)"));
+        b_side.set_tooltip_text(Some(tr("显示/隐藏 会话列表 (Ctrl+Shift+B)")));
         {
             let t = toggle_sidebar.clone();
             b_side.connect_clicked(move |_| t());
@@ -498,9 +496,9 @@ fn app_menubar(
             // ⚠️ **先问一句**：最近连接删了就没了（不像连接配置还能重建）
             crate::panel::dialogs::confirm_with(
                 Some(w.upcast_ref::<gtk::Window>()),
-                "清空最近连接？\n\n\
-                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。",
-                "清空",
+                tr("清空最近连接？\n\n\
+                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。"),
+                tr("清空"),
                 move |ok| {
                     if ok {
                         puttyplus::recent::clear();
@@ -669,12 +667,12 @@ fn app_menubar(
     // 「终端」、「帮助」并进「工具」），最容易出的错是"菜单项还在、action
     // 没了"——点了没反应，界面还不报错。这里启动时对一遍，缺了就打 stderr。
     for (title, label, action) in topmenus::missing_actions(&registered) {
-        eprintln!("[菜单] 顶级菜单「{title}」的「{label}」引用了未注册的 action：{action}");
+        eprintln!("{}", trf!("[菜单] 顶级菜单「{title}」的「{label}」引用了未注册的 action：{action}", title = title, label = label, action = action));
     }
     // ⚠️ **反向**对账（阶段 74）：注册了却没有任何入口的 action = 孤儿
     // （快捷键还能用，但菜单里找不到它，用户不知道它存在）。
     for action in topmenus::orphan_actions(&registered) {
-        eprintln!("[菜单] action「{action}」注册了，但没有任何菜单入口能点到它");
+        eprintln!("{}", trf!("[菜单] action「{action}」注册了，但没有任何菜单入口能点到它", action = action));
     }
 
     // 一排 Button，点开的是统一构件的弹层

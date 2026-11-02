@@ -12,6 +12,7 @@
 //! （只有 Papirus 有）⇒ GTK 会静默回退成一个默认图标，看着完全不是那个意思。
 
 use gtk::prelude::*;
+use crate::i18n::tr;
 
 /// 一个 CTA（按钮）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,10 +59,10 @@ impl EmptyState {
 /// 侧栏：一条连接都没有。
 pub fn sidebar() -> EmptyState {
     EmptyState::new(
-        "还没有连接",
-        "连一台机器、传个文件、跑个数据库查询 —— 先建一个连接。",
+        tr("还没有连接"),
+        tr("连一台机器、传个文件、跑个数据库查询 —— 先建一个连接。"),
         Cta {
-            label: "新建连接",
+            label: tr("新建连接"),
             icon: "list-add-symbolic",
         },
     )
@@ -73,15 +74,15 @@ pub fn sidebar() -> EmptyState {
 /// 「没找到私钥」与「目录还不存在」是两回事）。
 pub fn keys(has_ssh_dir: bool) -> EmptyState {
     let desc = if has_ssh_dir {
-        "~/.ssh 下没有找到私钥。生成一对就能用了。"
+        tr("~/.ssh 下没有找到私钥。生成一对就能用了。")
     } else {
-        "~/.ssh 目录还不存在，先生成一对密钥（会一并建好目录）。"
+        tr("~/.ssh 目录还不存在，先生成一对密钥（会一并建好目录）。")
     };
     EmptyState::new(
-        "还没有密钥",
+        tr("还没有密钥"),
         desc,
         Cta {
-            label: "生成第一对密钥",
+            label: tr("生成第一对密钥"),
             icon: "document-new-symbolic",
         },
     )
@@ -90,10 +91,10 @@ pub fn keys(has_ssh_dir: bool) -> EmptyState {
 /// 传输队列：一批都没传。
 pub fn queue() -> EmptyState {
     EmptyState::new(
-        "还没有传输",
-        "从文件面板拖一个文件过去，或在文件菜单里选「传输…」。",
+        tr("还没有传输"),
+        tr("从文件面板拖一个文件过去，或在文件菜单里选「传输…」。"),
         Cta {
-            label: "打开传输队列",
+            label: tr("打开传输队列"),
             icon: "folder-download-symbolic",
         },
     )
@@ -102,10 +103,10 @@ pub fn queue() -> EmptyState {
 /// 通知中心：一条通知都没有。
 pub fn notifications() -> EmptyState {
     EmptyState::new(
-        "还没有通知",
-        "传输完成、连接失败这些事会记在这里，错过桌面通知也还能回看。",
+        tr("还没有通知"),
+        tr("传输完成、连接失败这些事会记在这里，错过桌面通知也还能回看。"),
         Cta {
-            label: "知道了",
+            label: tr("知道了"),
             icon: "dialog-information-symbolic",
         },
     )

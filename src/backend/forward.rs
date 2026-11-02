@@ -22,6 +22,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::conn::HostKeyHandler;
 use super::{BackendError, BackendResult};
+use crate::i18n::tr;
+use crate::trf;
 
 /// 一条本地转发规则（"-L"）。
 #[derive(Debug, Clone, PartialEq)]
@@ -38,8 +40,7 @@ impl LocalForward {
     /// 空监听地址按 127.0.0.1 呈现（与实际绑定一致），不需要真去 bind。
     pub fn display(&self) -> String {
         let lh = self.effective_listen_host();
-        format!(
-            "{lh}:{} → {}:{}",
+        format!("{lh}:{} → {}:{}",
             self.listen_port, self.target_host, self.target_port
         )
     }
@@ -72,10 +73,7 @@ impl RemoteForward {
     /// 展示用一行：远端 127.0.0.1:2222 → 10.0.0.1:22
     pub fn display(&self) -> String {
         let bh = self.effective_bind_host();
-        format!(
-            "远程 {bh}:{} → {}:{}",
-            self.bind_port, self.target_host, self.target_port
-        )
+        trf!("远程 {bh}:{v0} → {v1}:{v2}", bh = bh, v0 = self.bind_port, v1 = self.target_host, v2 = self.target_port)
     }
 
     /// 空绑定地址 = 127.0.0.1（与 OpenSSH 的 -R 默认一致）
@@ -117,26 +115,26 @@ impl SocksForward {
 pub fn parse_local(spec: &str) -> Result<LocalForward, String> {
     let spec = spec.trim();
     if spec.is_empty() {
-        return Err("转发规则为空".into());
+        return Err(tr("转发规则为空").into());
     }
     let (listen_host, listen_port, dest) = if let Some(eq) = spec.find('=') {
         (
             String::new(),
-            parse_port(spec[..eq].trim(), "监听")?,
+            parse_port(spec[..eq].trim(), tr("监听"))?,
             spec[eq + 1..].trim().to_string(),
         )
     } else {
         // 从右向左拆两段：目标端口、目标主机，剩下的按 [监听地址:]监听端口
-        let (dport, rest) = rsplit_field(spec, "目标")?;
-        let (dhost, rest) = rsplit_field(&rest, "目标")?;
+        let (dport, rest) = rsplit_field(spec, tr("目标"))?;
+        let (dhost, rest) = rsplit_field(&rest, tr("目标"))?;
         let dest = format!("{dhost}:{dport}");
         match rest.rfind(':') {
             Some(i) => (
                 rest[..i].trim().to_string(),
-                parse_port(rest[i + 1..].trim(), "监听")?,
+                parse_port(rest[i + 1..].trim(), tr("监听"))?,
                 dest,
             ),
-            None => (String::new(), parse_port(rest.trim(), "监听")?, dest),
+            None => (String::new(), parse_port(rest.trim(), tr("监听"))?, dest),
         }
     };
     let (target_host, target_port) = split_dest(&dest)?;
@@ -164,7 +162,7 @@ pub fn parse_remote(spec: &str) -> Result<RemoteForward, String> {
 pub fn parse_socks(spec: &str) -> Result<SocksForward, String> {
     let spec = spec.trim();
     if spec.is_empty() {
-        return Err("SOCKS 端口为空".into());
+        return Err(tr("SOCKS 端口为空").into());
     }
     let (host, port) = match spec.rfind(':') {
         Some(i) => (
@@ -182,17 +180,17 @@ pub fn parse_socks(spec: &str) -> Result<SocksForward, String> {
 /// 拆 "host:port"（从右取端口）。未加方括号的裸 IPv6 地址会拆错——
 /// 与 ssh -L 一致要求 IPv6 写作 [addr]:port，这里不支持该写法，直接报错。
 fn split_dest(dest: &str) -> Result<(String, u16), String> {
-    let (port, host) = rsplit_field(dest, "目标")?;
+    let (port, host) = rsplit_field(dest, tr("目标"))?;
     if host.is_empty() {
-        return Err("目标主机为空".into());
+        return Err(tr("目标主机为空").into());
     }
-    Ok((host, parse_port(&port, "目标")?))
+    Ok((host, parse_port(&port, tr("目标"))?))
 }
 
 fn rsplit_field(s: &str, what: &str) -> Result<(String, String), String> {
     match s.rfind(':') {
         Some(i) => Ok((s[i + 1..].trim().to_string(), s[..i].to_string())),
-        None => Err(format!("{what}段缺失（应为 端口:主机:端口）: {s}")),
+        None => Err(trf!("{what}段缺失（应为 端口:主机:端口）: {s}", what = what, s = s)),
     }
 }
 
@@ -200,7 +198,7 @@ fn parse_port(s: &str, what: &str) -> Result<u16, String> {
     let v = crate::util::atoi_like(s);
     match u16::try_from(v) {
         Ok(p) if p > 0 => Ok(p),
-        _ => Err(format!("{what}端口无效: {s}")),
+        _ => Err(trf!("{what}端口无效: {s}", what = what, s = s)),
     }
 }
 
@@ -318,10 +316,10 @@ async fn start_local(
     let bind_host: &str = spec.effective_listen_host();
     let listener = TcpListener::bind((bind_host, spec.listen_port))
         .await
-        .map_err(|e| BackendError(format!("监听 {bind_host}:{} 失败: {e}", spec.listen_port)))?;
+        .map_err(|e| BackendError(trf!("监听 {bind_host}:{v0} 失败: {e}", bind_host = bind_host, e = e, v0 = spec.listen_port)))?;
     let listen = listener
         .local_addr()
-        .map_err(|e| BackendError(format!("监听地址获取失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("监听地址获取失败: {e}", e = e)))?;
 
     let target_host = spec.target_host.clone();
     let target_port = spec.target_port;
@@ -394,10 +392,7 @@ async fn start_remote(
         .tcpip_forward(bind_host.clone(), u32::from(spec.bind_port))
         .await
         .map_err(|e| {
-            BackendError(format!(
-                "远程监听 {bind_host}:{} 失败: {e}（服务器可能禁止 TCP 转发）",
-                spec.bind_port
-            ))
+            BackendError(trf!("远程监听 {bind_host}:{v0} 失败: {e}（服务器可能禁止 TCP 转发）", bind_host = bind_host, e = e, v0 = spec.bind_port))
         })?;
     let bind_port = if ret == 0 {
         spec.bind_port
@@ -430,10 +425,10 @@ async fn start_socks(
     let bind_host = spec.effective_listen_host();
     let listener = TcpListener::bind((bind_host, spec.listen_port))
         .await
-        .map_err(|e| BackendError(format!("监听 {bind_host}:{} 失败: {e}", spec.listen_port)))?;
+        .map_err(|e| BackendError(trf!("监听 {bind_host}:{v0} 失败: {e}", bind_host = bind_host, e = e, v0 = spec.listen_port)))?;
     let listen = listener
         .local_addr()
-        .map_err(|e| BackendError(format!("监听地址获取失败: {e}")))?;
+        .map_err(|e| BackendError(trf!("监听地址获取失败: {e}", e = e)))?;
     let pumps: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let pumps_in = Arc::clone(&pumps);
     let task = tokio::spawn(async move {
@@ -494,72 +489,72 @@ async fn socks5_handshake(sock: &mut TcpStream) -> Result<(String, u16), String>
     let mut head = [0u8; 2];
     sock.read_exact(&mut head)
         .await
-        .map_err(|e| format!("SOCKS5 握手失败: {e}"))?;
+        .map_err(|e| trf!("SOCKS5 握手失败: {e}", e = e))?;
     if head[0] != 5 {
-        return Err("不是 SOCKS5 请求".into());
+        return Err(tr("不是 SOCKS5 请求").into());
     }
     let mut methods = vec![0u8; head[1] as usize];
     if !methods.is_empty() {
         sock.read_exact(&mut methods)
             .await
-            .map_err(|e| format!("SOCKS5 握手失败: {e}"))?;
+            .map_err(|e| trf!("SOCKS5 握手失败: {e}", e = e))?;
     }
     if !methods.contains(&0) {
-        return Err("SOCKS5 客户端要求认证（本程序只提供无认证）".into());
+        return Err(tr("SOCKS5 客户端要求认证（本程序只提供无认证）").into());
     }
     sock.write_all(&[5, 0])
         .await
-        .map_err(|e| format!("SOCKS5 握手失败: {e}"))?;
+        .map_err(|e| trf!("SOCKS5 握手失败: {e}", e = e))?;
 
     let mut req = [0u8; 4];
     sock.read_exact(&mut req)
         .await
-        .map_err(|e| format!("SOCKS5 请求失败: {e}"))?;
+        .map_err(|e| trf!("SOCKS5 请求失败: {e}", e = e))?;
     if req[0] != 5 {
-        return Err("SOCKS5 请求版本不对".into());
+        return Err(tr("SOCKS5 请求版本不对").into());
     }
     if req[1] != 1 {
-        return Err("SOCKS5 只支持 CONNECT（绑定/UDP 不支持）".into());
+        return Err(tr("SOCKS5 只支持 CONNECT（绑定/UDP 不支持）").into());
     }
     let host = match req[3] {
         1 => {
             let mut a = [0u8; 4];
             sock.read_exact(&mut a)
                 .await
-                .map_err(|e| format!("SOCKS5 地址读取失败: {e}"))?;
+                .map_err(|e| trf!("SOCKS5 地址读取失败: {e}", e = e))?;
             Ipv4Addr::from(a).to_string()
         }
         3 => {
             let mut n = [0u8; 1];
             sock.read_exact(&mut n)
                 .await
-                .map_err(|e| format!("SOCKS5 地址读取失败: {e}"))?;
+                .map_err(|e| trf!("SOCKS5 地址读取失败: {e}", e = e))?;
             let mut b = vec![0u8; n[0] as usize];
             sock.read_exact(&mut b)
                 .await
-                .map_err(|e| format!("SOCKS5 地址读取失败: {e}"))?;
+                .map_err(|e| trf!("SOCKS5 地址读取失败: {e}", e = e))?;
             String::from_utf8_lossy(&b).into_owned()
         }
         4 => {
             let mut a = [0u8; 16];
             sock.read_exact(&mut a)
                 .await
-                .map_err(|e| format!("SOCKS5 地址读取失败: {e}"))?;
+                .map_err(|e| trf!("SOCKS5 地址读取失败: {e}", e = e))?;
             Ipv6Addr::from(a).to_string()
         }
-        _ => return Err("SOCKS5 地址类型不支持".into()),
+        _ => return Err(tr("SOCKS5 地址类型不支持").into()),
     };
     let mut p = [0u8; 2];
     sock.read_exact(&mut p)
         .await
-        .map_err(|e| format!("SOCKS5 端口读取失败: {e}"))?;
+        .map_err(|e| trf!("SOCKS5 端口读取失败: {e}", e = e))?;
     let port = u16::from_be_bytes(p);
     if port == 0 {
-        return Err("SOCKS5 目标端口无效".into());
+        return Err(tr("SOCKS5 目标端口无效").into());
     }
     sock.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
         .await
-        .map_err(|e| format!("SOCKS5 应答失败: {e}"))?;
+        .map_err(|e| trf!("SOCKS5 应答失败: {e}", e = e))?;
     Ok((host, port))
 }
 
@@ -605,7 +600,7 @@ impl FwdRule {
         match self.kind {
             'L' => self
                 .to_local()
-                .map(|l| format!("本地 {}", l.display()))
+                .map(|l| trf!("本地 {v0}", v0 = l.display()))
                 .unwrap_or_else(|_| self.spec.clone()),
             'R' => self
                 .to_remote()
@@ -622,17 +617,17 @@ impl FwdRule {
     /// 类型中文名（UI 徽标用）
     pub fn kind_name(&self) -> &'static str {
         match self.kind {
-            'L' => "本地",
-            'R' => "远程",
-            'D' => "动态",
-            _ => "未知",
+            'L' => tr("本地"),
+            'R' => tr("远程"),
+            'D' => tr("动态"),
+            _ => tr("未知"),
         }
     }
 
     /// 解析成可进程内实现的本地转发规格（只认 'L'）
     pub fn to_local(&self) -> Result<LocalForward, String> {
         if self.kind != 'L' {
-            return Err(format!("规则类型 {} 不是本地转发", self.kind));
+            return Err(trf!("规则类型 {v0} 不是本地转发", v0 = self.kind));
         }
         parse_local(&self.spec)
     }
@@ -640,7 +635,7 @@ impl FwdRule {
     /// 解析成可进程内实现的远程转发规格（只认 'R'）
     pub fn to_remote(&self) -> Result<RemoteForward, String> {
         if self.kind != 'R' {
-            return Err(format!("规则类型 {} 不是远程转发", self.kind));
+            return Err(trf!("规则类型 {v0} 不是远程转发", v0 = self.kind));
         }
         parse_remote(&self.spec)
     }
@@ -648,7 +643,7 @@ impl FwdRule {
     /// 解析成可进程内实现的动态转发规格（只认 'D'）
     pub fn to_socks(&self) -> Result<SocksForward, String> {
         if self.kind != 'D' {
-            return Err(format!("规则类型 {} 不是动态转发", self.kind));
+            return Err(trf!("规则类型 {v0} 不是动态转发", v0 = self.kind));
         }
         parse_socks(&self.spec)
     }
@@ -739,8 +734,7 @@ pub fn rule_to_putty(r: &FwdRule) -> Option<String> {
             if !l.listen_host.is_empty() {
                 return None;
             }
-            Some(format!(
-                "{}{}={}:{}",
+            Some(format!("{}{}={}:{}",
                 r.kind, l.listen_port, l.target_host, l.target_port
             ))
         }
@@ -759,7 +753,7 @@ pub fn to_putty_value(rules: &[FwdRule]) -> (String, Vec<String>) {
             None => skipped.push(if r.enabled {
                 r.display()
             } else {
-                format!("{}（已停用）", r.display())
+                trf!("{v0}（已停用）", v0 = r.display())
             }),
         }
     }
@@ -852,7 +846,7 @@ impl FwdEntry {
                 Ok(s) => start_socks(session, &s).await,
                 Err(msg) => Err(BackendError(msg)),
             },
-            _ => Err(BackendError(format!("未知转发类型：{}", self.rule.kind))),
+            _ => Err(BackendError(trf!("未知转发类型：{v0}", v0 = self.rule.kind))),
         };
         match res {
             Ok(a) => {

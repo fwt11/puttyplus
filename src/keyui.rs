@@ -9,6 +9,8 @@
 use gtk::prelude::*;
 
 use crate::keymgr::{self, GenAlgo};
+use crate::i18n::tr;
+use crate::trf;
 
 pub fn open(parent: Option<&gtk::Window>) {
     let parent = parent.cloned();
@@ -36,14 +38,14 @@ pub fn open(parent: Option<&gtk::Window>) {
         // 列表挤到下面去；用户第一眼看到的是一段实现细节，而不是
         // 「你的密钥在这儿」⇒ 折起来，标题写「技术说明」，想看再点开。
         let exp = gtk::Expander::builder()
-            .label("技术说明")
+            .label(tr("技术说明"))
             .expanded(false)
             .build();
         let hint = gtk::Label::new(Some(
-        "生成 ed25519 / RSA 密钥，或把 PuTTY 的 .ppk 转成 OpenSSH 格式。\n\
+        tr("生成 ed25519 / RSA 密钥，或把 PuTTY 的 .ppk 转成 OpenSSH 格式。\n\
          私钥一律以 0600 写入；口令可选（留空则不加密，文件权限是唯一防线）。\n\
          注：PPK 只能读不能写（底层库只实现了 PPK 解析），转换方向是 .ppk → OpenSSH。\n\
-         旧式 PEM（RSA/EC/PKCS#8）可用「导入/转换…」原地转 OpenSSH；带口令的 PEM 需手动 ssh-keygen。",
+         旧式 PEM（RSA/EC/PKCS#8）可用「导入/转换…」原地转 OpenSSH；带口令的 PEM 需手动 ssh-keygen。"),
     ));
         hint.add_css_class("dim-label");
         hint.set_xalign(0.0);
@@ -116,18 +118,18 @@ pub fn open(parent: Option<&gtk::Window>) {
             algo.append(Some(&format!("{:?}", a)), a.label());
         }
         algo.set_active_id(Some("Ed25519"));
-        algo.set_tooltip_text(Some("RSA 4096 生成较慢，但对老堡垒机兼容性最好"));
+        algo.set_tooltip_text(Some(tr("RSA 4096 生成较慢，但对老堡垒机兼容性最好")));
         let stem = gtk::Entry::new();
-        stem.set_placeholder_text(Some("文件名（可留空）"));
+        stem.set_placeholder_text(Some(tr("文件名（可留空）")));
         stem.set_hexpand(true);
         let comment = gtk::Entry::new();
-        comment.set_placeholder_text(Some("注释（可留空）"));
+        comment.set_placeholder_text(Some(tr("注释（可留空）")));
         comment.set_hexpand(true);
         let pw = gtk::Entry::new();
         pw.set_visibility(false);
-        pw.set_placeholder_text(Some("口令（可留空）"));
+        pw.set_placeholder_text(Some(tr("口令（可留空）")));
         pw.set_hexpand(true);
-        let b_gen = gtk::Button::with_label("生成");
+        let b_gen = gtk::Button::with_label(tr("生成"));
         b_gen.add_css_class("suggested-action");
 
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -148,10 +150,10 @@ pub fn open(parent: Option<&gtk::Window>) {
         // 认错格式就点错按钮，点错就报一句看不懂的错。
         // ⇒ 一个按钮：挑文件，**按文件头自己认**，认出来再问必要的口令。
         let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let conv = gtk::Button::with_label("导入/转换…");
+        let conv = gtk::Button::with_label(tr("导入/转换…"));
         conv.set_tooltip_text(Some(
-            "挑一个私钥文件：PuTTY 的 .ppk 会另存一份 OpenSSH 私钥（同名）；\
-             旧式 PEM 原地转 OpenSSH（先备份）；已经是 OpenSSH 的会告诉你不用转。",
+            tr("挑一个私钥文件：PuTTY 的 .ppk 会另存一份 OpenSSH 私钥（同名）；\
+             旧式 PEM 原地转 OpenSSH（先备份）；已经是 OpenSSH 的会告诉你不用转。"),
         ));
         row2.append(&conv);
         vbox.append(&row2);
@@ -162,7 +164,7 @@ pub fn open(parent: Option<&gtk::Window>) {
         // ⚠️ 闭包只抓**弱引用**（强引用 = 引用环 ⇒ 窗口回收不掉）
         {
             let winw = dlg.downgrade();
-            let btn_close = gtk::Button::with_label("关闭");
+            let btn_close = gtk::Button::with_label(tr("关闭"));
             btn_close.connect_clicked(move |_| {
                 if let Some(w) = winw.upgrade() {
                     w.close();
@@ -238,7 +240,7 @@ pub fn open(parent: Option<&gtk::Window>) {
                     rebuild(l1.clone(), &e1);
                 }
                 Err(e) => {
-                    crate::panel::dialogs::show_error(Some(d2.upcast_ref::<gtk::Window>()), "生成失败", &e);
+                    crate::panel::dialogs::show_error(Some(d2.upcast_ref::<gtk::Window>()), tr("生成失败"), &e);
                 }
             }
         });
@@ -283,15 +285,15 @@ where
     F: FnOnce(std::path::PathBuf) + 'static,
 {
     let dlg = gtk::FileChooserDialog::builder()
-        .title("选择私钥文件")
+        .title(tr("选择私钥文件"))
         .transient_for(parent)
         .modal(true)
         .action(gtk::FileChooserAction::Open)
         .build();
-    dlg.add_button("取消", gtk::ResponseType::Cancel);
-    dlg.add_button("选择", gtk::ResponseType::Accept);
+    dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
+    dlg.add_button(tr("选择"), gtk::ResponseType::Accept);
     let filter = gtk::FileFilter::new();
-    filter.set_name(Some("私钥（OpenSSH / PPK / PEM）"));
+    filter.set_name(Some(tr("私钥（OpenSSH / PPK / PEM）")));
     filter.add_pattern("id_*");
     filter.add_pattern("*.pem");
     filter.add_pattern("*.ppk");
@@ -344,8 +346,8 @@ fn import_or_convert(
         Err(e) => {
             crate::panel::dialogs::show_error(
                 Some(&parent),
-                "读不了这个文件",
-                &format!("读取 {} 失败：{e}", path.display()),
+                tr("读不了这个文件"),
+                &trf!("读取 {v0} 失败：{e}", e = e, v0 = path.display()),
             );
             return;
         }
@@ -354,11 +356,8 @@ fn import_or_convert(
         keymgr::KeyFormat::OpenSsh => {
             crate::panel::dialogs::info(
                 Some(&parent),
-                "不用转换",
-                &format!(
-                    "{} 已经是 OpenSSH 格式的私钥，直接用就行。",
-                    path.display()
-                ),
+                tr("不用转换"),
+                &trf!("{v0} 已经是 OpenSSH 格式的私钥，直接用就行。", v0 = path.display()),
             );
         }
         keymgr::KeyFormat::Ppk => {
@@ -368,20 +367,20 @@ fn import_or_convert(
             let w = parent.clone();
             crate::panel::dialogs::ask_password(
                 Some(&parent),
-                "PPK 口令",
-                "若该 .ppk 有口令保护请输入（没有就留空）：",
+                tr("PPK 口令"),
+                tr("若该 .ppk 有口令保护请输入（没有就留空）："),
                 move |pw| {
                     let pw_opt = pw.as_deref().filter(|p| !p.is_empty());
                     match keymgr::ppk_to_openssh(&p2, pw_opt, &out, "") {
                         Ok(p) => {
                             crate::panel::dialogs::info(
                                 Some(&w),
-                                "转换完成",
-                                &format!("已写出 OpenSSH 私钥：{}", p.display()),
+                                tr("转换完成"),
+                                &trf!("已写出 OpenSSH 私钥：{v0}", v0 = p.display()),
                             );
                             rebuild(list, &empty);
                         }
-                        Err(e) => crate::panel::dialogs::show_error(Some(&w), "转换失败", &e),
+                        Err(e) => crate::panel::dialogs::show_error(Some(&w), tr("转换失败"), &e),
                     }
                 },
             );
@@ -391,12 +390,8 @@ fn import_or_convert(
             let w = parent.clone();
             crate::panel::dialogs::confirm_with(
                 Some(&parent),
-                &format!(
-                    "将把\n{}\n原地转换成 OpenSSH 格式（先备份为 *.puttyplus.bak）。\n\
-                     带口令的旧 PEM 无法在应用内转换。继续？",
-                    path.display()
-                ),
-                "转换",
+                &trf!("将把\n{v0}\n原地转换成 OpenSSH 格式（先备份为 *.puttyplus.bak）。\n带口令的旧 PEM 无法在应用内转换。继续？", v0 = path.display()),
+                tr("转换"),
                 move |ok| {
                     if !ok {
                         return;
@@ -405,12 +400,12 @@ fn import_or_convert(
                         Ok(bak) => {
                             crate::panel::dialogs::info(
                                 Some(&w),
-                                "转换完成",
-                                &format!("已转成 OpenSSH 格式。\n备份：{}", bak.display()),
+                                tr("转换完成"),
+                                &trf!("已转成 OpenSSH 格式。\n备份：{v0}", v0 = bak.display()),
                             );
                             rebuild(list, &empty);
                         }
-                        Err(e) => crate::panel::dialogs::show_error(Some(&w), "转换失败", &e),
+                        Err(e) => crate::panel::dialogs::show_error(Some(&w), tr("转换失败"), &e),
                     }
                 },
             );
@@ -418,11 +413,8 @@ fn import_or_convert(
         keymgr::KeyFormat::Unknown => {
             crate::panel::dialogs::show_error(
                 Some(&parent),
-                "认不出格式",
-                &format!(
-                    "{} 不像私钥文件（既不是 OpenSSH，也不是 PuTTY .ppk，也不是旧式 PEM）。",
-                    path.display()
-                ),
+                tr("认不出格式"),
+                &trf!("{v0} 不像私钥文件（既不是 OpenSSH，也不是 PuTTY .ppk，也不是旧式 PEM）。", v0 = path.display()),
             );
         }
     }
@@ -438,12 +430,12 @@ fn show_generated(
     pub_p: &std::path::Path,
 ) {
     let dlg = crate::windows::dialog(
-        "已生成密钥",
+        tr("已生成密钥"),
         parent,
         &[
-            ("复制公钥", gtk::ResponseType::Other(1)),
-            ("在连接中使用", gtk::ResponseType::Other(2)),
-            ("关闭", gtk::ResponseType::Close),
+            (tr("复制公钥"), gtk::ResponseType::Other(1)),
+            (tr("在连接中使用"), gtk::ResponseType::Other(2)),
+            (tr("关闭"), gtk::ResponseType::Close),
         ],
     );
     dlg.set_default_size(500, -1);
@@ -454,13 +446,7 @@ fn show_generated(
     vbox.set_margin_start(16);
     vbox.set_margin_end(16);
 
-    let body = gtk::Label::new(Some(&format!(
-        "私钥：{}\n公钥：{}\n\n\
-         「复制公钥」把公钥内容放进剪贴板，贴到目标机的 authorized_keys；\
-         「在连接中使用」打开新建连接窗口，认证方式设成「只用私钥文件」并选中这一把。",
-        priv_p.display(),
-        pub_p.display()
-    )));
+    let body = gtk::Label::new(Some(&trf!("私钥：{v0}\n公钥：{v1}\n\n「复制公钥」把公钥内容放进剪贴板，贴到目标机的 authorized_keys；「在连接中使用」打开新建连接窗口，认证方式设成「只用私钥文件」并选中这一把。", v0 = priv_p.display(), v1 = pub_p.display())));
     body.set_xalign(0.0);
     body.set_wrap(true);
     body.set_selectable(true);
@@ -630,15 +616,15 @@ fn rebuild(list: gtk::ListBox, empty: &gtk::Box) {
         name.set_xalign(0.0);
         let mut bits = String::new();
         if let Some(b) = i.bits {
-            bits = format!(" {b}位");
+            bits = trf!(" {b}位", b = b);
         }
         let mut meta = if i.pem {
-            "旧式 PEM".to_string()
+            tr("旧式 PEM").to_string()
         } else {
             format!("{}{}", i.algo, bits)
         };
         if i.encrypted {
-            meta.push_str(" · 有口令");
+            meta.push_str(tr(" · 有口令"));
         }
         if !i.comment.is_empty() {
             meta.push_str(&format!(" · {}", i.comment));
@@ -652,14 +638,14 @@ fn rebuild(list: gtk::ListBox, empty: &gtk::Box) {
         row.append(&name);
         row.append(&meta_lbl);
         let lbl = if let Some(e) = &i.error {
-            let l = gtk::Label::new(Some(if i.pem { "PEM 格式" } else { "读不了" }));
+            let l = gtk::Label::new(Some(if i.pem { tr("PEM 格式") } else { tr("读不了") }));
             l.add_css_class(if i.pem { "dim-label" } else { "error" });
             l.set_tooltip_text(Some(e));
             l
         } else {
             let l = gtk::Label::new(Some(&i.fingerprint));
             l.add_css_class("dim-label");
-            l.set_tooltip_text(Some("SHA256 指纹：复制它去目标机核对，避免登错机"));
+            l.set_tooltip_text(Some(tr("SHA256 指纹：复制它去目标机核对，避免登错机")));
             l
         };
         row.append(&lbl);
