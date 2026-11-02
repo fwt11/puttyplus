@@ -1909,7 +1909,7 @@ pub fn welcome_page() -> gtk::Widget {
     title.set_margin_bottom(4);
     box_.append(&title);
     let sub = gtk::Label::new(Some(if recents.is_empty() {
-        "点「新建连接」开一个会话"
+        "从左侧建一个连接就能开工"
     } else {
         "选一个最近连接就能开工"
     }));
@@ -1951,36 +1951,24 @@ pub fn welcome_page() -> gtk::Widget {
     } else {
         // 没有最近记录：**不摆**「最近连接」块（摆个空块更没用，审计 P2-9），
         // 只留一句提示，让人知道「新建连接」在哪儿。
-        let hint = gtk::Label::new(Some("还没有连接记录 —— 点下面的「新建连接」开一个"));
+        let hint = gtk::Label::new(Some("还没有连接记录 —— 从左侧建一个连接"));
         hint.add_css_class("dim-label");
         hint.set_margin_bottom(4);
         box_.append(&hint);
     }
 
-    // ---- 新建连接（主 CTA）----
-    let btns = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    btns.set_halign(gtk::Align::Center);
-    btns.set_margin_top(14);
-
-    let b_new = gtk::Button::new();
-    b_new.add_css_class("suggested-action");
-    {
-        // ⚠️ 图标与文字都从「新建」动作表取（阶段 68）：欢迎页的按钮与
-        // 顶栏的「＋」是**同一个动作**（`new`）⇒ 长得一样、行为一样。
-        let it = crate::newmenu::item_of(crate::topmenus::NewEntry::Welcome, "new")
-            .expect("动作表里应当有「新建连接」");
-        let h = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        h.append(&gtk::Image::from_icon_name(it.icon));
-        h.append(&gtk::Label::new(Some(it.label)));
-        b_new.set_child(Some(&h));
-    }
-    b_new.set_tooltip_text(Some(crate::newmenu::entry_tooltip(
-        crate::topmenus::NewEntry::Welcome,
-    )));
-    b_new.connect_clicked(|_| prompt_new());
-    btns.append(&b_new);
-
-    box_.append(&btns);
+    // ⚠️ **这里原来有一颗「新建连接」大按钮，现在删了**
+    // （用户 2026-11-02：「欢迎页面不要有『新建连接』按钮了。
+    // 和侧栏的连接管理器中的重复了。」）。
+    //
+    // 理由跟顶栏那个「＋」一样（阶段 92c）：**同一个入口出现两遍** ——
+    // 侧栏标题栏的「＋」（统一的新建菜单）和侧栏自己的空态 CTA
+    // （`emptystate::sidebar()`，一条连接都没有时摆「新建连接」）都管这事，
+    // 欢迎页再摆一颗就是第三份 ⇒ 功能一点不丢，屏幕干净了。
+    //
+    // ⚠️ 顶栏的「＋」早就删了（阶段 92c），所以**欢迎页上能点到的入口
+    // 就是侧栏那个「＋」** ⇒ 文案要跟着改，不能再让人去找一个不存在的
+    // 按钮（上面两句提示已经改过）。
 
     // ---- 常用键位只留一行 ----
     //
