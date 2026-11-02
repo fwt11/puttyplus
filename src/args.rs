@@ -80,7 +80,28 @@ pub struct ConnOptions {
     pub font_size: Option<f64>,
     /// 终端响铃；None = 沿用 VTE 默认（开）
     pub bell: Option<bool>,
+    /// 这条连接要不要记进「最近连接」。
+    ///
+    /// ⚠️ **默认 true**：界面上点开的连接当然要记。
+    ///
+    /// ⚠️ **命令行启动的连接默认不记**（堡垒机场景）：堡垒机的 launcher
+    /// 每次拉起都是一条**一次性**的设备连接（`user@设备IP`），全都记下来
+    /// 只会把「最近连接」冲垮、想找自己常用的那条反而找不到。
+    /// ⇒ 由启动流程（`main.rs`）按设置决定，见
+    /// [`crate::settings::record_cli_recent`]。
+    ///
+    /// **不在 `--print-config` 里**：命令行输出是 C 版兼容基线，
+    /// 多一行就破坏契约（见 AGENTS.md）。
+    pub record_recent: bool,
 }
+
+/// 「这是我们自己派生的窗口」的环境变量标记。
+///
+/// ⚠️ 「在新窗口打开」是**用户在界面里点的** ⇒ 那条连接该照常记进
+/// 「最近连接」；但它是用命令行 spawn 起来的（密码走
+/// `PUTTYPLUS_PW_SESSION`）⇒ 不带这个标记的话，会跟"堡垒机从外面拉起
+/// 的窗口"混为一谈，一起被当成"命令行启动"而不记录。
+pub const INTERNAL_SPAWN_ENV: &str = "PUTTYPLUS_INTERNAL_SPAWN";
 
 impl ConnOptions {
     /// 会话级覆盖的键：会话名/标题优先，否则 host:port。
@@ -124,6 +145,7 @@ impl Default for ConnOptions {
             auth_method: AuthMethod::default(),
             font_size: None,
             bell: None,
+            record_recent: true,
             serial_baud: 115200,
             serial_data: 8,
             serial_parity: 'n',
@@ -552,9 +574,19 @@ mod tests {
         (o, w)
     }
 
+    /// 「这条连接要不要记进最近连接」默认**要记**——
+    /// 界面上点开的连接当然要进「最近」；命令行启动的那条由
+    /// **启动流程**（`main.rs`）按设置改掉。
     #[test]
-    fn user_at_host_positional() {
-        let (o, _) = parse(&["ops@192.168.1.10"]);
+    fn 默认要记最近连接() {
+        let o = ConnOptions::default();
+        assert!(o.record_recent, "默认要记");
+        let (o2, _) = parse(&["ops@192.168.1.10"]);
+        assert!(o2.record_recent, "解析出来的也默认要记");
+    }
+
+    #[test]
+    fn user_at_host_positional() {        let (o, _) = parse(&["ops@192.168.1.10"]);
         assert_eq!(o.user, "ops");
         assert_eq!(o.host, "192.168.1.10");
         assert_eq!(o.port, 22);

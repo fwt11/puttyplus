@@ -212,6 +212,18 @@ pub const SETTINGS: &[SettingItem] = &[
         page: Page::Advanced,
         from: "子标签栏的「文件面板」开关",
     },
+    SettingItem {
+        id: "recent_max",
+        label: "最近连接条数",
+        page: Page::Advanced,
+        from: "（新）侧栏「最近」分组",
+    },
+    SettingItem {
+        id: "record_cli_recent",
+        label: "命令行启动的连接记入最近连接",
+        page: Page::Advanced,
+        from: "（新）命令行启动路径",
+    },
 ];
 
 /// 某一页上的设置项。
@@ -736,6 +748,89 @@ fn advanced_page(root: &gtk::Box) {
             crate::settings::set_db_hide_sftp(state);
             gtk::glib::Propagation::Proceed
         });
+    }
+
+    /* ---- 最近连接 ---- */
+    {
+        let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        sec.append(&section("最近连接"));
+
+        // ---- 条数上限 ----
+        let cur_n = crate::settings::recent_max();
+        let mut list: Vec<usize> = vec![3, 5, 10, 20];
+        if !list.contains(&cur_n) {
+            list.push(cur_n);
+        }
+        list.push(0); // 「不限」放最后
+        let combo = gtk::ComboBoxText::new();
+        for n in &list {
+            let id = n.to_string();
+            let text = if *n == 0 {
+                "不限".to_string()
+            } else {
+                format!("{n} 条")
+            };
+            combo.append(Some(&id), &text);
+        }
+        let cur_id = cur_n.to_string();
+        combo.set_active_id(Some(cur_id.as_str()));
+        combo.set_tooltip_text(Some("「最近连接」最多留几条（0 = 不限）"));
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let lbl = gtk::Label::new(Some("最近连接条数"));
+        lbl.set_xalign(0.0);
+        lbl.set_hexpand(true);
+        row.append(&lbl);
+        row.append(&combo);
+        sec.append(&row);
+        combo.connect_changed(move |c| {
+            let Some(id) = c.active_id() else { return };
+            let Ok(n) = id.parse::<usize>() else { return };
+            crate::settings::set_recent_max(n);
+        });
+
+        // ---- 命令行启动的连接要不要记 ----
+        let sw = gtk::Switch::new();
+        sw.set_active(crate::settings::record_cli_recent());
+        sw.set_tooltip_text(Some(
+            "堡垒机每次拉起都是一条一次性的设备连接 ⇒ 默认不记，\
+             省得把「最近连接」冲垮、自己常用的那条反而找不到。",
+        ));
+        let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let lbl2 = gtk::Label::new(Some("命令行启动的连接记入最近连接"));
+        lbl2.set_xalign(0.0);
+        lbl2.set_hexpand(true);
+        row2.append(&lbl2);
+        row2.append(&sw);
+        sec.append(&row2);
+        sw.connect_state_set(|_s, state| {
+            crate::settings::set_record_cli_recent(state);
+            gtk::glib::Propagation::Proceed
+        });
+
+        // ---- 清空 ----
+        let row3 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let lbl3 = gtk::Label::new(Some("清空最近连接"));
+        lbl3.set_xalign(0.0);
+        lbl3.set_hexpand(true);
+        let b = gtk::Button::with_label("清空");
+        b.set_tooltip_text(Some("把「最近连接」里的记录全删掉（连接配置不受影响）"));
+        row3.append(&lbl3);
+        row3.append(&b);
+        sec.append(&row3);
+        b.connect_clicked(|_| {
+            crate::panel::dialogs::confirm_with(
+                None,
+                "清空最近连接？\n\n\
+                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。",
+                "清空",
+                |ok| {
+                    if ok {
+                        crate::recent::clear();
+                    }
+                },
+            );
+        });
+        root.append(&sec);
     }
 
     root.append(&hint_label(

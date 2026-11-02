@@ -99,6 +99,15 @@ pub const TOP_MENUS: &[(&str, &[MenuEntry])] = &[
                 shortcut: None,
                 enabled: None,
             },
+            MenuEntry::Item {
+                icon: "edit-clear-all-symbolic",
+                label: "清空最近连接",
+                action: "clear_recent",
+                danger: false,
+                shortcut: None,
+                // 没有最近连接时没什么可清 ⇒ 置灰（别给一个点了没反应的项）
+                enabled: Some(crate::recent::has_any),
+            },
             MenuEntry::Sep,
             MenuEntry::Item {
                 icon: "application-exit-symbolic",
@@ -566,6 +575,27 @@ pub fn missing_actions(registered: &[&str]) -> Vec<(&'static str, &'static str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 文件菜单里得有「清空最近连接」（最近连接太多时的清理入口）。
+    #[test]
+    fn 文件菜单能清空最近连接() {
+        let file = TOP_MENUS
+            .iter()
+            .find(|(t, _)| *t == "文件")
+            .expect("得有「文件」菜单");
+        let acts: Vec<&str> = file
+            .1
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            acts.contains(&"clear_recent"),
+            "文件菜单里没有清空最近连接：{acts:?}"
+        );
+    }
 
     /// **所有「新建」入口都指向同一组 action**（阶段 68 / 审计 P1-2、P1-6）。
     ///

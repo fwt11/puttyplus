@@ -50,6 +50,12 @@ fn main() {
     if opts.password.is_none() {
         opts.password = connmgr::password_from_env();
     }
+    // ⚠️ **命令行启动的连接要不要记进「最近连接」**：
+    //    堡垒机的 launcher 每次拉起都是一条一次性的设备连接 ⇒ 默认**不记**
+    //    （否则「最近」列表全是一次性连接，自己常用的那条得翻很久）。
+    //    「在新窗口打开」是用户在界面里点的 ⇒ 照记（它带内部标记）。
+    let internal_spawn = std::env::var_os(args::INTERNAL_SPAWN_ENV).is_some();
+    opts.record_recent = internal_spawn || settings::record_cli_recent();
 
     if argv.get(1).map(String::as_str) == Some("--print-config") {
         // 与 C 版一致：调试输出，警告不打印
@@ -215,7 +221,7 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
 
         // 菜单栏（文件/编辑/会话/视图/帮助）：入口不再只有图标，
         // 与 PuTTY 用户的菜单使用习惯也对得上
-        let menubar = app_menubar(&win, &tabs, &toggle_sidebar);
+        let menubar = app_menubar(&win, &tabs, &toggle_sidebar, &sb);
         header.pack_start(&menubar);
 
         win.set_titlebar(Some(&header));
@@ -416,6 +422,7 @@ fn app_menubar(
     win: &gtk::ApplicationWindow,
     tabs: &Rc<tabs::Tabs>,
     toggle_sidebar: &Rc<dyn Fn()>,
+    sb: &Rc<sidebar::Sidebar>,
 ) -> gtk::Box {
     let actions = gio::SimpleActionGroup::new();
     // 注册过的 action 名（启动时跟菜单表对账用，见下）
@@ -475,6 +482,28 @@ fn app_menubar(
                 .map(|e| e.name)
                 .collect();
             connmgr::ui_export_putty(Some(w.upcast_ref::<gtk::Window>()), names);
+        });
+    }
+    {
+        let w = win.clone();
+        let sb = Rc::clone(sb);
+        act!("clear_recent", move || {
+            // ⚠️ 外层是 `Fn` 闭包 ⇒ 不能把捕获的 Rc **移**进内层闭包
+            //    （那是 FnOnce 才干的事）⇒ 这里克隆一份。
+            let sb2 = Rc::clone(&sb);
+            // ⚠️ **先问一句**：最近连接删了就没了（不像连接配置还能重建）
+            crate::panel::dialogs::confirm_with(
+                Some(w.upcast_ref::<gtk::Window>()),
+                "清空最近连接？\n\n\
+                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。",
+                "清空",
+                move |ok| {
+                    if ok {
+                        puttyplus::recent::clear();
+                        sb2.reload();
+                    }
+                },
+            );
         });
     }
     {

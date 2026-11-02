@@ -37,6 +37,12 @@ const COL_NAME: i32 = 5;
 /// **副标题**（纯文本）：地址 / 计数。与 [`COL_NAME`] 一起构成这一行。
 const COL_SUB: i32 = 6;
 
+/// 「最近」组的**组名**。
+///
+/// ⚠️ 既是**显示**用的名字，也是**判定**用的标识（组头右键有没有
+/// 「清空最近连接」就看它）⇒ 用常量，别在两处各写一个字面量。
+const RECENT_GROUP: &str = "最近";
+
 /// 活着的侧边栏实例（主题切换后要重画行内灰字；weak 避免拖住窗口）。
 thread_local! {
     static LIVE: RefCell<Vec<std::rc::Weak<Sidebar>>> = const { RefCell::new(Vec::new()) };
@@ -126,6 +132,11 @@ pub struct RowMenuCtx {
     ///
     /// ⚠️ 取不到就不摆「启用转发」——摆一个点了没反应的项比不摆更糟。
     pub fwd: Option<(ConnEntry, connmgr::FwdLeaf)>,
+    /// 选中的是**组头**（kind==0）时的组名；不是组头就是 None。
+    ///
+    /// ⚠️ 组头没有 idx ⇒ [`Sidebar::selected_row`] 对它返回 None
+    /// ⇒ 「最近」组的右键菜单（清空最近连接）得单独取。
+    pub group: Option<String>,
 }
 
 /// 某一行的右键菜单**有哪些项**（纯函数，不碰 GTK）。
@@ -140,6 +151,18 @@ pub struct RowMenuCtx {
 pub fn row_menu_items(ctx: &RowMenuCtx) -> Vec<RowMenuItem> {
     use RowMenuItem::{Act, Sep};
     let mut v: Vec<RowMenuItem> = Vec::new();
+    // **组头**（kind==0）：组头不是连接，不能点「连接」——
+    // 以前这里会落进下面的 `_ => "连接"` ⇒ 右键组头弹出一个**点了没反应**
+    // 的菜单。现在组头只给「最近」组一个清理动作。
+    if ctx.kind == 0 {
+        if ctx.group.as_deref() == Some(RECENT_GROUP) {
+            v.push(Act {
+                label: "清空最近连接",
+                icon: "edit-clear-all-symbolic",
+            });
+        }
+        return v;
+    }
     // 连接 / 打开数据库 / 打开端口转发（三行共用第一个项）
     v.push(Act {
         label: match ctx.kind {
@@ -620,7 +643,7 @@ impl Sidebar {
         let g_recent = if n_recent > 0 {
             Some(add_group(
                 &self.store,
-                "最近",
+                RECENT_GROUP,
                 "document-open-recent-symbolic",
                 n_recent,
                 "同一个 用户/主机/端口 只保留最近一次（双击重开）",
@@ -891,6 +914,23 @@ impl Sidebar {
         (kind > 0 && idx >= 0).then_some((kind, idx))
     }
 
+    /// 选中行对应的**组头**（仅 kind==0）：返回组名。
+    ///
+    /// ⚠️ 组头没有 idx ⇒ [`Self::selected_row`] 对它返回 None
+    /// ⇒ 「最近」组的右键菜单（清空最近连接）得单独取。
+    fn selected_group(&self) -> Option<String> {
+        let (rows, _m) = self.view.selection().selected_rows();
+        let path = rows.first()?;
+        let child = self.filter.convert_path_to_child_path(path)?;
+        let it = self.store.iter(&child)?;
+        let kind: i32 = self.store.get(&it, COL_KIND);
+        if kind != 0 {
+            return None;
+        }
+        let name: String = self.store.get(&it, COL_NAME);
+        Some(name)
+    }
+
     /// 选中行对应的自建/ssh config 条目（仅 kind=2）。
     fn selected_entry(&self) -> Option<ConnEntry> {
         let (kind, idx) = self.selected_row()?;
@@ -956,7 +996,11 @@ impl Sidebar {
                     sel.select_path(&path);
                 }
             }
-            let Some((kind, idx)) = sb.selected_row() else { return };
+            // ⚠️ **组头**（kind==0）没有 idx ⇒ `selected_row()` 给 None。
+            //    组头不是连接，不能点「连接」；「最近」组的组头右键 =
+            //    「清空最近连接」。
+            let group = sb.selected_group();
+            let (kind, idx) = sb.selected_row().unwrap_or((0, -1));
             let entry = sb.selected_entry();
             let recent = sb.selected_recent();
             let custom = entry.as_ref().map(|e| e.custom).unwrap_or(false);
@@ -1016,6 +1060,7 @@ impl Sidebar {
                 custom,
                 has_db: db_item.is_some(),
                 fwd: fwd_ctx,
+                group,
             };
 
             for item in row_menu_items(&ctx) {
@@ -1222,6 +1267,31 @@ impl Sidebar {
                             pop2.popdown();
                             recent::remove(idx as usize);
                             sb2.reload();
+                        });
+                    }
+                    // 「最近」**组头**右键 = 清空整份最近连接
+                    // （堡垒机场景：一次性连接太多，一条条删太累）
+                    "清空最近连接" => {
+                        let pop2 = pop.clone();
+                        let sb2 = Rc::clone(&sb);
+                        let parent2 = parent.clone();
+                        b.connect_clicked(move |_| {
+                            pop2.popdown();
+                            // ⚠️ 外层是 `Fn` 闭包 ⇒ 不能把捕获的 Rc **移**进
+                            //    内层闭包（那是 FnOnce 才干的事）⇒ 这里克隆一份。
+                            let sb3 = Rc::clone(&sb2);
+                            crate::panel::dialogs::confirm_with(
+                                parent2.as_ref(),
+                                "清空最近连接？\n\n\
+                                 「最近连接」里的记录会被全部删掉（已保存的连接配置不受影响）。",
+                                "清空",
+                                move |ok| {
+                                    if ok {
+                                        crate::recent::clear();
+                                        sb3.reload();
+                                    }
+                                },
+                            );
                         });
                     }
                     "复制地址" => {
@@ -1707,7 +1777,33 @@ mod tests {
             custom,
             has_db,
             fwd: None,
+            group: None,
         }
+    }
+
+    /// 组头**不是连接** ⇒ 右键不能给「连接」（那是个点了没反应的项）。
+    #[test]
+    fn 组头菜单不是连接菜单() {
+        let v = labels(&row_menu_items(&ctx(0, false, false)));
+        assert!(v.is_empty(), "普通组头不该有菜单项：{v:?}");
+    }
+
+    /// 「最近」组头右键 = 清空最近连接（堡垒机场景：一次性连接太多）。
+    #[test]
+    fn 最近组头有清空动作() {
+        let mut c = ctx(0, false, false);
+        c.group = Some(super::RECENT_GROUP.to_string());
+        let v = labels(&row_menu_items(&c));
+        assert!(v.contains(&"清空最近连接"), "最近组头要能清空：{v:?}");
+        assert!(!v.contains(&"连接"), "组头不是连接：{v:?}");
+    }
+
+    /// 别的组头没有清理动作（自定义 / ssh config 不能清）。
+    #[test]
+    fn 别的组头没有清理动作() {
+        let mut c = ctx(0, false, false);
+        c.group = Some("自定义".to_string());
+        assert!(labels(&row_menu_items(&c)).is_empty());
     }
 
     #[test]

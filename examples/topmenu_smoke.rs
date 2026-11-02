@@ -83,6 +83,15 @@ fn main() {
     gtk::init().expect("gtk init");
     puttyplus::theme::apply(puttyplus::theme::Theme::Light);
 
+    // ⚠️ 「清空最近连接」的可点性取决于**有没有最近连接** ⇒ 隔离一份空文件，
+    //    免得断言随用户机器上的真实记录变（那样这条断言在别人机器上会挂）。
+    let recent = std::env::temp_dir().join(format!("pp-topmenu-recent-{}.ini", std::process::id()));
+    let _ = std::fs::remove_file(&recent);
+    // set_var 在新 Rust 里是 unsafe：这里只有一个线程在跑，不存在并发改环境变量
+    unsafe {
+        std::env::set_var("PUTTYPLUS_RECENT_INI", &recent);
+    }
+
     let mut fails: Vec<String> = Vec::new();
     macro_rules! check {
         ($name:expr, $cond:expr, $detail:expr) => {{
@@ -217,6 +226,30 @@ fn main() {
         "「新建连接」动作不受影响",
         acts.get("new").map(|a| a.is_enabled()).unwrap_or(false),
         "动作被误禁了"
+    );
+
+    // ---------- 4c. 「清空最近连接」：没有最近连接时灰掉 ----------
+    //
+    // 堡垒机场景：最近连接会被一次性连接冲垮 ⇒ 用户得能清。
+    // 没有记录时清不了 ⇒ 灰掉（别给一个点了没反应的项）。
+    {
+        let w = item("文件", "清空最近连接")
+            .unwrap_or_else(|| panic!("找不到「清空最近连接」"));
+        check!(
+            "没有最近连接时「清空最近连接」灰掉",
+            !w.is_sensitive(),
+            "还是可点的"
+        );
+    }
+
+    // ---------- 4d. 动作也跟着禁用 ----------
+    check!(
+        "「清空最近连接」动作也禁用",
+        !acts
+            .get("clear_recent")
+            .map(|a| a.is_enabled())
+            .unwrap_or(true),
+        "动作还是启用的"
     );
 
     // ---------- 4b. 传输队列有主菜单入口（阶段 77c-1）----------

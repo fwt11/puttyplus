@@ -116,9 +116,26 @@ mod tests {
         assert_ne!(safe_key("a:b"), safe_key("a_b"));
     }
 
+    /// 最近连接上限的解析（纯逻辑，不碰文件）。
     #[test]
-    fn defaults_size_and_time() {
-        // 默认显示大小与修改时间，权限列默认关；远程/本地一致
+    fn 最近连接上限的解析() {
+        assert_eq!(parse_recent_max(""), DEFAULT_RECENT_MAX, "缺键回默认");
+        assert_eq!(parse_recent_max("abc"), DEFAULT_RECENT_MAX, "写坏了回默认");
+        assert_eq!(parse_recent_max(" 5 "), 5);
+        assert_eq!(parse_recent_max("20"), 20);
+        assert_eq!(parse_recent_max("0"), 0, "0 = 不限");
+    }
+
+    /// 命令行启动的连接**默认不记**进最近连接（堡垒机场景）。
+    #[test]
+    fn 命令行启动默认不记最近连接() {
+        // ⚠️ 这里只查**默认值常量**：`record_cli_recent()` 读的是设置文件，
+        //    真机上用户自己可能开着 ⇒ 拿它当断言会误报。
+        assert!(!RECORD_CLI_RECENT_DEFAULT, "默认不该记");
+    }
+
+    #[test]
+    fn defaults_size_and_time() {        // 默认显示大小与修改时间，权限列默认关；远程/本地一致
         let r = ColumnsCfg::defaults(true);
         assert!(r.size && r.mtime && !r.perm);
         let l = ColumnsCfg::defaults(false);
@@ -245,6 +262,55 @@ pub fn language() -> crate::i18n::Lang {
 /// 保存界面语言。
 pub fn set_language(l: crate::i18n::Lang) {
     set_str("general", "language", l.code());
+}
+
+/* ---------------- 最近连接（上限 / 命令行启动是否记录） ---------------- */
+
+/// 最近连接默认留几条。
+pub const DEFAULT_RECENT_MAX: usize = 10;
+
+/// 最近连接最多留几条（`[general] recent_max`；**0 = 不限**）。
+///
+/// ⚠️ **堡垒机场景**：launcher 每次拉起都是一条一次性连接 ⇒ 「最近」
+/// 列表很容易被冲垮。用户可以在首选项的「高级」页里改小（或设成不限）。
+pub fn recent_max() -> usize {
+    parse_recent_max(&get_str("general", "recent_max"))
+}
+
+/// 上限字符串的解析（**纯函数**，便于单测）。
+///
+/// ⚠️ 认不出来（缺键 / 写坏了）⇒ 回默认值，而不是当成 0（= 不限）：
+/// 一个手滑写坏的值不该让「最近连接」无限增长。
+fn parse_recent_max(v: &str) -> usize {
+    match v.trim().parse::<usize>() {
+        Ok(n) => n,
+        Err(_) => DEFAULT_RECENT_MAX,
+    }
+}
+
+/// 保存最近连接条数上限（0 = 不限）。
+pub fn set_recent_max(n: usize) {
+    set_str("general", "recent_max", &n.to_string());
+}
+
+/// 命令行启动的连接要不要记进「最近连接」——**默认值**。
+///
+/// ⚠️ 单独提成常量：单测只能查它（`record_cli_recent()` 读的是设置文件，
+/// 真机上用户自己可能开着 ⇒ 拿它当断言会误报）。
+pub const RECORD_CLI_RECENT_DEFAULT: bool = false;
+
+/// 命令行启动的连接要不要记进「最近连接」（`[general] record_cli_recent`）。
+///
+/// ⚠️ **默认否**：堡垒机从外面拉起的一台设备一条记录 ⇒ 「最近」列表
+/// 全是一次性连接，想找自己常用的那条得翻很久。
+/// （界面上点开的连接不受影响 —— 那些照记。）
+pub fn record_cli_recent() -> bool {
+    get_bool("general", "record_cli_recent", RECORD_CLI_RECENT_DEFAULT)
+}
+
+/// 保存「命令行启动的连接是否记进最近连接」。
+pub fn set_record_cli_recent(on: bool) {
+    set_bool("general", "record_cli_recent", on);
 }
 
 pub fn show_sidebar() -> bool {
@@ -565,6 +631,27 @@ pub fn set_str(group: &str, key: &str, value: &str) {
     let kf = glib::KeyFile::new();
     let _ = kf.load_from_file(&p, glib::KeyFileFlags::NONE);
     kf.set_string(group, key, value);
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&p, kf.to_data().as_bytes());
+}
+
+/// 取一个布尔键（缺键 / 值损坏 ⇒ 回默认值）。
+pub fn get_bool(group: &str, key: &str, default: bool) -> bool {
+    let kf = glib::KeyFile::new();
+    if kf.load_from_file(path(), glib::KeyFileFlags::NONE).is_err() {
+        return default;
+    }
+    kf.boolean(group, key).unwrap_or(default)
+}
+
+/// 存一个布尔键。
+pub fn set_bool(group: &str, key: &str, value: bool) {
+    let p = path();
+    let kf = glib::KeyFile::new();
+    let _ = kf.load_from_file(&p, glib::KeyFileFlags::NONE);
+    kf.set_boolean(group, key, value);
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

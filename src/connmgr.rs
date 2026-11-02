@@ -1027,6 +1027,11 @@ fn spawn_self(e: &ConnEntry) -> Result<(), String> {
     if let Some(pw) = e.password.as_ref().filter(|p| !p.is_empty()) {
         cmd.env("PUTTYPLUS_PW_SESSION", pw.as_str());
     }
+    // ⚠️ **标记「这是我们自己派生的窗口」**：用户在界面里点的
+    //    「在新窗口打开」⇒ 这条连接该照常记进「最近连接」。
+    //    不带这个标记的话，它会跟"堡垒机从外面拉起的窗口"一样，
+    //    被当成"命令行启动"而不记录。
+    cmd.env(crate::args::INTERNAL_SPAWN_ENV, "1");
     cmd.spawn().map(|_| ()).map_err(|err| err.to_string())
 }
 

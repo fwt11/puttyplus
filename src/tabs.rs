@@ -684,14 +684,20 @@ impl Tabs {
         self.notebook.set_tab_reorderable(&page_w, true);
 
         // 记录最近连接（label 与条目名对齐，便于重开时回查密码）
-        recent::push(recent::RecentConn {
-            label: title.clone(),
-            host: opts.host.clone(),
-            // 端口归一化：0 与 22 是同一台机器，别在"最近"里存成两条
-            port: if opts.port > 0 { opts.port } else { 22 },
-            user: opts.user.clone(),
-            ref_name: opts.title.clone().filter(|_| opts.session_name.is_some()),
-        });
+        //
+        // ⚠️ **命令行启动的连接默认不记**（堡垒机场景：launcher 每次拉起
+        // 都是一条一次性连接，全记下来「最近」列表就没法看了）——
+        // 界面上点开的连接照记。判定见 `args::ConnOptions::record_recent`。
+        if opts.record_recent {
+            recent::push(recent::RecentConn {
+                label: title.clone(),
+                host: opts.host.clone(),
+                // 端口归一化：0 与 22 是同一台机器，别在"最近"里存成两条
+                port: if opts.port > 0 { opts.port } else { 22 },
+                user: opts.user.clone(),
+                ref_name: opts.title.clone().filter(|_| opts.session_name.is_some()),
+            });
+        }
 
         // 第一个面板即"活动面板"；后续分屏以它为起点
         let active: Rc<RefCell<Option<TermPane>>> = Rc::new(RefCell::new(Some(tp.clone())));

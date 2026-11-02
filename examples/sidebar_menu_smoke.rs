@@ -54,6 +54,18 @@ fn ctx(kind: i32, custom: bool, has_db: bool) -> RowMenuCtx {
         custom,
         has_db,
         fwd: None,
+        group: None,
+    }
+}
+
+/// 组头的上下文（kind==0）。
+fn group_ctx(name: &str) -> RowMenuCtx {
+    RowMenuCtx {
+        kind: 0,
+        custom: false,
+        has_db: false,
+        fwd: None,
+        group: Some(name.to_string()),
     }
 }
 
@@ -193,6 +205,39 @@ fn main() {
     println!("[5] 树上的数据库连接行：{rows:?}");
     assert_eq!(rows.len(), 1, "树上没挂出数据库连接：{rows:?}");
     assert!(rows[0].0.contains("ttt"), "树上没有「ttt」：{rows:?}");
+
+    // ---- ⑥ 「最近」组头：能清空最近连接（堡垒机场景）----
+    //
+    // ⚠️ 堡垒机每次拉起都是一条一次性连接 ⇒ 「最近」列表会被冲垮
+    // ⇒ 用户得能**一次性清掉**（一条条「从最近中移除」太累）。
+    {
+        puttyplus::recent::push(puttyplus::recent::RecentConn {
+            label: "堡垒机拉起的设备".into(),
+            host: "10.0.0.99".into(),
+            port: 22,
+            user: "ops".into(),
+            ref_name: None,
+        });
+        sb.reload();
+        pump(50);
+        // 组头确实在树上（kind==0，名字是「最近」）
+        let rows = sb.tree_rows();
+        let has_group = rows
+            .iter()
+            .any(|(k, name, _, _)| *k == 0 && name == "最近");
+        assert!(has_group, "树上没有「最近」组头：{rows:?}");
+        // 组头的菜单里能清空
+        let v = labels(&row_menu_items(&group_ctx("最近")));
+        println!("[6] 「最近」组头的菜单：{v:?}");
+        assert!(v.contains(&"清空最近连接"), "最近组头要能清空：{v:?}");
+        assert!(!v.contains(&"连接"), "组头不是连接：{v:?}");
+        // 别的组头没有清理动作
+        let v2 = labels(&row_menu_items(&group_ctx("自定义")));
+        assert!(v2.is_empty(), "别的组头不该有清理动作：{v2:?}");
+        // 清空之后最近项真的没了
+        puttyplus::recent::clear();
+        assert!(!puttyplus::recent::has_any(), "清空后不该还有最近连接");
+    }
 
     // ---- 截图：侧栏（含凭据库标志）----
     let win = gtk::Window::new();
