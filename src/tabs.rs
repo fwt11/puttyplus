@@ -33,8 +33,13 @@ pub fn tab_title_label(title: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(title));
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label.set_max_width_chars(18);
-    // 显式最小宽（px）：别被页签挤成「…」
-    label.set_size_request(64, -1);
+    // ⚠️ **尺寸请求要跟着文字走**：页签里给标签分的宽度**就是**这个尺寸
+    //    请求（实测：自然宽 80px 的 "demo-server" 只分到 64px ⇒ 被截成
+    //    「demo-s…」）。固定 64px ⇒ 长标题一律只剩几个字。
+    //    ⇒ 先量自然宽（`max_width_chars(18)` 已经把上限卡住了），再拿它
+    //    当尺寸请求；下限 64px：页签挤一挤也不至于整个变成「… ×」。
+    let (_, nat, _, _) = label.measure(gtk::Orientation::Horizontal, -1);
+    label.set_size_request(nat.max(64), -1);
     label.set_xalign(0.0);
     label
 }
