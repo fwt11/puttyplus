@@ -108,6 +108,35 @@ jobs:
           sha256sum puttyplus_*.deb puttyplus-linux-x86_64.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      - name: 版本号一致性校验（tag ⟷ Cargo.toml ⟷ debian/changelog）
+        # ⚠️ **这道闸门是 v0.2.0 那次翻车的补丁**：
+        #    tag 打的是 v0.2.0，可 Cargo.toml 与 debian/changelog 还停在
+        #    0.1.0 ⇒ 产出的 deb 叫 puttyplus_0.1.0-1_amd64.deb（和 v0.1.0
+        #    的**同名**），Release 正文也写着「PuTTYPlus 0.1.0」。
+        #    三处版本号必须一致，不一致就别发。
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 tools/check_version.py "$TAG"
+
+      - name: 生成发布说明（版本号从 tag 注入）
+        # ⚠️ 正文**不再硬编码**在 workflow 里：按版本放在仓库的
+        #    docs/发布说明/<tag>.md，`{{VERSION}}` 会替换成实际版本号。
+        #    没有对应文件 ⇒ 直接失败（宁可不发，也不要发一个说错版本的说明）。
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          notes="docs/发布说明/${TAG}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::找不到发布说明 $notes（发版说明必须按版本写好再打 tag）"
+            exit 1
+          fi
+          sed "s/{{VERSION}}/${version}/g" "$notes" > "$GITHUB_WORKSPACE/dist/notes.md"
+          cat "$GITHUB_WORKSPACE/dist/notes.md"
+
       - name: 建 Release 并上传资产
         # ⚠️ 用 REST API 而不是 gh CLI：容器里 gh 的认证/参数组合容易出岔子，
         #    而 API 的每一步都能看到状态码。失败时把响应体做成注解回传。
@@ -119,26 +148,6 @@ jobs:
           set -uo pipefail
           cd "$GITHUB_WORKSPACE/dist"
 
-          cat > notes.md <<'EOF'
-          ## PuTTYPlus 0.1.0
-
-          PuTTY 兼容的 SSH 终端 + 图形化 SFTP + 数据库工作台（Linux / GTK4）。
-
-          **下载**
-
-          - `puttyplus_0.1.0-1_amd64.deb` —— Debian / Ubuntu 等发行版的安装包
-            （依赖 GTK ≥ 4.18、VTE ≥ 0.80）
-          - `puttyplus-linux-x86_64.tar.gz` —— 免安装的单个可执行文件
-            （SSH 与加密全静态，只要目标机器有 GTK4 / VTE4）
-
-          校验和见 `SHA256SUMS`。
-
-          **特性**：命令行与 PuTTY 兼容（可顶替 PuTTY 部署在堡垒机上）· 终端 + SFTP
-          双栏同窗口 · 数据库工作台（PostgreSQL / MySQL，通道复用当前 SSH 连接）·
-          凭据库（argon2 + AES-GCM）· 会话录制与回放（asciicast）· 串口会话。
-
-          详见 [README](https://github.com/fwt11/puttyplus#readme)。
-          EOF
 
           api() {  # api <method> <url> [json-body]
             local method="$1" url="$2" body="${3:-}"

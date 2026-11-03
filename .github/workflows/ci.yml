@@ -52,6 +52,16 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: 版本号一致性校验（Cargo.toml ⟷ debian/changelog）
+        # ⚠️ **发版翻车过一次**：v0.2.0 的 tag 打出去时，Cargo.toml 与
+        #    debian/changelog 还停在 0.1.0 ⇒ 那个 Release 里的 deb 叫
+        #    puttyplus_0.1.0-1_amd64.deb，和 v0.1.0 的**同名**。
+        #    ⇒ 在这儿就拦住：版本号对不上，后面的构建与打包都别做。
+        run: |
+          set -euo pipefail
+          python3 tools/check_version.py
+
+
       - name: 装 Rust（stable）
         # ⚠️ 装到**固定路径** /opt/rust：容器 job 里 HOME 不是 /root
         #    （runner 会设成 /github/home），硬编码 $HOME/.cargo 会找不到。
@@ -183,6 +193,21 @@ jobs:
           bash tools/build_deb.sh
           # dpkg-buildpackage 把产物写在**仓库目录的上一级**，搬进工作区再上传
           cp ../puttyplus_*.deb "$GITHUB_WORKSPACE/"
+
+      - name: 核对 deb 的文件名跟版本号一致
+        # ⚠️ deb 的**包名与包版本来自 debian/changelog**，不是 Cargo.toml。
+        #    两边对不上就会出现「v0.2.0 的 Release 里装着 0.1.0 的包」
+        #    （用户装上后 dpkg -l 显示的还是旧版本）。
+        #    ⇒ 这里直接看产出的文件名，名字里必须带当前版本号。
+        run: |
+          set -euo pipefail
+          ver="$(python3 tools/check_version.py --print)"
+          echo "当前版本：$ver"
+          ls -1 puttyplus_*.deb
+          if ! ls -1 puttyplus_*.deb | grep -q "^puttyplus_${ver}-"; then
+            echo "::error::deb 的文件名跟版本号 ${ver} 对不上（见上面列出的文件）"
+            exit 1
+          fi
 
       - name: 核对 deb 的依赖（别再出现 libc6 (>= 2.39)）
         # 装不上老系统的根因就是这一行依赖；把它钉在 CI 里，别再回归。
