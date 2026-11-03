@@ -137,13 +137,13 @@ ssh 子进程长什么样 —— 每一处都要和 PuTTY 对得上。
 
 | 资产 | 用途 |
 |---|---|
-| `puttyplus_<版本>_amd64.deb` | Debian / Ubuntu 等发行版的安装包（依赖 GTK ≥ 4.18、VTE ≥ 0.80） |
+| `puttyplus_<版本>-1_amd64.deb` | Debian / Ubuntu 等发行版的安装包（依赖 GTK ≥ 4.18、VTE ≥ 0.80） |
 | `puttyplus-linux-x86_64.tar.gz` | 免安装的单文件版：解开直接跑 `puttyplus` |
 | `SHA256SUMS` | 校验和（`sha256sum -c SHA256SUMS`） |
 
 ```bash
-# 装 deb
-sudo dpkg -i puttyplus_0.1.0-1_amd64.deb
+# 装 deb（<版本> 换成 Releases 页上的那个，例如 0.3.0）
+sudo dpkg -i puttyplus_<版本>-1_amd64.deb
 
 # 免安装版
 tar xf puttyplus-linux-x86_64.tar.gz
@@ -180,7 +180,7 @@ cargo build --release
 ```bash
 bash tools/build_deb.sh            # 只打包
 bash tools/build_deb.sh --test     # 先跑单元测试再打包
-sudo dpkg -i puttyplus_0.1.0-1_amd64.deb
+sudo dpkg -i puttyplus_<版本>-1_amd64.deb
 ```
 
 包里带桌面菜单项、图标和中文手册页。
