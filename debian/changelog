@@ -1,3 +1,17 @@
+puttyplus (0.3.0-1) unstable; urgency=medium
+
+  * 界面文案全部接入翻译机制（1610 条中英对照）：设置里可切中文 / English，
+    菜单、快捷键、报错一并跟着切。
+  * 堡垒机使用场景下所有地方都不出现「记住密码」——按会话判定（不在
+    自建连接 / ssh config 别名 / 最近连接里的会话 = 堡垒机拉起的一次性会话）。
+  * 页签标题宽度跟着文字走，长标题不再被截成「demo-s…」。
+  * README 的截图换成真机演示（终端分屏 + 数据库工作台），并补上
+    「分屏」这一条说明（分屏功能本身 v0.1.0 就有，只是没写进文档）。
+  * 发版流程修好：版本号三处（Cargo.toml / debian/changelog / git tag）
+    必须一致才让发，发布说明按版本从仓库里读，不再硬编码。
+
+ -- fwt11 <wutong.feng@qq.com>  Tue, 03 Nov 2026 20:40:00 +0800
+
 puttyplus (0.1.0-1) unstable; urgency=medium
 
   * 首次以 deb 包形式发布（Rust 重构版主线）。
