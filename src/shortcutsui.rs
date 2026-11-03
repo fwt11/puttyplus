@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use gtk::prelude::*;
 
 use crate::shortcuts;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_dyn};
 
 pub fn set_parent(w: gtk::Window) {
     // ⚠️ 父窗口统一由 `windows` 管（阶段 67）
@@ -40,7 +40,9 @@ pub fn open() {
             root.append(&sep);
         }
         first = false;
-        let head = gtk::Label::new(Some(group));
+        // ⚠️ 分组名在 const 表里 ⇒ 显示时翻译。
+        let gname = tr_dyn(group);
+        let head = gtk::Label::new(Some(&gname));
         head.set_xalign(0.0);
         head.set_margin_top(4);
         head.add_css_class("pp-section");
@@ -55,7 +57,9 @@ pub fn open() {
             key.set_width_chars(16);
             key.add_css_class("monospace");
             key.add_css_class("pp-key");
-            let desc = gtk::Label::new(Some(b.desc));
+            // ⚠️ 说明在 const 表里 ⇒ 显示时翻译。
+            let dtext = tr_dyn(b.desc);
+            let desc = gtk::Label::new(Some(&dtext));
             desc.set_xalign(0.0);
             desc.set_hexpand(true);
             desc.set_wrap(true);

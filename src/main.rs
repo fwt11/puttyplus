@@ -687,7 +687,8 @@ fn app_menubar(
         // ⚠️ 用**普通 Button**而不是 `MenuButton`：MenuButton 自带一个小三角
         // （GTK 4.18 里那不是普通 image 节点，CSS 压不掉），菜单栏里显得多余。
         // 普通 Button 配一个挂在它上面的 Popover，观感与经典菜单栏一致。
-        let (btn, pop) = menubar.item(title);
+        // ⚠️ 菜单标题在 const 表里（编译期求值 ⇒ 不能调 tr()）⇒ 显示时翻译。
+        let (btn, pop) = menubar.item(tr(*title));
         // ⚠️ 正文交给 `topbar::build_body`（阶段 74）：这段原来在 main.rs 里，
         // 冒烟**测不到**（例子链不到 bin）⇒ 「快捷键列」「没有终端时灰掉」
         // 只能靠人眼看。搬到 lib 后冒烟能直接验。

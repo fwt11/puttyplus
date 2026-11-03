@@ -811,6 +811,29 @@ mod tests {
         }
     }
 
+    /// 菜单标题与菜单项的文案**都要有英文译文**。
+    ///
+    /// ⚠️ 这些文字在 `const` 表里（编译期求值 ⇒ 不能调 `tr()`）⇒ 显示时
+    ///    才翻译。表里漏了一条 ⇒ 英文界面上那一条还是中文。
+    #[test]
+    fn 菜单文案都有英文译文() {
+        for (title, entries) in TOP_MENUS {
+            assert!(
+                crate::i18n::has_translation(title),
+                "顶级菜单「{title}」没有英文译文"
+            );
+            for e in entries.iter() {
+                let label = match e {
+                    MenuEntry::Item { label, .. } | MenuEntry::Toggle { label, .. } => Some(*label),
+                    _ => None,
+                };
+                if let Some(l) = label {
+                    assert!(crate::i18n::has_translation(l), "菜单项「{l}」没有英文译文");
+                }
+            }
+        }
+    }
+
     /// 开关项**统一成 Toggle**：勾选标记说开还是关（阶段 74 / 审计 P1-13）。
     ///
     /// ⚠️ 以前「显示侧边栏」是 Toggle（有勾），「按键广播（开关）」「记录

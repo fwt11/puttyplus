@@ -44,6 +44,27 @@ fn destructive_words_t() -> Vec<String> {
         .collect()
 }
 
+/// 两个按钮词表**都要有英文译文**。
+///
+/// ⚠️ 词表是**中文源词**，英文界面里靠 `tr_dyn` 翻成英文再跟按钮上的字
+///    比对（`label.contains(word)`）⇒ 漏一条译文，那个按钮在英文界面
+///    就既不会被标成危险、也不会被认成主操作。
+#[test]
+fn 按钮词表都有英文译文() {
+    for w in destructive_words().iter() {
+        assert!(
+            crate::i18n::has_translation(w),
+            "危险词「{w}」没有英文译文"
+        );
+    }
+    for w in primary_words().iter() {
+        assert!(
+            crate::i18n::has_translation(w),
+            "主操作词「{w}」没有英文译文"
+        );
+    }
+}
+
 /// 主操作词表（**当前语言**）。
 fn primary_words_t() -> Vec<String> {
     primary_words()

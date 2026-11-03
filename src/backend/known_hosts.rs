@@ -17,10 +17,20 @@ use crate::trf;
 
 type HmacSha1 = Hmac<Sha1>;
 
-pub const CHANGED_MSG: &str = "主机密钥校验失败（密钥已变化）。\n\
-                               若确定环境安全，可删除 ~/.ssh/known_hosts 中相关条目后重试。";
-pub const REVOKED_MSG: &str = "主机密钥校验失败（该密钥已被标记吊销）。\n\
-                               若确定环境安全，可删除 ~/.ssh/known_hosts 中相关条目后重试。";
+/// 主机密钥**变了**的提示。
+///
+/// ⚠️ 原来是 `const` —— 但 const 是**编译期求值**，不能调 `tr()`
+///    ⇒ 英文界面里这句还是中文。改成函数，运行时翻译。
+pub fn changed_msg() -> &'static str {
+    tr("主机密钥校验失败（密钥已变化）。\n\
+       若确定环境安全，可删除 ~/.ssh/known_hosts 中相关条目后重试。")
+}
+
+/// 主机密钥**被吊销**的提示（同 [`changed_msg`]：const 翻不了）。
+pub fn revoked_msg() -> &'static str {
+    tr("主机密钥校验失败（该密钥已被标记吊销）。\n\
+       若确定环境安全，可删除 ~/.ssh/known_hosts 中相关条目后重试。")
+}
 
 #[derive(Debug)]
 struct KhEntry {
@@ -155,7 +165,7 @@ pub fn verify_and_learn(
         }
         if e.keytype == kt && e.key_b64 == b64 {
             if e.revoked {
-                return Err(REVOKED_MSG.into());
+                return Err(revoked_msg().into());
             }
             found_same = true;
         } else {
@@ -166,7 +176,7 @@ pub fn verify_and_learn(
         return Ok(HostKeyCheck::Match);
     }
     if found_diff {
-        return Err(CHANGED_MSG.into());
+        return Err(changed_msg().into());
     }
 
     // 首次见到：追加写入

@@ -18,7 +18,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use crate::density::{self, Density, UiFont};
-use crate::i18n::{tr, Lang};
+use crate::i18n::{tr, tr_dyn, Lang};
 use crate::theme::{self, Palette, Theme};
 use crate::windows::ToolKind;
 use crate::trf;
@@ -451,10 +451,11 @@ fn appearance_page(root: &gtk::Box) {
         sec.append(&section(tr("界面字号")));
 
         let fonts = UiFont::ALL;
+        // ⚠️ FONT_HINT 是 const（编译期求值 ⇒ 不能调 tr()）⇒ 显示时翻译。
         let items: [(&str, &str); 3] = [
-            (fonts[0].label(), FONT_HINT),
-            (fonts[1].label(), FONT_HINT),
-            (fonts[2].label(), FONT_HINT),
+            (fonts[0].label(), tr(FONT_HINT)),
+            (fonts[1].label(), tr(FONT_HINT)),
+            (fonts[2].label(), tr(FONT_HINT)),
         ];
         let cur = density::ui_font();
         let cur_idx = fonts.iter().position(|f| *f == cur).unwrap_or(1);
@@ -660,7 +661,9 @@ fn shortcuts_page(root: &gtk::Box) {
         t.add_css_class("pp-section");
         g.append(&t);
         for b in items {
-            let line = gtk::Label::new(Some(&trf!("{v0}　{v1}", v0 = b.display, v1 = b.desc)));
+            // ⚠️ 快捷键说明在 const 表里 ⇒ 用 tr_dyn 翻（trf! 的占位符
+            //    走的是 to_string()，传 Cow 进去也对）。
+            let line = gtk::Label::new(Some(&trf!("{v0}　{v1}", v0 = b.display, v1 = tr_dyn(b.desc))));
             line.set_xalign(0.0);
             line.add_css_class("pp-hint");
             g.append(&line);

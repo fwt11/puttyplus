@@ -62,6 +62,26 @@ impl Binding {
     }
 }
 
+/// 快捷键的分组名与说明**都要有英文译文**。
+///
+/// ⚠️ 同 `topmenus`：它们在 `const` 表里 ⇒ 显示时才翻译 ⇒ 漏一条
+///    英文界面上那一条就是中文。
+#[test]
+fn 快捷键文案都有英文译文() {
+    for b in ALL.iter() {
+        assert!(
+            crate::i18n::has_translation(b.group),
+            "快捷键分组「{}」没有英文译文",
+            b.group
+        );
+        assert!(
+            crate::i18n::has_translation(b.desc),
+            "快捷键说明「{}」没有英文译文",
+            b.desc
+        );
+    }
+}
+
 const WIN: Scope = Scope::Window;
 const TERM: Scope = Scope::Terminal;
 

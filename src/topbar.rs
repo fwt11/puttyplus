@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 
+use crate::i18n::tr;
 use crate::menu;
 use crate::topmenus::MenuEntry;
 use crate::trf;
@@ -61,7 +62,8 @@ pub fn build_body(
             } => {
                 // ⚠️ 快捷键写在文字右边（阶段 74 / 审计 P1-13）：
                 // 以前顶栏菜单一个快捷键都不显示，用户只能去查一览表。
-                let b = menu::item(icon, label, shortcut);
+                // ⚠️ 菜单项文字在 const 表里 ⇒ 显示时翻译（见 `main.rs` 同理）。
+                let b = menu::item(icon, tr(label), shortcut);
                 if danger {
                     menu::danger(&b);
                 }
@@ -86,7 +88,7 @@ pub fn build_body(
             } => {
                 // 开关项（阶段 59）：右侧勾选标记显示当前状态（勾 = 开）。
                 // 菜单项只建一次 → 每次弹出前把状态刷成最新的。
-                let b = menu::toggle(icon, label, shortcut, state());
+                let b = menu::toggle(icon, tr(label), shortcut, state());
                 toggles.push((b.clone(), state));
                 let acts2 = acts.clone();
                 let pop2 = pop.clone();

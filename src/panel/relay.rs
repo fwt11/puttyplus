@@ -284,7 +284,7 @@ async fn direct(
     if pre_out.code != Some(0) {
         let why = pre_out.stderr.trim();
         return Err(if why.is_empty() {
-            format!("预检失败（退出码 {:?}）", pre_out.code)
+            trf!("预检失败（退出码 {code}）", code = format!("{:?}", pre_out.code))
         } else {
             trf!("预检失败：{why}", why = why)
         });
@@ -338,7 +338,7 @@ async fn direct(
         let why = out.stderr.trim().to_string();
         let _ = remove_rec(&spec.dst_sftp, tmp.clone()).await;
         return Err(if why.is_empty() {
-            format!("scp 失败（退出码 {:?}）", out.code)
+            trf!("scp 失败（退出码 {code}）", code = format!("{:?}", out.code))
         } else {
             trf!("scp 失败：{why}", why = why)
         });

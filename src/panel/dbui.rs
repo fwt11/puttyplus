@@ -6413,7 +6413,7 @@ fn do_save(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
         match dbmeta::build_insert(proto, &target.schema, &target.table, &columns, &types, vals) {
             Ok(sql) => sqls.push(sql),
             // 一行都没填 → 跳过（不是错误：用户可能只是开了个空行）
-            Err(e) if e.contains("还没有填任何值") => {
+            Err(e) if dbmeta::is_empty_row_err(&e) => {
                 let _ = i;
             }
             Err(e) => {

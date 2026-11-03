@@ -620,7 +620,9 @@ impl Sidebar {
             // ⚠️ 阶段 93：**组头一律粗体 + 计数徽章**。
             // 以前「有条目时」不加粗、只跟一个小灰字计数 ⇒ 组头和条目
             // 长得一模一样，列表层次全糊了（用户 2026-11-01：「有点丑」）。
-            let label = group_markup(title, n, &chip_bg, &fg);
+            // ⚠️ 组头标题在 const 表里 ⇒ 显示时翻译；**识别用的仍是中文
+            //    原文**（COL_NAME，右键菜单靠它认组）。
+            let label = group_markup(&crate::i18n::tr_dyn(title), n, &chip_bg, &fg);
             store.set(
                 &it,
                 &[
