@@ -17,9 +17,20 @@ env:
 
 jobs:
   build:
-    name: 构建 · 测试 · 打包
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: 构建 · 测试 · 打包（${{ matrix.arch }}）
+    # ⚠️ **两种架构都要 CI 跑**：arm64 用 GitHub 官方的 ARM runner
+    #    （`ubuntu-24.04-arm`，**公开仓库免费**）。fail-fast 关掉 ——
+    #    一边失败别把另一边也取消掉（ARM 慢，先跑完的 amd64 不用等它）。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     # ⚠️ 用 Debian 13 (trixie) 容器：它带 GTK 4.18.6 / VTE 0.80.1，
     #    正好是 debian/control 里声明的依赖下限（Ubuntu runner 只有 GTK 4.14，
     #    编译期就会被 gtk4-sys 的版本断言挡下）。
@@ -82,7 +93,9 @@ jobs:
             /opt/rust/cargo/registry
             /opt/rust/cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          # ⚠️ 键里**必须带架构**：ARM 与 x86 的 target/ 里是不同架构的产物，
+          #    共用一个缓存 key 会互相覆盖（偶尔会编出跑不起来的二进制）。
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: 打印工具链与依赖版本
         # 只是给人看的诊断，不让它把整个 CI 拖红（真缺库编译那步会自己报错）
@@ -183,7 +196,7 @@ jobs:
       - name: 上传可执行文件
         uses: actions/upload-artifact@v4
         with:
-          name: puttyplus-linux-x86_64
+          name: puttyplus-linux-${{ matrix.arch }}
           path: target/release/puttyplus
           if-no-files-found: error
 
@@ -223,6 +236,6 @@ jobs:
       - name: 上传 deb
         uses: actions/upload-artifact@v4
         with:
-          name: puttyplus-deb-amd64
+          name: puttyplus-deb-${{ matrix.arch }}
           path: puttyplus_*.deb
           if-no-files-found: error

@@ -137,16 +137,19 @@ ssh 子进程长什么样 —— 每一处都要和 PuTTY 对得上。
 
 | 资产 | 用途 |
 |---|---|
-| `puttyplus_<版本>-1_amd64.deb` | Debian / Ubuntu 等发行版的安装包（依赖 GTK ≥ 4.18、VTE ≥ 0.80） |
-| `puttyplus-linux-x86_64.tar.gz` | 免安装的单文件版：解开直接跑 `puttyplus` |
+| `puttyplus_<版本>-1_amd64.deb` | x86-64 的 Debian / Ubuntu 等发行版安装包（依赖 GTK ≥ 4.18、VTE ≥ 0.80） |
+| `puttyplus_<版本>-1_arm64.deb` | arm64（aarch64）同上，树莓派 / ARM 服务器 / ARM 笔记本用这个 |
+| `puttyplus-linux-x86_64.tar.gz` | 免安装的单文件版（x86-64）：解开直接跑 `puttyplus` |
+| `puttyplus-linux-aarch64.tar.gz` | 免安装的单文件版（arm64） |
 | `SHA256SUMS` | 校验和（`sha256sum -c SHA256SUMS`） |
 
 ```bash
 # 装 deb（<版本> 换成 Releases 页上的那个，例如 0.3.0）
-sudo dpkg -i puttyplus_<版本>-1_amd64.deb
+sudo dpkg -i puttyplus_<版本>-1_amd64.deb      # x86-64
+sudo dpkg -i puttyplus_<版本>-1_arm64.deb      # arm64
 
 # 免安装版
-tar xf puttyplus-linux-x86_64.tar.gz
+tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 ./puttyplus
 ```
 
@@ -178,10 +181,14 @@ cargo build --release
 ### 打包成 deb
 
 ```bash
-bash tools/build_deb.sh            # 只打包
+bash tools/build_deb.sh            # 只打包（架构跟本机走）
 bash tools/build_deb.sh --test     # 先跑单元测试再打包
 sudo dpkg -i puttyplus_<版本>-1_amd64.deb
 ```
+
+⚠️ **包名里的架构是打包机器的架构**（amd64 / arm64）——在 arm64 机器上跑
+上面的脚本，出来的就是 `_arm64.deb`。发布用的两个架构由 GitHub Actions
+分别构建（见下）。
 
 包里带桌面菜单项、图标和中文手册页。
 
@@ -258,8 +265,9 @@ bash tools/cli_contract_check.sh              # 命令行契约回归（73 条�
 - 跑命令行契约回归（73 条黄金基准）；
 - 打成 deb 包。
 
-产物在 Actions 页面直接下载：`puttyplus-linux-x86_64`（可执行文件）与
-`puttyplus-deb-amd64`（deb 包）。本地等价命令：
+产物在 Actions 页面直接下载：`puttyplus-linux-amd64` / `puttyplus-linux-arm64`
+（可执行文件）与 `puttyplus-deb-amd64` / `puttyplus-deb-arm64`（deb 包）。
+本地等价命令：
 
 ```bash
 cargo test --lib                              # 单元测试（不需要显示环境）

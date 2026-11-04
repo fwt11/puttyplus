@@ -13,10 +13,24 @@ permissions:
   contents: write   # 要建 Release、上传资产
 
 jobs:
-  release:
-    name: 打 tag · 构建 · 发 Release
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  # ---- 两个架构各编一份（amd64 / arm64）----
+  build:
+    name: 构建 ${{ matrix.arch }}
+    # ⚠️ **两种架构都要出包**：arm64 用 GitHub 官方的 ARM runner
+    #    （`ubuntu-24.04-arm`，公开仓库免费）。fail-fast 关掉 ——
+    #    一边失败别把另一边也取消掉。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            tarname: puttyplus-linux-x86_64.tar.gz
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            tarname: puttyplus-linux-aarch64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     container:
       image: debian:trixie
     steps:
@@ -56,7 +70,7 @@ jobs:
             /opt/rust/cargo/registry
             /opt/rust/cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: 编译（release）
         run: cargo build --release --locked
@@ -93,20 +107,45 @@ jobs:
             exit 1
           fi
 
-      - name: 收拢二进制并算校验和
+      - name: 收拢二进制
+        # ⚠️ **校验和不在这里算**：要覆盖两个架构的全部资产 ⇒ 统一在
+        #    publish job 里算（那时 dist/ 里才有两个架构的东西）。
         run: |
           set -eux
           mkdir -p dist/pkg
           cp target/release/puttyplus dist/pkg/puttyplus
           cp README.md LICENSE dist/pkg/
           # ⚠️ deb 在仓库根（dpkg-buildpackage 写在上一级），**得先拷进 dist/**
-          #    —— 否则下一步在 dist/ 里 sha256sum 找不到它，直接退出 1。
+          #    —— 否则下一步在 dist/ 里找不到它。
           cp puttyplus_*.deb dist/
-          tar -C dist/pkg -czf "$GITHUB_WORKSPACE/dist/puttyplus-linux-x86_64.tar.gz" \
+          tar -C dist/pkg -czf "$GITHUB_WORKSPACE/dist/${{ matrix.tarname }}" \
             puttyplus README.md LICENSE
-          cd dist
-          sha256sum puttyplus_*.deb puttyplus-linux-x86_64.tar.gz > SHA256SUMS
-          cat SHA256SUMS
+          ls -l dist
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/${{ matrix.tarname }}
+          if-no-files-found: error
+
+  # ---- 两个架构都编完，再统一建 Release ----
+  publish:
+    name: 建 Release 并上传资产
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 收拢两个架构的产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: dist
 
       - name: 版本号一致性校验（tag ⟷ Cargo.toml ⟷ debian/changelog）
         # ⚠️ **这道闸门是 v0.2.0 那次翻车的补丁**：
@@ -119,6 +158,29 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/check_version.py "$TAG"
+
+      - name: 核对资产齐全（两个架构的 deb + tar.gz）
+        # ⚠️ deb 的**包名与包版本来自 debian/changelog**，不是 Cargo.toml。
+        #    两边对不上就会出现「v0.2.0 的 Release 里装着 0.1.0 的包」。
+        #    ⇒ 直接看产出的文件名，名字里必须带当前版本号。
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ver="$(python3 tools/check_version.py --print)"
+          echo "当前版本：$ver"
+          ls -1 dist
+          for f in dist/puttyplus_*.deb; do
+            [ -f "$f" ] || { echo "::error::没有 deb 产物"; exit 1; }
+            base="$(basename "$f")"
+            case "$base" in
+              puttyplus_"${ver}"-*_amd64.deb|puttyplus_"${ver}"-*_arm64.deb) : ;;
+              *) echo "::error::deb 文件名跟版本号 ${ver} 对不上：$base"; exit 1 ;;
+            esac
+          done
+          for t in dist/puttyplus-linux-x86_64.tar.gz dist/puttyplus-linux-aarch64.tar.gz; do
+            [ -f "$t" ] || { echo "::error::缺少 $t"; exit 1; }
+          done
 
       - name: 生成发布说明（版本号从 tag 注入）
         # ⚠️ 正文**不再硬编码**在 workflow 里：按版本放在仓库的
@@ -136,6 +198,13 @@ jobs:
           fi
           sed "s/{{VERSION}}/${version}/g" "$notes" > "$GITHUB_WORKSPACE/dist/notes.md"
           cat "$GITHUB_WORKSPACE/dist/notes.md"
+
+      - name: 算校验和（覆盖两个架构的全部资产）
+        run: |
+          set -eux
+          cd dist
+          sha256sum puttyplus_*.deb puttyplus-linux-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
 
       - name: 建 Release 并上传资产
         # ⚠️ 用 REST API 而不是 gh CLI：容器里 gh 的认证/参数组合容易出岔子，
@@ -216,7 +285,7 @@ jobs:
             upload_url="https://uploads.github.com/repos/$REPO/releases/$rid/assets"
           }
           upload_url=$(echo "$upload_url" | sed 's/{[^}]*}//')
-          for f in puttyplus_*.deb puttyplus-linux-x86_64.tar.gz SHA256SUMS; do
+          for f in puttyplus_*.deb puttyplus-linux-*.tar.gz SHA256SUMS; do
             [ -f "$f" ] || continue
             old_id=$(api GET "https://api.github.com/repos/$REPO/releases/$rid/assets" \
                      >/dev/null 2>&1; jq -r --arg n "$f" '.[] | select(.name==$n) | .id' /tmp/api.out 2>/dev/null | head -1)
