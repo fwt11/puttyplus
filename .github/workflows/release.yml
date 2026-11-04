@@ -70,7 +70,9 @@ jobs:
             /opt/rust/cargo/registry
             /opt/rust/cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          # ⚠️ 键尾的 v2：见 ci.yml 里的说明（被取消的 run 会把半成品 target/
+          #    存进缓存，下一轮恢复后跑的是坏掉的二进制）。
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-v2-${{ hashFiles('Cargo.lock') }}
 
       - name: 编译（release）
         run: cargo build --release --locked

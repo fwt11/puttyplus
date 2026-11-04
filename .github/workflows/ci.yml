@@ -95,7 +95,11 @@ jobs:
             target
           # ⚠️ 键里**必须带架构**：ARM 与 x86 的 target/ 里是不同架构的产物，
           #    共用一个缓存 key 会互相覆盖（偶尔会编出跑不起来的二进制）。
-          key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          # ⚠️ **键尾的 v2 是 2026-11 加的**：上一轮 run 编译到一半被取消时，
+          #    "Post 缓存"照样把**半成品 target/** 存进了缓存 ⇒ 下一轮恢复它
+          #    之后跑的是坏掉的测试二进制 ⇒ 整个测试进程 abort（失败名单是空的，
+          #    看着像"玄学"）。换键 ⇒ 旧的那份污染缓存自然作废。
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-v2-${{ hashFiles('Cargo.lock') }}
 
       - name: 打印工具链与依赖版本
         # 只是给人看的诊断，不让它把整个 CI 拖红（真缺库编译那步会自己报错）
@@ -147,6 +151,15 @@ jobs:
             sed -n '/^failures:$/,/^test result:/p' /tmp/test.log \
               | head -c 4000 | sed 's/%/%25/g' | tr '\n' '%0A'
             echo
+            # ⚠️ 有时不是断言失败，而是**整个测试进程 abort**（GTK 断言 / 段错误 /
+            #    坏掉的二进制）—— 这时日志里没有 "failures:" 段，上面那条注解
+            #    就是空的 ⇒ 网页上什么都看不到（run 级日志又要 admin 才能下）。
+            #    ⇒ 把日志尾巴也塞进注解，下次不用猜。
+            if ! grep -q "^failures:" /tmp/test.log; then
+              echo "::error::日志里没有 failures: 段（测试进程多半是 abort 了），日志尾部："
+              tail -c 3000 /tmp/test.log | sed 's/%/%25/g' | tr '\n' '%0A'
+              echo
+            fi
             grep -E "^test result:" /tmp/test.log | sed 's/%/%25/g'
             exit 1
           }
