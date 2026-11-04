@@ -119,6 +119,8 @@ jobs:
             readelf --version-info target/release/puttyplus 2>/dev/null \
               | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -u | tr '\n' ' ' || true
             echo
+            echo "=== 版本需求表体检（strip_weak_glibc_versions.py --check）==="
+            python3 tools/strip_weak_glibc_versions.py --check target/release/puttyplus 2>&1 || true
           } > "diag-${{ matrix.arch }}.txt" 2>&1
           cat "diag-${{ matrix.arch }}.txt"
 
