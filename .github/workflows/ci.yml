@@ -113,10 +113,20 @@ jobs:
       - name: 摘掉弱符号的 glibc 版本要求
         # ⚠️ Rust 的 std 弱引用了 pidfd_spawnp / pidfd_getpid（glibc 2.39 才有）。
         #    在 trixie（glibc 2.41）上链接 ⇒ 这些弱引用被打了 GLIBC_2.39 标签 ⇒
-        #    dpkg-shlibdeps 把依赖算成 libc6 (>= 2.39) ⇒ **glibc 2.38 的机器
-        #    （Deepin 25 等）装不上**（程序其实能跑）。摘掉标签后依赖回到
-        #    libc6 (>= 2.34)。这个步骤对已经在老 glibc 上编出来的二进制是空操作。
-        run: python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
+        #    ① dpkg-shlibdeps 把依赖算成 libc6 (>= 2.39) ⇒ **glibc 2.38 的机器
+        #    （Deepin 25 等）装不上**；② 动态加载器直接报
+        #    "version `GLIBC_2.39' not found"，程序在老 glibc 上根本起不来。
+        #    摘掉标签后依赖回到 libc6 (>= 2.34)。这个步骤对已经在老 glibc 上
+        #    编出来的二进制是空操作。
+        #
+        # ⚠️ 脚本会**自检**（链长 / 符号索引 / 硬下限三条），不过就 exit 1；
+        #    --selftest 是脚本自身的单测（摘链首 / 链中 / 链尾三种位置，
+        #    2026-11 的 ARM 事故就是"摘链尾那条"摘错了留下的坑）。
+        run: |
+          set -euo pipefail
+          python3 tools/strip_weak_glibc_versions.py --selftest
+          python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
+          python3 tools/strip_weak_glibc_versions.py --check target/release/puttyplus
 
       - name: 单元测试
         # ⚠️ **不要给单测提供显示环境**！libtest 把每个测试跑在子线程上，
@@ -238,6 +248,8 @@ jobs:
             readelf --version-info target/release/puttyplus 2>/dev/null \
               | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -u | tr '\n' ' ' || true
             echo
+            echo "=== 版本需求表体检（strip_weak_glibc_versions.py --check）==="
+            python3 tools/strip_weak_glibc_versions.py --check target/release/puttyplus 2>&1 || true
           } > "diag-${{ matrix.arch }}.txt" 2>&1
           cat "diag-${{ matrix.arch }}.txt"
 

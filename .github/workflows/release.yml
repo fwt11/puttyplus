@@ -78,8 +78,14 @@ jobs:
       - name: 摘掉弱符号的 glibc 版本要求
         # ⚠️ 见 ci.yml 同名步骤的注释：Rust 的 std 弱引用了 glibc 2.39 才有的
         #    pidfd_* ⇒ 在 trixie 上链接会给它们打 GLIBC_2.39 标签 ⇒ deb 的
-        #    依赖被算成 libc6 (>= 2.39) ⇒ glibc 2.38 的机器装不上。
-        run: python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
+        #    依赖被算成 libc6 (>= 2.39) ⇒ glibc 2.38 的机器装不上，
+        #    而且动态加载器会直接拒绝启动程序。
+        #    脚本会自检（链长 / 符号索引 / 硬下限），不过就 exit 1。
+        run: |
+          set -euo pipefail
+          python3 tools/strip_weak_glibc_versions.py --selftest
+          python3 tools/strip_weak_glibc_versions.py target/release/puttyplus
+          python3 tools/strip_weak_glibc_versions.py --check target/release/puttyplus
 
       - name: 命令行契约回归（73 条黄金基准）
         # ⚠️ HOME 必须是 /home/<当前用户名>：`~` 是 eval 所在 shell 展开的，
