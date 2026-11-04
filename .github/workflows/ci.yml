@@ -146,21 +146,23 @@ jobs:
         run: |
           set -o pipefail
           cargo test --lib --locked 2>&1 | tee /tmp/test.log || {
-            # 注解是单行的：换行写成 %0A，% 本身要先转义成 %25
-            echo "::error::单元测试失败，详见本步骤输出。失败名单："
-            sed -n '/^failures:$/,/^test result:/p' /tmp/test.log \
-              | head -c 4000 | sed 's/%/%25/g' | tr '\n' '%0A'
-            echo
-            # ⚠️ 有时不是断言失败，而是**整个测试进程 abort**（GTK 断言 / 段错误 /
-            #    坏掉的二进制）—— 这时日志里没有 "failures:" 段，上面那条注解
-            #    就是空的 ⇒ 网页上什么都看不到（run 级日志又要 admin 才能下）。
-            #    ⇒ 把日志尾巴也塞进注解，下次不用猜。
-            if ! grep -q "^failures:" /tmp/test.log; then
-              echo "::error::日志里没有 failures: 段（测试进程多半是 abort 了），日志尾部："
-              tail -c 3000 /tmp/test.log | sed 's/%/%25/g' | tr '\n' '%0A'
-              echo
+            # ⚠️ **注解必须是"一整行"**：`::error::` 的消息到行尾为止，
+            #    后面再 echo 出来的东西**不会**进注解（2026-11 踩过：失败名单
+            #    一直是空的，只看得到一句"失败名单："）。⇒ 用 printf 把内容
+            #    拼进同一个 echo 里；换行写成 %0A，% 本身要先转义成 %25。
+            names="$(sed -n '/^failures:$/,/^test result:/p' /tmp/test.log \
+              | head -c 3000 | sed 's/%/%25/g' | tr '\n' '%0A')"
+            if [ -n "$names" ]; then
+              printf '::error::单元测试失败。失败名单：%s\n' "$names"
+            else
+              # ⚠️ 没有 failures: 段 ⇒ 不是断言失败，而是**整个测试进程 abort**
+              #    （GTK 断言 / 段错误 / 坏掉的二进制）⇒ 把日志尾巴也塞进注解，
+              #    否则网页上什么都看不到（run 级日志要 admin 才能下载）。
+              printf '::error::单元测试失败，且日志里没有 failures: 段（测试进程多半是 abort 了）。日志尾部：%s\n' \
+                "$(tail -c 3000 /tmp/test.log | sed 's/%/%25/g' | tr '\n' '%0A')"
             fi
-            grep -E "^test result:" /tmp/test.log | sed 's/%/%25/g'
+            printf '::error::测试结果行：%s\n' \
+              "$(grep -E '^test result:' /tmp/test.log | sed 's/%/%25/g' | tr '\n' '%0A')"
             exit 1
           }
 
