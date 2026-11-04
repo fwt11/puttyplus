@@ -947,17 +947,27 @@ impl Tabs {
         let tp = TermPane::new(&opts);
         // 阶段 65：额外终端页签也算进"这个会话有几个终端活着"
         install_alive_hook(&tp, &panel_st);
-        // 进到指定目录：等 ssh 子进程起来（ready 钩子）再往 pty 写 `cd`。
+        // 进到指定目录：等**远端真的就绪了**（ready 钩子）再往 pty 写 `cd`。
         //
-        // ⚠️ **写早没关系**：pty 是个 pipe，数据在里面排队，ssh 认证通过
-        // 之后才发给远端 shell。所以网络慢也不怕丢。
+        // ⚠️ **不能早写**：pty 带行规程（本地回显 + 规范模式），ssh 还没
+        //    切到 raw 模式时写进去的字节会被**本地回显**（屏幕上凭空多一
+        //    行命令）并**缓冲**在本地，等 ssh 切 raw 后才转发给远端 ——
+        //    那会儿远端可能还停在**登录流程**（堡垒机常见）里，这行就被
+        //    它吃掉，`cd` 根本不执行。钩子自己会等（见 `term.rs` 的
+        //    `feed_when_remote_ready`）。
         // ⚠️ 闭包**不捕获 TermPane**（自引用 = 引用环，面板释放不掉），
         //    钩子把终端传进来，往里写字节就行。
         if let Some(d) = dir {
             if !d.is_empty() {
-                let cmd = format!("cd {}\n", shell_quote(d));
-                tp.set_ready_hook(move |term| {
-                    term.feed_child(cmd.as_bytes());
+                let cmd = cwd_cmd(d);
+                tp.set_ready_hook(move |term, what| {
+                    let bytes: &[u8] = match what {
+                        // 初始命令：落进 shell 里
+                        crate::term::ReadyCmd::Cmd => cmd.as_bytes(),
+                        // 探路：只发一个空行（喂给登录脚本的「按回车」）
+                        crate::term::ReadyCmd::Probe => b"\n",
+                    };
+                    term.feed_child(bytes);
                 });
             }
         }
@@ -2160,11 +2170,28 @@ pub fn open_term_at(st: &Rc<panel::PanelState>, dir: &str) {
     }
 }
 
+/// 「在此处打开终端」往 pty 里写的初始命令。
+///
+/// ⚠️ **这里只有命令本身，不带前面的空行**：空行是**探路**用的
+///    （`term::ReadyCmd::Probe`），由就绪钩子按需发 —— 看见 shell 提示符
+///    时说明 shell 已经起来了，不用再喂空行（免得多出一个空提示符行）。
+///
+/// 空行为什么重要：堡垒机那类登录脚本会打印
+/// "Access granted. Press Return to begin session." 然后**读掉一整行**
+/// 才往下走 —— 空行正好当它那次回车，后面的 `cd` 才能落到真 shell 上
+/// （用户实测：少了它，`cd` 被登录脚本吃掉，目录没进去）。
+pub fn cwd_cmd(dir: &str) -> String {
+    format!("cd {}\n", shell_quote(dir))
+}
+
 /// 给远端 shell 的路径加引号（空格/特殊字符安全的 `cd`）。
 ///
-/// 单引号里不能有单引号 → 用 `'"'"'` 的经典转义。
+/// 单引号里不能有单引号 → 用 `'\''`（反斜杠 + 两个单引号）的经典转义。
 fn shell_quote(p: &str) -> String {
-    format!("'{}'", p.replace('\'', "'\''"))
+    // ⚠️ Rust 里 `"'\''"` 是**两个**单引号，不是 shell 经典的 `\'\''`
+    //    （反斜杠 + 两个单引号）—— 写错的话，路径里有单引号时
+    //    `cd '/it''s'` 会被 shell 读成 `/its` ⇒ 静默进错目录。
+    format!("'{}'", p.replace('\'', "'\\''"))
 }
 
 /// 当前标签的终端（菜单动作的公共前置）。
@@ -2295,6 +2322,29 @@ impl Tabs {
             *t.active.borrow_mut() = Some(pane.clone());
         }
         self.split_index(i, stacked);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cwd_cmd;
+
+    /// 「在此处打开终端」喂给 pty 的初始命令。
+    ///
+    /// ⚠️ **命令本身不带前面的空行**：空行是**探路**用的
+    ///    （`term::ReadyCmd::Probe`）—— 堡垒机的登录脚本会
+    ///    "Press Return to begin session."（**读掉一整行**才往下走），
+    ///    空行正好当它那次回车；命令本身得落在 shell 里才有效。
+    #[test]
+    fn cwd_cmd_is_plain_cd() {
+        assert_eq!(cwd_cmd("/tmp"), "cd '/tmp'\n");
+    }
+
+    /// 路径里有空格/单引号时也要安全（单引号包起来 + 经典转义）。
+    #[test]
+    fn cwd_cmd_quotes_path() {
+        assert_eq!(cwd_cmd("/a b"), "cd '/a b'\n");
+        assert_eq!(cwd_cmd("/it's"), "cd '/it'\\''s'\n");
     }
 }
 

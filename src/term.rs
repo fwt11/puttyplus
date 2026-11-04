@@ -4,6 +4,7 @@
 //! OSC 7 目录跟随回调。
 
 use std::cell::{Cell, RefCell};
+use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
 use gtk::gdk;
@@ -250,6 +251,24 @@ pub(crate) type MenuExtra = Rc<dyn Fn(&gtk::Box, &Rc<TermInner>)>;
 /// 面板永远不会被回收。
 pub(crate) type BroadcastHook = Box<dyn Fn(&Rc<TermInner>, &[u8])>;
 
+/// 会话就绪钩子要发的东西（「在此处打开终端」用）。
+///
+/// ⚠️ **为什么分两种**：
+///
+/// - `Cmd` —— 初始命令（`cd <目录>`）。等**看见 shell 提示符**之后发，
+///   这时命令落进的是真 shell，不会被任何登录脚本吃掉；
+/// - `Probe` —— 只发一个**空行**。堡垒机那类登录脚本会先打印
+///   "Access granted. Press Return to begin session." 然后**读掉一整行**
+///   才往下走 —— 空行正好当它那次回车；它走完了，shell 的提示符才会
+///   出现（才能走到 `Cmd` 那一支）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyCmd {
+    /// 发初始命令。
+    Cmd,
+    /// 只发一个空行（探路）。
+    Probe,
+}
+
 pub(crate) struct TermInner {
     term: vte::Terminal,
     search_bar: gtk::SearchBar,
@@ -273,16 +292,19 @@ pub(crate) struct TermInner {
     banner_re: gtk::Button,
     /// 右键菜单的扩展区提供方（分屏/广播/日志由 tabs 注册）
     menu_extra: RefCell<Option<MenuExtra>>,
-    /// **会话就绪钩子**：ssh 子进程起来之后调一次。
+    /// **会话就绪钩子**：**远端准备好了**之后调一次。
     ///
     /// 「在此处打开终端」要用：新终端连上后往 pty 里写 `cd <目录>`，
-    /// 让它进到用户右键的那个目录。时机必须等"子进程起来了"——
-    /// `feed_keys` 在 `child_alive` 还是 false 时**写不进去**（静默丢）。
+    /// 让它进到用户右键的那个目录。
+    ///
+    /// ⚠️ **时机不是「ssh 子进程起来了」**（见 `feed_when_remote_ready`）：
+    /// 那时候 ssh 还没连上、pty 还没切 raw 模式，写进去的字节会被本地
+    /// 回显 + 缓冲，然后被远端的**登录流程**吃掉 ⇒ `cd` 根本不执行。
     ///
     /// ⚠️ 钩子拿到的是**终端**，不是 TermPane：闭包一旦捕获 TermPane，
     /// 就是「TermPane → ready_hook → TermPane」的**引用环**，面板永远
     /// 释放不掉（AGENTS.md 的红线）。
-    ready_hook: RefCell<Option<Box<dyn Fn(&vte::Terminal) + 'static>>>,
+    ready_hook: RefCell<Option<Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static>>>,
     /// 按键广播钩子（全局开关装在每个 pane 上）
     key_sink: RefCell<Option<BroadcastHook>>,
     /// **会话存活钩子**（阶段 65 / 审计 P0-4）：子进程起来 / 退出时调一次。
@@ -710,13 +732,16 @@ impl TermPane {
         *self.inner.menu_extra.borrow_mut() = Some(f);
     }
 
-    /// **会话就绪钩子**：ssh 子进程起来之后调一次（只调一次）。
+    /// **会话就绪钩子**：**远端说完了话**之后调一次（只调一次）。
     ///
     /// 给「在此处打开终端」用——新终端连上后要 `cd` 到用户右键的目录。
     ///
+    /// ⚠️ **不是「ssh 子进程起来了」就调**：见 `feed_when_remote_ready`
+    /// （写早了会被本地回显、并被远端的登录流程吃掉）。
+    ///
     /// ⚠️ 闭包里**别捕获 TermPane 自己**（那是自引用，终端永远释放不掉）。
     /// 钩子收到的是终端本身，往里写字节就行。
-    pub fn set_ready_hook<F: Fn(&vte::Terminal) + 'static>(&self, f: F) {
+    pub fn set_ready_hook<F: Fn(&vte::Terminal, ReadyCmd) + 'static>(&self, f: F) {
         *self.inner.ready_hook.borrow_mut() = Some(Box::new(f));
     }
 
@@ -2057,6 +2082,167 @@ fn apply_palette(term: &vte::Terminal, p: crate::theme::Palette) {
 
 /* ---------------- spawn ---------------- */
 
+/* ---------------- 「在此处打开终端」：等远端就绪 ---------------- */
+
+/// 采样周期（毫秒）。
+const READY_TICK_MS: i64 = 200;
+/// 还没看见 shell 提示符 ⇒ 多久后发一个**空行**探路（毫秒）。
+const READY_PROBE_MS: i64 = 2500;
+/// 探过路之后，屏幕安静多久算「远端说完了」（毫秒）。
+const READY_QUIET_MS: i64 = 900;
+/// 最多等这么久（远端一声不吭时的兜底）（毫秒）。
+const READY_MAX_WAIT_MS: i64 = 8000;
+
+/// 读终端屏幕上的文字（前 60 行 × 250 列）。
+///
+/// 与 `examples/fileops_smoke.rs` 的 `screen_text` 同一个读法
+/// （VTE 0.80 还没有 `text()`，只能按区域取）。
+fn screen_text(term: &vte::Terminal) -> String {
+    term.text_range_format(vte::Format::Text, 0, 0, 59, 249)
+        .0
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// pty 的本地行规程是不是已经切到 **raw 模式**（ICANON / ECHO 关掉）。
+///
+/// ssh **认证通过之后**才把本地 tty 切到 raw；那之前往里写字节会被
+/// **本地回显**（屏幕上凭空多一行命令）并**缓冲**在本地行规程里，
+/// 等 ssh 切 raw 才转发给远端 —— 那会儿远端可能还停在**登录流程**
+/// 里，命令就被吃掉了（用户实测：堡垒机上 `cd` 没执行）。
+///
+/// ⚠ pty 的 **master 与 slave 共用同一份 termios**（实测：slave 切 raw
+/// 后 master 的 `c_lflag` 同步变了），所以拿 VTE 给的 master fd 查就行。
+fn pty_is_raw(pty: &vte::Pty) -> bool {
+    let mut tio: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `tio` 是本函数栈上的零初始化结构；`fd` 由 VTE 持有且有效；
+    // `tcgetattr` 只往里写，不读未初始化内存。
+    let rc = unsafe { libc::tcgetattr(pty.fd().as_raw_fd(), &mut tio) };
+    if rc != 0 {
+        // 取不到 ⇒ 当作还没切 raw（宁可多等，也别写出本地回显的噪声）
+        return false;
+    }
+    tio.c_lflag & libc::ICANON == 0 && tio.c_lflag & libc::ECHO == 0
+}
+
+/// 屏幕最后一行像不像 shell 提示符。
+///
+/// ⚠️ **宁可认不出**（那就走「探路 + 兜底」那一支），也别把欢迎消息里
+///    恰好以 `$` 结尾的行当成提示符 —— 认错了就会早发，命令可能被登录
+///    脚本吃掉。
+///
+/// 常见提示符：`$ `（bash）、`# `（root）、`❯ `（fish）、`➜ `（oh-my-zsh）、
+/// `λ `（nushell）。**不收 `%` 和 `>`** —— 「磁盘用了 85%」「load > 50」
+/// 这种行太常见，容易误判。
+pub fn screen_has_prompt(text: &str) -> bool {
+    let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let t = last.trim_end();
+    let Some(c) = t.chars().last() else {
+        return false;
+    };
+    matches!(c, '$' | '#' | '❯' | '➜' | 'λ')
+}
+
+/// **等远端真的就绪了，再把初始命令送进去**（「在此处打开终端」用）。
+///
+/// ⚠️ **为什么不能「ssh 子进程起来了就写」**：
+///
+/// pty 不是一个光秃秃的 pipe，它带**行规程**（本地回显 + 规范模式）。
+/// ssh 刚 fork 出来、还没把 pty 切到 raw 模式时，写进去的字节会：
+///
+/// 1. **被本地回显** —— 屏幕上凭空多出一行命令（用户看到的就是
+///    `cd '/home/fwt/litellm'` 孤零零地出现在 banner 上面）；
+/// 2. **缓冲在本地行规程里** —— 等 ssh 连上后被**转发给远端**。
+///    而那会儿远端可能还停在**登录流程**（堡垒机那种
+///    "Access granted. Press Return to begin session."），
+///    它**读掉一整行**才往下走 ⇒ 这行 `cd` 被它吃掉，**根本没执行**。
+///
+/// ⇒ 判据：**看见 shell 提示符**（= shell 起来了，命令落进去就一定
+/// 执行）**且本地 pty 已切 raw**（= 不会被本地回显）。
+///
+/// ⚠️ **提示符有时等不到**：堡垒机的提示符卡在登录脚本后面 ——
+///    脚本要读一行才往下走，提示符才会出现。所以先发一个**空行探路**
+///    （`ReadyCmd::Probe`），喂它那次回车；脚本走完，提示符就出来了。
+///
+/// ⚠️ 远端一声不吭（没有 MOTD、也没有提示符）时靠 `READY_MAX_WAIT_MS`
+///    兜底。
+fn feed_when_remote_ready(
+    term: &vte::Terminal,
+    hook: Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static>,
+    inner: std::rc::Weak<TermInner>,
+    pty: vte::Pty,
+) {
+    let term = term.clone();
+    let hook = Rc::new(hook);
+    let last_text = Rc::new(RefCell::new(String::new()));
+    let last_change = Rc::new(Cell::new(glib::monotonic_time() / 1000));
+    let probe_sent = Rc::new(Cell::new(false));
+    let start = glib::monotonic_time() / 1000;
+
+    glib::timeout_add_local(
+        std::time::Duration::from_millis(READY_TICK_MS as u64),
+        move || {
+            // 会话已经没了 ⇒ 送进去也没人收，算了吧。
+            let Some(i) = inner.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if !i.child_alive.get() {
+                return glib::ControlFlow::Break;
+            }
+
+            let now = glib::monotonic_time() / 1000;
+            let elapsed = now - start;
+            let text = screen_text(&term);
+            let changed = {
+                let cur = last_text.borrow();
+                text != *cur
+            };
+            if changed {
+                *last_text.borrow_mut() = text.clone();
+                last_change.set(now);
+            }
+            // ⚠ **本地 pty 必须已经切到 raw 模式**（ssh 认证通过之后
+            // 才切）。没切就写 ⇒ 字节被**本地回显**（屏幕上凭空多一行
+            // 命令）并**缓冲**在本地行规程里，等 ssh 切 raw 后才转发给
+            // 远端 —— 那时远端可能还停在登录流程里，命令被吃掉。
+            let raw = pty_is_raw(&pty);
+
+            // ① **看见 shell 提示符** ⇒ shell 起来了，命令直接发
+            //    （落进的是真 shell，不会被任何登录脚本吃掉）。
+            if raw && screen_has_prompt(&text) {
+                hook(&term, ReadyCmd::Cmd);
+                return glib::ControlFlow::Break;
+            }
+
+            if !probe_sent.get() {
+                // ② 还没看见提示符 ⇒ 先发一个**空行**探路：堡垒机那种
+                //    「Press Return to begin session.」要读掉一整行才往
+                //    下走，空行正好当它那次回车；它走完了，提示符才会
+                //    出现（下一轮就能走 ①）。
+                if (raw && elapsed >= READY_PROBE_MS) || elapsed >= READY_MAX_WAIT_MS {
+                    hook(&term, ReadyCmd::Probe);
+                    probe_sent.set(true);
+                    // 探完之后重新起算「安静」——等远端把话说完。
+                    last_change.set(now);
+                    return glib::ControlFlow::Continue;
+                }
+            } else {
+                // ③ 探过路了 ⇒ 等远端安静下来（欢迎消息发完了）再发命令。
+                //    登录脚本可能读了不止一行，把命令吃掉了 —— 这时命令
+                //    还没到 shell，得自己再发一遍。
+                let quiet = now - last_change.get() >= READY_QUIET_MS;
+                if (quiet && elapsed >= READY_PROBE_MS) || elapsed >= READY_MAX_WAIT_MS {
+                    hook(&term, ReadyCmd::Cmd);
+                    return glib::ControlFlow::Break;
+                }
+            }
+            glib::ControlFlow::Continue
+        },
+    );
+}
+
 fn spawn_term(inner: &Rc<TermInner>) {
     let o = &inner.opts;
     inner.child_alive.set(false);
@@ -2093,6 +2279,9 @@ fn spawn_term(inner: &Rc<TermInner>) {
     inner.term.set_pty(Some(&pty));
 
     let inner_cb = Rc::clone(inner);
+    // 克隆一份 pty 给就绪钩子：要读它的 termios 判断 ssh 有没有把本地
+    // tty 切到 raw（VTE 自己那份随后随 `term.set_pty` 一起活着）。
+    let pty_cb = pty.clone();
     pty.spawn_async(
         Some(cwd.as_str()),
         &argv_ref,
@@ -2121,8 +2310,19 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 inner_cb.sync_banner_visibility();
                 // 会话就绪钩子（「在此处打开终端」靠它发 `cd`）
                 // ⚠️ 先 take 出来再调：闭包里若又碰这个 RefCell 会死锁。
+                //
+                // ⚠️ **不是「子进程起来了」就发**：那时 ssh 还没连上，
+                //    pty 还没切 raw 模式 ⇒ 写进去的字节被本地回显（屏幕上
+                //    凭空多一行命令）并缓冲在本地行规程里，等 ssh 连上后
+                //    转发给远端 —— 那会儿远端可能还停在**登录流程**
+                //    （堡垒机常见），这行就被它吃掉，`cd` 根本没执行。
                 if let Some(h) = inner_cb.ready_hook.borrow_mut().take() {
-                    h(&inner_cb.term);
+                    feed_when_remote_ready(
+                        &inner_cb.term,
+                        h,
+                        Rc::downgrade(&inner_cb),
+                        pty_cb,
+                    );
                 }
             }
             Err(e) => {

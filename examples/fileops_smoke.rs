@@ -70,6 +70,25 @@ fn has_line_equals(text: &str, want: &str) -> bool {
     text.lines().any(|l| l.trim() == want)
 }
 
+/// 反复问 `pwd`，直到看到 `want`。
+///
+/// ⚠️ **不能只问一次**：`cd` 是「就绪钩子」**异步**发的，可能比这一轮
+/// `pwd` 晚到 ⇒ 只问一次会看到旧目录，误判成「cd 没生效」。
+fn wait_for_pwd(pane: &TermPane, want: &str, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        pane.terminal().feed_child(b"pwd\n");
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(700);
+        while std::time::Instant::now() < until {
+            if has_line_equals(&screen_text(pane), want) {
+                return true;
+            }
+            pump(50);
+        }
+    }
+    false
+}
+
 /// 本地 sshd 的连接参数。
 fn test_opts() -> ConnOptions {
     let host = std::env::var("PP_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".into());
@@ -98,19 +117,27 @@ fn main() {
 
     // ---- 1) 「在此处打开终端」的 cd 机制（机制级）----
     //
-    // 走的是 `TermPane::set_ready_hook`：ssh 子进程起来 → 往 pty 写
-    // `cd <目录>`。写早不怕——pty 是 pipe，数据排队，认证通过后才发给
-    // 远端 shell。
+    // 走的是 `TermPane::set_ready_hook`：**远端说完了话**才往 pty 写
+    // `cd <目录>`（前面还带一个空行喂给堡垒机的登录脚本）。
+    // ⚠️ 写早不行：pty 有行规程，早写会被本地回显 + 缓冲，转发给远端
+    //    时远端可能还停在登录流程里 ⇒ 那行被吃掉，`cd` 不执行。
     let pane = TermPane::new(&opts);
     let win = gtk::Window::new();
     win.set_default_size(900, 600);
     win.set_child(Some(pane.widget()));
     win.present();
 
+    // ⚠️ 用**生产代码**那一套（`tabs::cwd_cmd` + 就绪钩子）：
+    //    `Cmd` = 发 `cd <目录>`；`Probe` = 只发一个空行
+    //    （喂给堡垒机登录脚本的「按回车」）。
     let target = "/tmp";
-    let cmd = format!("cd {target}\n");
-    pane.set_ready_hook(move |term| {
-        term.feed_child(cmd.as_bytes());
+    let cmd = puttyplus::tabs::cwd_cmd(target);
+    pane.set_ready_hook(move |term, what| {
+        let bytes: &[u8] = match what {
+            puttyplus::term::ReadyCmd::Cmd => cmd.as_bytes(),
+            puttyplus::term::ReadyCmd::Probe => b"\n",
+        };
+        term.feed_child(bytes);
     });
 
     // 等提示符出来，再问 pwd
@@ -128,8 +155,7 @@ fn main() {
     let alive = wait_until(15_000, || screen_text(&pane).contains("PP_ALIVE_9527"));
     assert!(alive, "终端连上了但不能执行命令");
 
-    pane.terminal().feed_child(b"pwd\n");
-    let got = wait_until(15_000, || has_line_equals(&screen_text(&pane), target));
+    let got = wait_for_pwd(&pane, target, 30_000);
     assert!(
         got,
         "新终端没进到 {target}（pwd 的输出里没有它）\n屏幕内容：\n{}",
@@ -161,10 +187,9 @@ fn main() {
         pages.last().unwrap().1.clone()
     };
 
-    let entered = wait_until(25_000, || {
-        let t = screen_text(&newpane);
-        has_prompt(&t) && t.contains(target)
-    });
+    let up = wait_until(30_000, || has_prompt(&screen_text(&newpane)));
+    assert!(up, "新终端没出提示符\n屏幕内容：\n{}", screen_text(&newpane));
+    let entered = wait_for_pwd(&newpane, target, 30_000);
     assert!(
         entered,
         "open_term_at 开出来的新终端没进到 {target}\n屏幕内容：\n{}",
