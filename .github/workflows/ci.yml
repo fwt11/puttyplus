@@ -222,6 +222,32 @@ jobs:
             exit 1
           fi
 
+      - name: 收集诊断（glibc 版本要求）
+        # ⚠ 这个步骤**永远成功**：诊断不该把 CI 拖红。产物上传上去，
+        #    出问题时直接下载看，不用翻日志（run 级日志要 admin 才能下）。
+        run: |
+          {
+            echo "=== dpkg --print-architecture ==="
+            dpkg --print-architecture
+            echo "=== deb Depends ==="
+            dpkg-deb -f puttyplus_*.deb Depends || true
+            echo "=== objdump -p：Version References（谁要的高版本）==="
+            objdump -p target/release/puttyplus 2>/dev/null \
+              | sed -n '/Version References/,/^$/p' | head -150 || true
+            echo "=== readelf --version-info 摘要 ==="
+            readelf --version-info target/release/puttyplus 2>/dev/null \
+              | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -u | tr '\n' ' ' || true
+            echo
+          } > "diag-${{ matrix.arch }}.txt" 2>&1
+          cat "diag-${{ matrix.arch }}.txt"
+
+      - name: 上传诊断
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ matrix.arch }}
+          path: diag-${{ matrix.arch }}.txt
+          if-no-files-found: warn
+
       - name: 核对 deb 的依赖（别再出现 libc6 (>= 2.39)）
         # 装不上老系统的根因就是这一行依赖；把它钉在 CI 里，别再回归。
         run: |
