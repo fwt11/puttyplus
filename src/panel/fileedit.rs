@@ -124,6 +124,13 @@ pub struct FileEdit {
     gutter_adj: gtk::Adjustment,
     /// 正文的纵向滚动条
     main_adj: gtk::Adjustment,
+    /// **行号栏 ↔ 正文滚动同步的闸门**。
+    ///
+    /// ⚠️ 重建行号栏（`rebuild_gutter`）时必须把它关上：`set_text` 会把
+    ///    行号栏的滚动条**归零**，而两边是**双向**同步的 ⇒ 归零会顺带把
+    ///    **正文拽到顶部**（用户实测：长文件在底部敲一个字就跳顶，
+    ///    跳完没法继续改）。关上闸门，重建期间行号栏就不牵动正文。
+    scroll_guard: Rc<Cell<bool>>,
     /// 行号（普通色）
     num_tag: gtk::TextTag,
     /// 行号（光标所在行，用强调色）
@@ -952,6 +959,30 @@ fn build(
     sw.set_margin_start(0);
     sw.set_margin_end(8);
 
+    // **行号栏上的滚轮 → 带着正文一起滚**。
+    //
+    // 行号栏的滚动条是"跟随"正文的（见 `sync_scroll`），它自己滚了也
+    // 不会牵动正文 ⇒ 得在这儿把滚轮事件转给正文，否则在行号上滚滚轮
+    // 什么都不会发生（gedit / Zed / VS Code 里都是滚正文）。
+    {
+        let m = sw.vadjustment();
+        let sc = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::empty());
+        sc.connect_scroll(move |_, _dx, dy| {
+            if dy == 0.0 {
+                return gtk::glib::Propagation::Proceed;
+            }
+            let adj = m.clone();
+            // 一个滚轮档 ≈ 60px（跟 GTK 默认的滚动手感接近）
+            let delta = -dy * 60.0;
+            let lo = adj.lower();
+            let hi = (adj.upper() - adj.page_size()).max(lo);
+            adj.set_value((adj.value() + delta).clamp(lo, hi));
+            // 吃掉它：行号栏自己不滚（它的位置只跟着正文）
+            gtk::glib::Propagation::Stop
+        });
+        gutter.add_controller(sc);
+    }
+
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.append(&gutter_sw);
     row.append(&sw);
@@ -1019,6 +1050,7 @@ fn build(
         gutter_buffer,
         gutter_adj: gutter_sw.vadjustment(),
         main_adj: sw.vadjustment(),
+        scroll_guard: Rc::new(Cell::new(false)),
         num_tag,
         cur_tag,
         shadow_tag,
@@ -1075,7 +1107,7 @@ fn build(
     update_cursor(&e);
     update_ui(&e);
     wire(&e, st);
-    sync_scroll(&e.gutter_adj, &e.main_adj);
+    sync_scroll(&e.gutter_adj, &e.main_adj, &e.scroll_guard);
     Rc::clone(&e)
 }
 
@@ -1772,6 +1804,14 @@ pub fn path_of(e: &FileEdit) -> &str {
     &e.path
 }
 
+/// 正文当前的**纵向滚动偏移**（像素）。冒烟/测试用。
+///
+/// 长文件在底部敲字会不会跳到顶部，就看这个数会不会突然变成 0
+/// （用户实测：跳顶后就改不了了）。
+pub fn scroll_offset(e: &FileEdit) -> f64 {
+    e.main_adj.value()
+}
+
 /// 保存按钮当前是否可见。只读（查看）窗口里不该摆保存按钮。
 pub fn save_btn_visible(e: &FileEdit) -> bool {
     e.save_btn.is_visible()
@@ -1950,8 +1990,24 @@ fn rgba_hex(c: gdk::RGBA) -> String {
 /// 两边是各自独立的 `ScrolledWindow`（正文横向滚、行号不滚，行号才能
 /// 一直留在左边），所以要把正文的滚动值同步给行号栏。行高一致（见
 /// `rebuild_gutter`），同一个像素偏移就是同一行。
-fn sync_scroll(gutter_adj: &gtk::Adjustment, main_adj: &gtk::Adjustment) {
-    let guard = std::rc::Rc::new(Cell::new(false));
+///
+/// ⚠️ **必须是单向的**：行号栏的位置**只由正文决定**，行号栏自己怎么动
+///    都**不牵动正文**。
+///
+///    为什么不能双向：行号栏每敲一个字就要重建（`rebuild_gutter` →
+///    `gutter_buffer.set_text`），而 `set_text` 会把行号栏的滚动条
+///    **归零**——而且是**异步**的（要等布局那一步才发生，同步的闸门
+///    根本挡不住）。双向同步时，这次归零会顺带把**正文拽到文件顶部**
+///    ⇒ 长文件在底部敲一个字就跳顶，跳完没法继续改（用户实测）。
+///
+///    单向就稳：行号栏被归零后，它的回调会把它**拉回正文的位置**，
+///    正文一个像素都不动。用户在行号栏上滚滚轮照样能滚正文
+///    （见 `build` 里的滚轮转发）。
+fn sync_scroll(
+    gutter_adj: &gtk::Adjustment,
+    main_adj: &gtk::Adjustment,
+    guard: &Rc<Cell<bool>>,
+) {
     {
         let g = gutter_adj.clone();
         let guard = guard.clone();
@@ -1971,8 +2027,10 @@ fn sync_scroll(gutter_adj: &gtk::Adjustment, main_adj: &gtk::Adjustment) {
             if guard.get() {
                 return;
             }
+            // 行号栏自己动了（重建时被归零 / 用户滚了它）⇒ **拉回正文
+            // 的位置**，正文不动（见上面的说明）。
             guard.set(true);
-            m.set_value(adj.value());
+            adj.set_value(m.value());
             guard.set(false);
         });
     }
@@ -2068,7 +2126,14 @@ fn rebuild_gutter(e: &Rc<FileEdit>) {
         }
     }
 
+    // ⚠️ **重建期间把同步闸门关上**：`set_text` 会把行号栏的滚动条归零，
+    //    而行号栏 ↔ 正文是**双向**同步的 ⇒ 归零会顺带把**正文拽到顶部**
+    //    ⇒ 长文件在底部敲一个字，视图就跳到文件头（用户实测：跳完没法
+    //    继续改）。闸门关着，行号栏这一轮就不牵动正文；下面再把行号栏
+    //    自己的位置还回去。
+    e.scroll_guard.set(true);
     e.gutter_buffer.set_text(&gtext);
+    e.scroll_guard.set(false);
     let gstart = e.gutter_buffer.start_iter();
     let gend = e.gutter_buffer.end_iter();
     // 行号本体：普通色

@@ -141,6 +141,12 @@ fn main() {
     // 阶段 23：双击打开编辑器的样本（**单独一个文件**，双击它必然新开一扇窗）
     let dbl_file = dir.join("dblclick.txt");
     std::fs::write(&dbl_file, "双击我，应当打开编辑器。\n").expect("dblclick file");
+    // 长文件：超过一屏（用户报的「在底部输入就跳到顶部」就是它）
+    let long_file = dir.join("long.txt");
+    let long_text: String = (1..=400)
+        .map(|i| format!("第 {i} 行：这是一份很长的文件，用来复现跳顶。\n"))
+        .collect();
+    std::fs::write(&long_file, &long_text).expect("long file");
 
     // 看门狗：主线程要是原地打转（历史 bug），这里会替我们喊出来
     let done = watchdog(if hold { 90 } else { 60 });
@@ -248,6 +254,54 @@ fn main() {
             "含中文的行行号不对"
         );
         println!("gutter lines: {total}，语言：{:?}", fileedit::lang_of(e));
+    }
+
+    // —— 长文件：在底部敲字**不能跳到顶部** ——
+    //
+    // 用户实测：文件超过一屏时，在底部输入会突然跳到文件头 ⇒ 没法继续改。
+    // 根因：行号栏每次敲字都会重建（`rebuild_gutter` → `set_text`），而
+    // `set_text` 把行号栏的滚动条归零；行号栏 ↔ 正文是**双向**同步的
+    // ⇒ 归零顺带把正文也拽到顶部。
+    {
+        assert!(select("long.txt"), "本地面板里没找到 long.txt");
+        pump(100);
+        panel::on_open_file(&panel.st, false, view);
+        pump(500);
+        let edits = panel.st.file_edits.borrow();
+        let e = edits
+            .iter()
+            .find(|e| fileedit::path_of(e).ends_with("long.txt"))
+            .expect("长文件编辑器窗口");
+        let e = e.clone();
+        // 光标 + 视图都挪到文件尾部（模拟用户已经滚到下面在改）
+        fileedit::jump_to_line(&e, 380);
+        pump(200);
+        let before = fileedit::scroll_offset(&e);
+        assert!(
+            before > 0.0,
+            "跳到第 380 行后视图没跟着滚下去（scroll={before}）——这一步就没法测跳顶"
+        );
+        // 在底部敲一个字（走真的 buffer 变更 ⇒ 真的会重建行号栏）
+        assert!(
+            fileedit::type_into(&panel.st, &fileedit::path_of(&e).to_string(), "X"),
+            "往长文件里插字失败"
+        );
+        // 等防抖 + 重建（行号栏重建有 80ms 防抖）
+        pump(600);
+        let after = fileedit::scroll_offset(&e);
+        println!("长文件底部敲字前后的滚动偏移：{before} → {after}");
+        // ⚠ 断言要**卡得死**：跳顶后 scroll 会变成 ~8（不是 0），光判
+        //   「大于 0」会把它放过（踩过：修复前 8475 → 8 竟然过了）。
+        //   ⇒ 判「位置基本没变」：允许 GTK 自动滚到光标的那点微调。
+        assert!(
+            after > 0.0,
+            "在底部敲一个字，视图跳到顶部了（scroll={before} → {after}）——没法继续改"
+        );
+        assert!(
+            (after - before).abs() < 200.0,
+            "在底部敲一个字，视图跳到了别处（scroll={before} → {after}）"
+        );
+        println!("长文件底部敲字没有跳顶 ✓");
     }
 
     // —— 阶段 23：双击文件 = **编辑**（不是上传 / 下载）——
