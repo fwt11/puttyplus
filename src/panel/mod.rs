@@ -56,6 +56,15 @@ pub struct PanelState {
     /// 会话期保存的密码（来自 -pw 或用户输入），释放时抹零
     pub pw: RefCell<Option<Zeroizing<String>>>,
     pub conn_ok: Cell<bool>,
+    /// **本次会话**里，用户在数据库页把左边的文件面板拉回来过。
+    ///
+    /// ⚠️ **为什么不再存进设置文件**（2026-11-05）：原来这个选择记在
+    /// `settings.ini` 的 `db_hide_sftp` 里 ⇒ **同一套代码在两台机器上
+    /// 表现不一样**（办公机器记住了"文件面板可见"，家里机器是默认的
+    /// "藏起来"）——用户报的就是这个。
+    /// 现在它是**会话内**的状态：进数据库页默认收起（工作台要宽度），
+    /// 用户拉回来就保持到他关掉这个连接为止。**每台机器行为一致。**
+    pub db_sftp_shown: Cell<bool>,
     pub tx: RefCell<Option<Sender<WorkerCmd>>>,
     /// 数据库「**测连**」的回包去处（新建数据库连接的对话框在等）。
     ///
@@ -272,6 +281,7 @@ impl SftpPanel {
         let st = Rc::new(PanelState {
             pw: RefCell::new(opts.password.clone()),
             conn_ok: Cell::new(false),
+            db_sftp_shown: Cell::new(false),
             tx: RefCell::new(None),
             db_test_cb: RefCell::new(None),
             next_db_test_id: Cell::new(1),

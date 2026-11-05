@@ -21,6 +21,15 @@ use gtk::prelude::*;
 use puttyplus::args::ConnOptions;
 use puttyplus::panel::subtabs::PageKind;
 
+/// 退出时把临时 ini 删掉（别留垃圾）。
+struct IniGuard(std::path::PathBuf);
+
+impl Drop for IniGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn pump(ms: u64) {
     let ctx = gtk::glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -33,6 +42,16 @@ fn pump(ms: u64) {
 }
 
 fn main() {
+    // ⚠️ **别碰用户真实的设置文件**：这个冒烟会点「文件面板」开关，
+    // 以前那个选择是记在 `settings.ini` 里的 ⇒ 跑一次冒烟就改了用户
+    // 的设置（而且**跑挂了还留在那儿**：上一次点击已经写进去了）。
+    // 现在那个选择是**会话内**的状态，但设置文件本身照旧隔离。
+    let settings_ini = std::env::temp_dir()
+        .join(format!("pp-db-wide-smoke-set-{}.ini", std::process::id()));
+    let _ = std::fs::remove_file(&settings_ini);
+    unsafe { std::env::set_var("PUTTYPLUS_SETTINGS_INI", &settings_ini) };
+    let _settings_guard = IniGuard(settings_ini.clone());
+
     gtk::init().expect("gtk init");
     puttyplus::theme::apply(puttyplus::theme::Theme::Light);
 
@@ -133,15 +152,20 @@ fn main() {
         "点了「文件面板」开关，文件面板应当回来"
     );
     assert!(sub.toggle_state(), "开关的状态应当是按下");
+    // ⚠️ **这个选择只在本次会话里有效**（2026-11-05）：以前它记在
+    // `settings.ini` 里 ⇒ 同一套代码在两台机器上表现不一样（办公机器
+    // 记住了"文件面板可见"，家里机器是藏起来的）——用户报的就是这个。
+    // 现在它挂在面板状态上：关掉这个连接就没了。
     assert!(
-        !puttyplus::settings::db_hide_sftp(),
-        "用户的这个选择应当被记住（下次进 DB 页还是他上次的样子）"
+        st.db_sftp_shown.get(),
+        "「文件面板」被拉回来这件事应当在本会话里被记住"
     );
     // 再点一下 ⇒ 又藏起来
     sub.click_toggle();
     pump(300);
     assert!(!st.root.is_visible(), "再点一次应当又藏起来");
-    println!("[4] 「文件面板」开关：拉回来 / 再藏起，选择被记住 ✓");
+    assert!(!st.db_sftp_shown.get(), "再点一次应当又记成「藏起来」");
+    println!("[4] 「文件面板」开关：拉回来 / 再藏起（本会话内记住）✓");
 
     // ---- 5) 对象树可折叠 ----
     {

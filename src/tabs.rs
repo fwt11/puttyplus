@@ -501,6 +501,9 @@ impl Tabs {
         {
             let subw = Rc::downgrade(&sub);
             let sftpw = sp.widget().downgrade();
+            // ⚠️ 面板状态也只抓**弱引用**：面板状态里挂着子标签容器，
+            // 抓强引用就成环（面板永远释放不掉）。
+            let stw = Rc::downgrade(&sp.st);
             // ⚠️ 用 **`switch-page`** 信号，不是 `notify::current-page`——
             // GTK4 的 `GtkNotebook:current-page` **改了也不发通知**
             // （实测：set_current_page 之后 notify 回调一次都不跑）。
@@ -513,12 +516,15 @@ impl Tabs {
             sub.nb.connect_switch_page(move |_nb, _page, num| {
                 let Some(sub) = subw.upgrade() else { return };
                 let Some(w) = sftpw.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
                 let is_db = sub.kind_by_page_num(num) == panel::subtabs::PageKind::Db;
                 // 开关只在 DB 页出现（终端页的文件面板是常驻的）
                 sub.set_toggle_visible(is_db);
                 if is_db {
-                    // 默认隐藏；用户拉回来过就还他上次的选择
-                    let want = !crate::settings::db_hide_sftp();
+                    // 默认隐藏（工作台要宽度）；用户这次会话里拉回来过就还他
+                    // ⚠️ **不再读设置文件**：记在机器上会让两台机器行为不一致
+                    //   （办公机器记住"文件面板可见"，家里机器是藏起来的）。
+                    let want = st.db_sftp_shown.get();
                     if w.is_visible() != want {
                         w.set_visible(want);
                     }
@@ -530,12 +536,13 @@ impl Tabs {
                     sub.set_toggle_state(true);
                 }
             });
-            // 「文件面板」开关 → 切可见性 + 记住选择
+            // 「文件面板」开关 → 切可见性 + 记住（**会话内**，不落盘）
             let sftpw2 = sp.widget().downgrade();
+            let st2 = sp.st.clone();
             sub.set_toggle_hook(move |want_visible| {
                 let Some(w) = sftpw2.upgrade() else { return };
                 w.set_visible(want_visible);
-                crate::settings::set_db_hide_sftp(!want_visible);
+                st2.db_sftp_shown.set(want_visible);
             });
         }
         // 右侧放的是**外层容器**（notebook + 尾部的「+」按钮），不是裸的
@@ -1086,6 +1093,21 @@ impl Tabs {
         };
         for p in panes {
             p.reconnect_term();
+        }
+        // **顺带把断了的文件面板也救回来**（2026-11-05，用户原话：
+        // 「重连终端后，sftp仍然没有重连」）。
+        //
+        // 终端和 SFTP 是**两条独立的连接**——终端那条断了，SFTP 那条可能还活着
+        // （那就别动它：重建连接会把正在跑的传输打断），也可能一起断了
+        // （服务端把会话关了的时候就是这样）⇒ 只在**它确实断了**的时候重连。
+        let st = {
+            let tabs = self.tabs.borrow();
+            tabs.get(i).map(|t| t.panel_st.clone())
+        };
+        if let Some(st) = st {
+            if !st.conn_ok.get() {
+                crate::panel::on_reconnect(&st);
+            }
         }
     }
 

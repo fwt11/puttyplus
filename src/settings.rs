@@ -588,22 +588,6 @@ pub fn set_sftp_pane_pos(pos: i32) {
     let _ = std::fs::write(&p, kf.to_data().as_bytes());
 }
 
-/// DB 页激活时**隐藏左边的文件面板**（阶段 66 / 审计 P0-2）。
-///
-/// **默认 true（隐藏）**：DB 工作台要的是宽度——SFTP 常驻 340px 时，
-/// 工作台主区只剩 300px，主 CTA 都被裁掉（审计 P0-2）。
-///
-/// 用户在页签栏用「文件面板」开关把它拉回来之后，这个选择会被**记住**
-/// （下次进 DB 页还是他上次的样子）。
-pub fn db_hide_sftp() -> bool {
-    // 缺键 = 默认隐藏（只有显式写了 "0" 才不隐藏）
-    get_str("ui", "db_hide_sftp") != "0"
-}
-
-pub fn set_db_hide_sftp(hide: bool) {
-    set_str("ui", "db_hide_sftp", if hide { "1" } else { "0" });
-}
-
 /* ---------------- 通用键值 ----------------
  * 主题 / 终端配色这类"一个字符串值"的设置都走这里，
  * 不为每个键单开一组函数——它们语义完全一样，只是 key 不同。

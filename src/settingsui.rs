@@ -208,12 +208,6 @@ pub const SETTINGS: &[SettingItem] = &[
         from: "目录镜像窗口",
     },
     SettingItem {
-        id: "db_hide_sftp",
-        label: "数据库页独占宽度",
-        page: Page::Advanced,
-        from: "子标签栏的「文件面板」开关",
-    },
-    SettingItem {
         id: "recent_max",
         label: "最近连接条数",
         page: Page::Advanced,
@@ -731,23 +725,6 @@ fn advanced_page(root: &gtk::Box) {
         root.append(&bbox);
         e.connect_changed(|e| {
             crate::settings::set_mirror_ignore(e.text().as_str());
-        });
-    }
-
-    /* ---- 数据库页独占宽度 ---- */
-    {
-        let sw = gtk::Switch::new();
-        sw.set_active(crate::settings::db_hide_sftp());
-        sw.set_tooltip_text(Some(
-            tr("进数据库工作台时把左边的文件面板收起来（工作台要宽度）"),
-        ));
-        let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some(tr("数据库页独占宽度"))));
-        bbox.append(&sw);
-        root.append(&bbox);
-        sw.connect_state_set(|_s, state| {
-            crate::settings::set_db_hide_sftp(state);
-            gtk::glib::Propagation::Proceed
         });
     }
 
