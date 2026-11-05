@@ -2058,6 +2058,81 @@ fn tag_exclusive(
     buffer.apply_tag(tag, &s, &e);
 }
 
+/// 这个字符会不会被渲染成**彩色**字形（emoji）？
+///
+/// **为什么要在意**：行号栏的影子靠"把前景色设成底色"来隐形（同色即隐形）。
+/// 这招对**单色**字形有效，对**彩色**字形**完全无效** —— 彩色 emoji 由系统
+/// 的 emoji 字体自带颜色绘制，**不吃文本前景色**（2026-11 实测：显式把前景色
+/// 设成红色，渲染出来仍是 Noto Color Emoji 的黄色本色）。
+/// ⇒ 彩色字形会原色漏到行号栏上；而且它的墨迹还会**往左溢出**几个像素
+/// （实测：emoji 的光标在 x=26，字形却从 x=20 就开始画）⇒ 露在行号后面的
+/// 正好是"半个"emoji（用户报的"行号后面冒出半个 emoji"）。
+///
+/// **判据**（Unicode 的 Emoji_Presentation=Yes 集合 + 变体选择符）：
+/// - `U+FE0F`（VS16）：本身不显示，但会把它**前面**那个字符变成彩色呈现
+///   （如 `❤️` = U+2764 U+FE0F）；
+/// - **紧跟着 VS16 的字符**：被"点名"要彩色呈现；
+/// - `Emoji_Presentation=Yes` 的码点：默认就是彩色。
+///
+/// ⚠️ 只认 `Emoji_Presentation=Yes`（**不认**"Emoji 但默认文本呈现"的那些，
+///    比如 ♈♉♊）：它们是**单色**渲染 ⇒ 前景色对它们有效 ⇒ 隐形没问题；
+///    而且它们走的字体度量与正文一致 ⇒ 必须保留在影子里（否则行高对不上）。
+fn is_color_emoji(c: char, next: Option<char>) -> bool {
+    // VS16 本身：跟着它的字符要彩色，它自己也不该进影子
+    if c == '\u{FE0F}' {
+        return true;
+    }
+    // 后面跟着 VS16 ⇒ 被"点名"要彩色呈现
+    if next == Some('\u{FE0F}') {
+        return true;
+    }
+    let u = c as u32;
+    EMOJI_PRESENTATION.iter().any(|(a, b)| u >= *a && u <= *b)
+}
+
+/// `Emoji_Presentation=Yes` 的码点区间（Unicode 官方集合）。
+///
+/// ⚠️ 只收"**默认就是彩色呈现**"的那些；**不收**"是 emoji 但默认文本呈现"的
+///    （比如 ♈♉♊、♥）—— 它们是**单色**渲染 ⇒ 前景色对它们有效 ⇒ 影子隐形
+///    没问题；而且它们走的字体度量与正文一致 ⇒ 必须留在影子里（否则行高
+///    对不上，行号会跟正文错行 —— 那比漏半个 emoji 严重得多）。
+const EMOJI_PRESENTATION: &[(u32, u32)] = &[
+    (0x1F000, 0x1FAFF), // 表情符号 / 图符 / 交通 / 补充 / 扩展 A
+    (0x1FC00, 0x1FFFD), // 预留
+    (0x231A, 0x231B),   // ⌚ ⌛
+    (0x23E9, 0x23EC),   // ⏩ ⏪ ⏫ ⏬
+    (0x23F0, 0x23F0),   // ⏰
+    (0x23F3, 0x23F3),   // ⏳
+    (0x25FD, 0x25FE),   // ◽ ◾
+    (0x2614, 0x2615),   // ☔ ☕
+    (0x267F, 0x267F),   // ♿
+    (0x2693, 0x2693),   // ⚓
+    (0x26A1, 0x26A1),   // ⚡
+    (0x26AA, 0x26AB),   // ⚪ ⚫
+    (0x26BD, 0x26BE),   // ⚽ ⚾
+    (0x26C4, 0x26C5),   // ⛄ ⛅
+    (0x26CE, 0x26CE),   // ⛎
+    (0x26D4, 0x26D4),   // ⛔
+    (0x26EA, 0x26EA),   // ⛪
+    (0x26F2, 0x26F3),   // ⛲ ⛳
+    (0x26F5, 0x26F5),   // ⛵
+    (0x26FA, 0x26FA),   // ⛺
+    (0x26FD, 0x26FD),   // ⛽
+    (0x2705, 0x2705),   // ✅
+    (0x270A, 0x270B),   // ✊ ✋
+    (0x2728, 0x2728),   // ✨
+    (0x274C, 0x274C),   // ❌
+    (0x274E, 0x274E),   // ❎
+    (0x2753, 0x2755),   // ❓ ❔ ❕
+    (0x2757, 0x2757),   // ❗
+    (0x2795, 0x2797),   // ➕ ➖ ➗
+    (0x27B0, 0x27B0),   // ➰
+    (0x27BF, 0x27BF),   // ➿
+    (0x2B1B, 0x2B1C),   // ⬛ ⬜
+    (0x2B50, 0x2B50),   // ⭐
+    (0x2B55, 0x2B55),   // ⭕
+];
+
 /// 重建行号栏。
 ///
 /// **为什么要塞"影子字符"**：正文里含中文的行，用的字体和纯 ASCII 行
@@ -2066,12 +2141,18 @@ fn tag_exclusive(
 /// 中文行，两边就错开几像素，越往下越歪。
 ///
 /// 解决办法：行号栏的每一行在数字后面接上**该行的非 ASCII 字符**，并把
-/// 它们设成透明（`foreground: transparent`）——看不见，但照样参与排版，
+/// 它们**画成行号栏的底色**（同色即隐形）——看不见，但照样参与排版，
 /// 行高就和正文完全一致了。行高只取决于**字体**不取决于字数，所以每行
 /// 留一两个就够。
 ///
 /// （试过 `GtkTextTag:invisible`——那个字符直接不参与排版，行高对不上；
-///  也试过 `line-height` 属性——GTK4 里它对布局没影响。）
+///  也试过 `line-height` 属性——GTK4 里它对布局没影响；
+///  试过 `foreground: transparent`——TextTag 的前景色走 GdkRGBA 解析，
+///  不认 transparent 关键字；`foreground_rgba(alpha=0)` GTK4 也不吃。）
+///
+/// ⚠️ **彩色 emoji 不能进影子**（`is_color_emoji`）：彩色字形不吃前景色，
+///    "画成底色"对它无效 ⇒ 会原色漏到行号栏上（还会因为墨迹往左溢出而
+///    只露出"半个"）。emoji 又不影响行高 ⇒ 索性不抄。
 fn rebuild_gutter(e: &Rc<FileEdit>) {
     let buf = &e.buffer;
     let text = buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string();
@@ -2101,9 +2182,20 @@ fn rebuild_gutter(e: &Rc<FileEdit>) {
         pos += num.chars().count() as i32;
 
         // 影子：这一行里的非 ASCII 字符（决定行高的就是它们）
+        //
+        // ⚠️ **彩色 emoji 不抄**（见 `is_color_emoji` 的说明）：彩色字形不吃
+        //    文本前景色 ⇒ 影子"画成底色就隐形"的机制对它完全无效 ⇒ 它会原色
+        //    漏到行号栏上；而且彩色字形的墨迹还会往左溢出几个像素 ⇒ 露在
+        //    行号后面的正好是"半个"emoji（用户实测：2026-11）。
+        //    而 emoji **根本不影响行高**（实测：emoji 行与 ASCII 行同高，
+        //    只有中文这类字体回退才把行高撑高）⇒ 抄它纯属多余。
         let mut shadow = String::new();
-        for c in line.chars() {
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
             if c.is_ascii() {
+                continue;
+            }
+            if is_color_emoji(c, chars.peek().copied()) {
                 continue;
             }
             if shadow.contains(c) {
@@ -2597,6 +2689,30 @@ mod tests {
         assert!(!d.valid_utf8);
         assert_eq!(d.text, "a�b");
         assert_eq!(d.encode(&d.text), [0x61, 0xEF, 0xBF, 0xBD, 0x62]);
+    }
+
+    /// 影子里不能有彩色字形：彩色 emoji 不吃前景色 ⇒ "画成底色"对它无效
+    /// ⇒ 会原色漏到行号栏上（而且只露出"半个"，用户 2026-11 实测）。
+    #[test]
+    fn 彩色emoji不进影子_单色字形要保留() {
+        // 彩色 emoji：默认就是彩色呈现
+        assert!(is_color_emoji('\u{1F600}', None));
+        assert!(is_color_emoji('\u{1F44D}', None));
+        assert!(is_color_emoji('\u{1F1E8}', None));
+        // Emoji_Presentation=Yes 但不在大区块里的
+        assert!(is_color_emoji('\u{2705}', None)); // ✅
+        assert!(is_color_emoji('\u{2B50}', None)); // ⭐
+        assert!(is_color_emoji('\u{26A1}', None)); // ⚡
+        // VS16：它前面的字符被点名要彩色
+        assert!(is_color_emoji('\u{2764}', Some('\u{FE0F}'))); // ❤️
+        assert!(is_color_emoji('\u{FE0F}', None));
+        // ⚠️ 这些**不是** Emoji_Presentation=Yes（默认文本呈现 ⇒ 单色 ⇒
+        //    前景色对它们有效 ⇒ 隐形没问题），而且它们走的字体度量与正文
+        //    一致 ⇒ 必须留在影子里，否则行高对不上
+        assert!(!is_color_emoji('\u{2648}', None)); // ♈
+        assert!(!is_color_emoji('\u{2665}', None)); // ♥
+        assert!(!is_color_emoji('\u{4E2D}', None)); // 中
+        assert!(!is_color_emoji('a', None));
     }
 
     #[test]

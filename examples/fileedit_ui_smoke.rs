@@ -66,6 +66,18 @@ if not wlan.isconnected():
     wlan.connect(SSID, "pwd")
 "#;
 
+/// 带 emoji 的样例：**行号栏不能漏出半个 emoji**（用户 2026-11 实测）。
+///
+/// 彩色 emoji 不吃文本前景色 ⇒ 行号栏的"影子字符"（靠画成底色隐形）对它
+/// 完全无效 ⇒ 它会原色漏到行号后面，而且墨迹往左溢出几个像素 ⇒ 只露出
+/// "半个"。emoji 又不影响行高 ⇒ 影子里干脆不抄它。
+const SAMPLE_EMOJI: &str = "\u{1F600} 行首就是表情
+plain ascii line
+\u{2764}\u{FE0F} 带 VS16 的心
+中文行：撑行高的是它
+\u{1F389} 结尾再来一个
+";
+
 /// Markdown 样例：**含代码围栏**。
 ///
 /// 这是 2026-10-26 办公机"编辑文件时整个软件冻住"的复现样本：围栏分支
@@ -141,6 +153,9 @@ fn main() {
     // 阶段 23：双击打开编辑器的样本（**单独一个文件**，双击它必然新开一扇窗）
     let dbl_file = dir.join("dblclick.txt");
     std::fs::write(&dbl_file, "双击我，应当打开编辑器。\n").expect("dblclick file");
+    // emoji 样例：验行号栏不会漏出半个 emoji
+    let emoji_file = dir.join("emoji.txt");
+    std::fs::write(&emoji_file, SAMPLE_EMOJI).expect("sample emoji file");
     // 长文件：超过一屏（用户报的「在底部输入就跳到顶部」就是它）
     let long_file = dir.join("long.txt");
     let long_text: String = (1..=400)
@@ -388,6 +403,38 @@ fn main() {
         let fg = fileedit::fg_at(md, char_off).expect("围栏没有高亮颜色");
         assert_ne!(fg, "#000000", "围栏颜色是黑的，等于没高亮");
         println!("Markdown 围栏的高亮色：{fg}");
+    }
+
+    // —— emoji：行号栏不能漏出半个 emoji ——
+    // 影子字符靠"画成底色"隐形 ⇒ 单色字形隐形没问题；**彩色 emoji 不吃
+    // 前景色** ⇒ 它会原色漏到行号后面（实测还只露出"半个"）。
+    // 修法：影子里不抄彩色字形（emoji 不影响行高，抄了纯属多余）。
+    {
+        assert!(select("emoji.txt"), "本地面板里没找到 emoji.txt");
+        pump(100);
+        panel::on_open_file(&panel.st, false, view);
+        pump(500);
+        let edits = panel.st.file_edits.borrow();
+        let em = edits
+            .iter()
+            .find(|e| fileedit::path_of(e).ends_with("emoji.txt"))
+            .expect("emoji 编辑器窗口");
+        let gtext = fileedit::gutter_text(em);
+        // 行号栏里不许出现任何彩色字形
+        for c in gtext.chars() {
+            let u = c as u32;
+            assert!(
+                !(0x1F000..=0x1FAFF).contains(&u) && u != 0xFE0F,
+                "行号栏里漏出了彩色字形 {c:?}（U+{u:04X}）\n{gtext}"
+            );
+        }
+        // ⚠️ 反过来也要成立：中文影子**必须还在** —— 影子没了行高就对不上，
+        //    行号会跟正文错行（那比漏半个 emoji 严重得多）
+        assert!(
+            gtext.contains('\u{4E2D}'),
+            "中文影子不见了（行高会错行）\n{gtext}"
+        );
+        println!("emoji 样例的行号栏文本：\n{gtext}");
     }
 
     if hold {
