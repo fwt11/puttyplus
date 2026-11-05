@@ -757,6 +757,19 @@ impl SftpBackend {
             .collect()
     }
 
+    /// 这条 SSH 会话**断了没有**（服务端关了 / 网络断了 / 空闲超时）。
+    ///
+    /// ⚠️ **为什么需要它**（2026-11-05）：SFTP 面板和终端是**两条独立的
+    /// 连接**——终端那条断了，SFTP 那条可能还活着，也可能一起断了。
+    /// 以前没人问过"SFTP 那条还在不在" ⇒ 面板一直显示「已连接」，
+    /// 用户点「刷新」才报错（"读取远程目录失败"），还得自己知道要去点
+    /// 「重新连接 SFTP」。
+    /// 现在 worker 盯着这个标志 ⇒ 断了就**主动上报**，UI 立刻把状态改成
+    /// 「已断开」，并在下一次操作（刷新 / 换目录）时**自动重连**。
+    pub fn is_closed(&self) -> bool {
+        self.session.is_closed()
+    }
+
     pub async fn close(&self) {
         {
             let mut forwards = self.forwards.lock().await;

@@ -429,6 +429,15 @@ impl FwdView {
 /// worker → UI 事件。
 pub enum PanelEvent {
     Connected(Result<String, String>),
+    /// **连接断了**（服务端关了 / 网络断了 / 空闲超时）。
+    ///
+    /// ⚠️ **为什么要有**（2026-11-05）：SFTP 面板和终端是**两条独立的
+    /// 连接**。终端那条断了，用户点「重新连接终端」能救回来；**SFTP 那条**
+    /// 断了却没人知道——面板还显示「已连接」，直到用户点「刷新」才弹一个
+    /// 「读取远程目录失败」，而且还得自己想到去点「重新连接 SFTP」。
+    /// worker 盯着底层会话（`SftpBackend::is_closed`）⇒ 断了就上报，
+    /// UI 立刻改成「已断开」，下一次操作自动重连。
+    Disconnected,
     /// 转发规则集快照 + 本次操作的失败说明（Connected 之后到达；
     /// 任何规则变动都重发完整列表）
     Forwards {
@@ -564,6 +573,10 @@ pub fn spawn_worker(
             rt.block_on(async move {
                 // 传输调度器与命令循环共享同一条连接（并发 SFTP 请求）
                 let mut conn: Option<Arc<SftpBackend>> = None;
+                // **连接代号**：每次重连 +1。盯着连接的那个任务靠它判断
+                // 「我盯的那条已经不是当前这条了」⇒ 旧连接的断开**不**上报
+                // （否则会把刚连上的新连接误判成断的）。
+                let conn_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let mut xfer_tx: Option<UnboundedSender<TransferMsg>> = None;
                 let mut xfer_task: Option<tokio::task::JoinHandle<()>> = None;
                 let mut db: Option<DbHandle> = None;
@@ -596,6 +609,7 @@ pub fn spawn_worker(
                         } => {
                             // 重连会换掉底层 SSH 连接：先停传输调度器（它持有
                             // 旧连接 Arc），再停数据库，最后关旧连接。
+                            conn_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             stop_scheduler(&mut xfer_tx, &mut xfer_task);
                             if let Some(d) = db.take() {
                                 d.stop();
@@ -651,6 +665,12 @@ pub fn spawn_worker(
                                         spawn_scheduler(Arc::clone(&c), ui_tx.clone());
                                     xfer_tx = Some(tx);
                                     xfer_task = Some(task);
+                                    // 盯着这条连接：断了就告诉 UI（2026-11-05）
+                                    watch_connection(
+                                        Arc::clone(&c),
+                                        Arc::clone(&conn_gen),
+                                        ui_tx.clone(),
+                                    );
                                     conn = Some(c);
                                 }
                                 Err(e) => {
@@ -1277,6 +1297,31 @@ fn rules_of(forwards: &[String]) -> Vec<crate::backend::forward::FwdRule> {
         .iter()
         .flat_map(|f| crate::backend::forward::parse_rules(f))
         .collect()
+}
+
+/// 盯着一条连接：**它断了就上报** [`PanelEvent::Disconnected`]。
+///
+/// ⚠️ **只报「当前这条」的断开**：连接被换掉（重连）时代号会变 ⇒ 这个任务
+/// 直接退出，不把旧连接的断开报上去（否则刚连上的新连接会被误判成断的）。
+fn watch_connection(
+    conn: Arc<SftpBackend>,
+    conn_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ui_tx: async_channel::Sender<PanelEvent>,
+) {
+    let my_gen = conn_gen.load(std::sync::atomic::Ordering::SeqCst);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            // 连接已经被换掉了 ⇒ 我盯的这条没意义了，退出
+            if conn_gen.load(std::sync::atomic::Ordering::SeqCst) != my_gen {
+                return;
+            }
+            if conn.is_closed() {
+                let _ = ui_tx.try_send(PanelEvent::Disconnected);
+                return;
+            }
+        }
+    });
 }
 
 /// 当前连接上的转发规则视图（含停用项）。

@@ -65,6 +65,10 @@ pub struct PanelState {
     /// 现在它是**会话内**的状态：进数据库页默认收起（工作台要宽度），
     /// 用户拉回来就保持到他关掉这个连接为止。**每台机器行为一致。**
     pub db_sftp_shown: Cell<bool>,
+    /// **正在连接 / 重连**（避免连点好几次，连一次就够）。
+    pub connecting: Cell<bool>,
+    /// 用户输入了路径、但**当时没连着** ⇒ 记在这儿，连上之后接着跳过去。
+    pub pending_cd: RefCell<Option<String>>,
     pub tx: RefCell<Option<Sender<WorkerCmd>>>,
     /// 数据库「**测连**」的回包去处（新建数据库连接的对话框在等）。
     ///
@@ -282,6 +286,8 @@ impl SftpPanel {
             pw: RefCell::new(opts.password.clone()),
             conn_ok: Cell::new(false),
             db_sftp_shown: Cell::new(false),
+            connecting: Cell::new(false),
+            pending_cd: RefCell::new(None),
             tx: RefCell::new(None),
             db_test_cb: RefCell::new(None),
             next_db_test_id: Cell::new(1),
@@ -686,6 +692,29 @@ fn set_remote_sensitive(st: &Rc<PanelState>, sens: bool) {
 
 /* ---------------- 提交任务 ---------------- */
 
+/// 要用远端连接时调它：**断了就自动重连**。
+///
+/// 返回 `false` = "这次先别做，等连上再继续"（调用方把要做的事记下来，
+/// 连上之后会自动接着做）。
+///
+/// ⚠️ **为什么要有**（2026-11-05，用户原话：「有任何变化，sftp自动重连，
+/// 比如改变目录的时候、刷新的时候，发现 sftp断了就自动重连」）：
+/// 以前 SFTP 会话断了，面板还显示「已连接」——用户点「刷新」只弹一个
+/// 「读取远程目录失败」，还得自己想到去点「重新连接 SFTP」。
+fn ensure_remote(st: &Rc<PanelState>) -> bool {
+    if st.conn_ok.get() {
+        return true;
+    }
+    if st.connecting.get() {
+        // 已经在连了 ⇒ 别再发一次（连一次就够）
+        return false;
+    }
+    st.connecting.set(true);
+    set_remote_status(st, State::Warn, tr("连接已断开，正在重新连接…"));
+    submit_connect(st);
+    false
+}
+
 fn submit_connect(st: &Rc<PanelState>) {
     let pw = st
         .pw
@@ -769,22 +798,47 @@ fn cancel_aborted_xfers(st: &Rc<PanelState>) {
 /// 「测连失败」的回包 ⇒ 得能直接调。
 pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
     match ev {
+        PanelEvent::Disconnected => {
+            // 底层会话断了（服务端关了 / 网络断了 / 空闲超时）⇒ 标成未连接。
+            // 下一次操作（刷新 / 换目录）会**自动重连**（`ensure_remote`）。
+            st.conn_ok.set(false);
+            st.connecting.set(false);
+            st.remote_list_pending.set(false);
+            st.remote_stat_pending.set(false);
+            set_remote_sensitive(st, false);
+            if let Some(b) = st.rreconnect.borrow().as_ref() {
+                b.set_sensitive(true);
+            }
+            set_remote_status(st, State::Err, tr("连接已断开"));
+        }
         PanelEvent::Connected(Ok(cwd)) => {
             // 重连会 abort 旧传输调度器，先把旧队列里未完成的项标成取消
             cancel_aborted_xfers(st);
             st.conn_ok.set(true);
+            st.connecting.set(false);
             st.remote_mtime.set(0);
             st.remote_stat_pending.set(false);
             st.remote_list_pending.set(false);
             *st.remote_home.borrow_mut() = Some(cwd.clone());
             set_connected_status(st, &cwd);
             set_remote_sensitive(st, true);
-            submit_list(st, &cwd);
+            // **连上之后去哪儿**：
+            // ① 用户刚才输入了路径（当时没连着）⇒ 跳那个路径；
+            // ② 否则回到**断之前那个目录**（重连不该把用户踢回主目录）；
+            // ③ 第一次连接（还没待过任何目录）⇒ 主目录。
+            let pending = st.pending_cd.borrow_mut().take();
+            let last = st.remote_cwd.borrow().clone();
+            let target = pending
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| if last.is_empty() { None } else { Some(last) })
+                .unwrap_or(cwd);
+            submit_list(st, &target);
         }
         PanelEvent::Connected(Err(err)) => {
             // 旧连接已经断开，在跑的传输不可能完成
             cancel_aborted_xfers(st);
             st.conn_ok.set(false);
+            st.connecting.set(false);
             st.remote_mtime.set(0);
             st.remote_stat_pending.set(false);
             st.remote_list_pending.set(false);
@@ -1117,6 +1171,10 @@ pub(crate) fn refresh_after_edit_save(st: &Rc<PanelState>, remote: bool) {
 
 pub fn on_refresh(st: &Rc<PanelState>, remote: bool) {
     if remote {
+        // ⚠️ **断了就先重连**（用户原话：「刷新的时候，发现 sftp断了就自动重连」）
+        if !ensure_remote(st) {
+            return;
+        }
         let cwd = st.remote_cwd.borrow().clone();
         submit_list(st, &cwd);
     } else {
@@ -1203,6 +1261,10 @@ pub fn on_up(st: &Rc<PanelState>, remote: bool) {
         if !cwd.starts_with('/') {
             return; // ~ 相对路径保护
         }
+        // 断了就先重连（连上之后会回到原来的目录）
+        if !ensure_remote(st) {
+            return;
+        }
         submit_list(st, &parent);
     } else {
         set_local_cwd(st, &parent);
@@ -1212,6 +1274,10 @@ pub fn on_up(st: &Rc<PanelState>, remote: bool) {
 
 pub fn on_home(st: &Rc<PanelState>, remote: bool) {
     if remote {
+        // 断了就先重连
+        if !ensure_remote(st) {
+            return;
+        }
         let home = st.remote_home.borrow().clone();
         if let Some(h) = home {
             submit_list(st, &h);
@@ -1233,6 +1299,12 @@ pub fn on_entry_activated(st: &Rc<PanelState>, remote: bool, txt: &str) {
             (Some(h), Some(rest)) => path_join(h, rest.trim_start_matches('/')),
             _ => txt.to_string(),
         };
+        // ⚠️ **断了就先重连**，并把"要去哪儿"记下来 ⇒ 连上之后自动跳过去
+        // （用户原话：「改变目录的时候……发现 sftp断了就自动重连」）
+        if !ensure_remote(st) {
+            *st.pending_cd.borrow_mut() = Some(target);
+            return;
+        }
         submit_list(st, &target);
     } else {
         let p = std::path::Path::new(txt);
@@ -1387,6 +1459,7 @@ pub fn on_reconnect(st: &Rc<PanelState>) {
     if let Some(b) = st.rreconnect.borrow().as_ref() {
         b.set_sensitive(false);
     }
+    st.connecting.set(true);
     set_remote_status(
         st,
         State::Warn,

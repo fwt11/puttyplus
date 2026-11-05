@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1657] = [
+pub static EN: [(&str, &str); 1658] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1577,6 +1577,7 @@ pub static EN: [(&str, &str); 1657] = [
     ("连接已保存", "The connection was saved"),
     ("连接已断开", "The connection was closed"),
     ("连接已断开或已重建", "The connection was closed or rebuilt"),
+    ("连接已断开，正在重新连接…", "The connection was closed; reconnecting…"),
     ("连接用哪把私钥、认证方式选哪种，在连接编辑器的「认证」页里设；凭据库管的是「记住的密码」要不要加密存着。", "Which private key a connection uses and which authentication method it allows are set on the \"Authentication\" page of the connection editor; the credential vault is about whether the \"remembered passwords\" are stored encrypted."),
     ("连接页左边文件面板的宽度", "The width of the file panel on the left of the connection page"),
     ("退出", "Quit"),
