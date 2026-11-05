@@ -1,17 +1,24 @@
-//! DB 页签**独占宽度** + 对象树可折叠的冒烟（审计 P0-2，阶段 66）。
+//! 子标签栏**不跳位** + 文件面板**跟着终端页签走**的冒烟（阶段 97）。
 //!
-//! **问题**：数据库工作台是连接页的**子标签**，而连接页左边是常驻的
-//! SFTP 文件面板（340px）。默认窗口 1200 宽：侧栏 230 + SFTP 340 ⇒
-//! 子标签区只剩 630，工作台再扣掉对象树 330 ⇒ **主区只剩 300px**——
-//! 结果网格和对象树全挤在一起（审计 P0-2 的现场截图就是这个）。
+//! **问题**（用户 2026-11-05 截图报）：连接页原来是横向 Paned
+//! （左＝常驻文件面板 / 右＝子标签区），切到数据库页时把左边的文件面板
+//! 藏起来 ⇒ GTK4 的 Paned 把空间全给右边 ⇒ **子标签栏整体左移**（页签头
+//! 从 x≈840 跳到 x≈330）。
+//!
+//! **改法**：文件面板进了**终端子页内部**（终端子页 = 横向 Paned：左＝文件
+//! 面板 / 右＝终端），连接页只剩子标签区 ⇒ 切页 = 整页替换 ⇒ 子标签栏不动。
+//! 文件面板仍是**会话级的一个 widget**，切到别的终端页签时会**搬**过去。
 //!
 //! **断言**：
-//! 1. 终端页激活时：SFTP 面板**可见**，且占着宽度；
-//! 2. DB 页激活时：SFTP 面板**不可见**（宽度为 0），子标签区**占满**
-//!    连接页的整个宽度（= 窗口宽 - 侧栏宽）；
-//! 3. 切回终端页 ⇒ SFTP 又**可见**了（不能把用户永久关在门外）；
-//! 4. 「文件面板」开关能把它**拉回来**（用户自己说了算）；
-//! 5. 对象树可折叠：收起后树那一列不可见、Paned 位置归零；展开后复原。
+//! 1. 终端页：文件面板可见、占着宽度；**记下子标签栏的位置**；
+//! 2. 切到 DB 页 ⇒ **子标签栏位置一模一样**（核心：不再跳位），
+//!    DB 页占满整个连接页，文件面板此刻不可见（它在终端页里），宽度没丢；
+//! 3. 切回终端页 ⇒ 文件面板又回来了；
+//! 4. **搬家**：用「+」新建一个终端页签 ⇒ 切过去 ⇒ 文件面板跟着过去；
+//!    切回来 ⇒ 又跟着回来（宽度始终一致）；
+//! 5. **寄存/恢复**：关掉主终端页签 ⇒ 文件面板没被销毁；
+//!    点「重新连接终端」重建 ⇒ 文件面板回到新终端页旁边；
+//! 6. 对象树可折叠：收起后树那一列不可见、Paned 位置归零；展开后复原。
 //!
 //! ```text
 //! xvfb-run -a cargo run --example db_wide_smoke
@@ -30,6 +37,13 @@ impl Drop for IniGuard {
     }
 }
 
+/// 两个 Paned 是不是同一个（GTK 控件按 GObject 指针比）。
+fn same(a: &gtk::Paned, b: &gtk::Paned) -> bool {
+    // ⚠️ 用 `==`（gtk::Widget 的 PartialEq 比的是 GObject 指针），
+    // 别用 `std::ptr::eq` 比 upcast 出来的引用——那比的是引用本身的地址。
+    a.upcast_ref::<gtk::Widget>() == b.upcast_ref::<gtk::Widget>()
+}
+
 fn pump(ms: u64) {
     let ctx = gtk::glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -42,10 +56,7 @@ fn pump(ms: u64) {
 }
 
 fn main() {
-    // ⚠️ **别碰用户真实的设置文件**：这个冒烟会点「文件面板」开关，
-    // 以前那个选择是记在 `settings.ini` 里的 ⇒ 跑一次冒烟就改了用户
-    // 的设置（而且**跑挂了还留在那儿**：上一次点击已经写进去了）。
-    // 现在那个选择是**会话内**的状态，但设置文件本身照旧隔离。
+    // ⚠️ **别碰用户真实的设置文件**：这个冒烟会拖分割条、翻页签。
     let settings_ini = std::env::temp_dir()
         .join(format!("pp-db-wide-smoke-set-{}.ini", std::process::id()));
     let _ = std::fs::remove_file(&settings_ini);
@@ -85,24 +96,25 @@ fn main() {
     let sub = st.sub_tabs().expect("应有子标签容器");
     let page = tabs.current_page_widget().expect("应有当前页");
 
-    // ---- 1) 终端页：SFTP 可见、占着宽度 ----
+    // ---- 1) 终端页：文件面板可见、占着宽度；记下子标签栏的位置 ----
     assert_eq!(sub.current_kind(), PageKind::Terminal, "第一页应当是终端");
-    assert!(st.root.is_visible(), "终端页时文件面板应当可见");
+    // ⚠️ 用 `is_mapped()`（"真的在屏幕上"）而不是 `is_visible()`：
+    // GtkNotebook 内部是个 GtkStack，切页时**不**改子页的 visible 标志，
+    // 只是不把它映射到屏幕上 ⇒ `is_visible()` 仍然是 true。
+    assert!(st.root.is_mapped(), "终端页时文件面板应当显示在屏幕上");
     let sftp_w_term = st.root.width();
-    let sub_w_term = sub.root().width();
     assert!(
         sftp_w_term > 100,
         "终端页时文件面板宽度只有 {sftp_w_term}px（它应当占着位置）"
     );
-    assert!(
-        sub_w_term < page.width(),
-        "终端页时子标签区不该占满（文件面板还在旁边）：{} vs {}",
-        sub_w_term,
-        page.width()
-    );
-    println!("[1] 终端页：文件面板 {sftp_w_term}px，子标签区 {sub_w_term}px ✓");
+    // ⚠️ **核心量的位置**：子标签栏（notebook）在连接页里的左边界。
+    // 以前连接页是「文件面板｜子标签区」的 Paned ⇒ 切到数据库页文件面板
+    // 一藏，子标签栏的左边界就从 340 跳到 0 ⇒ 页签头整体位移。
+    let x_term = sub.nb.allocation().x();
+    let w_term = sub.nb.allocation().width();
+    println!("[1] 终端页：文件面板 {sftp_w_term}px，子标签栏 x={x_term} 宽 {w_term}px ✓");
 
-    // ---- 2) 打开 DB 页 ⇒ 文件面板让位 ----
+    // ---- 2) 打开 DB 页 ⇒ 子标签栏**不许动** ----
     puttyplus::panel::on_open_db_page(&st);
     puttyplus::panel::dbui::mount_for_test(&st);
     pump(600);
@@ -111,63 +123,148 @@ fn main() {
         PageKind::Db,
         "DB 页应当是当前页（种类没标对 ⇒ 上层不知道要给它腾地方）"
     );
-    assert!(
-        !st.root.is_visible(),
-        "DB 页激活时文件面板应当隐藏（不然工作台主区只剩 300px）"
+    let x_db = sub.nb.allocation().x();
+    assert_eq!(
+        x_db, x_term,
+        "子标签栏跳位了：切到数据库页后左边界从 {x_term} 变成了 {x_db}（文件面板被藏起来 ⇒ 整栏左移）"
     );
-    assert_eq!(st.root.width(), 0, "隐藏了还占着宽度");
-    let sub_w_db = sub.root().width();
+    // DB 页要占满整个连接页（文件面板在终端页里，DB 页不用跟它抢宽度）
+    //
+    // ⚠️ 工作台自己带一点内边距（22px 上下），所以按比例断言：DB 页至少要
+    // 拿到连接页的九成——以前它被文件面板挤到 630/1198 ≈ 53%。
+    let db_page_w = {
+        let slot = st.db_ui.borrow();
+        let ui = slot.as_ref().expect("数据库工作台应当挂出来了");
+        ui.page.width()
+    };
+    let page_w = page.width();
     assert!(
-        sub_w_db > sub_w_term,
-        "DB 页时子标签区没有变宽：{sub_w_db} vs {sub_w_term}"
+        db_page_w * 100 >= page_w * 90,
+        "DB 页没占满连接页：{db_page_w} vs {page_w}（文件面板还在跟它抢宽度？）"
     );
-    // 子标签区应当**占满**连接页（= 侧栏以外的全部）
+    // 文件面板此刻不在屏幕上（它在终端子页里，而终端子页没显示）
     assert!(
-        sub_w_db >= page.width() - 2,
-        "DB 页时子标签区没占满连接页：{sub_w_db} vs {}",
-        page.width()
+        !st.root.is_mapped(),
+        "DB 页激活时文件面板不该露出来（它在终端页里）"
     );
-    println!("[2] DB 页：文件面板 0px，子标签区 {sub_w_db}px（连接页 {}px）✓", page.width());
+    // 宽度没丢：终端子页的 Paned 位置还是 340
+    let term_paned = st
+        .root
+        .parent()
+        .and_downcast::<gtk::Paned>()
+        .expect("文件面板的父容器应当是终端子页的 Paned");
+    assert_eq!(
+        term_paned.position(),
+        340,
+        "终端子页里文件面板的宽度变了：{}",
+        term_paned.position()
+    );
+    println!("[2] DB 页：子标签栏 x 仍是 {x_db}（不跳位 ✓），DB 页 {db_page_w}px 占满连接页 ✓");
 
     // ---- 3) 切回终端页 ⇒ 文件面板又回来了 ----
-    let term_id = sub.id_by_title("终端").expect("应有终端子页");
-    sub.switch_to(term_id);
+    // 主终端页是**第一个**「终端」子页（后面新建的终端页签也叫「终端」）
+    let primary_term_id = sub
+        .id_by_title("终端")
+        .expect("应当有终端子页");
+    let db_id = sub.id_by_title("数据库").expect("应有数据库子页");
+    assert_eq!(
+        sub.current_id(),
+        Some(db_id),
+        "此刻应当停在数据库页上"
+    );
+    sub.switch_to(primary_term_id);
     pump(400);
     assert!(
-        st.root.is_visible(),
+        st.root.is_mapped(),
         "切回终端页后文件面板必须回来（不能把用户永久关在门外）"
     );
     assert!(st.root.width() > 100, "切回终端页后文件面板应当占着宽度");
-    println!("[3] 切回终端页：文件面板又可见了（{}px）✓", st.root.width());
-
-    // ---- 4) 再进 DB 页，用「文件面板」开关把它拉回来 ----
-    sub.switch_to(sub.id_by_title("数据库").expect("应有数据库子页"));
-    pump(400);
-    assert!(!st.root.is_visible(), "DB 页默认应当隐藏文件面板");
-    // **真的点那个按钮**（走按钮的 toggled 回调 → 上层的钩子 → 切可见性）
-    sub.click_toggle();
-    pump(300);
-    assert!(
-        st.root.is_visible(),
-        "点了「文件面板」开关，文件面板应当回来"
+    assert_eq!(
+        sub.nb.allocation().x(),
+        x_term,
+        "切回终端页后子标签栏的位置又变了"
     );
-    assert!(sub.toggle_state(), "开关的状态应当是按下");
-    // ⚠️ **这个选择只在本次会话里有效**（2026-11-05）：以前它记在
-    // `settings.ini` 里 ⇒ 同一套代码在两台机器上表现不一样（办公机器
-    // 记住了"文件面板可见"，家里机器是藏起来的）——用户报的就是这个。
-    // 现在它挂在面板状态上：关掉这个连接就没了。
-    assert!(
-        st.db_sftp_shown.get(),
-        "「文件面板」被拉回来这件事应当在本会话里被记住"
-    );
-    // 再点一下 ⇒ 又藏起来
-    sub.click_toggle();
-    pump(300);
-    assert!(!st.root.is_visible(), "再点一次应当又藏起来");
-    assert!(!st.db_sftp_shown.get(), "再点一次应当又记成「藏起来」");
-    println!("[4] 「文件面板」开关：拉回来 / 再藏起（本会话内记住）✓");
+    println!("[3] 切回终端页：文件面板又可见了（{}px），子标签栏 x 仍是 {x_term} ✓", st.root.width());
 
-    // ---- 5) 对象树可折叠 ----
+    // ---- 4) 搬家：文件面板跟着当前终端页签走 ----
+    {
+        let old_host = st
+            .root
+            .parent()
+            .and_downcast::<gtk::Paned>()
+            .expect("文件面板现在的宿主");
+        // 「+」→ 新建终端 ⇒ 会切到那个新页签
+        tabs.new_term_page(&page);
+        pump(500);
+        let new_host = st
+            .root
+            .parent()
+            .and_downcast::<gtk::Paned>()
+            .expect("文件面板应当还挂在某个 Paned 里");
+        assert!(
+            !same(&old_host, &new_host),
+            "切到新终端页签后文件面板没跟过去（还是待在旧页签里）"
+        );
+        assert_eq!(
+            new_host.position(),
+            340,
+            "搬家之后宽度应当按记忆值复位：{}",
+            new_host.position()
+        );
+        assert!(
+            old_host.start_child().is_none(),
+            "旧页签的左格应当已经空了（文件面板搬走了）"
+        );
+        // 切回第一个终端页签 ⇒ 文件面板又搬回来
+        sub.switch_to(primary_term_id);
+        pump(400);
+        let back = st
+            .root
+            .parent()
+            .and_downcast::<gtk::Paned>()
+            .expect("文件面板应当还挂在某个 Paned 里");
+        assert!(
+            same(&old_host, &back),
+            "切回原来的终端页签后文件面板没搬回来"
+        );
+        assert_eq!(back.position(), 340, "搬回来以后宽度变了");
+        println!("[4] 搬家：文件面板跟着终端页签走（宽度始终 340px）✓");
+    }
+
+    // ---- 5) 关掉主终端页签 ⇒ 文件面板不丢；重建 ⇒ 搬回来 ----
+    {
+        assert!(
+            sub.close_page(primary_term_id),
+            "关不掉主终端页签"
+        );
+        pump(400);
+        // 文件面板**没被销毁**（PanelState 一直持有它）
+        assert!(
+            st.root.parent().is_some(),
+            "文件面板被销毁了（关个终端页签不该把文件面板弄没）"
+        );
+        // 点「重新连接终端」⇒ 重建终端页 ⇒ 文件面板回到新页旁边
+        tabs.reconnect_term_page(&page);
+        pump(800);
+        let host = st
+            .root
+            .parent()
+            .and_downcast::<gtk::Paned>()
+            .expect("重建后文件面板应当重新挂进终端页的 Paned");
+        assert_eq!(
+            host.position(),
+            340,
+            "重建后文件面板宽度应当还是记忆值：{}",
+            host.position()
+        );
+        assert!(
+            st.root.is_mapped(),
+            "重建后文件面板应当重新露出来"
+        );
+        println!("[5] 关掉终端页签 → 文件面板没丢；重建终端 → 又回来了 ✓");
+    }
+
+    // ---- 6) 对象树可折叠 ----
     {
         assert!(
             !puttyplus::panel::dbui::tree_collapsed(&st),
@@ -209,30 +306,25 @@ fn main() {
             240,
             "展开后 Paned 位置没有回到对象树宽度"
         );
-        println!("[5] 对象树可收起 / 可展开（几何也对）✓");
+        println!("[6] 对象树可收起 / 可展开（几何也对）✓");
     }
 
-    // ---- 6) 关掉 DB 页签 ⇒ 文件面板必须回来 ----
-    //
-    // ⚠️ GTK 移除"当前页"时**不一定**发 `switch-page` ⇒ 要是这里没人
-    // 把文件面板放回来，用户关掉 DB 页签后终端页左边就**永远空着**。
+    // ---- 7) 关掉 DB 页签 ⇒ 回到终端页，文件面板可见 ----
     {
-        let db_id = sub.id_by_title("数据库").expect("应有数据库子页");
         sub.switch_to(db_id);
         pump(300);
-        assert!(!st.root.is_visible(), "DB 页时文件面板应当是藏着的");
         assert!(sub.close_page(db_id), "关不掉 DB 页签");
         pump(400);
         assert!(
-            st.root.is_visible(),
+            st.root.is_mapped(),
             "关掉 DB 页签后文件面板没回来（用户左边就永远空着了）"
         );
-        println!("[6] 关掉 DB 页签 ⇒ 文件面板回来了 ✓");
+        println!("[7] 关掉 DB 页签 ⇒ 文件面板回来了 ✓");
     }
 
     // ---- 截图模式（--hold）：摆出要拍的样子停住 ----
     if std::env::args().any(|a| a == "--hold") {
-        // 步骤 6 把 DB 页签关掉了 ⇒ 这里重新开一个
+        // 重新开一个数据库页签，摆出「DB 页占满整页」的样子
         puttyplus::panel::on_open_db_page(&st);
         puttyplus::panel::dbui::mount_for_test(&st);
         pump(700);

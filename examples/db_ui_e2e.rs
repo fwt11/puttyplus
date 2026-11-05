@@ -449,7 +449,8 @@ fn main() {
     let panel = SftpPanel::new(&opts);
     let st: Rc<PanelState> = Rc::clone(&panel.st);
 
-    // ---- 阶段 12 的真实布局：连接页 = 横向 Paned（左文件面板 / 右子标签）----
+    // ---- 阶段 97 的真实布局：连接页 = 子标签区；终端子页 = 横向 Paned
+    //      （左文件面板 / 右终端）----
     //
     // 真实运行时这段在 `tabs.rs::open` 里。这里照抄一份，e2e 的截图才跟
     // 用户实际看到的形状一致（数据库工作台是**子标签**，不是弹窗）。
@@ -458,20 +459,25 @@ fn main() {
         // 第一个子页是终端（这里没有真终端，用占位页占住位置）
         let term = gtk::Label::new(Some("终端（e2e 占位）"));
         term.set_margin_top(20);
-        sub.add_page("终端", term.upcast::<gtk::Widget>(), None);
+        // 终端子页 = 横向 Paned：左＝文件面板，右＝终端占位
+        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        term_page.set_start_child(Some(panel.widget()));
+        term_page.set_end_child(Some(term.upcast_ref::<gtk::Widget>()));
+        term_page.set_position(340);
+        sub.add_page(
+            "终端",
+            term_page.upcast::<gtk::Widget>(),
+            None,
+        );
     }
     *st.sub_tabs.borrow_mut() = Some(sub.clone());
-    let split = gtk::Paned::new(gtk::Orientation::Horizontal);
-    split.set_start_child(Some(panel.widget()));
     // 用 `root()`（notebook + 尾部的「+」按钮），不是裸的 notebook：
-    // notebook 现在挂在 root 里，直接塞进 Paned 会因为"已有父级"被拒绝，
-    // 结果整个右侧区域高度为 0（对象树一行的可见范围都查不到）。
-    split.set_end_child(Some(sub.root()));
-    split.set_position(340);
+    // notebook 现在挂在 root 里，直接塞进别的容器会因为"已有父级"被拒绝，
+    // 结果整个内容区高度为 0（对象树一行的可见范围都查不到）。
     let win = gtk::Window::new();
     win.set_title(Some("db ui e2e"));
     win.set_default_size(1500, 900);
-    win.set_child(Some(&split));
+    win.set_child(Some(sub.root()));
     win.present();
     pump(400);
 
@@ -2589,8 +2595,8 @@ fn main() {
             dbui::close_stats_now(&st);
             dbui::close_history_now(&st);
             dbui::close_search_now(&st);
-            // 收起左侧文件面板，让画布占满宽度（用户自己也会这么拖）
-            split.set_position(0);
+            // ⚠️ 阶段 97：不用再收左侧文件面板了——它已经进了**终端子页内部**，
+            // 数据库页本来就占满整页宽（画布自然占满宽度）。
             pump(800);
             shot("/tmp/er_diagram.png");
         }

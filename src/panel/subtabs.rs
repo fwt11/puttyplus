@@ -10,13 +10,19 @@
 //! ```text
 //! 主窗口
 //! ├── 标签栏：连接 tab（srv-01 ×   +）
-//! └── 当前连接页（横向 Paned）
-//!     ├── 左：文件面板（远程/本地，常驻）
-//!     └── 右：子标签栏（终端 / 数据库 / .zshrc …）
+//! └── 当前连接页（= 子标签区，整页宽）
+//!     ├── 子标签栏（终端 / 数据库 / .zshrc …）
+//!     └── 终端子页：横向 Paned
+//!         ├── 左：文件面板（远程/本地，**跟着当前终端页签走**）
+//!         └── 右：终端
 //! ```
 //!
 //! **终端也是子标签**：XTerminal 里「终端」跟「.zshrc」是平级的子标签，
-//! 我们照做——终端是第一个子页，文件面板留在左边不动。
+//! 我们照做——终端是第一个子页。
+//!
+//! ⚠️ **阶段 97**：文件面板从「连接页左边的常驻列」搬进了**终端子页内部**
+//! ⇒ 子标签栏不再因为文件面板的显隐而左右跳位（用户 2026-11-05 报）。
+//! 文件面板仍是**会话级的一个 widget**，切到别的终端页签时会**搬**过去。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -53,16 +59,17 @@ pub fn display_width(s: &str) -> usize {
         .sum()
 }
 
-/// 子页的**种类**（阶段 66 / 审计 P0-2）。
+/// 子页的**种类**（阶段 66 / 审计 P0-2；阶段 97 起含义有变）。
 ///
-/// **为什么要分种类**：DB 工作台激活时要**独占**右侧宽度（否则主区只剩
-/// 300px，审计 P0-2）⇒ 上层得能一眼看出"当前这一页是不是 DB"。
+/// **为什么分种类**：上层要能一眼看出"当前这一页是不是终端"——
+/// 阶段 97 起，**文件面板跟着当前终端页签走**（切到终端页就把文件面板
+/// 搬过去），所以这个判断是搬家的入口条件。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageKind {
     /// 其它（不属于下面几类）
     #[default]
     Other,
-    /// 终端页
+    /// 终端页（**文件面板的家**）
     Terminal,
     /// 数据库工作台页
     Db,
@@ -119,17 +126,6 @@ pub struct SubTabs {
     /// **可以有多个**：终端页签要收掉自己的 SSH 会话，数据库页签要断开
     /// 连接——各管各的，谁的东西谁自己注册（`add_close_hook`）。
     close_hooks: RefCell<Vec<Rc<dyn Fn(u64)>>>,
-    /// **文件面板开关**（阶段 66）：DB 页独占宽度时，用户要能把左边的
-    /// 文件面板拉回来——不然用户以为功能没了。
-    ///
-    /// 平时**隐藏**：只有当前页是 DB 时才有意义（终端页的文件面板是
-    /// 常驻的，没有"藏起来"这回事）。
-    toggle_btn: gtk::ToggleButton,
-    /// 开关被点时的回调（参数 = 想要的新状态）。
-    toggle_hook: RefCell<Option<Rc<dyn Fn(bool)>>>,
-    /// 程序化改开关状态时为 true——否则 `set_active` 又会触发
-    /// `toggled` ⇒ 又调钩子 ⇒ 死循环。
-    updating: Cell<bool>,
 }
 
 impl SubTabs {
@@ -154,17 +150,8 @@ impl SubTabs {
             crate::topmenus::NewEntry::SubTab,
         )));
 
-        // 「文件面板」开关（阶段 66）：DB 页独占宽度时，用户靠它把左边
-        // 的文件面板拉回来。**平时隐藏**（只有 DB 页用得上）。
-        let toggle = gtk::ToggleButton::new();
-        toggle.set_icon_name("view-sidebar-symbolic");
-        toggle.set_tooltip_text(Some(tr("显示文件面板")));
-        toggle.set_focusable(false);
-        toggle.set_visible(false);
-
-        // 两个按钮排在一起浮在页签栏右端（**不占布局宽度**）
+        // 尾部的「+」按钮浮在页签栏右端（**不占布局宽度**）
         let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        btn_box.append(&toggle);
         btn_box.append(&add);
 
         // 浮在页签栏那一行的右端（**不占布局宽度**）
@@ -188,9 +175,6 @@ impl SubTabs {
             add_btn: add.clone(),
             new_pop: RefCell::new(None),
             close_hooks: RefCell::new(Vec::new()),
-            toggle_btn: toggle.clone(),
-            toggle_hook: RefCell::new(None),
-            updating: Cell::new(false),
         });
 
         // 点击「+」→ 弹菜单（内容由上层给）
@@ -213,70 +197,7 @@ impl SubTabs {
             });
         }
 
-        // 「文件面板」开关被点（阶段 66）
-        {
-            let s = Rc::clone(&sub);
-            toggle.connect_toggled(move |b| {
-                // 程序化改状态时别再回调（否则死循环）
-                if s.updating.get() {
-                    return;
-                }
-                let want = b.is_active();
-                let hook = s.toggle_hook.borrow().clone();
-                match hook {
-                    Some(f) => f(want),
-                    // 没人接（上层还没注册）⇒ 弹回去，别留一个假的开关
-                    None => {
-                        s.updating.set(true);
-                        b.set_active(!want);
-                        s.updating.set(false);
-                    }
-                }
-            });
-        }
-
         sub
-    }
-
-    /// 注册「文件面板」开关的回调（参数 = 想要的新状态）。
-    ///
-    /// 上层（连接页）收到后切 SFTP 面板的可见性，并把选择记住。
-    pub fn set_toggle_hook<F: Fn(bool) + 'static>(&self, f: F) {
-        *self.toggle_hook.borrow_mut() = Some(Rc::new(f));
-    }
-
-    /// 文件面板开关**显不显示**（只有 DB 页才显示它）。
-    pub fn set_toggle_visible(&self, visible: bool) {
-        self.toggle_btn.set_visible(visible);
-    }
-
-    /// 文件面板开关的**当前状态**（= 文件面板可见与否）。
-    ///
-    /// ⚠️ 程序化改状态**不会**触发上层的回调（`updating` 挡着）——
-    /// 否则"切页时同步一次状态"会变成"切页 → 回调 → 再切页"。
-    pub fn set_toggle_state(&self, on: bool) {
-        self.updating.set(true);
-        self.toggle_btn.set_active(on);
-        self.updating.set(false);
-        self.toggle_btn.set_tooltip_text(Some(if on {
-            tr("隐藏文件面板")
-        } else {
-            tr("显示文件面板")
-        }));
-    }
-
-    /// 文件面板开关当前是不是"按下"（= 文件面板可见）。
-    pub fn toggle_state(&self) -> bool {
-        self.toggle_btn.is_active()
-    }
-
-    /// 点一下「文件面板」开关（冒烟用）。
-    ///
-    /// ⚠️ 走的是**真的按钮回调**（`set_active` ⇒ `toggled` ⇒ 上层的钩子）
-    /// ⇒ 测的是用户真点下去的那条路，不是"直接调内部函数"。
-    pub fn click_toggle(&self) {
-        let now = self.toggle_btn.is_active();
-        self.toggle_btn.set_active(!now);
     }
 
     /// 外层容器（notebook + 尾部按钮）——挂到连接页右侧用这个。
@@ -526,6 +447,23 @@ impl SubTabs {
             }
         }
         PageKind::Other
+    }
+
+    /// 按**页序号**取这一页的**宿主 Paned**（阶段 97）。
+    ///
+    /// 终端子页的内容**就是**那个「文件面板｜终端」的 Paned ⇒ 上层要把
+    /// 文件面板搬到某个终端页签时，直接拿它当宿主，不用再记一份映射。
+    ///
+    /// 不是 Paned 的页（数据库工作台 / 文件编辑器）⇒ `None`。
+    pub fn paned_by_page_num(&self, num: u32) -> Option<gtk::Paned> {
+        for p in self.pages.borrow().iter() {
+            if let Some(n) = self.nb.page_num(&p.widget) {
+                if n == num {
+                    return p.widget.clone().downcast::<gtk::Paned>().ok();
+                }
+            }
+        }
+        None
     }
 
     /// 有没有这个子页。

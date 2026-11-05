@@ -64,17 +64,21 @@ fn main() {
 
     // ---- 子标签模式（用户实际看到的那一屏）：图标在左、文件名在右 ----
     //
-    // 复刻 `tabs.rs` 的接线：子标签容器挂进窗口，面板当左半边。
+    // 复刻 `tabs.rs` 的接线（阶段 97）：连接页 = 子标签区；文件面板在
+    // **终端子页内部**（左半边）。
     {
         let sub = puttyplus::panel::subtabs::SubTabs::new();
         *panel.st.sub_tabs.borrow_mut() = Some(sub.clone());
-        let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-        paned.set_start_child(Some(panel.widget()));
-        paned.set_end_child(Some(sub.root()));
+        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        term_page.set_start_child(Some(panel.widget()));
+        let term = gtk::Label::new(Some("终端（shot 占位）"));
+        term_page.set_end_child(Some(term.upcast_ref::<gtk::Widget>()));
+        term_page.set_position(340);
+        sub.add_page("终端", term_page.upcast::<gtk::Widget>(), None);
         let win = gtk::Window::new();
         win.set_title(Some("editor tools shot"));
         win.set_default_size(1280, 760);
-        win.set_child(Some(&paned));
+        win.set_child(Some(sub.root()));
         win.present();
         pump(400);
         panel::fileedit::open_local(&panel.st, &path, false);

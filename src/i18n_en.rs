@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1658] = [
+pub static EN: [(&str, &str); 1657] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1041,7 +1041,6 @@ pub static EN: [(&str, &str); 1658] = [
     ("显示/隐藏 隐藏文件", "Show/hide hidden files"),
     ("显示侧边栏", "Show sidebar"),
     ("显示列", "Show columns"),
-    ("显示文件面板", "Show the file panel"),
     ("显示未变化的文件", "Show unchanged files"),
     ("显示这一列", "Show this column"),
     ("暗色底，夜间/暗光环境", "Dark background, night/low-light environment"),
@@ -1338,6 +1337,7 @@ pub static EN: [(&str, &str); 1658] = [
     ("终端转发", "Terminal forwarding"),
     ("终端转发：由终端标签页的 ssh/plink 承接（-L/-R/-D）\n{text}", "Terminal forwarding: handled by the ssh/plink of the terminal tab (-L/-R/-D)\n{text}"),
     ("终端配色", "Terminal colours"),
+    ("终端页左边文件面板的宽度", "Width of the file panel on the left of the terminal page"),
     ("终端（spawn 的 ssh -L/-R/-D）", "Terminal (the spawned ssh -L/-R/-D)"),
     ("结构", "Structure"),
     ("结构数据对不上（列号越界），请重新打开表结构", "The structure data does not match (column index out of range) — please open the table structure again"),
@@ -1626,7 +1626,6 @@ pub static EN: [(&str, &str); 1658] = [
     ("键盘交互认证失败: {e}", "Keyboard-interactive authentication failed: {e}"),
     ("降序排列", "Sort descending"),
     ("除数为零", "Division by zero"),
-    ("隐藏文件面板", "Hide the file panel"),
     ("隐藏这一列", "Hide this column"),
     ("需要另一个已连接 SFTP 的标签页。先在侧边栏打开目标服务器，再回来发送。", "Another tab with a connected SFTP is needed. Open the target server in the sidebar first, then come back and send."),
     ("需要密码", "A password is required"),

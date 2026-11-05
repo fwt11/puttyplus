@@ -193,7 +193,7 @@ pub const SETTINGS: &[SettingItem] = &[
         id: "sftp_pane_pos",
         label: "文件面板宽度",
         page: Page::Advanced,
-        from: "拖连接页中间的分割条",
+        from: "拖终端页中间的分割条",
     },
     SettingItem {
         id: "columns",
@@ -694,7 +694,7 @@ fn advanced_page(root: &gtk::Box) {
         let spin = gtk::SpinButton::with_range(180.0, 900.0, 10.0);
         let cur = crate::settings::sftp_pane_pos();
         spin.set_value(if cur > 120 { f64::from(cur) } else { 340.0 });
-        spin.set_tooltip_text(Some(tr("连接页左边文件面板的宽度")));
+        spin.set_tooltip_text(Some(tr("终端页左边文件面板的宽度")));
         bbox.append(&spin);
         root.append(&bbox);
         spin.connect_value_changed(|s| {

@@ -54,7 +54,10 @@ pub struct Tab {
     pub label: gtk::Label,
     /// 标签头左侧的连接状态点（颜色跟面板状态走）
     pub dot: gtk::Label,
-    /// 标签内左右分割（SFTP 面板宽度）——关闭时保存宽度
+    /// **主终端子页内**的左右分割（左＝SFTP 文件面板 / 右＝终端）。
+    ///
+    /// 阶段 97 起，连接页本身不再是 Paned（只有子标签区）⇒ 这个字段指的是
+    /// 终端子页里那个「文件面板｜终端」的 Paned。
     pub paned: gtk::Paned,
     /// 3.1 分屏：首个终端 pane（日志/录制/跟随目录默认作用于它；
     /// 它被关掉时会顺延到剩下的第一个 pane）
@@ -98,6 +101,54 @@ fn term_container(pane: &TermPane) -> gtk::Paned {
     let p = gtk::Paned::new(gtk::Orientation::Horizontal);
     p.set_start_child(Some(pane.widget()));
     p
+}
+
+/// 把文件面板**搬到**某个终端子页的 Paned 里（阶段 97）。
+///
+/// ⚠️ **GTK4：一个 widget 只能有一个父级** ⇒ 搬家必须先把旧框里的槽位
+/// 清掉，再挂新的框，否则 GTK 报 `gtk_paned_set_start_child: assertion
+/// 'child->parent == NULL' failed`（AGENTS.md 记过同类坑：「同一个 widget
+/// 别 append 进两个 Box」）。
+///
+/// **为什么走 Paned 的槽位 API**（而不是直接 `w.unparent()`）：
+/// `set_start_child(None)` 会让 GTK **自己**把旧孩子解除父级并清掉槽位
+/// ⇒ 旧框不会留着一个野指针（它析构时不会顺手把孩子销毁掉）。
+///
+/// **为什么文件面板要搬家**：它是**会话级的一个 widget**（`PanelState::root`），
+/// 而一个连接页里可以有好几个终端页签 ⇒ 文件面板跟着**当前**终端页签走，
+/// 切到哪个终端页签，它就站哪个页签的左边。
+///
+/// **宽度**：搬家后按 `st.file_w`（跨宿主同步的那个值）复位。
+fn host_file_panel(st: &Rc<panel::PanelState>, host: &gtk::Paned) {
+    let w = &st.root; // 文件面板 widget
+    if let Some(old) = w.parent().and_downcast::<gtk::Paned>() {
+        // 旧宿主先把槽位让出来（GTK 顺带把文件面板解除父级）
+        let me = w.upcast_ref::<gtk::Widget>();
+        if old.start_child().as_ref() == Some(me) {
+            old.set_start_child(None::<&gtk::Widget>);
+        } else if old.end_child().as_ref() == Some(me) {
+            old.set_end_child(None::<&gtk::Widget>);
+        }
+    } else if w.parent().is_some() {
+        // 不是 Paned 的父级（少见）⇒ 直接解除父级
+        w.unparent();
+    }
+    host.set_start_child(Some(w));       // 放进新框
+    host.set_position(st.file_w.get());  // 宽度按记忆值复位
+}
+
+/// 让宿主的分割条位置**同步回** `file_w`（搬家之后宽度得跟着走）。
+///
+/// ⚠️ **只有当前正托管文件面板的那个框才算数**：别的框 position=0，
+/// 照样写回会把记住的宽度冲成 0（用户下次打开就变成默认宽度了）。
+fn track_file_width(st: &Rc<panel::PanelState>, host: &gtk::Paned) {
+    let stw = Rc::downgrade(st);
+    host.connect_notify_local(Some("position"), move |p, _| {
+        let Some(st) = stw.upgrade() else { return };
+        if st.root.parent().as_ref() == Some(p.upcast_ref::<gtk::Widget>()) {
+            st.file_w.set(p.position());
+        }
+    });
 }
 
 /// 装"会话存活"钩子（阶段 65）：终端起来 / 结束 → 面板状态跟着变。
@@ -460,7 +511,12 @@ impl Tabs {
             self.notebook.remove_page(Some(0));
             self.welcome_attached.set(false);
         }
-        let page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        // **阶段 97：连接页 = 子标签区（整页宽）**——
+        // 以前这里是个横向 Paned：左＝常驻文件面板、右＝子标签区，
+        // 切到数据库页时把左边的文件面板藏起来 ⇒ GTK4 的 Paned 把空间全给
+        // 右边 ⇒ **子标签栏整体左移**（用户 2026-11-05 截图报的就是这个）。
+        // 现在文件面板进了**终端子页内部**，切页 = 整页替换 ⇒ 子标签栏不动。
+        let sub = panel::subtabs::SubTabs::new();
 
         let sp = panel::SftpPanel::new(opts);
         // 每个标签一个独立终端：spawn 的就是 ssh/plink 本身，
@@ -477,30 +533,46 @@ impl Tabs {
         // 拖文件到终端 = 上传到当前远程目录
         panel::enable_drop_upload(&sp.st, tp.terminal());
 
-        page.set_start_child(Some(sp.widget()));
-        // **阶段 12：终端也是子标签**（对标 XTerminal）——文件面板留在左边
-        // 常驻，右侧是子标签区：终端 / 数据库工作台 / 文件编辑器。
-        let sub = panel::subtabs::SubTabs::new();
+        // 终端子页的内容 = 「文件面板｜终端」的横向 Paned。
+        //
+        // ⚠️ 终端面板的父容器**仍然是** `term_container()` 那层 Paned
+        //（分屏逻辑要求「目标面板的父容器是 Paned」——AGENTS.md 记过这个
+        // 隐式契约），所以外面这层 Paned 只管文件面板的宽度。
+        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        let term_wrap = term_container(&tp);
+        term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        // 面板宽度：用上次会话记忆（默认 340：280 时工具栏 + 路径框挤在一起，
+        // 路径永远只显示后半截）
+        let pos = crate::settings::sftp_pane_pos();
+        let init_w = if pos > 120 { pos } else { 340 };
+        sp.st.file_w.set(init_w);
+        // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）
+        crate::settings::clamp_paned_start(&term_page, 0.38, 520);
+        term_page.set_hexpand(true);
+        term_page.set_vexpand(true);
+        // 文件面板的家：先记它的宿主（宽度变化要同步回 file_w），再挂进去
+        track_file_width(&sp.st, &term_page);
+        host_file_panel(&sp.st, &term_page);
         // 终端页签带图标：主标签头已经不放图标了，"这一页是终端"由子页签
         // 自己的图标说（标签头只留状态点 + 标题 + ×）。
         let term_sub_id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
             panel::subtabs::PageKind::Terminal,
-            term_container(&tp).upcast(),
+            term_page.clone().upcast(),
             None,
         );
         *sp.st.sub_tabs.borrow_mut() = Some(sub.clone());
-        // 阶段 66（审计 P0-2）：**DB 页激活时把左边的文件面板藏起来**——
-        // SFTP 常驻 340px 时，DB 工作台的主区只剩 300px，主 CTA 都被裁掉。
+        // 阶段 97：**切到「终端」页就把文件面板搬过去**。
         //
-        // ⚠️ **只切 `visible`，不改 Paned 的结构**（不新建容器、不换 child）：
-        // AGENTS.md 里"父容器类型隐式契约"那个坑就是这么踩出来的。
+        // 文件面板是**会话级的一个 widget**，但一个连接页里可以有好几个终端
+        // 页签 ⇒ 它跟着**当前**终端页签走（这样每个终端页签左边都有文件
+        // 面板，关掉一个终端页签也不会把文件面板弄丢）。
+        //
         // ⚠️ 抓**弱引用**：notebook 的信号处理器不能抓着 SubTabs / 面板的
         // 强引用（引用环 ⇒ 面板永远释放不掉）。
         {
             let subw = Rc::downgrade(&sub);
-            let sftpw = sp.widget().downgrade();
             // ⚠️ 面板状态也只抓**弱引用**：面板状态里挂着子标签容器，
             // 抓强引用就成环（面板永远释放不掉）。
             let stw = Rc::downgrade(&sp.st);
@@ -515,45 +587,20 @@ impl Tabs {
             // （GTK 那边返回 false 可以挡住切换，这套用不上—we 不需要挡）。
             sub.nb.connect_switch_page(move |_nb, _page, num| {
                 let Some(sub) = subw.upgrade() else { return };
-                let Some(w) = sftpw.upgrade() else { return };
                 let Some(st) = stw.upgrade() else { return };
-                let is_db = sub.kind_by_page_num(num) == panel::subtabs::PageKind::Db;
-                // 开关只在 DB 页出现（终端页的文件面板是常驻的）
-                sub.set_toggle_visible(is_db);
-                if is_db {
-                    // 默认隐藏（工作台要宽度）；用户这次会话里拉回来过就还他
-                    // ⚠️ **不再读设置文件**：记在机器上会让两台机器行为不一致
-                    //   （办公机器记住"文件面板可见"，家里机器是藏起来的）。
-                    let want = st.db_sftp_shown.get();
-                    if w.is_visible() != want {
-                        w.set_visible(want);
-                    }
-                    sub.set_toggle_state(want);
-                } else {
-                    if !w.is_visible() {
-                        w.set_visible(true);
-                    }
-                    sub.set_toggle_state(true);
+                // 只有切到「终端」页才搬文件面板；切到数据库/编辑器页**不动**它
+                //（它留在上一个终端页里，随那一页一起隐藏）。
+                if sub.kind_by_page_num(num) != panel::subtabs::PageKind::Terminal {
+                    return;
                 }
-            });
-            // 「文件面板」开关 → 切可见性 + 记住（**会话内**，不落盘）
-            let sftpw2 = sp.widget().downgrade();
-            let st2 = sp.st.clone();
-            sub.set_toggle_hook(move |want_visible| {
-                let Some(w) = sftpw2.upgrade() else { return };
-                w.set_visible(want_visible);
-                st2.db_sftp_shown.set(want_visible);
+                // 拿不到宿主就**静默不动**：界面不崩、不空半个页面。
+                let Some(host) = sub.paned_by_page_num(num) else { return };
+                host_file_panel(&st, &host);
             });
         }
-        // 右侧放的是**外层容器**（notebook + 尾部的「+」按钮），不是裸的
-        // notebook —— 「+」要落在子标签栏那一行的最右端。
-        page.set_end_child(Some(sub.root()));
-        // 面板宽度：用上次会话记忆（默认 280 适配“仅名称列”）
-        let pos = crate::settings::sftp_pane_pos();
-        // 默认 340：280 时工具栏 + 路径框挤在一起，路径永远只显示后半截
-        page.set_position(if pos > 120 { pos } else { 340 });
-        // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）
-        crate::settings::clamp_paned_start(&page, 0.38, 520);
+        // 连接页控件 = **子标签区的外层容器**（notebook + 尾部的「+」按钮），
+        // 不是裸的 notebook —— 「+」要落在子标签栏那一行的最右端。
+        let page = sub.root().clone();
         page.set_hexpand(true);
         page.set_vexpand(true);
 
@@ -562,7 +609,7 @@ impl Tabs {
             _ => format!("{}@{}", opts.user, opts.host),
         };
 
-        let page_w = page.clone().upcast::<gtk::Widget>();
+        let page_w = page.clone();
 
         // ---- 子标签栏尾部的「+」：新建终端 / 新建数据库连接 ----
         //
@@ -721,7 +768,9 @@ impl Tabs {
             term: tp.terminal().clone(),
             label,
             dot,
-            paned: page,
+            // 阶段 97：`Tab.paned` 指的是**主终端子页内**那个 Paned
+            //（左＝文件面板、右＝终端），不再是连接页的 Paned。
+            paned: term_page,
             term_pane: tp.clone(),
             // 布局树按子页签存：主终端子页签一棵
             layouts: RefCell::new(vec![(term_sub_id, PaneLayout::Leaf(tp.clone()))]),
@@ -978,11 +1027,20 @@ impl Tabs {
                 });
             }
         }
+        // 阶段 97：额外终端页签也是「文件面板｜终端」的 Paned，
+        // **左格先空着**（文件面板只有一个父级，用户切过来时才搬进来）。
+        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        let term_wrap = term_container(&tp);
+        term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        term_page.set_hexpand(true);
+        term_page.set_vexpand(true);
+        // 宽度跟着记忆走（切过去时文件面板会按它复位）
+        track_file_width(&panel_st, &term_page);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
             panel::subtabs::PageKind::Terminal,
-            term_container(&tp).upcast(),
+            term_page.upcast(),
             None,
         );
         sub.switch_to(id);
@@ -1030,6 +1088,16 @@ impl Tabs {
         let Some(t) = tabs.iter_mut().find(|t| t.page == *page) else {
             return;
         };
+        // 阶段 97：**文件面板不会被这一页带走**——
+        //
+        // 文件面板是**会话级的一个 widget**（`PanelState` 一直持有它），
+        // 所以这一页没了它也不会被销毁；等用户点「重新连接终端」重建出
+        // 新终端页时，`rebuild_term` 会把它搬回去。
+        //
+        // ⚠️ **这里不要主动 `unparent()`**：关掉的可能是**别的**终端页签，
+        // 而文件面板此刻正托管在另一个页签里 ⇒ 主动解除父级会把那边的
+        // 文件面板也弄掉。搬家统一由 `host_file_panel` 负责。
+        //
         // ⚠️ 阶段 37：这个子页签的**布局树**要一起摘掉——树里除了它自己
         // 那个面板，还有它分屏出来的那些（分屏的副面板不在 `term_pages` 里）。
         // 漏掉的话，关掉页签后那些面板还在跑 ssh 子进程（野进程）。
@@ -1144,11 +1212,21 @@ impl Tabs {
         // 拖文件到终端 = 上传到当前远程目录
         panel::enable_drop_upload(&st, tp.terminal());
 
+        // 阶段 97：重建的主终端页签也是「文件面板｜终端」的 Paned，
+        // **把文件面板搬回来**（用户 × 掉终端页签时它只是"寄存"着，
+        // 没被销毁——`PanelState` 一直持有它）。
+        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        let term_wrap = term_container(&tp);
+        term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        term_page.set_hexpand(true);
+        term_page.set_vexpand(true);
+        track_file_width(&st, &term_page);
+        host_file_panel(&st, &term_page);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
             panel::subtabs::PageKind::Terminal,
-            term_container(&tp).upcast(),
+            term_page.clone().upcast(),
             None,
         );
         sub.switch_to(id);
@@ -1162,6 +1240,8 @@ impl Tabs {
             t.term_sub_id.set(id);
             t.term = tp.terminal().clone();
             t.term_pane = tp.clone();
+            // `Tab.paned` 指的是主终端页签里那个 Paned ⇒ 跟着换
+            t.paned = term_page;
             // 原来的 pane 已经跟着子页签一起被丢掉了，布局重置成单块
             //
             // ⚠️ 阶段 37：布局树**按子页签存**，重建后是新的一棵（新 id）；
@@ -1243,7 +1323,11 @@ impl Tabs {
         };
         let tab = tabs.remove(idx);
         // 记住用户拖拽的面板宽度
-        crate::settings::set_sftp_pane_pos(tab.paned.position());
+        //
+        // ⚠️ 阶段 97：取 `st.file_w`（跨宿主同步的那个值），**不是**
+        // `tab.paned.position()`——文件面板会跟着当前终端页签搬家，
+        // `tab.paned` 未必是它现在的宿主（position 可能是 0）。
+        crate::settings::set_sftp_pane_pos(tab.panel_st.file_w.get());
         // 记住两侧文件列表的列宽（隐藏的列不记）
         for remote in [true, false] {
             let pane = tab.panel_st.pane(remote);
