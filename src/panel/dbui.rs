@@ -61,7 +61,12 @@ const PAGE_SIZE: usize = 200;
 /// 每列 min_width 140 → 280 起步，留 50 给缩进、滚动条和边框。
 /// 再宽就把右侧结果区挤小了——结果表工具栏一排 5-8 颗图标按钮，
 /// 宽度不够右边会被切掉。
-const TREE_WIDTH: i32 = 330;
+/// 对象树那一列的默认宽度（像素）。
+///
+/// **为什么从 330 降到 240**（2026-11-05）：对象树改成**单列**（图标 + 名称
+/// + 说明挤在一格里，dbx 的样子）⇒ 240 就够看了，省下的宽度给结果网格
+/// （审计 P0-2 嫌的就是主区太窄）。
+const TREE_WIDTH: i32 = 240;
 
 /// 数据库窗口。
 /// 对象树折叠开关的共享状态（阶段 66 / 审计 P0-2）。
@@ -1506,6 +1511,18 @@ pub fn tree_col_visible(st: &Rc<PanelState>) -> bool {
 pub fn tree_paned_pos(st: &Rc<PanelState>) -> i32 {
     let ui = st.db_ui.borrow();
     ui.as_ref().map(|u| u.tree_toggle.paned.position()).unwrap_or(-1)
+}
+
+/// 拖动树 + 主区之间的分隔条（冒烟用）：设成 `pos` 像素宽。
+///
+/// **为什么需要**：对象树的两列（名称 / 说明）都是 `expand` 列 ⇒ 树变窄时
+/// 两列一起变窄；但它们各自有 `min_width` **下限** ⇒ 窄到下限就冻住不缩了。
+/// 「窄了多少、说明列有没有跟着缩」只能用真拖分隔条来量。
+pub fn set_tree_paned_pos(st: &Rc<PanelState>, pos: i32) {
+    let ui = st.db_ui.borrow();
+    if let Some(u) = ui.as_ref() {
+        u.tree_toggle.paned.set_position(pos);
+    }
 }
 
 /* ---------------- 空态（阶段 51：结构化骨架；阶段 97：品牌页重做） ---------------- */

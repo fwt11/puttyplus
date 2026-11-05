@@ -182,7 +182,7 @@ fn main() {
         );
         assert_eq!(
             puttyplus::panel::dbui::tree_paned_pos(&st),
-            330,
+            240,
             "展开后 Paned 位置没有回到对象树宽度"
         );
         println!("[5] 对象树可收起 / 可展开（几何也对）✓");

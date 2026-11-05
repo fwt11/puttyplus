@@ -78,37 +78,43 @@ impl NodeKind {
         }
     }
 
-    /// 这一类对象的**图标**（Adwaita symbolic 系列）。
+    /// 这一类对象的**图标**（彩色 emoji）。
     ///
     /// ⚠️ **为什么每类一个图标**（用户 2026-11-02 给的 dbx 截图）：
     /// dbx 的对象树里，表 / 视图 / 函数 / 序列 / 类型各配一个图标 ⇒
-    /// **一眼就分得出是什么对象**，不用去读「说明」列里的字。
-    /// 我们以前只有一列字（"表" / "视图" / "模式"…）⇒ 得逐行读。
+    /// **一眼就分得出是什么对象**，不用去读后面的说明文字。
     ///
-    /// **图标名必须是系统里确实有的**（`/usr/share/icons/*/symbolic/`），
-    /// 写错了 GTK 静默不画 ⇒ 图标列一片空白（看着像"没做"）。
+    /// **为什么用 emoji 而不是系统图标**（2026-11-05）：
+    /// GTK4 的 **symbolic 图标是单色的**——CSS 的 `color` 只能把**整棵树**
+    /// 染成一个颜色（实测：给 treeview 设 `color: red`，所有图标一起变红），
+    /// 做不到"每类一个颜色"（每格的颜色得是**每行的数据**，而 GTK 的
+    /// `CellRendererPixbuf` 没有"前景色"这个属性）。而 **emoji 自带颜色** ⇒
+    /// 一个字符串就能拿到 dbx 那种"彩色图标"的效果。
+    ///
+    /// **emoji 字体**：两台机器都有彩色 emoji（办公机器上"行号栏漏半个
+    /// emoji"那个 bug 就是彩色 emoji 漏出来的）⇒ 不会出现豆腐块。
     pub fn icon(self) -> &'static str {
         match self {
-            // 连接（= 那个库）⇒ 磁盘（dbx 用的是数据库圆柱，GTK 没有）
-            NodeKind::Root => "drive-harddisk-symbolic",
+            // 连接（= 那个库）⇒ 文件柜（dbx 用的是数据库圆柱）
+            NodeKind::Root => "\u{1F5C4}\u{FE0F}",
             // 模式（PG）/ 库（MySQL）⇒ 文件夹（跟 dbx 一致）
-            NodeKind::Schema => "folder-symbolic",
-            // 表 ⇒ 网格（跟 dbx 一致）
-            NodeKind::Table => "view-grid-symbolic",
+            NodeKind::Schema => "\u{1F4C1}",
+            // 表 ⇒ 卡片盒（跟 dbx 的表格图标一个意思）
+            NodeKind::Table => "\u{1F5C3}\u{FE0F}",
             // 视图 ⇒ 眼睛（跟 dbx 一致）
-            NodeKind::View => "view-reveal-symbolic",
-            // 列 ⇒ 列表
-            NodeKind::Column => "view-list-symbolic",
-            // 索引 ⇒ 有序列表
-            NodeKind::Index => "view-list-ordered-symbolic",
-            // 函数 ⇒ 齿轮（例程/机制）
-            NodeKind::Function => "preferences-system-symbolic",
-            // 存储过程 ⇒ 文本（跟函数区分开）
-            NodeKind::Procedure => "text-x-generic-symbolic",
+            NodeKind::View => "\u{1F441}\u{FE0F}",
+            // 列 ⇒ 字母（字段/文本）
+            NodeKind::Column => "\u{1F524}",
+            // 索引 ⇒ 钥匙（跟 dbx 一致）
+            NodeKind::Index => "\u{1F511}",
+            // 函数 ⇒ ƒ（dbx 也用这个符号；单色，但它一眼就认得出）
+            NodeKind::Function => "\u{0192}",
+            // 存储过程 ⇒ 齿轮（跟函数区分开）
+            NodeKind::Procedure => "\u{2699}\u{FE0F}",
             // 触发器 ⇒ 闪电（跟 dbx 的事件触发器一致）
-            NodeKind::Trigger => "weather-storm-symbolic",
-            // 事件（定时任务）⇒ 日历
-            NodeKind::Event => "x-office-calendar-symbolic",
+            NodeKind::Trigger => "\u{26A1}",
+            // 事件（定时任务）⇒ 时钟
+            NodeKind::Event => "\u{1F550}\u{FE0F}",
             NodeKind::Placeholder => "",
         }
     }
@@ -202,6 +208,7 @@ impl TreeFilter {
 const COL_KIND: u32 = 0;
 const COL_NAME: u32 = 1;
 const COL_DETAIL: u32 = 2;
+
 const COL_SCHEMA: u32 = 3;
 const COL_TABLE: u32 = 4;
 const COL_NODE: u32 = 5;
@@ -210,6 +217,14 @@ const COL_NODE: u32 = 5;
 /// ⚠️ 放在**最后**：前面的列号是别的代码按位置取的（`COL_NAME` 等），
 /// 插在中间会全体错位。
 const COL_ICON: u32 = 6;
+/// **显示用的整行文字**（名字 + 说明）。
+///
+/// ⚠️ **为什么要合成一个字符串**：树只有**一列**了（dbx 的样子），
+/// 一格里塞「名字」和「说明」两个渲染器的话，GTK4 会把**最宽的名字**
+/// 那一格留给所有行 ⇒ 短名字的行上，说明前面会空一大块
+/// （实测："public" 后面隔了 100px 才是"模式"）。
+/// 合成一个字符串 ⇒ 说明**紧跟在每个名字后面**（dbx 就是这个样子）。
+const COL_LABEL: u32 = 7;
 
 /// 这个模式是不是**系统模式**（不该被当成"默认模式"展开）。
 ///
@@ -364,10 +379,13 @@ impl DbTree {
                 glib::Type::STRING, // TABLE
                 glib::Type::U32,    // NODE
                 glib::Type::STRING, // ICON
+                glib::Type::STRING, // LABEL（名字 + 说明，显示用）
             ]);
             let view = gtk::TreeView::new();
             view.set_model(Some(&store));
-            view.set_headers_visible(true);
+            // **只有一列了 ⇒ 不要表头**（dbx 的对象树也没有表头）：
+            // 表头这一行只会占地方，还让人以为下面那行文字是"表头的内容"。
+            view.set_headers_visible(false);
             view.set_enable_search(false);
             view.set_show_expanders(true);
 
@@ -406,42 +424,58 @@ impl DbTree {
     }
 
     fn build_columns(&self) {
-        // **只显示两列（名称 / 说明）**，类型信息放在「说明」列里
-        // （"表" / "视图" / "模式" / "函数 → integer" / "BEFORE/INSERT · 表名"）。
+        // **只显示一列**（2026-11-05，对标 dbx）：图标 + 名称 + 灰色说明后缀。
         //
-        // 为什么不单独留一列「类」：GTK4 把**展开箭头和缩进画在第一列**，
-        // 树里越深的节点留给文字的宽度越少。类型列本身只有两三个字，
-        // 在第二级缩进下就只剩 "…"（实测：宽 30px 的列放不下两个汉字）。
-        // 把类型并进「说明」列后，第一列留给最需要空间的「名称」。
+        // **为什么从「名称 | 说明」两列并成一列**：
+        // ① **省地方**：两列时对象树得 330px 才不挤（名字长一点就变 "…"）；
+        //    并成一列后 240px 就够，工作台主区多出来的宽度全给结果网格
+        //    （审计 P0-2 嫌的就是主区太窄）。
+        // ② **窄的时候不会"卡住"**：两列时每列各有 140px 的宽度下限 ⇒
+        //    树被挤到下限，「说明」列就**冻住不缩**（办公机器上就是这个现象：
+        //    工作台窄 340px ⇒ 对象树被挤 ⇒ 「说明」列一动不动）。
+        //    并成一列后没有"第二列"，树多窄都是一列文字跟着省略号走。
+        //
+        // **为什么说明跟名字合成一个字符串**（而不是同一列塞两个渲染器）：
+        // GTK4 的一列里塞两个渲染器时，**非 expand 的那个格子会按整棵树里
+        // 最宽的那行来占位** ⇒ 短名字的行上，说明前面会空出一大块
+        // （实测："public" 后面隔了 100px 才是"模式"）。合成一个字符串 ⇒
+        // 说明**紧跟在每个名字后面**（dbx 就是这个样子）。
+        // 代价：说明跟名字**同色同号**（一个 CellRendererText 只有一种样式）
+        // ⇒ 用「·」分隔，一眼能看出哪部分是补充说明。
         //
         // store 里的 COL_KIND 列还在（节点种类要留着给逻辑判断），
         // 只是不作为显示列——TreeViewColumn 绑定的是 store 的列号，
         // 少显示一列不影响按列号取值。
-        for (title, idx) in [(tr("名称"), COL_NAME), (tr("说明"), COL_DETAIL)] {
-            let r = gtk::CellRendererText::new();
-            r.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            let c = gtk::TreeViewColumn::new();
-            c.set_title(title);
-            c.set_resizable(true);
-            c.set_expand(true);
-            c.set_min_width(140);
-            // ⚠️ **图标渲染器跟文字渲染器塞进同一列**（侧边栏也是这么干的）：
-            //    GTK4 把**展开箭头和缩进画在第一列** ⇒ 图标要单独占一列的话，
-            //    箭头会压在图标上。同列里排（图标 → 文字）就都露得出来。
-            if idx == COL_NAME {
-                let r_icon = gtk::CellRendererPixbuf::new();
-                // 图标与文字之间留点空隙（贴太近看着挤成一坨）
-                r_icon.set_padding(4, 2);
-                c.pack_start(&r_icon, false);
-                c.add_attribute(&r_icon, "icon-name", COL_ICON as i32);
-            }
-            c.pack_start(&r, true);
-            // 必须显式绑定 "text" 属性：GTK4 的 pack_start **只把渲染器塞进列**，
-            // 不会把某一列的文本喂给它——不绑就是一片空白（列头还在，看着像"没数据"）。
-            // panel/pane.rs 的文件列表树也是这么写的。
-            c.add_attribute(&r, "text", idx as i32);
-            self.view.append_column(&c);
-        }
+        let c = gtk::TreeViewColumn::new();
+        c.set_title(tr("名称"));
+        c.set_resizable(false);
+        c.set_expand(true);
+        c.set_min_width(80);
+
+        // ⚠️ **图标渲染器跟文字渲染器塞进同一列**（侧边栏也是这么干的）：
+        //    GTK4 把**展开箭头和缩进画在第一列** ⇒ 图标要单独占一列的话，
+        //    箭头会压在图标上。同列里排（图标 → 文字）就都露得出来。
+        //
+        // ⚠️ **图标用 `CellRendererText`**：图标现在是 **emoji**（自带颜色），
+        //    `CellRendererPixbuf` 只认图标名 / 纹理，喂不进 emoji ⇒ 用文字
+        //    渲染器，emoji 由字体（Noto Color Emoji）自己上色。
+        let r_icon = gtk::CellRendererText::new();
+        // 图标与文字之间留点空隙（贴太近看着挤成一坨）
+        r_icon.set_padding(4, 2);
+        c.pack_start(&r_icon, false);
+        c.add_attribute(&r_icon, "text", COL_ICON as i32);
+
+        // 整行文字（名字 + 说明）：**唯一的一列** ⇒ 树宽变化时它跟着变，
+        // 窄了就省略号收尾（不会出现"某一列冻住不动"）。
+        let r_label = gtk::CellRendererText::new();
+        r_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        c.pack_start(&r_label, true);
+        // 必须显式绑定 "text" 属性：GTK4 的 pack_start **只把渲染器塞进列**，
+        // 不会把某一列的文本喂给它——不绑就是一片空白（列头还在，看着像"没数据"）。
+        // panel/pane.rs 的文件列表树也是这么写的。
+        c.add_attribute(&r_label, "text", COL_LABEL as i32);
+
+        self.view.append_column(&c);
     }
 
     fn wire(&self) {
@@ -599,6 +633,7 @@ impl DbTree {
         for (i, it, kind) in ids {
             let detail = kind.badge().to_string();
             self.store.set(&it, &[(COL_DETAIL, &detail)]);
+            self.refresh_label(&it);
             let mut nodes = self.nodes.borrow_mut();
             if let Some(n) = nodes.get_mut(i) {
                 n.detail = detail;
@@ -626,6 +661,7 @@ impl DbTree {
                 if let Some(st) = map.get(name.as_str()) {
                     let detail = dbmeta::fmt_table_detail(kind.badge(), st);
                     self.store.set(&child, &[(COL_DETAIL, &detail)]);
+                    self.refresh_label(&child);
                     let mut nodes = self.nodes.borrow_mut();
                     if let Some(n) = nodes.get_mut(node_id) {
                         n.detail = detail;
@@ -848,8 +884,25 @@ impl DbTree {
                 let name = tr("加载失败").to_string();
                 let detail = err.to_string();
                 self.store.set(&it, &[(COL_NAME, &name), (COL_DETAIL, &detail)]);
+                self.refresh_label(&it);
             }
         }
+    }
+
+    /// 重算这一行的**显示文字**（名字 + 说明）。
+    ///
+    /// 名字或说明变了就要调它（显示列只存拼好的那一串）。
+    fn refresh_label(&self, iter: &gtk::TreeIter) {
+        let name = self.store.get::<String>(iter, COL_NAME as i32);
+        let detail = self.store.get::<String>(iter, COL_DETAIL as i32);
+        let label = if detail.trim().is_empty() {
+            name
+        } else {
+            // 分隔符用「·」：说明跟名字同色（单列 ⇒ 没法给说明单独上色），
+            // 有个分隔符才看得出"这是名字的补充说明"。
+            format!("{name} · {detail}")
+        };
+        self.store.set(iter, &[(COL_LABEL, &label)]);
     }
 
     /// 节点被展开：还没查过就发请求。
@@ -1389,6 +1442,7 @@ impl DbTree {
                 (COL_ICON, &icon_s),
             ],
         );
+        self.refresh_label(&it);
         self.nodes.borrow_mut().push(Node {
             kind,
             name: name_s,
@@ -1957,6 +2011,10 @@ mod tests {
 
     /// **每类对象一个图标，而且互不相同**（用户 2026-11-02 给的 dbx 截图：
     /// "它为表、数据库、视图等都提供了不同的图标，一眼就能分辨"）。
+    ///
+    /// ⚠️ **图标是彩色 emoji**（2026-11-05 改）：GTK4 的 symbolic 图标是
+    /// 单色的，CSS 的 `color` 一次只能染**整棵树**，做不到"每类一个颜色"
+    /// ⇒ 改用自带颜色的 emoji。
     #[test]
     fn 每类对象一个不重样的图标() {
         let kinds = [
@@ -1975,9 +2033,16 @@ mod tests {
         for k in kinds {
             let ic = k.icon();
             assert!(!ic.is_empty(), "{:?} 没有图标", k);
+            // 不再是 symbolic 图标名（那种是单色的）
             assert!(
-                ic.ends_with("-symbolic"),
+                !ic.ends_with("-symbolic"),
                 "{:?} 的图标名不像 symbolic 系列：{ic}",
+                k
+            );
+            // 是 emoji（含非 ASCII 字符）⇒ 才有颜色
+            assert!(
+                !ic.chars().all(|c| c.is_ascii()),
+                "{:?} 的图标不是 emoji（没有颜色）：{ic}",
                 k
             );
             assert!(!seen.contains(&ic), "{:?} 的图标跟别人重了：{ic}", k);
