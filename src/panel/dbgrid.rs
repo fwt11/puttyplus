@@ -113,6 +113,102 @@ pub fn transpose(data: &GridData) -> GridData {
     out
 }
 
+/// 每列的**最小可读宽**（像素）。
+///
+/// 面板窄到连这个宽度都放不下（列很多）⇒ 才退回「自然宽 + 横向滚动条」。
+const MIN_COL: i32 = 60;
+
+/// 把**可用宽度**分给各列（纯函数，方便单测）。
+///
+/// - `nat`：每列的**自然宽**（内容有多长）。
+/// - `avail`：面板的可用宽度。
+///
+/// **规则**：
+/// ① 总自然宽 ≤ 可用宽 ⇒ 按自然宽的**比例**把富余分掉（右侧不留空白）；
+/// ② 总自然宽 > 可用宽 ⇒ 按比例**缩**，但每列不低于 [`MIN_COL`]；
+///    连 `MIN_COL` 都放不下（列很多）⇒ 退回自然宽，让横向滚动条出场。
+///
+/// ⚠️ **缩的时候不能超**：保底会把窄列顶到 `MIN_COL`，加起来可能超过可用宽
+/// （一列特别宽、别的列都很窄时就会超）⇒ 超了要**按比例收回来**
+/// （否则横向滚动条又回来 ⇒ 面板看起来还是没变窄 = 白改）。
+pub fn alloc_widths(nat: &[i32], avail: i32) -> Vec<i32> {
+    if nat.is_empty() || avail <= 0 {
+        return nat.to_vec();
+    }
+    let ncols = nat.len();
+    let total: i32 = nat.iter().sum();
+    if total <= avail {
+        // 有富余：按自然宽的比例把剩下的分掉（右侧不留空白）
+        let extra = avail - total;
+        return nat.iter().map(|n| n + (extra * n) / total.max(1)).collect();
+    }
+    // 不够宽：按比例缩，但每列不低于 `MIN_COL`（再窄只剩省略号了）
+    let min_total = MIN_COL * ncols as i32;
+    if avail < min_total {
+        // 连最小宽都放不下 ⇒ 保持自然宽，让横向滚动条出场
+        return nat.to_vec();
+    }
+    // ① 先按自然宽的比例分（整除）
+    let mut scaled: Vec<i32> = nat
+        .iter()
+        .map(|n| ((*n as i64 * avail as i64) / total.max(1) as i64) as i32)
+        .collect();
+    // ② 每列保底 `MIN_COL`
+    for s in scaled.iter_mut() {
+        if *s < MIN_COL {
+            *s = MIN_COL;
+        }
+    }
+    let mut sum: i32 = scaled.iter().sum();
+    if sum > avail {
+        // ③ **保底补多了 ⇒ 总量超了** ⇒ 从「还能让出多少」的列里按比例收回来。
+        //    ⚠️ 不收回来就等于白改：总宽超了 ⇒ 横向滚动条又回来，
+        //    面板看起来还是没变窄（就是用户报的那个症状）。
+        let excess = sum - avail;
+        let removable: Vec<i32> = scaled.iter().map(|s| s - MIN_COL).collect();
+        let total_removable: i32 = removable.iter().sum();
+        if total_removable > 0 {
+            let mut taken = 0i32;
+            for (i, r) in removable.iter().enumerate() {
+                let take = ((*r as i64 * excess as i64) / total_removable as i64) as i32;
+                let take = take.min(*r);
+                scaled[i] -= take;
+                taken += take;
+            }
+            // 整除的零头 ⇒ 从还剩余量的列里再收（每次 1px）
+            let mut left = excess - taken;
+            while left > 0 {
+                let mut idx = None;
+                let mut best = 0i32;
+                for (i, s) in scaled.iter().enumerate() {
+                    let can = s - MIN_COL;
+                    if can > best {
+                        best = can;
+                        idx = Some(i);
+                    }
+                }
+                match idx {
+                    Some(i) => {
+                        scaled[i] -= 1;
+                        left -= 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+    } else {
+        // ④ 缩完还差几个像素（整除的零头）⇒ 逐列补齐，别留一条缝
+        let n = scaled.len();
+        let mut i = 0usize;
+        while sum < avail && n > 0 {
+            scaled[i % n] += 1;
+            sum += 1;
+            i += 1;
+        }
+    }
+    scaled
+}
+
 /// 结果表控件（用 `Rc` 包一层：列头点击、单元格编辑的回调要指回自己）。
 pub struct DbGrid {
     pub view: gtk::TreeView,
@@ -376,20 +472,40 @@ impl DbGrid {
                 });
                 view.add_controller(click);
             }
-            // ---- 窗口宽度变了 → 重新分配列宽（阶段 72c）----
-            //
-            // ⚠️ **用 `notify::width` 而不是重排事件**：列宽是按"可用宽度"
-            // 分配的 ⇒ 容器一变宽就得重分。
-            {
-                let weak = grid.me.borrow().clone();
-                let v = view.clone();
-                v.connect_notify_local(Some("width"), move |_, _| {
-                    let Some(grid) = weak.upgrade() else { return };
-                    grid.apply_column_widths();
-                });
-            }
+            // ---- 面板宽度变了 → 重新分配列宽（阶段 72c）----
+            grid.watch_width();
             grid
         })
+    }
+
+    /// 盯住网格的宽度：变了就重排列宽。
+    ///
+    /// ⚠️ **为什么不能靠 `notify::width`**（2026-11-05 实测）：GTK4 的
+    /// `GtkWidget` **根本没有 "width" 属性**——`find_property("width")`
+    /// 返回 `None` ⇒ 那个 `connect_notify_local(Some("width"), …)`
+    /// **一次都不会触发**（而且它不会报错，只是静默连了个空）。
+    /// 实测：窗口从 1000px 缩到 240px，网格的列宽一直是
+    /// `[122,140,203,203,329]` 一动不动 ⇒ 面板怎么变，列都不跟。
+    ///
+    /// GTK4 没有 "size-allocate" 信号，gtk4-rs 0.11 也没绑 tick callback
+    /// ⇒ 只能**轮询**：每 100ms 比一次当前宽度，变了才重排（比重排本身便宜得多）。
+    ///
+    /// 网格被丢掉时（弱引用升级失败）⇒ 定时器自己退出。
+    fn watch_width(&self) {
+        let weak = self.me.borrow().clone();
+        let last = Rc::new(Cell::new(-1i32));
+        let last2 = Rc::clone(&last);
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let Some(grid) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let w = grid.view.allocated_width();
+            if w != last2.get() {
+                last2.set(w);
+                grid.apply_column_widths();
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     /// 重算每列的**自然宽**（量列名 + 最宽的单元格）。
@@ -429,8 +545,16 @@ impl DbGrid {
     /// 结果是 id 宽得离谱、email 还是不够（审计里说的正是这个症状）。
     /// 按**自然宽的比例**分才各得其所。
     ///
-    /// ⚠️ **不够宽就不分**：总自然宽已经超过可用宽度时（列很多），保持
-    /// 自然宽让横向滚动条出场——硬分会把每列压到看不清。
+    /// ⚠️ **不够宽就按比例缩**（2026-11-05）：以前是「总自然宽超过可用宽度
+    /// ⇒ 保持自然宽，让横向滚动条出场」——于是**面板一窄，列就冻住不动了**
+    /// （实测：窗口从 1000 缩到 240，列宽一直是 `[122,140,203,203,329]`）。
+    /// 用户看到的现象是「面板明明窄了，右边那几列却不变窄」，两台机器上
+    /// 因为可用宽度不同，表现还不一样（办公机器上工作台窄 340px ⇒ 一进去
+    /// 就是冻住的状态）。
+    ///
+    /// **自然宽是「内容有多长」，不是「必须占多宽」**：渲染器本来就设了
+    /// `ellipsize=End`，列窄了文字会收成省略号 ⇒ 列宽可以跟着面板走。
+    /// 只有窄到**每列的最小可读宽**都放不下时，才退回自然宽 + 滚动条。
     fn apply_column_widths(&self) {
         let avail = self.view.width();
         if avail <= 1 {
@@ -454,15 +578,7 @@ impl DbGrid {
         if nat.is_empty() || nat.len() != ncols {
             return;
         }
-        let total: i32 = nat.iter().sum();
-        let widths: Vec<i32> = if total >= avail {
-            nat.clone()
-        } else {
-            let extra = avail - total;
-            nat.iter()
-                .map(|n| n + (extra * n) / total.max(1))
-                .collect()
-        };
+        let widths = alloc_widths(&nat, avail);
         // ⚠️ **宽度没变就别再设**：反复 `set_fixed_width` 会触发重排，
         // 重排又可能改宽度 ⇒ 来回抖。
         if *self.applied_widths.borrow() == widths {
@@ -1224,7 +1340,9 @@ impl DbGrid {
             let col = gtk::TreeViewColumn::new();
             col.set_resizable(true);
             col.set_expand(true);
-            col.set_min_width(60);
+            // 下限跟 `apply_column_widths` 的 `MIN_COL` 一致：
+            // 缩列宽时不会缩到 GTK 又把它顶回去（fixed sizing 也按它兜底）
+            col.set_min_width(MIN_COL);
             col.pack_start(&renderer, true);
             // 必须显式绑定 "text"：GTK4 的 pack_start 不会把某一列的文本喂给
             // 渲染器，不绑就是一片空白（列头还在，看着像"查出来是空的"）。
@@ -2174,6 +2292,59 @@ fn cmp_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **列宽跟着面板走**（2026-11-05，用户报「面板变窄，右边几列不变窄」）。
+    ///
+    /// ⚠️ **回归点**：以前「总自然宽 ≥ 可用宽 ⇒ 保持自然宽」⇒ 面板一窄，
+    /// 列就**冻住不动**（实测 `[122,140,203,203,329]` 从 1000px 缩到 240px
+    /// 一动不动）。现在不够宽就**按比例缩**。
+    #[test]
+    fn 不够宽时列宽按比例缩() {
+        let nat = vec![122, 140, 203, 203, 329];
+        let w = alloc_widths(&nat, 300);
+        // 每列都不低于 MIN_COL
+        for x in &w {
+            assert!(*x >= MIN_COL, "有列缩到 {x} < {MIN_COL}：{w:?}");
+        }
+        // 总量正好填满可用宽（不超 ⇒ 不会冒出横向滚动条）
+        assert_eq!(w.iter().sum::<i32>(), 300, "总宽没填满：{w:?}");
+        // 比自然窄了
+        assert!(w.iter().sum::<i32>() < nat.iter().sum::<i32>());
+    }
+
+    /// **一列特别宽时，总宽也不能超出可用宽**（保底 + 比例缩的坑）。
+    ///
+    /// ⚠️ **回归点**：保底把窄列顶到 `MIN_COL` 后，总和可能**超过**可用宽
+    /// ⇒ 横向滚动条又回来 ⇒ 面板看起来还是没变窄（等于白改）。
+    #[test]
+    fn 一列特别宽时总量不超可用宽() {
+        let nat = vec![1000, 10, 10, 10];
+        let avail = 400;
+        let w = alloc_widths(&nat, avail);
+        assert_eq!(w.iter().sum::<i32>(), avail, "总宽超了：{w:?}");
+        for x in &w {
+            assert!(*x >= MIN_COL, "有列缩到 {x} < {MIN_COL}：{w:?}");
+        }
+    }
+
+    /// **够宽时按自然宽的比例把富余分掉**（右侧不留空白）。
+    #[test]
+    fn 够宽时富余按比例分掉() {
+        let nat = vec![100, 100, 100];
+        let avail = 600;
+        let w = alloc_widths(&nat, avail);
+        assert_eq!(w, vec![200, 200, 200]);
+    }
+
+    /// **连最小宽都放不下** ⇒ 退回自然宽（让横向滚动条出场）。
+    #[test]
+    fn 连最小宽都放不下就退回自然宽() {
+        let nat = vec![200, 200, 200, 200, 200];
+        // 5 列 × 60 = 300 > 220 ⇒ 放不下
+        let w = alloc_widths(&nat, 220);
+        assert_eq!(w, nat);
+    }
+
 
     fn data() -> GridData {
         GridData {
