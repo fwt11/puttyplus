@@ -64,6 +64,28 @@ pub struct PanelState {
     ///
     /// 持久化仍走 `settings::sftp_pane_pos`（关连接标签时写盘）。
     pub file_w: Cell<i32>,
+    /// **会话是不是已经死了**（worker 与 UI 共享，阶段 99）。
+    ///
+    /// ⚠️ **为什么共享**：SFTP 失败有两种——「连接断了」（**能自愈**：重连
+    /// 一次 + 重试原来的操作）与「服务器说不行」（权限不足、重名 ⇒ 只能
+    /// 报错）。UI 得知道是哪种。worker 在**发事件之前**就把标志写好 ⇒
+    /// UI 读到的一定是当时的真实状态（没有竞态）。
+    pub conn_dead: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 「连接断了」⇒ 重连之后**要重试**的那条操作（阶段 99）。
+    pub pending_retry: RefCell<Option<RetryOp>>,
+    /// 各类 SFTP 操作**"怎么重发"**（阶段 99）。
+    ///
+    /// ⚠️ **为什么要按种类分别记**：失败事件只带"路径"这类信息，够不着
+    /// 一条完整命令（「重命名」要知道改成什么名、「写文件」要知道内容）。
+    /// ⇒ 发命令时把**整条命令**记在这儿，失败时按种类取出来重发。
+    pub retry_ops: RefCell<HashMap<RetryKind, RetryOp>>,
+    /// **这条操作已经重试过一次了**（阶段 99）。
+    ///
+    /// ⚠️ **为什么要有**：用户原话是「重连**一次**，如果还是失败就报错」。
+    /// 没有这道闸门 ⇒ 重连成功、重试又失败 ⇒ 又重连 ⇒ 无限循环（用户看着
+    /// 是"程序在疯狂重连"）。
+    /// ⇒ 成功了就清掉（下一条操作还能自愈），又失败了就报给用户并清掉。
+    pub retried: Cell<bool>,
     /// 文件面板**当前的宿主 Paned**（阶段 98：文本编辑页也能托管它）。
     ///
     /// ⚠️ **为什么留一份强引用**：GTK4 里容器被销毁（finalize）时会把它
@@ -294,6 +316,10 @@ impl SftpPanel {
             conn_ok: Cell::new(false),
             file_w: Cell::new(340),
             file_host: RefCell::new(None),
+            conn_dead: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            pending_retry: RefCell::new(None),
+            retry_ops: RefCell::new(HashMap::new()),
+            retried: Cell::new(false),
             connecting: Cell::new(false),
             pending_cd: RefCell::new(None),
             tx: RefCell::new(None),
@@ -390,6 +416,10 @@ impl SftpPanel {
             opts.inproc_forwards.clone(),
             rx,
             ui_tx,
+            // ⚠️ **会话生死标志与 UI 共享**（阶段 99）：UI 靠它判断
+            // "这次失败能不能自愈（重连 + 重试）"。worker 在发事件**之前**
+            // 写 ⇒ UI 读到的就是当时的真实状态。
+            std::sync::Arc::clone(&st.conn_dead),
         );
         *st.tx.borrow_mut() = Some(tx);
 
@@ -509,6 +539,114 @@ pub fn track_file_width(st: &Rc<PanelState>, host: &gtk::Paned) {
             st.file_w.set(p.position());
         }
     });
+}
+
+/* ---------------- 断线自愈：失败 ⇒ 重连一次 ⇒ 重试原来的操作（阶段 99） ---------------- */
+
+/// 「连接断了」时**要重试**的那条操作（阶段 99）。
+///
+/// ⚠️ **为什么要单独列出来**：SFTP 失败分两种——「连接断了」（能自愈：
+/// 重连一次 + 重试原来的操作）与「服务器说不行」（权限不足、重名 ⇒ 只能
+/// 报错给用户）。后者**不能**重试（重试还是同样的错）。
+///
+/// **用户原话**（2026-11-06）：「在异常处理程序中重连一次，如果还是失败
+/// 就报错，否则就继续执行原来的操作」。
+#[derive(Debug, Clone)]
+pub enum RetryOp {
+    /// 列目录（点目录 / 刷新 / 终端切目录跟随）
+    List { path: String },
+    /// 新建 / 重命名 / 删除
+    Simple {
+        op: SimpleOp,
+        path: String,
+        new_path: Option<String>,
+    },
+    /// 读远程文件（内置编辑器打开）
+    ReadFile { id: u64, path: String, max: u64 },
+    /// 写远程文件（内置编辑器保存）
+    WriteFile { id: u64, path: String },
+}
+
+/// [`RetryOp`] 的**种类**（决定失败事件去哪个槽里取"怎么重发"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetryKind {
+    List,
+    Simple,
+    ReadFile,
+    WriteFile,
+}
+
+/// 记下"这条命令怎么再发一遍"（断线失败 ⇒ 重连后重试用）。
+fn remember_retry(st: &Rc<PanelState>, kind: RetryKind, op: RetryOp) {
+    st.retry_ops.borrow_mut().insert(kind, op);
+}
+
+/// 这次失败是不是"连接断了"（⇒ 能自愈）。
+///
+/// ⚠️ **两个来源都看**：worker 写的标志（精确到那一刻）+ UI 自己的
+/// `conn_ok`（收到「连接已断开」事件后就一直是 false）。
+fn failure_is_conn_dead(st: &Rc<PanelState>) -> bool {
+    st.conn_dead.load(std::sync::atomic::Ordering::SeqCst) || !st.conn_ok.get()
+}
+
+/// 安排"重连一次 ⇒ 重试原来的操作"。返回 true = **已安排**（调用方就
+/// 别再弹错误框了——重连成功后会接着做，不成功才由重试那次的失败来报）。
+///
+/// ⚠️ **已经在重连中 ⇒ 不安排**：否则会无限重试（一次失败触发一次重连，
+/// 重连又失败再触发……）。这时候这一次失败照常报错。
+fn schedule_retry(st: &Rc<PanelState>, kind: RetryKind) -> bool {
+    if st.connecting.get() {
+        return false;
+    }
+    if st.retried.get() {
+        // ⚠️ **已经重试过一次了**（用户：「重连**一次**，如果还是失败就报错」）
+        // ⇒ 这次就报给用户，并把这道闸门清掉（下一条操作还能自愈）。
+        st.retried.set(false);
+        return false;
+    }
+    let Some(op) = st.retry_ops.borrow().get(&kind).cloned() else {
+        // 没有可重发的操作（不是我们发的那条）⇒ 只能报错
+        return false;
+    };
+    *st.pending_retry.borrow_mut() = Some(op);
+    st.retried.set(true);
+    // ⚠️ **先重连、后写状态**：`on_reconnect` 自己也会写状态（「正在连接
+    // ……」），写在它后面就把「正在重新连接」盖掉了。
+    on_reconnect(st);
+    set_remote_status(st, State::Warn, tr("连接已断开，正在重新连接…"));
+    true
+}
+
+/// 重连成功之后：**把要重试的操作再发一遍**（继续执行原来的操作）。
+///
+/// 返回 true = 确实重发过（调用方就别再走"回到原目录"那条路了）。
+fn run_pending_retry(st: &Rc<PanelState>) -> bool {
+    let Some(op) = st.pending_retry.borrow_mut().take() else {
+        return false;
+    };
+    match &op {
+        RetryOp::List { path } => submit_list(st, path),
+        RetryOp::Simple {
+            op,
+            path,
+            new_path,
+        } => submit_simple(st, *op, path, new_path.as_deref()),
+        RetryOp::ReadFile { id, path, max } => fileedit::resend_read(st, *id, path, *max),
+        RetryOp::WriteFile { id, path } => fileedit::resend_save(st, *id, path),
+    }
+    true
+}
+
+/// SFTP 断了就重连一次（"重连终端时顺带救回 SFTP"用）。
+///
+/// ⚠️ **幂等**：已经在连了就不重复发起（`connecting` 挡着）。
+pub fn reconnect_sftp_if_dead(st: &Rc<PanelState>) {
+    if st.connecting.get() {
+        return;
+    }
+    if failure_is_conn_dead(st) {
+        on_reconnect(st);
+    }
 }
 
 /* ---------------- 本地目录记忆 ---------------- */
@@ -801,6 +939,14 @@ fn submit_list_full(st: &Rc<PanelState>, path: &str, silent: bool) {
     st.next_list.set(id + 1);
     st.last_list.set(id);
     st.remote_list_pending.set(true);
+    // ⚠️ **先记下"怎么重发"**（阶段 99）：断线失败时要靠它重试同一条操作
+    remember_retry(
+        st,
+        RetryKind::List,
+        RetryOp::List {
+            path: path.to_string(),
+        },
+    );
     if st
         .tx
         .borrow()
@@ -822,6 +968,16 @@ fn submit_list(st: &Rc<PanelState>, path: &str) {
 }
 
 fn submit_simple(st: &Rc<PanelState>, op: SimpleOp, path: &str, new_path: Option<&str>) {
+    // ⚠️ **先记下"怎么重发"**（阶段 99）：断线失败时要靠它重试同一条操作
+    remember_retry(
+        st,
+        RetryKind::Simple,
+        RetryOp::Simple {
+            op,
+            path: path.to_string(),
+            new_path: new_path.map(str::to_string),
+        },
+    );
     let _ = st.tx.borrow().as_ref().unwrap().send(WorkerCmd::Simple {
         op,
         path: path.to_string(),
@@ -886,6 +1042,13 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             *st.remote_home.borrow_mut() = Some(cwd.clone());
             set_connected_status(st, &cwd);
             set_remote_sensitive(st, true);
+            // ⚠️ **阶段 99：先重试"因为断线失败的那条操作"**——
+            // 用户原话：「重连一次……否则就继续执行原来的操作」。
+            //  重试本身就是"继续原操作"（比如点开的那个目录）⇒ 不用再走
+            //  下面"回到原目录"那条路（否则会连着列两次）。
+            if run_pending_retry(st) {
+                return;
+            }
             // **连上之后去哪儿**：
             // ① 用户刚才输入了路径（当时没连着）⇒ 跳那个路径；
             // ② 否则回到**断之前那个目录**（重连不该把用户踢回主目录）；
@@ -903,6 +1066,12 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             cancel_aborted_xfers(st);
             st.conn_ok.set(false);
             st.connecting.set(false);
+            // ⚠️ **阶段 99：重连本身失败了 ⇒ 「重连一次」的那道闸门作废**
+            // （用户：「凡是 sftp 因为没连接的失败都要进行一次重连」）。
+            //  闸门是用来防「重连成功 ⇒ 重试又失败 ⇒ 又重连」的无限循环的；
+            //  **重连没成功**就没进入那个循环 ⇒ 不该占着用户的额度，
+            //  否则用户下一次点目录只会看到一个错、连重连都不会发起。
+            st.retried.set(false);
             st.remote_mtime.set(0);
             st.remote_stat_pending.set(false);
             st.remote_list_pending.set(false);
@@ -982,6 +1151,9 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             st.remote_list_pending.set(false);
             match result {
             Ok(entries) => {
+                // 阶段 99：这次成功了 ⇒ 「已重试过」的闸门清掉
+                // （下一条操作断线了还能自愈）
+                st.retried.set(false);
                 *st.remote_cwd.borrow_mut() = path.clone();
                 st.pane(true).set_cwd_entry(&path);
                 let show_hidden = st.pane(true).show_hidden.get();
@@ -990,6 +1162,13 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 set_connected_status(st, &path);
             }
             Err(err) if !silent => {
+                // ⚠️ **阶段 99：连接断了 ⇒ 重连一次 + 重试同一条操作**
+                // （用户原话：「在异常处理程序中重连一次，如果还是失败就
+                //  报错，否则就继续执行原来的操作」）。
+                //  ⇒ 这一条**不弹错**：重连成功后会自动重列这个目录。
+                if failure_is_conn_dead(st) && schedule_retry(st, RetryKind::List) {
+                    return;
+                }
                 dialogs::show_error(
                     st.topwin().as_ref(),
                     tr("读取远程目录失败"),
@@ -1015,7 +1194,15 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             }
         }
         PanelEvent::SimpleDone { path, result } => {
+            if result.is_ok() {
+                // 阶段 99：成功了 ⇒ 清掉「已重试过」的闸门
+                st.retried.set(false);
+            }
             if let Err(err) = &result {
+                // ⚠️ 阶段 99：连接断了 ⇒ 重连一次 + 重试同一条操作（不弹错）
+                if failure_is_conn_dead(st) && schedule_retry(st, RetryKind::Simple) {
+                    return;
+                }
                 dialogs::show_error(st.topwin().as_ref(), tr("操作失败"), err);
             }
             // 上级目录可能被整体删除，列父目录更安全
@@ -1028,9 +1215,29 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             }
         }
         PanelEvent::FileRead { id, path, result } => {
+            if result.is_ok() {
+                st.retried.set(false);
+            }
+            // ⚠️ 阶段 99：连接断了 ⇒ 重连一次 + 重发这次读（不弹错）
+            if result.is_err()
+                && failure_is_conn_dead(st)
+                && schedule_retry(st, RetryKind::ReadFile)
+            {
+                return;
+            }
             fileedit::on_read(st, id, &path, result);
         }
         PanelEvent::FileWritten { id, path, result } => {
+            if result.is_ok() {
+                st.retried.set(false);
+            }
+            // ⚠️ 阶段 99：连接断了 ⇒ 重连一次 + 重发这次写（不弹错）
+            if result.is_err()
+                && failure_is_conn_dead(st)
+                && schedule_retry(st, RetryKind::WriteFile)
+            {
+                return;
+            }
             fileedit::on_written(st, id, &path, result);
         }
         PanelEvent::FollowDone(path) => {
@@ -1102,6 +1309,9 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
         }
         PanelEvent::DbRows { id, rows } => dbui::on_rows(st, id, rows),
         PanelEvent::DbError(err) => dbui::on_error(st, err),
+        // ⚠️ **阶段 99：数据库连接断了** ⇒ 重连一次 + 重试刚才那条操作
+        // （不是普通失败：普通失败只能报错，断了能自愈）
+        PanelEvent::DbLost { id } => dbui::on_lost(st, id),
         PanelEvent::DbClosed => {
             dbui::on_closed(st);
             // 活跃标记（阶段 57）：断开了 → 树上灭掉

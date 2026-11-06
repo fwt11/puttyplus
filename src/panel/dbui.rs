@@ -234,6 +234,17 @@ pub struct DbUi {
     next_req: Cell<u64>,
     /// 请求 id → 这个请求是干什么的
     pending: RefCell<HashMap<u64, PendingReq>>,
+    /// **断线后要重试的操作**（阶段 99）。
+    ///
+    /// 数据库连接断了 ⇒ 那条操作失败了 ⇒ 得**重连一次**再**重试它**
+    /// （用户 2026-11-06：「在异常处理程序中重连一次，如果还是失败就报错，
+    /// 否则就继续执行原来的操作」）。重连期间 UI 得记住"要重试哪一条"。
+    pending_retry: RefCell<Option<DbRetry>>,
+    /// **这条操作已经重试过一次了**（阶段 99）。
+    ///
+    /// ⚠️ 用户原话：「重连**一次**，如果还是失败就报错」——没有这道闸门
+    /// ⇒ 重连成功、重试又失败 ⇒ 又重连 ⇒ 无限循环。
+    retried: Cell<bool>,
     /// SQL 编辑器高亮器
     sql_hl: Rc<SqlHl>,
     /// 保存作业队列（一条一条发，PG 里一条失败整个事务就废了）
@@ -345,6 +356,20 @@ impl SqlHl {
     }
 }
 
+/// **断线后要重试的那条数据库操作**（阶段 99）。
+#[derive(Clone)]
+struct DbRetry {
+    /// 待办请求的 id（重发时用**同一个 id** ⇒ 回包能对上那个页签）
+    id: u64,
+    /// **结果页签的 id**（重发时结果要落回这个页签）。
+    ///
+    /// ⚠️ 必须带着：重连时待办表被清过 ⇒ 光有 id 重发不了（回包按待办表
+    /// 找落点，找不到就把结果丢了）。
+    tab_id: u64,
+    /// 要重试的查询
+    sql: String,
+}
+
 /// 请求的用途（回包时才知道该怎么处理）。
 enum PendingReq {
     /// 对象树的元数据 → 填回树里
@@ -352,7 +377,14 @@ enum PendingReq {
     /// 打开表数据：先取列元信息（类型 + 主键），再查数据
     MetaForTable { tab_id: u64 },
     /// 查询 / 翻页
-    Query { tab_id: u64 },
+    Query {
+        tab_id: u64,
+        /// **这条查询的 SQL**（阶段 99）。
+        ///
+        /// 干什么用：连接断了要**重连 + 重试同一条查询** ⇒ 得留着原文
+        /// （失败事件只带 id，光有 id 重发不了）。
+        sql: String,
+    },
     /// 写语句
     Exec { tab_id: u64 },
     /// 事务
@@ -1465,6 +1497,8 @@ fn build(st: &Rc<PanelState>) -> DbUi {
         session_key: key,
         next_req: Cell::new(1),
         pending: RefCell::new(HashMap::new()),
+        pending_retry: RefCell::new(None),
+        retried: Cell::new(false),
         save_queue: RefCell::new(VecDeque::new()),
         save_job: RefCell::new(None),
         save_id: Cell::new(0),
@@ -2123,7 +2157,7 @@ fn set_current_conn(st: &Rc<PanelState>, ui: &DbUi, key: &str, name: &str) {
             let _ = tx.send(WorkerCmd::DbClose);
         }
         ui.connected.set(false);
-        clear_tabs(ui);
+        clear_tabs(ui, false);
         ui.tree.clear();
     }
     *st.db_active.borrow_mut() = None;
@@ -2160,6 +2194,14 @@ fn update_tab_title(st: &Rc<PanelState>, ui: &DbUi) {
 /// 异步的连接结果走 `on_connected`。返回值是为了让调用方能在**释放
 /// `st.db_ui` 借用之后**再弹对话框（弹窗时页面可能还没挂 ⇒ 状态行没人看）。
 fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
+    do_connect_inner(st, ui, false)
+}
+
+/// `keep_pages` = **保住结果页签**（断线自愈用，阶段 99）。
+///
+/// ⚠️ 见 [`clear_tabs`] 的说明：自愈重连时页签要留着，否则「重试原来那条
+/// 查询」的结果**没有地方放**。
+fn do_connect_inner(st: &Rc<PanelState>, ui: &DbUi, keep_pages: bool) -> Option<String> {
     if ui.busy.get() {
         return None;
     }
@@ -2220,7 +2262,7 @@ fn do_connect(st: &Rc<PanelState>, ui: &DbUi) -> Option<String> {
     ui.connected.set(false);
     // 活跃标记（阶段 57）：正在连 → 先灭掉，等连上了再亮
     *st.db_active.borrow_mut() = None;
-    clear_tabs(ui);
+    clear_tabs(ui, keep_pages);
     ui.tree.clear();
     update_buttons(ui);
     set_status(ui, tr("正在连接数据库…"), false);
@@ -2319,7 +2361,13 @@ fn do_run(st: &Rc<PanelState>, ui: &DbUi, only_sel: bool) {
     update_buttons(ui);
     set_status(ui, tr("执行中…"), false);
     let id = next_id(ui);
-    ui.pending.borrow_mut().insert(id, PendingReq::Query { tab_id: tab.id });
+    ui.pending.borrow_mut().insert(
+        id,
+        PendingReq::Query {
+            tab_id: tab.id,
+            sql: sql.clone(),
+        },
+    );
     send_cmd(st, ui, WorkerCmd::DbQuery { id, sql, page_size: PAGE_SIZE });
 }
 
@@ -5495,9 +5543,15 @@ fn do_next(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     tab.offset.set(tab.offset.get() + size);
     tab.page.set(tab.page.get() + 1);
     let id = next_id(ui);
-    ui.pending
-        .borrow_mut()
-        .insert(id, PendingReq::Query { tab_id: tab.id });
+    ui.pending.borrow_mut().insert(
+        id,
+        PendingReq::Query {
+            tab_id: tab.id,
+            // 翻页走的是 `DbNextPage`（不是重发同一条查询）⇒ 这里没有
+            // 可重试的 SQL（阶段 99：断线只重连，不重试翻页）。
+            sql: String::new(),
+        },
+    );
     send_cmd(st, ui, WorkerCmd::DbNextPage { id, page_size: size });
 }
 
@@ -6554,11 +6608,48 @@ pub fn on_connected(st: &Rc<PanelState>, result: Result<String, String>) {
                 // 被悄悄存下来。
                 let msg = trf!("已连接：{label}", label = label);
                 set_status(ui, &msg, false);
+                // ⚠️ **阶段 99：重连成功 ⇒ 把断线时失败的那条查询重发一遍**
+                // （用户：「重连一次……否则就继续执行原来的操作」）。
+                //
+                // ⚠️ **待办表要补登记**：重连时它被清过（`clear_tabs`）⇒
+                // 不补的话，回包按待办表找落点会找不到 ⇒ **结果被丢掉**
+                // （用户看着就是"重连了，但那条查询没结果"）。
+                if let Some(r) = ui.pending_retry.borrow_mut().take() {
+                    ui.pending.borrow_mut().insert(
+                        r.id,
+                        PendingReq::Query {
+                            tab_id: r.tab_id,
+                            sql: r.sql.clone(),
+                        },
+                    );
+                    ui.busy.set(true);
+                    // ⚠️ 闸门**先不关**：这次重试要是又失败 ⇒ 报给用户
+                    // （`on_lost` 里会看到 retried=true ⇒ 不再无限重连）
+                    update_buttons(ui);
+                    set_status(ui, tr("正在重试刚才那条查询…"), false);
+                    send_cmd(
+                        st,
+                        ui,
+                        WorkerCmd::DbQuery {
+                            id: r.id,
+                            sql: r.sql,
+                            page_size: PAGE_SIZE,
+                        },
+                    );
+                }
             }
             Err(e) => {
                 ui.connected.set(false);
                 *st.db_active.borrow_mut() = None;
-                clear_tabs(ui);
+                // ⚠️ **阶段 99：重连本身失败了 ⇒ 「重连一次」的闸门作废**
+                // （闸门是防「重连成功 ⇒ 重试又失败 ⇒ 又重连」的无限循环的；
+                //  **重连没成功**就没进那个循环 ⇒ 不该占着额度，
+                //  否则用户下一次操作只会看到一个错、连重连都不发起）。
+                ui.retried.set(false);
+                *ui.pending_retry.borrow_mut() = None;
+                // ⚠️ **保住页签**（阶段 99）：自愈重连失败时，用户刚才的
+                // 结果还在屏幕上（连接只是断了，不是"换了个库"）。
+                clear_tabs(ui, true);
                 let msg = trf!("连接失败：{e}", e = e);
                 set_status(ui, &msg, true);
                 fail = Some(msg);
@@ -6752,10 +6843,15 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     let tab_id = match ui.pending.borrow_mut().remove(&id) {
-        Some(PendingReq::Query { tab_id }) => tab_id,
+        Some(PendingReq::Query { tab_id, .. }) => tab_id,
         _ => return,
     };
     ui.busy.set(false);
+    // ⚠️ **阶段 99：查询成功了 ⇒ 「已重试过」的闸门清掉**
+    //（下一条操作断线了还能自愈）。
+    // ⚠️ **不清的话**：自愈成功一次之后闸门一直挂着 ⇒ 之后**每一次**断线
+    //  都会被当成「重试后又失败」⇒ 直接报错、永远不再重连。
+    ui.retried.set(false);
     let Some(tab) = find_tab(ui, tab_id) else { return };
     tab.has_more.set(!rows.done);
 
@@ -6821,6 +6917,83 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
     set_status(ui, &trf!("查询完成：{msg}", msg = msg), false);
 }
 
+/// **数据库连接断了**（阶段 99）：重连一次 ⇒ 重试刚才那条操作。
+///
+/// 用户原话（2026-11-06）：「在异常处理程序中重连一次，如果还是失败就
+/// 报错，否则就继续执行原来的操作」。
+///
+/// ⚠️ **只重试"查询"**：翻页 / 元数据 / 写语句的重试语义各不相同
+/// （翻页的游标已经挪过了，重发会翻错页）⇒ 那几种只**重连**，不重试。
+pub fn on_lost(st: &Rc<PanelState>, id: u64) {
+    {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return };
+        ui.busy.set(false);
+        ui.connected.set(false);
+        update_buttons(ui);
+        // ⚠️ **已经重试过一次了** ⇒ 这次就报给用户（用户：「重连一次，
+        // 如果还是失败就报错」）⇒ 别再无限重连。
+        if ui.retried.get() {
+            ui.retried.set(false);
+            set_status(ui, tr("数据库连接已断开，重连后仍然失败"), true);
+            return;
+        }
+        // 记住要重试的那条查询（从待办表里取原文）
+        let retry = ui.pending.borrow().get(&id).and_then(|p| match p {
+            PendingReq::Query { tab_id, sql } if !sql.is_empty() => Some(DbRetry {
+                id,
+                tab_id: *tab_id,
+                sql: sql.clone(),
+            }),
+            _ => None,
+        });
+        if retry.is_some() {
+            ui.retried.set(true);
+        }
+        *ui.pending_retry.borrow_mut() = retry;
+    }
+    // —— 借用放掉了再重连（重连里会再借 db_ui）——
+    let err = reconnect_db(st);
+    if err.is_none() {
+        // 重连发起成功 ⇒ 写明"正在重连"（`do_connect` 自己写的是「正在连接…」）
+        let slot = st.db_ui.borrow();
+        if let Some(ui) = slot.as_ref() {
+            set_status(ui, tr("数据库连接已断开，正在重新连接…"), false);
+        }
+    }
+}
+
+/// **重连数据库一次**（断线自愈用）。
+///
+/// ⚠️ 用「当前这条连接」的配置重连（`do_connect`）——工作台里没有连接
+/// 下拉框，当前连的是哪条由 `ui.current` 记着。
+///
+/// 返回 `Some(说明)` = 重连**没发起成**（原因已说给用户听）。
+fn reconnect_db(st: &Rc<PanelState>) -> Option<String> {
+    let err = {
+        let slot = st.db_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return None };
+        if ui.connected.get() {
+            return None; // 已经连着了，别打断
+        }
+        // ⚠️ **`keep_pages = true`**（阶段 99）：自愈重连**保住结果页签**
+        // ⇒ 断线时失败的那条查询重发回去，结果落得回原来那个页签
+        // （走普通 `do_connect` 的话页签被清掉 ⇒ 结果没有落点）。
+        do_connect_inner(st, ui, true)
+    };
+    if let Some(msg) = err {
+        // 重连也失败 ⇒ 这次是真的连不上 ⇒ 报给用户（别再重试了）
+        let slot = st.db_ui.borrow();
+        if let Some(ui) = slot.as_ref() {
+            set_status(ui, &msg, true);
+            *ui.pending_retry.borrow_mut() = None;
+            ui.retried.set(false);
+        }
+        return Some(msg);
+    }
+    None
+}
+
 pub fn on_error(st: &Rc<PanelState>, err: String) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
@@ -6845,7 +7018,7 @@ pub fn on_closed(st: &Rc<PanelState>) {
     // 活跃标记（阶段 57）：断开就别再亮着
     *st.db_active.borrow_mut() = None;
     ui.busy.set(false);
-    clear_tabs(ui);
+    clear_tabs(ui, false);
     update_buttons(ui);
     // 阶段 22：工作台里没有「连接」按钮了，断开后得告诉用户**怎么再连上**
     set_status(ui, tr("已断开（再连：双击会话树 / 连接管理器里的这条连接）"), false);
@@ -7452,9 +7625,13 @@ fn query_table(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>, target: &Tab
     ui.busy.set(true);
     update_buttons(ui);
     let qid = next_id(ui);
-    ui.pending
-        .borrow_mut()
-        .insert(qid, PendingReq::Query { tab_id: tab.id });
+    ui.pending.borrow_mut().insert(
+        qid,
+        PendingReq::Query {
+            tab_id: tab.id,
+            sql: sql.clone(),
+        },
+    );
     send_cmd(st, ui, WorkerCmd::DbQuery { id: qid, sql, page_size: PAGE_SIZE });
 }
 
@@ -8504,18 +8681,30 @@ fn find_tab(ui: &DbUi, id: u64) -> Option<Rc<ResultTab>> {
 }
 
 /// 清空所有页签。
-fn clear_tabs(ui: &DbUi) {
-    while ui.notebook.n_pages() > 0 {
-        ui.notebook.remove_page(Some(0));
+///
+/// `keep_pages` = **保住结果页签**（断线自愈用，阶段 99）。
+///
+/// ⚠️ **为什么自愈要保住页签**：重连走的是 `do_connect`，它会清空页签
+/// ⇒ 断线时失败的那条查询**重发回去也没有地方放结果**（页签没了 ⇒ 回包
+/// 找不到落点 ⇒ 结果被丢掉）。⇒ 自愈重连**保住页签**：用户刚才的结果还
+/// 在，重试的查询也落回原来那个页签。
+///
+/// ⚠️ **待办表照样清**：旧连接上那些「在飞」的请求永远不会有回包了 ⇒ 清掉
+/// （`id` 不复用，清掉不会错认回包）。
+fn clear_tabs(ui: &DbUi, keep_pages: bool) {
+    if !keep_pages {
+        while ui.notebook.n_pages() > 0 {
+            ui.notebook.remove_page(Some(0));
+        }
+        ui.stack.set_visible_child_name("empty");
+        ui.tabs.borrow_mut().clear();
+        // ⚠️ **表文档也要清**（阶段 72e）：文档页已经跟着 notebook 一起摘掉了，
+        // 但 `ui.docs` 里还留着它们 ⇒ 断线重连后 `find_doc` 会找到**已经死掉的**
+        // 文档，用户点表什么反应都没有。
+        ui.docs.borrow_mut().clear();
+        ui.struct_tabs.borrow_mut().clear();
+        ui.def_tabs.borrow_mut().clear();
     }
-    ui.stack.set_visible_child_name("empty");
-    ui.tabs.borrow_mut().clear();
-    // ⚠️ **表文档也要清**（阶段 72e）：文档页已经跟着 notebook 一起摘掉了，
-    // 但 `ui.docs` 里还留着它们 ⇒ 断线重连后 `find_doc` 会找到**已经死掉的**
-    // 文档，用户点表什么反应都没有。
-    ui.docs.borrow_mut().clear();
-    ui.struct_tabs.borrow_mut().clear();
-    ui.def_tabs.borrow_mut().clear();
     ui.pending.borrow_mut().clear();
     ui.save_queue.borrow_mut().clear();
     *ui.save_job.borrow_mut() = None;
@@ -8918,6 +9107,35 @@ pub fn is_connected_now(st: &Rc<PanelState>) -> bool {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
     ui.connected.get()
+}
+
+/// 冒烟测试用：**最后一条**待办请求的 id（阶段 99）。
+///
+/// 干什么用：断线自愈要**重发**那条失败的请求 ⇒ 得知道它的 id
+/// （`PanelEvent::DbLost { id }` 就是用它找回"要重试哪一条"）。
+pub fn last_pending_id(st: &Rc<PanelState>) -> Option<u64> {
+    let slot = st.db_ui.borrow();
+    let ui = slot.as_ref()?;
+    ui.pending.borrow().keys().max().copied()
+}
+
+/// 冒烟测试用：待办表里**都有哪些 id**（阶段 99）。
+///
+/// 干什么用：断线自愈重发查询时要**重新登记**待办（重连时它被清过）⇒
+/// 冒烟要能看见"那条查询的 id 又回来了"。
+pub fn pending_ids(st: &Rc<PanelState>) -> Vec<u64> {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut ids: Vec<u64> = ui.pending.borrow().keys().copied().collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// 冒烟测试用：工作台现在是不是"忙着等回包"。
+pub fn busy_now(st: &Rc<PanelState>) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.busy.get()
 }
 
 /// 冒烟测试用：数据库工作台所在子页签的 id（关掉它 = 自动断开）。

@@ -514,6 +514,13 @@ pub enum PanelEvent {
     DbRows { id: u64, rows: crate::backend::db::DbRows },
     /// 数据库通道：连接/查询失败
     DbError(String),
+    /// 数据库通道：**连接断了**（阶段 99）。
+    ///
+    /// ⚠️ **为什么单独一个事件**：数据库的失败有两种——「连接断了」
+    /// （**能自愈**：重连一次 + 重试这条操作）与「SQL 写错了 / 权限不足」
+    /// （只能报错）。混在一个 `DbError(String)` 里的话，UI 只能靠**匹配
+    /// 错误文案**来判断（脆，而且文案会翻译）。
+    DbLost { id: u64 },
     /// 数据库通道：已关闭（用户主动断开）
     DbClosed,
     /// 数据库通道：元数据应答（req 原样带回，便于把结果填回树里的对应节点）
@@ -547,6 +554,30 @@ pub enum PanelEvent {
     },
 }
 
+/// 会话是不是已经死了（没连上 / 底层句柄已关）。
+fn session_dead(conn: &Option<Arc<SftpBackend>>) -> bool {
+    match conn {
+        None => true,
+        Some(c) => c.is_closed(),
+    }
+}
+
+/// 把回执发回 UI。
+///
+/// ⚠️ **必须先写"会话已死"标志再发**（阶段 99）：UI 收到失败事件时会读它，
+/// 判断"这次失败能不能自愈"——能自愈的就**重连一次 + 重试原来的操作**，
+/// 不能的才报错。晚一步写，UI 读到的就是**上次命令留下的旧值** ⇒ 该自愈
+/// 的失败会被当成硬错误弹给用户（用户 2026-11-06 报的现象）。
+fn send_ev(
+    ui_tx: &async_channel::Sender<PanelEvent>,
+    conn: &Option<Arc<SftpBackend>>,
+    conn_dead: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ev: PanelEvent,
+) {
+    conn_dead.store(session_dead(conn), std::sync::atomic::Ordering::SeqCst);
+    let _ = ui_tx.try_send(ev);
+}
+
 /// 启动 worker 线程。连接对象由该线程独占——UI 侧只发命令。
 ///
 /// 命令循环整体跑在一个 block_on 里（而不是每条命令单独 block_on）：
@@ -562,6 +593,7 @@ pub fn spawn_worker(
     inproc_forwards: Vec<String>,
     rx: Receiver<WorkerCmd>,
     ui_tx: async_channel::Sender<PanelEvent>,
+    conn_dead: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("sftp-worker".into())
@@ -634,6 +666,10 @@ pub fn spawn_worker(
                             .await
                             {
                                 Ok(c) => {
+                                    // ⚠️ **连上了 ⇒ 会话没死**（UI 靠这个标志判断
+                                    // "这次失败能不能自愈"）。必须在发事件**之前**
+                                    // 写：UI 收到事件就可能立刻读它。
+                                    conn_dead.store(false, std::sync::atomic::Ordering::SeqCst);
                                     // 连通后取主目录只是「锦上添花」：服务器
                                     // 迟迟不回 realpath 时回落到 / 先让面板可用，
                                     // 不能让 UI 一直停在「正在连接」。
@@ -674,6 +710,7 @@ pub fn spawn_worker(
                                     conn = Some(c);
                                 }
                                 Err(e) => {
+                                    conn_dead.store(true, std::sync::atomic::Ordering::SeqCst);
                                     let _ = ui_tx.try_send(PanelEvent::Connected(Err(e.0)));
                                 }
                             }
@@ -694,7 +731,7 @@ pub fn spawn_worker(
                                     .unwrap_or(0),
                                 _ => 0,
                             };
-                            let _ = ui_tx.try_send(PanelEvent::Listed {
+                            send_ev(&ui_tx, &conn, &conn_dead, PanelEvent::Listed {
                                 id,
                                 path,
                                 silent,
@@ -730,7 +767,12 @@ pub fn spawn_worker(
                                     r.map_err(|e| e.0)
                                 }
                             };
-                            let _ = ui_tx.try_send(PanelEvent::SimpleDone { path, result });
+                            send_ev(
+                                &ui_tx,
+                                &conn,
+                                &conn_dead,
+                                PanelEvent::SimpleDone { path, result },
+                            );
                         }
                         WorkerCmd::ReadFile { id, path, max } => {
                             let result = match &conn {
@@ -740,11 +782,16 @@ pub fn spawn_worker(
                                     .await
                                     .map_err(|e| e.0),
                             };
-                            let _ = ui_tx.try_send(PanelEvent::FileRead {
-                                id,
-                                path,
-                                result,
-                            });
+                            send_ev(
+                                &ui_tx,
+                                &conn,
+                                &conn_dead,
+                                PanelEvent::FileRead {
+                                    id,
+                                    path,
+                                    result,
+                                },
+                            );
                         }
                         WorkerCmd::WriteFile { id, path, data } => {
                             let result = match &conn {
@@ -754,11 +801,16 @@ pub fn spawn_worker(
                                     .await
                                     .map_err(|e| e.0),
                             };
-                            let _ = ui_tx.try_send(PanelEvent::FileWritten {
-                                id,
-                                path,
-                                result,
-                            });
+                            send_ev(
+                                &ui_tx,
+                                &conn,
+                                &conn_dead,
+                                PanelEvent::FileWritten {
+                                    id,
+                                    path,
+                                    result,
+                                },
+                            );
                         }
                         WorkerCmd::Follow { age_sec } => {
                             let path = match &conn {
@@ -1112,9 +1164,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Query { id, sql, page_size }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1126,9 +1179,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::NextPage { id, page_size }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1193,9 +1247,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Meta { id, req }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1207,9 +1262,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Exec { id, sql }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1221,9 +1277,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Tx { id, op }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1235,9 +1292,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Import { id, batch }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1249,9 +1307,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Export { id, schema, table, path, fmt }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },
@@ -1263,9 +1322,10 @@ pub fn spawn_worker(
                             Some(d) => {
                                 if d.tx.send(DbCmd::Er { id, schema, table }).is_err() {
                                     db = None;
-                                    let _ = ui_tx.try_send(PanelEvent::DbError(
-                                        tr("数据库连接已断开").into(),
-                                    ));
+                                    // ⚠️ **连接断了**（阶段 99）：发 `DbLost`
+                                    // （结构化事件，不靠匹配文案）⇒ UI 知道
+                                    // 「这次失败能自愈」：重连一次 + 重试这条操作。
+                                    let _ = ui_tx.try_send(PanelEvent::DbLost { id });
                                 }
                             }
                         },

@@ -305,6 +305,23 @@ pub(crate) struct TermInner {
     /// 就是「TermPane → ready_hook → TermPane」的**引用环**，面板永远
     /// 释放不掉（AGENTS.md 的红线）。
     ready_hook: RefCell<Option<Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static>>>,
+    /// **重连钩子**（阶段 99）：这条终端**重连**时调一次。
+    ///
+    /// 干什么用：「重新连接终端」时**顺带把断了的 SFTP 也救回来**——
+    /// 终端与 SFTP 是**两条独立的连接**，只救一条的话，另一条还断着
+    /// （用户 2026-11-06 报的现象）。
+    ///
+    /// ⚠️ 闭包**只能抓弱引用**（面板）——抓强引用就是引用环
+    /// （TermPane → 钩子 → TermPane ⇒ 面板永远释放不掉）。
+    reconnect_hook: RefCell<Option<Box<dyn Fn() + 'static>>>,
+    /// **断线时用户敲的输入**（阶段 99）：攒着，等重连成功**补发**进新会话。
+    ///
+    /// 干什么用：会话结束（ssh 子进程退了）之后用户还在敲命令 ⇒ 那几下
+    /// 写进了**死掉的 pty**，全丢了 ⇒ 用户以为自己敲过了，白敲。
+    /// ⇒ 攒下来，重连后（看见提示符了）补发进去。
+    pending_input: RefCell<Vec<u8>>,
+    /// **正在重连**（阶段 99）：防止连按几个键就起好几个 ssh。
+    reconnecting: Cell<bool>,
     /// 按键广播钩子（全局开关装在每个 pane 上）
     key_sink: RefCell<Option<BroadcastHook>>,
     /// **会话存活钩子**（阶段 65 / 审计 P0-4）：子进程起来 / 退出时调一次。
@@ -582,6 +599,9 @@ impl TermPane {
             banner_re,
             menu_extra: RefCell::new(None),
             ready_hook: RefCell::new(None),
+            reconnect_hook: RefCell::new(None),
+            pending_input: RefCell::new(Vec::new()),
+            reconnecting: Cell::new(false),
             key_sink: RefCell::new(None),
             log: RefCell::new(None),
             rec: RefCell::new(None),
@@ -615,6 +635,8 @@ impl TermPane {
 
         connect_signals(&inner);
         install_broadcast_capture(&inner);
+        // 阶段 99：会话死了 ⇒ 用户敲的输入攒着 + 自动重连一次 + 补发
+        install_dead_input_capture(&inner);
         // 录制指示条点一下就停（和广播条同一个交互逻辑）
         {
             let weak = Rc::downgrade(&inner);
@@ -699,7 +721,6 @@ impl TermPane {
     /// 装"会话存活"钩子（阶段 65 / 审计 P0-4）。
     ///
     /// 子进程起来 / 退出时各调一次（`true` / `false`）。
-    ///
     /// ⚠️ 闭包**只能抓弱引用**（面板 / 标签）——抓强引用就是引用环
     /// （TermPane → 钩子 → TermPane），面板永远释放不掉。
     ///
@@ -715,6 +736,16 @@ impl TermPane {
                 h(true);
             }
         }
+    }
+
+    /// 装**重连钩子**（阶段 99）：这条终端重连时调一次。
+    ///
+    /// 干什么用：「重新连接终端」时**顺带把断了的 SFTP 也救回来**
+    /// （终端与 SFTP 是两条独立的连接）。
+    ///
+    /// ⚠️ 闭包**只能抓弱引用**（面板）——抓强引用就是引用环。
+    pub fn set_reconnect_hook<F: Fn() + 'static>(&self, f: F) {
+        *self.inner.reconnect_hook.borrow_mut() = Some(Box::new(f));
     }
 
     /// 按当前配色方案重刷本面板（4.1）。切方案时对所有面板调一次。
@@ -1051,6 +1082,15 @@ impl TermInner {
         // VTE spawn 不自动清屏，重连时清掉上一会话的残留
         self.term.reset(true, true);
         spawn_term(self);
+        // 阶段 99：告诉上层「这条终端重连了」⇒ 上层顺带把断了的 SFTP 救回来
+        //
+        // ⚠️ 用 `try_borrow`：钩子里万一又碰到重连（重入）也不会 panic，
+        // 顶多少叫一次钩子。
+        if let Ok(h) = self.reconnect_hook.try_borrow() {
+            if let Some(h) = h.as_ref() {
+                h();
+            }
+        }
     }
 
     /// 当前日志文件路径（没在记录时 None）。
@@ -1461,6 +1501,43 @@ impl TermPane {
     pub fn sync_rec_ui(&self) {
         self.inner.sync_rec_ui();
     }
+}
+
+/// 在终端上装**断线自愈**的按键捕获（阶段 99）。
+///
+/// **会话已经死了**（ssh 子进程退了）用户还在敲 ⇒ 那几下写进了**死掉的
+/// pty**，全丢了 ⇒ 用户以为敲过了，白敲。
+///
+/// ⇒ 这里把输入**攒起来**，并**自动重连一次**；等新会话看见提示符了，
+/// 把攒下来的输入**补发**进去（继续执行原来的操作）。
+///
+/// ⚠️ **不吞键**：VTE 照常处理（用户看得见自己敲了什么）——我们只是
+/// **另外**留一份副本。
+fn install_dead_input_capture(inner: &Rc<TermInner>) {
+    let kc = gtk::EventControllerKey::new();
+    kc.set_propagation_phase(gtk::PropagationPhase::Capture);
+    // 只抓 Weak：controller 挂在终端控件上，抓强的就成环
+    let weak = Rc::downgrade(inner);
+    kc.connect_key_pressed(move |_k, keyval, _code, mods| {
+        let Some(inner) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        // 会话还活着 ⇒ 什么都不用做（输入照常走 VTE）
+        if inner.child_alive.get() {
+            return glib::Propagation::Proceed;
+        }
+        // 攒下这次输入（跟 VTE 算的是同一串字节 ⇒ 补发回去就是原样）
+        if let Some(bytes) = encode_key(keyval, mods) {
+            inner.pending_input.borrow_mut().extend_from_slice(&bytes);
+        }
+        // **重连一次**（已经在重连就别再起了）
+        if !inner.reconnecting.get() {
+            inner.reconnecting.set(true);
+            inner.reconnect_term();
+        }
+        glib::Propagation::Proceed
+    });
+    inner.term.add_controller(kc);
 }
 
 /// 在终端上装按键捕获（捕获阶段，先于 VTE 自己的处理）。
@@ -2316,10 +2393,32 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 //    凭空多一行命令）并缓冲在本地行规程里，等 ssh 连上后
                 //    转发给远端 —— 那会儿远端可能还停在**登录流程**
                 //    （堡垒机常见），这行就被它吃掉，`cd` 根本没执行。
-                if let Some(h) = inner_cb.ready_hook.borrow_mut().take() {
+                //
+                // ⚠️ **阶段 99**：一起把「断线时用户敲的输入」带上 ——
+                //    看见提示符后**补发**进去（继续执行原来的操作）。
+                inner_cb.reconnecting.set(false);
+                let pending = std::mem::take(&mut *inner_cb.pending_input.borrow_mut());
+                let user_hook = inner_cb.ready_hook.borrow_mut().take();
+                if !pending.is_empty() || user_hook.is_some() {
+                    let pending = RefCell::new(Some(pending));
+                    let hook: Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static> =
+                        Box::new(move |term, what| {
+                            if let Some(h) = &user_hook {
+                                h(term, what);
+                            }
+                            // ⚠️ 只在**看见提示符**时补发（`Probe` 是探路，
+                            // 那会儿远端还没进 shell，发过去会被登录脚本吃掉）
+                            if what == ReadyCmd::Cmd {
+                                if let Some(bytes) = pending.borrow_mut().take() {
+                                    if !bytes.is_empty() {
+                                        term.feed_child(&bytes);
+                                    }
+                                }
+                            }
+                        });
                     feed_when_remote_ready(
                         &inner_cb.term,
-                        h,
+                        hook,
                         Rc::downgrade(&inner_cb),
                         pty_cb,
                     );
@@ -2327,6 +2426,9 @@ fn spawn_term(inner: &Rc<TermInner>) {
             }
             Err(e) => {
                 // 起不来就把「重新连接」留在那儿，用户可以再点一次
+                // ⚠️ 阶段 99：起失败 ⇒ 别把"正在重连"卡住（不然用户再敲键
+                // 也不会再试一次了）
+                inner_cb.reconnecting.set(false);
                 inner_cb.banner_re.set_visible(true);
                 inner_cb.sync_banner_visibility();
                 alert::<gtk::Window>(

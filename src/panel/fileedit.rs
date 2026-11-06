@@ -310,6 +310,16 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
     }
     let id = next_id();
     st.pending_file_reads.borrow_mut().insert(id, readonly);
+    // ⚠️ **先记下"怎么重发"**（阶段 99）：断线失败时要靠它重试同一次读
+    super::remember_retry(
+        st,
+        super::RetryKind::ReadFile,
+        super::RetryOp::ReadFile {
+            id,
+            path: path.to_string(),
+            max: MAX_BYTES,
+        },
+    );
     if !send(
         st,
         WorkerCmd::ReadFile {
@@ -2403,6 +2413,77 @@ pub fn refresh_theme_colors(st: &Rc<PanelState>) {
 
 /* ---------------- 保存 / 重新载入 ---------------- */
 
+/// **重发一次「读远程文件」**（阶段 99：断线 ⇒ 重连 ⇒ 重试原来的操作）。
+///
+/// ⚠️ **同一个 id**：回包按 id 分发（`on_read` 找的就是这个编辑器）⇒
+/// 重发必须用原来的 id，否则回包找不到人。
+pub fn resend_read(st: &Rc<PanelState>, id: u64, path: &str, max: u64) {
+    if !send(
+        st,
+        WorkerCmd::ReadFile {
+            id,
+            path: path.to_string(),
+            max,
+        },
+    ) {
+        dialogs::show_error(
+            st.topwin().as_ref(),
+            tr("无法打开文件"),
+            tr("SFTP 尚未连接，无法读取远程文件。"),
+        );
+    }
+}
+
+/// **重发一次「写远程文件」**（阶段 99：断线 ⇒ 重连 ⇒ 重试原来的操作）。
+///
+/// ⚠️ **数据从当前缓冲区重新取**：断线那会儿用户可能又改了内容 ⇒ 重试要
+/// 写的是**现在**的内容（不然会把用户刚改的丢掉）。
+pub fn resend_save(st: &Rc<PanelState>, id: u64, path: &str) {
+    let Some(e) = find(st, id) else { return };
+    if !e.remote || e.readonly.get() || !e.valid_utf8.get() {
+        return;
+    }
+    let buf = e.buffer.clone();
+    let text = buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string();
+    let dec = Decoded {
+        text: String::new(), // encode 只用 bom/crlf
+        bom: e.bom.get(),
+        crlf: e.crlf.get(),
+        valid_utf8: true,
+        bytes: 0,
+    };
+    let data = dec.encode(&text);
+    if data.len() as u64 > MAX_BYTES {
+        dialogs::show_error(
+            Some(&e.win),
+            tr("无法保存"),
+            &trf!("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", v0 = human_size(data.len() as u64), v1 = human_size(MAX_BYTES)),
+        );
+        return;
+    }
+    e.saving.set(true);
+    update_ui(&e);
+    // ⚠️ **写回期间锁住视图**（跟 `save()` 一样）：回包成功时才会把 dirty
+    // 清掉 ⇒ 晚到的按键若没写进去就会变成"看起来保存了、其实没保存"。
+    e.view.set_editable(false);
+    e.view.set_cursor_visible(false);
+    e.size.set(data.len() as u64);
+    let ok = send(
+        st,
+        WorkerCmd::WriteFile {
+            id,
+            path: path.to_string(),
+            data,
+        },
+    );
+    if !ok {
+        e.saving.set(false);
+        e.view.set_editable(!e.readonly.get());
+        e.view.set_cursor_visible(!e.readonly.get());
+        update_ui(&e);
+    }
+}
+
 fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
     if e.readonly.get() || !e.valid_utf8.get() || e.saving.get() || e.loading.get() {
         return false;
@@ -2436,6 +2517,15 @@ fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
         e.view.set_editable(false);
         e.view.set_cursor_visible(false);
         e.size.set(data.len() as u64);
+        // ⚠️ **先记下"怎么重发"**（阶段 99）：断线失败时要靠它重试同一次写
+        super::remember_retry(
+            st,
+            super::RetryKind::WriteFile,
+            super::RetryOp::WriteFile {
+                id: e.id,
+                path: e.path.clone(),
+            },
+        );
         let ok = send(
             st,
             WorkerCmd::WriteFile {

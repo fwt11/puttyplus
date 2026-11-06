@@ -115,6 +115,23 @@ fn install_alive_hook(tp: &TermPane, st: &Rc<panel::PanelState>) {
     });
 }
 
+/// 装**重连钩子**（阶段 99）：这条终端重连时，顺带把断了的 SFTP 也救回来。
+///
+/// ⚠️ 闭包只抓**弱引用**（AGENTS.md 的引用环红线）。
+///
+/// **为什么要有**：终端与 SFTP 是**两条独立的连接**——用户点「重新连接
+/// 终端」时，SFTP 那条可能也断了（服务端把会话一起关了）⇒ 只救终端的话，
+/// 文件面板还是断的（用户 2026-11-06 报的现象：「重连终端后 sftp 仍然没有
+/// 重连」）。
+fn install_reconnect_hook(tp: &TermPane, st: &Rc<panel::PanelState>) {
+    let stw = Rc::downgrade(st);
+    tp.set_reconnect_hook(move || {
+        if let Some(st) = stw.upgrade() {
+            panel::reconnect_sftp_if_dead(&st);
+        }
+    });
+}
+
 /// 算一个面板的状态点（级别 + tooltip）。
 ///
 /// **聚合**三个维度：文件面板（SFTP）、终端、数据库（阶段 65）。
@@ -480,6 +497,7 @@ impl Tabs {
         }
         // 阶段 65：会话起来 / 结束 → 状态点跟着变（终端掉了不再是绿点）
         install_alive_hook(&tp, &sp.st);
+        install_reconnect_hook(&tp, &sp.st);
         panel::set_term_spawn(&sp.st, tp.spawn_time());
         panel::set_term(&sp.st, &tp.terminal());
         // 拖文件到终端 = 上传到当前远程目录
@@ -961,6 +979,7 @@ impl Tabs {
         let tp = TermPane::new(&opts);
         // 阶段 65：额外终端页签也算进"这个会话有几个终端活着"
         install_alive_hook(&tp, &panel_st);
+        install_reconnect_hook(&tp, &panel_st);
         // 进到指定目录：等**远端真的就绪了**（ready 钩子）再往 pty 写 `cd`。
         //
         // ⚠️ **不能早写**：pty 带行规程（本地回显 + 规范模式），ssh 还没
@@ -1126,14 +1145,16 @@ impl Tabs {
         // 终端和 SFTP 是**两条独立的连接**——终端那条断了，SFTP 那条可能还活着
         // （那就别动它：重建连接会把正在跑的传输打断），也可能一起断了
         // （服务端把会话关了的时候就是这样）⇒ 只在**它确实断了**的时候重连。
+        //
+        // ⚠️ 终端**自己**的重连按钮 / 「会话已结束」条走的是 `install_reconnect_hook`
+        // 装的钩子 ⇒ 那里也会顺带救 SFTP。这里再调一次是**幂等**的
+        // （`reconnect_sftp_if_dead` 里 `connecting` 挡着，不会连两次）。
         let st = {
             let tabs = self.tabs.borrow();
             tabs.get(i).map(|t| t.panel_st.clone())
         };
         if let Some(st) = st {
-            if !st.conn_ok.get() {
-                crate::panel::on_reconnect(&st);
-            }
+            panel::reconnect_sftp_if_dead(&st);
         }
     }
 
@@ -1165,6 +1186,7 @@ impl Tabs {
         }
         // 阶段 65：重建的终端也算一个
         install_alive_hook(&tp, &st);
+        install_reconnect_hook(&tp, &st);
         panel::set_term_spawn(&st, tp.spawn_time());
         panel::set_term(&st, &tp.terminal());
         // 拖文件到终端 = 上传到当前远程目录

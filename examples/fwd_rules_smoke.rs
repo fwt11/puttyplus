@@ -55,6 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new(),
         rx_cmd,
         ui_tx,
+        // 阶段 99：会话生死标志（UI 靠它判断"这次失败能不能自愈"）
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
     );
 
     // 连接（用掉 Connected + 首个 Forwards 快照）
