@@ -183,7 +183,7 @@ jobs:
           export PUTTYPLUS_RECENT_INI="$HOME/recent.ini"
           export PUTTYPLUS_VAULT="$HOME/credentials.vault"
           rc=0
-          for ex in db_ui_smoke db_empty_smoke tree_panel_smoke; do
+          for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then

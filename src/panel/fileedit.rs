@@ -635,11 +635,26 @@ fn attach_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
         forget(&st, e.id);
         true
     });
+    // 阶段 98：编辑器页**也带上文件面板**（左边文件面板 / 右边编辑器）。
+    //
+    // ⚠️ **页面内容要包一层 Paned**：文件面板是**会话级的一个 widget**，
+    // 它跟着「当前页」走（切到编辑页就搬进编辑页）⇒ 编辑器页也得有个
+    // 能托管它的槽位。跟终端子页一个结构。
+    let page_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    e.page.set_hexpand(true);
+    e.page.set_vexpand(true);
+    page_paned.set_end_child(Some(e.page.clone().upcast_ref::<gtk::Widget>()));
+    page_paned.set_hexpand(true);
+    page_paned.set_vexpand(true);
+    // 宽度上限跟终端页一样（编辑器才是主角，最多 38% 或 520px）
+    crate::settings::clamp_paned_start(&page_paned, 0.38, 520);
+    // 拖分割条 ⇒ 宽度同步回 `file_w`（只有真正托管文件面板的那个框才算数）
+    super::track_file_width(st, &page_paned);
     let tab_id = sub.add_page_icon_kind(
         Some(tab_icon(e)),
         &tab_title(e),
         super::subtabs::PageKind::FileEdit,
-        e.page.clone(),
+        page_paned.upcast(),
         Some(on_close),
     );
     e.tab_id.set(tab_id);

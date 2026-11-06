@@ -103,54 +103,6 @@ fn term_container(pane: &TermPane) -> gtk::Paned {
     p
 }
 
-/// 把文件面板**搬到**某个终端子页的 Paned 里（阶段 97）。
-///
-/// ⚠️ **GTK4：一个 widget 只能有一个父级** ⇒ 搬家必须先把旧框里的槽位
-/// 清掉，再挂新的框，否则 GTK 报 `gtk_paned_set_start_child: assertion
-/// 'child->parent == NULL' failed`（AGENTS.md 记过同类坑：「同一个 widget
-/// 别 append 进两个 Box」）。
-///
-/// **为什么走 Paned 的槽位 API**（而不是直接 `w.unparent()`）：
-/// `set_start_child(None)` 会让 GTK **自己**把旧孩子解除父级并清掉槽位
-/// ⇒ 旧框不会留着一个野指针（它析构时不会顺手把孩子销毁掉）。
-///
-/// **为什么文件面板要搬家**：它是**会话级的一个 widget**（`PanelState::root`），
-/// 而一个连接页里可以有好几个终端页签 ⇒ 文件面板跟着**当前**终端页签走，
-/// 切到哪个终端页签，它就站哪个页签的左边。
-///
-/// **宽度**：搬家后按 `st.file_w`（跨宿主同步的那个值）复位。
-fn host_file_panel(st: &Rc<panel::PanelState>, host: &gtk::Paned) {
-    let w = &st.root; // 文件面板 widget
-    if let Some(old) = w.parent().and_downcast::<gtk::Paned>() {
-        // 旧宿主先把槽位让出来（GTK 顺带把文件面板解除父级）
-        let me = w.upcast_ref::<gtk::Widget>();
-        if old.start_child().as_ref() == Some(me) {
-            old.set_start_child(None::<&gtk::Widget>);
-        } else if old.end_child().as_ref() == Some(me) {
-            old.set_end_child(None::<&gtk::Widget>);
-        }
-    } else if w.parent().is_some() {
-        // 不是 Paned 的父级（少见）⇒ 直接解除父级
-        w.unparent();
-    }
-    host.set_start_child(Some(w));       // 放进新框
-    host.set_position(st.file_w.get());  // 宽度按记忆值复位
-}
-
-/// 让宿主的分割条位置**同步回** `file_w`（搬家之后宽度得跟着走）。
-///
-/// ⚠️ **只有当前正托管文件面板的那个框才算数**：别的框 position=0，
-/// 照样写回会把记住的宽度冲成 0（用户下次打开就变成默认宽度了）。
-fn track_file_width(st: &Rc<panel::PanelState>, host: &gtk::Paned) {
-    let stw = Rc::downgrade(st);
-    host.connect_notify_local(Some("position"), move |p, _| {
-        let Some(st) = stw.upgrade() else { return };
-        if st.root.parent().as_ref() == Some(p.upcast_ref::<gtk::Widget>()) {
-            st.file_w.set(p.position());
-        }
-    });
-}
-
 /// 装"会话存活"钩子（阶段 65）：终端起来 / 结束 → 面板状态跟着变。
 ///
 /// ⚠️ 闭包只抓**弱引用**（AGENTS.md 的引用环红线）。
@@ -551,8 +503,8 @@ impl Tabs {
         term_page.set_hexpand(true);
         term_page.set_vexpand(true);
         // 文件面板的家：先记它的宿主（宽度变化要同步回 file_w），再挂进去
-        track_file_width(&sp.st, &term_page);
-        host_file_panel(&sp.st, &term_page);
+        panel::track_file_width(&sp.st, &term_page);
+        panel::host_file_panel(&sp.st, &term_page);
         // 终端页签带图标：主标签头已经不放图标了，"这一页是终端"由子页签
         // 自己的图标说（标签头只留状态点 + 标题 + ×）。
         let term_sub_id = sub.add_page_icon_kind(
@@ -588,14 +540,20 @@ impl Tabs {
             sub.nb.connect_switch_page(move |_nb, _page, num| {
                 let Some(sub) = subw.upgrade() else { return };
                 let Some(st) = stw.upgrade() else { return };
-                // 只有切到「终端」页才搬文件面板；切到数据库/编辑器页**不动**它
-                //（它留在上一个终端页里，随那一页一起隐藏）。
-                if sub.kind_by_page_num(num) != panel::subtabs::PageKind::Terminal {
+                // 只有切到「终端」页或「文本编辑」页才搬文件面板；
+                // 切到数据库页**不动**它（它留在上一个宿主里，随那一页一起隐藏）。
+                //
+                // ⚠️ **按传进来的页序号查**：`switch-page` 是切换**之前**发的，
+                // 那时 `current_kind()` 还是旧页的。
+                let kind = sub.kind_by_page_num(num);
+                if kind != panel::subtabs::PageKind::Terminal
+                    && kind != panel::subtabs::PageKind::FileEdit
+                {
                     return;
                 }
                 // 拿不到宿主就**静默不动**：界面不崩、不空半个页面。
                 let Some(host) = sub.paned_by_page_num(num) else { return };
-                host_file_panel(&st, &host);
+                panel::host_file_panel(&st, &host);
             });
         }
         // 连接页控件 = **子标签区的外层容器**（notebook + 尾部的「+」按钮），
@@ -1035,7 +993,7 @@ impl Tabs {
         term_page.set_hexpand(true);
         term_page.set_vexpand(true);
         // 宽度跟着记忆走（切过去时文件面板会按它复位）
-        track_file_width(&panel_st, &term_page);
+        panel::track_file_width(&panel_st, &term_page);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
@@ -1220,8 +1178,8 @@ impl Tabs {
         term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_page.set_hexpand(true);
         term_page.set_vexpand(true);
-        track_file_width(&st, &term_page);
-        host_file_panel(&st, &term_page);
+        panel::track_file_width(&st, &term_page);
+        panel::host_file_panel(&st, &term_page);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),

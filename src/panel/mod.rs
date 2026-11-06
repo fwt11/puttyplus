@@ -64,6 +64,14 @@ pub struct PanelState {
     ///
     /// 持久化仍走 `settings::sftp_pane_pos`（关连接标签时写盘）。
     pub file_w: Cell<i32>,
+    /// 文件面板**当前的宿主 Paned**（阶段 98：文本编辑页也能托管它）。
+    ///
+    /// ⚠️ **为什么留一份强引用**：GTK4 里容器被销毁（finalize）时会把它
+    /// 的子控件一起 `gtk_widget_destroy` ⇒ **宿主页签一关，文件面板就跟着
+    /// 没了**（`PanelState` 手里那个 Rust 引用救不回来——widget 已经被标成
+    /// 「不可再用」）。留一份强引用 ⇒ 宿主 Paned 不会被 finalize ⇒ 文件
+    /// 面板安全等到下一次搬家（`host_file_panel` 把它挪走时才放手）。
+    pub file_host: RefCell<Option<gtk::Paned>>,
     /// **正在连接 / 重连**（避免连点好几次，连一次就够）。
     pub connecting: Cell<bool>,
     /// 用户输入了路径、但**当时没连着** ⇒ 记在这儿，连上之后接着跳过去。
@@ -285,6 +293,7 @@ impl SftpPanel {
             pw: RefCell::new(opts.password.clone()),
             conn_ok: Cell::new(false),
             file_w: Cell::new(340),
+            file_host: RefCell::new(None),
             connecting: Cell::new(false),
             pending_cd: RefCell::new(None),
             tx: RefCell::new(None),
@@ -444,6 +453,62 @@ impl SftpPanel {
     pub fn widget(&self) -> &gtk::Paned {
         &self.st.root
     }
+}
+
+/* ---------------- 文件面板的"搬家"（阶段 97 / 98） ---------------- */
+
+/// 把文件面板**搬到**某个宿主页的 Paned 里（阶段 97）。
+///
+/// ⚠️ **GTK4：一个 widget 只能有一个父级** ⇒ 搬家必须先把旧框里的槽位
+/// 清掉，再挂新的框，否则 GTK 报 `gtk_paned_set_start_child: assertion
+/// 'child->parent == NULL' failed`（AGENTS.md 记过同类坑：「同一个 widget
+/// 别 append 进两个 Box」）。
+///
+/// **为什么走 Paned 的槽位 API**（而不是直接 `w.unparent()`）：
+/// `set_start_child(None)` 会让 GTK **自己**把旧孩子解除父级并清掉槽位
+/// ⇒ 旧框不会留着一个野指针（它析构时不会顺手把孩子销毁掉）。
+///
+/// **谁能当宿主**：**终端子页**与**文本编辑子页**（阶段 98）——这两页的
+/// 左边都摆文件面板；**数据库工作台页不摆**（它要整页宽度）。
+///
+/// **为什么文件面板要搬家**：它是**会话级的一个 widget**（`PanelState::root`），
+/// 而一个连接页里可以有好几个终端页签、好几个编辑器页签 ⇒ 文件面板跟着
+/// **当前**那一页走。
+///
+/// **宽度**：搬家后按 `st.file_w`（跨宿主同步的那个值）复位。
+pub fn host_file_panel(st: &Rc<PanelState>, host: &gtk::Paned) {
+    let w = &st.root; // 文件面板 widget
+    if let Some(old) = w.parent().and_downcast::<gtk::Paned>() {
+        // 旧宿主先把槽位让出来（GTK 顺带把文件面板解除父级）
+        let me = w.upcast_ref::<gtk::Widget>();
+        if old.start_child().as_ref() == Some(me) {
+            old.set_start_child(None::<&gtk::Widget>);
+        } else if old.end_child().as_ref() == Some(me) {
+            old.set_end_child(None::<&gtk::Widget>);
+        }
+    } else if w.parent().is_some() {
+        // 不是 Paned 的父级（少见）⇒ 直接解除父级
+        w.unparent();
+    }
+    host.set_start_child(Some(w));       // 放进新框
+    host.set_position(st.file_w.get());  // 宽度按记忆值复位
+    // ⚠️ **记住新宿主（强引用）**：见 `PanelState::file_host` 的注释——
+    // 宿主页签被关掉时，宿主 Paned 还得活着，文件面板才不会被连带销毁。
+    *st.file_host.borrow_mut() = Some(host.clone());
+}
+
+/// 让宿主的分割条位置**同步回** `file_w`（搬家之后宽度得跟着走）。
+///
+/// ⚠️ **只有当前正托管文件面板的那个框才算数**：别的框 position=0，
+/// 照样写回会把记住的宽度冲成 0（用户下次打开就变成默认宽度了）。
+pub fn track_file_width(st: &Rc<PanelState>, host: &gtk::Paned) {
+    let stw = Rc::downgrade(st);
+    host.connect_notify_local(Some("position"), move |p, _| {
+        let Some(st) = stw.upgrade() else { return };
+        if st.root.parent().as_ref() == Some(p.upcast_ref::<gtk::Widget>()) {
+            st.file_w.set(p.position());
+        }
+    });
 }
 
 /* ---------------- 本地目录记忆 ---------------- */
