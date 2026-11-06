@@ -589,12 +589,17 @@ fn failure_is_conn_dead(st: &Rc<PanelState>) -> bool {
     st.conn_dead.load(std::sync::atomic::Ordering::SeqCst) || !st.conn_ok.get()
 }
 
-/// 安排"重连一次 ⇒ 重试原来的操作"。返回 true = **已安排**（调用方就
+/// 安排"重连一次 ⇒ 重试**这条**操作"。返回 true = **已安排**（调用方就
 /// 别再弹错误框了——重连成功后会接着做，不成功才由重试那次的失败来报）。
 ///
 /// ⚠️ **已经在重连中 ⇒ 不安排**：否则会无限重试（一次失败触发一次重连，
 /// 重连又失败再触发……）。这时候这一次失败照常报错。
-fn schedule_retry(st: &Rc<PanelState>, kind: RetryKind) -> bool {
+///
+/// ⚠️ **为什么由调用方决定"是哪一条"**：失败事件说的是**哪一条**失败了，
+/// 而 `retry_ops` 记的是**最后一次发出去**的那条——两者可能不是同一条
+/// （中间插进来一条后台刷新就会改写它）⇒ 失败事件自带路径的用自带路径，
+/// 不自带的（重命名要知道改成什么名、写文件要知道内容）**核对过再用**。
+fn schedule_retry_op(st: &Rc<PanelState>, op: RetryOp) -> bool {
     if st.connecting.get() {
         return false;
     }
@@ -604,10 +609,6 @@ fn schedule_retry(st: &Rc<PanelState>, kind: RetryKind) -> bool {
         st.retried.set(false);
         return false;
     }
-    let Some(op) = st.retry_ops.borrow().get(&kind).cloned() else {
-        // 没有可重发的操作（不是我们发的那条）⇒ 只能报错
-        return false;
-    };
     *st.pending_retry.borrow_mut() = Some(op);
     st.retried.set(true);
     // ⚠️ **先重连、后写状态**：`on_reconnect` 自己也会写状态（「正在连接
@@ -615,6 +616,33 @@ fn schedule_retry(st: &Rc<PanelState>, kind: RetryKind) -> bool {
     on_reconnect(st);
     set_remote_status(st, State::Warn, tr("连接已断开，正在重新连接…"));
     true
+}
+
+/// 「记住的那条操作」是不是「这次失败的那一条」？
+///
+/// ⚠️ **为什么要核对**：记住的是**最后一次发出去**的那条；两条操作都在路上
+/// 时（用户连着点了两个目录、开了两个文件），失败的可能不是最后那条。
+/// ⇒ 对不上就**不重试**（只能报错）——重试错的那条等于替用户干了一件事
+/// 他没要求的事（读别的文件 / 翻别的目录）。
+///
+/// ⚠️ **纯函数**（好测：不碰 GTK、不连服务器）。
+fn retry_op_matches(op: &RetryOp, path: &str) -> bool {
+    match op {
+        RetryOp::List { path: p } => p == path,
+        RetryOp::Simple { path: p, .. } => p == path,
+        RetryOp::ReadFile { path: p, .. } => p == path,
+        RetryOp::WriteFile { path: p, .. } => p == path,
+    }
+}
+
+/// 取出「记住的那条操作」，**并核对它是不是这次失败的那一条**。
+fn take_retry_op(st: &Rc<PanelState>, kind: RetryKind, path: &str) -> Option<RetryOp> {
+    let op = st.retry_ops.borrow().get(&kind).cloned()?;
+    if retry_op_matches(&op, path) {
+        Some(op)
+    } else {
+        None
+    }
 }
 
 /// 重连成功之后：**把要重试的操作再发一遍**（继续执行原来的操作）。
@@ -1166,7 +1194,13 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 // （用户原话：「在异常处理程序中重连一次，如果还是失败就
                 //  报错，否则就继续执行原来的操作」）。
                 //  ⇒ 这一条**不弹错**：重连成功后会自动重列这个目录。
-                if failure_is_conn_dead(st) && schedule_retry(st, RetryKind::List) {
+                //
+                // ⚠️ **用失败事件自带的 `path`**（不是"记住的那条"）：记住的
+                // 是最后一次发出去的列目录，中间插进来一条后台刷新（目录跟随
+                // / mtime 变化）就会改写它 ⇒ 重试的会变成别的目录。
+                if failure_is_conn_dead(st)
+                    && schedule_retry_op(st, RetryOp::List { path: path.clone() })
+                {
                     return;
                 }
                 dialogs::show_error(
@@ -1200,8 +1234,16 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             }
             if let Err(err) = &result {
                 // ⚠️ 阶段 99：连接断了 ⇒ 重连一次 + 重试同一条操作（不弹错）
-                if failure_is_conn_dead(st) && schedule_retry(st, RetryKind::Simple) {
-                    return;
+                //
+                // ⚠️ **核对是不是同一条**：失败事件只带 path（「重命名」要知道
+                // 改成什么名 ⇒ 只能靠记住的那条）⇒ 两条操作都在路上时可能
+                // 对不上 ⇒ 对不上就不重试（重试错的那条 = 替用户干了别的事）。
+                if failure_is_conn_dead(st) {
+                    if let Some(op) = take_retry_op(st, RetryKind::Simple, &path) {
+                        if schedule_retry_op(st, op) {
+                            return;
+                        }
+                    }
                 }
                 dialogs::show_error(st.topwin().as_ref(), tr("操作失败"), err);
             }
@@ -1219,11 +1261,15 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 st.retried.set(false);
             }
             // ⚠️ 阶段 99：连接断了 ⇒ 重连一次 + 重发这次读（不弹错）
-            if result.is_err()
-                && failure_is_conn_dead(st)
-                && schedule_retry(st, RetryKind::ReadFile)
-            {
-                return;
+            //
+            // ⚠️ **核对是不是同一条**：两个文件同时在读、记住的却是另一个 ⇒
+            // 重发错的那个等于替用户读了另一个文件。
+            if result.is_err() && failure_is_conn_dead(st) {
+                if let Some(op) = take_retry_op(st, RetryKind::ReadFile, &path) {
+                    if schedule_retry_op(st, op) {
+                        return;
+                    }
+                }
             }
             fileedit::on_read(st, id, &path, result);
         }
@@ -1232,11 +1278,15 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 st.retried.set(false);
             }
             // ⚠️ 阶段 99：连接断了 ⇒ 重连一次 + 重发这次写（不弹错）
-            if result.is_err()
-                && failure_is_conn_dead(st)
-                && schedule_retry(st, RetryKind::WriteFile)
-            {
-                return;
+            //
+            // ⚠️ **核对是不是同一条**（同上：写文件要知道内容 ⇒ 只能靠记住
+            // 的那条）⇒ 对不上就不重试（写错的文件比不写更糟）。
+            if result.is_err() && failure_is_conn_dead(st) {
+                if let Some(op) = take_retry_op(st, RetryKind::WriteFile, &path) {
+                    if schedule_retry_op(st, op) {
+                        return;
+                    }
+                }
             }
             fileedit::on_written(st, id, &path, result);
         }
@@ -2167,7 +2217,8 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode, usable_local_dir};
+    use super::{percent_decode, retry_op_matches, usable_local_dir, RetryOp};
+    use crate::panel::worker::SimpleOp;
 
     #[test]
     fn uri_decode() {
@@ -2175,6 +2226,56 @@ mod tests {
         assert_eq!(percent_decode("/a%20b/c"), "/a b/c");
         assert_eq!(percent_decode("/%E4%B8%AD"), "/中");
         assert_eq!(percent_decode("/%zz"), "/%zz"); // 非法序列保留
+    }
+
+    /// **重试的必须是「失败的那一条」**，不是「最后记住的那一条」
+    /// （阶段 99 复查时发现的竞态：中间插进来一条后台刷新会改写记住的那条）。
+    #[test]
+    fn 重试要认准失败的那条操作() {
+        // 路径对得上 ⇒ 可以重试
+        assert!(retry_op_matches(
+            &RetryOp::List {
+                path: "/tmp/a".into()
+            },
+            "/tmp/a"
+        ));
+        assert!(retry_op_matches(
+            &RetryOp::Simple {
+                op: SimpleOp::Rename,
+                path: "/tmp/a".into(),
+                new_path: Some("/tmp/b".into()),
+            },
+            "/tmp/a"
+        ));
+        assert!(retry_op_matches(
+            &RetryOp::ReadFile {
+                id: 1,
+                path: "/tmp/a".into(),
+                max: 1024,
+            },
+            "/tmp/a"
+        ));
+        assert!(retry_op_matches(
+            &RetryOp::WriteFile {
+                id: 1,
+                path: "/tmp/a".into(),
+            },
+            "/tmp/a"
+        ));
+        // 路径对不上 ⇒ **不重试**（重试错的那条 = 替用户干了别的事）
+        assert!(!retry_op_matches(
+            &RetryOp::List {
+                path: "/tmp/b".into()
+            },
+            "/tmp/a"
+        ));
+        assert!(!retry_op_matches(
+            &RetryOp::WriteFile {
+                id: 2,
+                path: "/tmp/b".into(),
+            },
+            "/tmp/a"
+        ));
     }
 
     #[test]
