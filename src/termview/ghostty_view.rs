@@ -115,10 +115,21 @@ mod pangocairo {
 
 /* ---------------- 状态 ---------------- */
 
+/// 控件上挂 State's 的键（从控件反查后端句柄用）。
+const STATE_DATA_KEY: &str = "pp-ghostty-state";
+
+/// 自绘终端控件的 CSS 类（`is_terminal_widget` 靠它认人）。
+///
+/// ⚠️ 不能只靠「是不是 DrawingArea」认——界面上别的 DrawingArea 多的是。
+const TERM_CSS_CLASS: &str = "pp-ghostty-term";
+
 /// 控件的全部可变状态（放在 `Rc` 里，好让 GTK 回调共享）。
 struct State {
-    /// 控件本体（回调里要重画）。
-    area: gtk::DrawingArea,
+    /// 控件本体（**弱引用**）。
+    ///
+    /// ⚠️ 必须是弱的：控件的 data 里存着本 State（`Rc<State>`）⇒
+    /// 强引用会成环（控件 → State → 控件），关掉标签也回收不掉。
+    area: glib::WeakRef<gtk::DrawingArea>,
     /// 终端内核。
     term: RefCell<GhosttyTerm>,
     /// 渲染状态（ghostty 的增量刷新机制）。
@@ -139,6 +150,14 @@ struct State {
     preedit: RefCell<String>,
     /// 光标闪烁相位（true = 画实心光标）。
     cursor_on: Cell<bool>,
+    /// 挂着的 PTY（写给子进程用）。
+    pty: RefCell<Option<crate::platform::pty::PtySession>>,
+    /// 远程标题变化的回调（OSC 0/2）。
+    title_cb: RefCell<Vec<Box<dyn Fn(&str)>>>,
+    /// OSC 7 目录变化的回调。
+    cwd_cb: RefCell<Vec<Box<dyn Fn(&str)>>>,
+    /// 子进程退出的回调。
+    exit_cb: RefCell<Option<Box<dyn Fn(i32)>>>,
 }
 
 impl State {
@@ -156,6 +175,63 @@ impl State {
     /// 重画（GTK 控件那边）。
     fn queue_draw(&self, area: &gtk::DrawingArea) {
         area.queue_draw();
+    }
+
+    /// 重画（控件可能已经没了 ⇒ 取不到就跳过）。
+    fn queue_draw_self(&self) {
+        if let Some(area) = self.area.upgrade() {
+            area.queue_draw();
+        }
+    }
+
+    /// 设置视口大小（**内核与 pty 一起**）。
+    ///
+    /// ⚠️ 两者必须同步：内核决定画几列，pty 决定**远端**以为屏幕多大。
+    /// 不同步 ⇒ 远端一直按旧尺寸排版（画面看着正常其实错位）。
+    fn set_term_size(&self, cols: u16, rows: u16) {
+        let _ = self.term.borrow_mut().set_size(cols, rows);
+        let pty = self.pty.borrow().clone();
+        if let Some(p) = pty {
+            let _ = p.set_size(cols, rows);
+        }
+    }
+
+    /// 写给子进程（pty 在的话）。
+    fn write_to_child(&self, bytes: &[u8]) {
+        let pty = self.pty.borrow().clone();
+        if let Some(p) = pty {
+            let _ = p.write(bytes);
+        }
+    }
+
+    /// 触发「远程标题变了」的回调。
+    ///
+    /// ⚠️ **先把回调取出来再调**（`drain` 出去、调完再放回去）——
+    /// 回调里要是又碰这个 RefCell（比如顺手改标题），直接
+    /// `borrow()` 就会死锁。
+    fn fire_title(&self, title: &str) {
+        let cbs: Vec<Box<dyn Fn(&str)>> = self.title_cb.borrow_mut().drain(..).collect();
+        for cb in &cbs {
+            cb(title);
+        }
+        self.title_cb.borrow_mut().extend(cbs);
+    }
+
+    /// 触发「远程目录变了」的回调。
+    fn fire_cwd(&self, uri: &str) {
+        let cbs: Vec<Box<dyn Fn(&str)>> = self.cwd_cb.borrow_mut().drain(..).collect();
+        for cb in &cbs {
+            cb(uri);
+        }
+        self.cwd_cb.borrow_mut().extend(cbs);
+    }
+
+    /// 触发「子进程退出了」的回调（只报一次）。
+    fn fire_exit(&self, status: i32) {
+        let cb = self.exit_cb.borrow_mut().take();
+        if let Some(cb) = cb {
+            cb(status);
+        }
     }
 }
 
@@ -218,6 +294,7 @@ impl Run {
 /* ---------------- 控件 ---------------- */
 
 /// 自绘的终端控件（DrawingArea + ghostty 内核）。
+#[derive(Clone)]
 pub struct GhosttyView {
     area: gtk::DrawingArea,
     state: Rc<State>,
@@ -240,8 +317,9 @@ impl GhosttyView {
             area.set_cursor(Some(&cur));
         }
 
+        area.add_css_class(TERM_CSS_CLASS);
         let state = Rc::new(State {
-            area: area.clone(),
+            area: glib::object::ObjectExt::downgrade(&area),
             term: RefCell::new(term),
             render: RefCell::new(render),
             rows: RefCell::new(rows),
@@ -252,7 +330,19 @@ impl GhosttyView {
             im: RefCell::new(None),
             preedit: RefCell::new(String::new()),
             cursor_on: Cell::new(true),
+            pty: RefCell::new(None),
+            title_cb: RefCell::new(Vec::new()),
+            cwd_cb: RefCell::new(Vec::new()),
+            exit_cb: RefCell::new(None),
         });
+        // 控件上挂一份 State ⇒ 能从控件反查回后端句柄
+        // （`TermView::from_widget` 要用）。
+        //
+        // SAFETY：State 是 'static 的（只含 GTK 对象与 Rc）⇒ glib 的
+        // data 槽能安全持有它；控件销毁时 glib 会把它 drop 掉。
+        unsafe {
+            area.set_data(STATE_DATA_KEY, state.clone());
+        }
 
         let view = GhosttyView { area, state };
         view.install_draw();
@@ -283,9 +373,37 @@ impl GhosttyView {
     }
 
     /// 把远端来的字节喂给内核（并重画）。
+    ///
+    /// ⚠️ **喂完要把事件取出来**（标题变了、目录变了、响铃……）——
+    /// 不取的话事件队列会一直涨，标题回调也永远不触发。
     pub fn feed(&self, bytes: &[u8]) {
-        self.state.term.borrow_mut().feed(bytes);
+        let events = {
+            let mut term = self.state.term.borrow_mut();
+            term.feed(bytes);
+            term.drain_events()
+        };
+        self.handle_events(events);
         self.area.queue_draw();
+    }
+
+    /// 处理内核排队的事件（标题、目录、响铃……）。
+    fn handle_events(&self, events: Vec<ghostty_vt::terminal::Event>) {
+        use ghostty_vt::terminal::Event;
+        for ev in events {
+            match ev {
+                Event::TitleChanged(title) => {
+                    if !title.is_empty() {
+                        self.state.fire_title(&title);
+                    }
+                }
+                Event::PwdChanged(uri) => {
+                    if !uri.is_empty() {
+                        self.state.fire_cwd(&uri);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// 模拟一次按键（**走的是真实按键回调同一条路**）。
@@ -299,6 +417,224 @@ impl GhosttyView {
     /// 模拟输入法的 commit（**走的是真实 commit 回调同一条路**）。
     pub fn commit_text(&self, text: &str) {
         commit_text(&self.state, text);
+    }
+
+    /* ---------------- 尺寸 / 内容 ---------------- */
+
+    /// 视口行数。
+    pub fn row_count(&self) -> i64 {
+        self.state.term.borrow().row_count()
+    }
+
+    /// 视口列数。
+    pub fn column_count(&self) -> i64 {
+        self.state.term.borrow().column_count()
+    }
+
+    /// 设置视口大小（**并同步给 pty**）。
+    ///
+    /// ⚠️ 远端 ssh 靠 pty 的窗口大小知道屏幕多大 ⇒ 不同步的话，
+    /// 远端会一直按 80×24 排版（画面能看，但不对齐）。
+    pub fn set_size(&self, cols: i64, rows: i64) {
+        self.state
+            .set_term_size(cols.max(1) as u16, rows.max(1) as u16);
+        self.area.queue_draw();
+    }
+
+    /// 光标行号。
+    ///
+    /// ⚠️ **视口内**的行号（内核的 `cursor_y()`）——VTE 那边给的是
+    /// **绝对**行号 ⇒ 两个后端这里语义不同，录制那边要注意。
+    pub fn cursor_row(&self) -> i64 {
+        self.state.term.borrow().cursor_row()
+    }
+
+    /// 回滚缓冲里的行数（屏幕外还存着的历史行）。
+    pub fn scrollback_lines(&self) -> i64 {
+        let t = self.state.term.borrow();
+        (t.total_rows() - t.row_count()).max(0)
+    }
+
+    /// 带样式的屏幕行（每行一段 ANSI）。
+    ///
+    /// ⚠️ **行号是视口内的**（0 起）——ghostty 的 Formatter 只能格式化
+    /// 当前视口，给不了绝对行号区间。
+    pub fn ansi_rows(&self, start: i64, end: i64) -> Vec<String> {
+        let rows = self.state.term.borrow().ansi_rows();
+        let mut out = Vec::new();
+        for i in start..=end {
+            if i < 0 || i as usize >= rows.len() {
+                out.push(String::new());
+            } else {
+                out.push(rows[i as usize].clone());
+            }
+        }
+        out
+    }
+
+    /// 屏幕文字（不带样式）。
+    pub fn screen_text(&self, _rows: i64, _cols: i64) -> String {
+        self.state.term.borrow().screen_text()
+    }
+
+    /// 可见屏幕的文字。
+    ///
+    /// ⚠️ ghostty 侧**总是取得到**（内核里就有屏幕）⇒ 不会返回 `None`。
+    pub fn visible_text(&self) -> Option<String> {
+        Some(self.state.term.borrow().screen_text())
+    }
+
+    /* ---------------- 查找 ---------------- */
+
+    /// 设置查找模式（**普通文本**，不是正则）。
+    pub fn search_set_pattern(&self, text: Option<&str>) {
+        self.state.term.borrow_mut().search_set_pattern(text);
+    }
+
+    /// 找下一个。
+    pub fn search_find_next(&self) -> bool {
+        self.state.term.borrow_mut().search_find_next()
+    }
+
+    /// 找上一个。
+    pub fn search_find_previous(&self) -> bool {
+        self.state.term.borrow_mut().search_find_previous()
+    }
+
+    /* ---------------- 剪贴板 ---------------- */
+
+    /// 复制选区到剪贴板。
+    ///
+    /// ⚠️ **还没做鼠标选区**（内核有 selection 模块，我们没接拖选）
+    /// ⇒ 现在复制的是空选区。
+    pub fn copy_selection(&self) {}
+
+    /// 从剪贴板粘贴。
+    ///
+    /// ⚠️ GTK4 的剪贴板**只能异步读** ⇒ 读完再写给子进程。
+    pub fn paste_clipboard(&self) {
+        let state = self.state.clone();
+        crate::platform::clipboard::read_text(move |text| {
+            if let Some(t) = text {
+                state.write_to_child(t.as_bytes());
+            }
+        });
+    }
+
+    /* ---------------- 子进程 ---------------- */
+
+    /// 接管子进程。
+    ///
+    /// ⚠️ ghostty 后端**不接管**——子进程归 PTY 层管（读线程结束时
+    /// 就知道它没了）⇒ 这里什么都不做。
+    pub fn watch_child(&self) {}
+
+    /// 子进程退出回调（退出时会被调一次）。
+    pub fn connect_child_exited<F: Fn(i32) + 'static>(&self, cb: F) {
+        *self.state.exit_cb.borrow_mut() = Some(Box::new(cb));
+    }
+
+    /// 远程标题变化回调（OSC 0/2）。
+    pub fn connect_title_changed<F: Fn(&str) + 'static>(&self, cb: F) {
+        self.state.title_cb.borrow_mut().push(Box::new(cb));
+    }
+
+    /// OSC 7 目录变化回调（`file://` URI）。
+    pub fn connect_cwd_changed<F: Fn(&str) + 'static>(&self, cb: F) {
+        self.state.cwd_cb.borrow_mut().push(Box::new(cb));
+    }
+
+    /* ---------------- PTY ---------------- */
+
+    /// 把 PTY 交给终端：起读线程把 master 的输出喂给内核。
+    ///
+    /// ⚠️ 与 VTE 后端的区别：**VTE 自己读 master**（`set_pty` 之后），
+    /// ghostty 不碰 PTY ⇒ 这里要自己读。
+    ///
+    /// ⚠️ **读线程结束时 = 子进程没了**（pty 关闭）⇒ 这时上报退出。
+    pub fn attach_pty(&self, pty: &crate::platform::pty::PtySession) {
+        *self.state.pty.borrow_mut() = Some(pty.clone());
+
+        // ⚠️ **pty 的窗口大小要跟终端对齐**：远端 ssh 靠它知道屏幕多大
+        // （不同步 ⇒ 远端一直按 80×24 排版，画面和实际宽度对不上）。
+        {
+            let t = self.state.term.borrow();
+            let _ = pty.set_size(t.column_count().max(1) as u16, t.row_count().max(1) as u16);
+        }
+
+        // worker 线程读 pty ⇒ 事件通道 ⇒ 主线程喂给内核
+        // （glib 0.22 移除了 MainContext::channel，用 async-channel +
+        // 主线程 spawn_local 循环）。
+        let (tx, rx) = async_channel::unbounded::<Vec<u8>>();
+        let state = self.state.clone();
+        if pty
+            .spawn_reader(Box::new(move |bytes| {
+                let _ = tx.send_blocking(bytes.to_vec());
+            }))
+            .is_err()
+        {
+            return;
+        }
+        let area = self.area.clone();
+        glib::MainContext::default().spawn_local(async move {
+            while let Ok(bytes) = rx.recv().await {
+                {
+                    let mut term = state.term.borrow_mut();
+                    term.feed(&bytes);
+                    let events = term.drain_events();
+                    drop(term);
+                    // 事件（标题/目录）要在**主线程**回调 ⇒ 这里直接处理。
+                    for ev in events {
+                        use ghostty_vt::terminal::Event;
+                        match ev {
+                            Event::TitleChanged(t) if !t.is_empty() => state.fire_title(&t),
+                            Event::PwdChanged(u) if !u.is_empty() => state.fire_cwd(&u),
+                            _ => {}
+                        }
+                    }
+                }
+                area.queue_draw();
+            }
+            // 读完了 ⇒ pty 关闭 ⇒ 子进程大概没了
+            state.fire_exit(0);
+        });
+    }
+
+    /// 把**用户敲的字节**写给子进程。
+    pub fn feed_child(&self, bytes: &[u8]) {
+        self.state.write_to_child(bytes);
+    }
+
+    /// 复位（重连时用）。
+    pub fn reset(&self, _hard: bool, _clear: bool) {
+        self.state.term.borrow_mut().reset();
+        self.area.queue_draw();
+    }
+
+    /// 重画。
+    pub fn queue_draw(&self) {
+        self.area.queue_draw();
+    }
+
+    /// 这个控件**是不是一个自绘终端**。
+    pub fn is_terminal_widget(w: &gtk::Widget) -> bool {
+        w.has_css_class(TERM_CSS_CLASS)
+    }
+
+    /// 从控件反查回后端句柄。
+    pub fn from_widget(w: &gtk::Widget) -> Option<Self> {
+        let area = w.downcast_ref::<gtk::DrawingArea>()?;
+        if !area.has_css_class(TERM_CSS_CLASS) {
+            return None;
+        }
+        // SAFETY：data 里存的是 `Rc<State>`（'static）⇒ 指针有效，
+        // 直到控件销毁为止（我们此刻正拿着控件的引用）。
+        let ptr = unsafe { area.data::<Rc<State>>(STATE_DATA_KEY) }?;
+        let state = unsafe { (*ptr.as_ptr()).clone() };
+        Some(GhosttyView {
+            area: area.clone(),
+            state,
+        })
     }
 
     /// 内核的当前屏幕文字（每行一段，去掉行尾空白）。
@@ -399,7 +735,7 @@ impl GhosttyView {
         im.connect_preedit_changed(move |im| {
             let (text, _attrs, _cursor) = im.preedit_string();
             *state2.preedit.borrow_mut() = text.to_string();
-            state2.queue_draw(&state2.area.clone());
+            state2.queue_draw_self();
         });
 
         let im2 = im.clone();
@@ -432,10 +768,16 @@ fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Conte
     let rows = ((area.height() as f64) / cell_h).floor().max(1.0) as u16;
 
     // 3. 尺寸变了就告诉内核（内核会重排屏幕）
+    //
+    // ⚠️ **必须连 pty 一起改**（`set_term_size`）——远端 ssh 靠 pty 的
+    // 窗口大小知道屏幕多大 ⇒ 只改内核的话，远端会一直按旧尺寸排版。
     {
-        let mut term = state.term.borrow_mut();
-        if term.column_count() != cols as i64 || term.row_count() != rows as i64 {
-            let _ = term.set_size(cols, rows);
+        let changed = {
+            let term = state.term.borrow();
+            term.column_count() != cols as i64 || term.row_count() != rows as i64
+        };
+        if changed {
+            state.set_term_size(cols, rows);
         }
     }
 

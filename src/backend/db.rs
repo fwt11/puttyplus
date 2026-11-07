@@ -1666,15 +1666,12 @@ struct SocketDir {
 
 impl SocketDir {
     fn new() -> BackendResult<Self> {
-        use std::os::unix::fs::DirBuilderExt;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!("ppdb-{}-{nanos:09}", std::process::id()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
+        crate::platform::perm::create_private_dir(&path)
             .map_err(|e| BackendError(trf!("创建数据库套接字目录失败: {e}", e = e)))?;
         Ok(Self { path })
     }

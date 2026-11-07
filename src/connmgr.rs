@@ -196,20 +196,14 @@ fn ini_save_to(kf: &glib::KeyFile, path: &std::path::Path) -> bool {
             if std::fs::create_dir_all(dir).is_err() {
                 return false;
             }
-            let _ = std::fs::set_permissions(
-                dir,
-                std::os::unix::fs::PermissionsExt::from_mode(0o700),
-            );
+            let _ = crate::platform::perm::set_private_dir(dir);
         }
     }
     let data = kf.to_data();
     let ok = std::fs::write(path, data.as_bytes()).is_ok();
     if ok {
         // 可能存有明文密码
-        let _ = std::fs::set_permissions(
-            path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        );
+        let _ = crate::platform::perm::set_private_file(path);
     }
     ok
 }
@@ -2527,10 +2521,13 @@ mod tests {
         let data2 = std::fs::read_to_string(&path).unwrap();
         assert!(data2.contains("[conn2]"));
 
-        // 权限 600
-        let mode = std::fs::metadata(&path).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(mode.mode() & 0o777, 0o600);
+        // 权限 600（POSIX 才有这个概念 ⇒ Windows 上跳过）
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&path).unwrap().permissions();
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(mode.mode() & 0o777, 0o600);
+        }
     }
 
     /// 进程内端口映射：独立一把键（inprocess_forwardings），

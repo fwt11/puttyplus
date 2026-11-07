@@ -21,4 +21,11 @@ pub mod exe;
 pub mod locale;
 pub mod notify;
 pub mod paths;
+pub mod perm;
 pub mod pty;
+
+/// Windows 的 ConPTY（伪终端）。
+///
+/// ⚠️ 只有 Windows 编译；别的平台上这个模块是空的。
+#[cfg(windows)]
+pub mod conpty;

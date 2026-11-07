@@ -5,7 +5,6 @@
 
 use std::cell::{Cell, RefCell};
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
 use gtk::gdk;
@@ -435,7 +434,7 @@ impl TermPane {
 
     /// 一个独立终端：独占一条 SSH 连接（分屏的每个 pane 各来一个）。
     pub fn new(opts: &ConnOptions) -> TermPane {
-        let term = TermView::new();
+        let term = new_term_backend();
 
         // ⚠️ 阶段 69：终端字号的**全局默认**（首选项中心 →「终端」页）。
         // 优先级：连接里设的字号 > 全局默认 > 终端内置的 10.5。
@@ -2207,6 +2206,32 @@ fn feed_when_remote_ready(
             glib::ControlFlow::Continue
         },
     );
+}
+
+/// 新建终端后端。
+///
+/// ⚠️ **默认按平台**：Linux 用 VTE（主线，行为零变化），
+/// Windows 用 ghostty 自绘（Windows 没有 VTE）。
+///
+/// ⚠️ `PP_TERM_BACKEND=ghostty` 可**强制**用 ghostty 后端——
+/// Linux 上自测用（`examples/term_reconnect_smoke.rs` 那套冒烟
+/// 换个环境变量就能跑 ghostty 后端）。
+fn new_term_backend() -> TermView {
+    let forced = std::env::var("PP_TERM_BACKEND").unwrap_or_default();
+    if forced.eq_ignore_ascii_case("ghostty") {
+        #[cfg(any(feature = "ghostty", target_os = "windows"))]
+        {
+            return TermView::new_ghostty();
+        }
+        #[cfg(not(any(feature = "ghostty", target_os = "windows")))]
+        {
+            // ⚠️ 说了要用 ghostty 却没编 ⇒ 说清楚，别静默换一个后端
+            eprintln!(
+                "PP_TERM_BACKEND=ghostty 但本次构建没有 ghostty 后端（要 --features ghostty）"
+            );
+        }
+    }
+    TermView::new()
 }
 
 fn spawn_term(inner: &Rc<TermInner>) {

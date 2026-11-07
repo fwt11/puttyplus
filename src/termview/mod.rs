@@ -1,4 +1,4 @@
-//! 终端后端抽象（跨平台版 阶段 C1）。
+//! 终端后端抽象（跨平台版 阶段 C1，阶段 C4 起接上 ghostty 后端）。
 //!
 //! ## 为什么要有这一层
 //!
@@ -21,24 +21,48 @@
 //! - 录制（asciicast）要的是**带样式的行文本**，两个后端的取法不同
 //!   （VTE 给 HTML，ghostty 给 VT 序列）⇒ 这一层统一**产出 ANSI 行**，
 //!   上层拿到的永远是 ANSI（见 [`TermView::ansi_rows`]）。
+//!
+//! ## 两个后端各在哪（阶段 C4）
+//!
+//! | 平台 | 后端 | 依赖 |
+//! |---|---|---|
+//! | Linux | **VTE**（主线，行为零变化） | 系统装 `libvte-2.91-dev` |
+//! | Windows | **ghostty**（自绘） | 编译期要 **Zig 0.17** |
+//!
+//! Linux 上也可以用 `ghostty` 特性**试跑 ghostty 后端**（自测用，
+//! 见 `examples/ghostty_view_smoke.rs`）。
 
+#[cfg(target_os = "linux")]
 pub mod vte;
 
 /// ghostty 终端内核（跨平台版 阶段 C2 起）。
 ///
-/// ⚠️ 需要 `ghostty` 特性（会编译 libghostty-vt ⇒ 要 Zig 0.17）。
-#[cfg(feature = "ghostty")]
+/// ⚠️ Linux 上需要 `ghostty` 特性（会编译 libghostty-vt ⇒ 要 Zig 0.17）；
+/// Windows 上**常驻**（Windows 没有 VTE，终端后端只能是它）。
+#[cfg(any(feature = "ghostty", target_os = "windows"))]
 pub mod ghostty;
 
 /// ghostty 自绘终端控件（跨平台版 阶段 C3 起）。
-///
-/// ⚠️ 需要 `ghostty` 特性。
-#[cfg(feature = "ghostty")]
+#[cfg(any(feature = "ghostty", target_os = "windows"))]
 pub mod ghostty_view;
 
+/// 本程序目前只做了 Linux 与 Windows。
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+compile_error!("目前只支持 Linux 与 Windows（macOS 待在后续版本做）");
+
+#[cfg(target_os = "linux")]
 use gtk::prelude::*;
-use glib::prelude::*;
+#[cfg(target_os = "linux")]
 use vte4::prelude::*;
+#[cfg(any(feature = "ghostty", target_os = "windows"))]
+use gtk::prelude::*;
+#[cfg(any(feature = "ghostty", target_os = "windows"))]
+use gtk::glib::prelude::*;
+
+#[cfg(any(feature = "ghostty", target_os = "windows"))]
+use ghostty_view::GhosttyView;
+#[cfg(any(feature = "ghostty", target_os = "windows"))]
+use ghostty::GhosttyTerm;
 
 /// 终端视图：后端无关的句柄。
 ///
@@ -47,19 +71,40 @@ use vte4::prelude::*;
 #[derive(Clone)]
 pub enum TermView {
     /// Linux：VTE 终端控件。
+    #[cfg(target_os = "linux")]
     Vte(vte4::Terminal),
+    /// Windows（以及 Linux 上的自测）：ghostty 自绘终端。
+    #[cfg(any(feature = "ghostty", target_os = "windows"))]
+    Ghostty(GhosttyView),
 }
 
 impl TermView {
     /// 新建一个终端控件（还没接 PTY、没设外观）。
     pub fn new() -> Self {
-        TermView::Vte(vte4::Terminal::new())
+        // Linux 走 VTE（主线零回归）；其它平台走 ghostty 自绘。
+        #[cfg(target_os = "linux")]
+        {
+            TermView::Vte(vte4::Terminal::new())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            TermView::Ghostty(GhosttyView::new())
+        }
+    }
+
+    /// **新建一个 ghostty 后端的终端**（Windows 默认走这个）。
+    ///
+    /// ⚠️ Linux 上只是给自测用（主线仍然是 VTE）。
+    #[cfg(any(feature = "ghostty", target_os = "windows"))]
+    pub fn new_ghostty() -> Self {
+        TermView::Ghostty(GhosttyView::new())
     }
 
     /// 用**现成的 VTE 终端控件**包一层。
     ///
     /// ⚠️ **Linux 专用**：给那些直接操作 VTE 控件的工具用
     /// （录制比对的 example 等）。跨平台的后端应当用 [`TermView::new`]。
+    #[cfg(target_os = "linux")]
     pub fn from_vte(t: vte4::Terminal) -> Self {
         TermView::Vte(t)
     }
@@ -69,13 +114,28 @@ impl TermView {
     /// 终端控件本体（塞进容器 / 挂控制器都用它）。
     pub fn widget(&self) -> &gtk::Widget {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.upcast_ref::<gtk::Widget>(),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.widget(),
         }
     }
 
     /// 这个控件**是不是一个终端**（快速命令弹层据此决定弹层指向哪）。
     pub fn is_terminal_widget(w: &gtk::Widget) -> bool {
-        w.is::<vte4::Terminal>()
+        #[cfg(target_os = "linux")]
+        {
+            if w.is::<vte4::Terminal>() {
+                return true;
+            }
+        }
+        #[cfg(any(feature = "ghostty", target_os = "windows"))]
+        {
+            if GhosttyView::is_terminal_widget(w) {
+                return true;
+            }
+        }
+        false
     }
 
     /// 从控件反查它所属的终端。
@@ -90,21 +150,41 @@ impl TermView {
     /// });
     /// ```
     pub fn from_widget(w: &gtk::Widget) -> Option<TermView> {
-        w.downcast_ref::<vte4::Terminal>().cloned().map(TermView::Vte)
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(t) = w.downcast_ref::<vte4::Terminal>() {
+                return Some(TermView::Vte(t.clone()));
+            }
+        }
+        #[cfg(any(feature = "ghostty", target_os = "windows"))]
+        {
+            if let Some(v) = GhosttyView::from_widget(w) {
+                return Some(TermView::Ghostty(v));
+            }
+        }
+        None
     }
 
     /// 挂一个事件控制器（按键、手势、焦点……）。
     pub fn add_controller(&self, c: impl IsA<gtk::EventController>) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.add_controller(c),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.area().add_controller(c),
         }
     }
 
     /// 把焦点抢到终端上。
     pub fn grab_focus(&self) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => {
                 t.grab_focus();
+            }
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                v.area().grab_focus();
             }
         }
     }
@@ -112,9 +192,15 @@ impl TermView {
     /// 撑满容器（VTE 必须显式 expand，否则最大化后右边留白）。
     pub fn set_expand(&self, hexpand: bool, vexpand: bool) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => {
                 t.set_hexpand(hexpand);
                 t.set_vexpand(vexpand);
+            }
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                v.area().set_hexpand(hexpand);
+                v.area().set_vexpand(vexpand);
             }
         }
     }
@@ -124,42 +210,89 @@ impl TermView {
     /// 字号与响铃（会话级覆盖）。
     pub fn set_appearance(&self, font_size: Option<f64>, bell: Option<bool>) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::set_appearance(t, font_size, bell),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                // ⚠️ ghostty 后端：字号自己算（响铃暂不支持——内核的
+                // BEL 事件已经在事件流里，应用层要的话自己去取）。
+                let font_env = std::env::var("PUTTYPLUS_FONT").unwrap_or_default();
+                let size = font_size
+                    .or_else(crate::settings::term_font_size)
+                    .unwrap_or(10.5);
+                let font = if font_env.is_empty() {
+                    format!("Monospace {size}")
+                } else {
+                    font_env
+                };
+                v.set_font(gtk::pango::FontDescription::from_string(&font));
+            }
         }
     }
 
     /// 按当前配色方案刷终端配色。
     pub fn apply_colors(&self) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::apply_colors(t),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                // ⚠️ ghostty 自绘用的是**内核自己那套配色**（OSC 改色
+                // 也要生效）⇒ 这里不刷界面主题的配色。
+                v.queue_draw();
+            }
         }
     }
 
     /// 按指定配色方案刷终端配色。
     pub fn apply_palette(&self, p: crate::theme::Palette) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::apply_palette(t, p),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                let _ = p;
+                v.queue_draw();
+            }
         }
     }
 
     /// 鼠标滚到底自动隐藏指针。
     pub fn set_mouse_autohide(&self, on: bool) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.set_mouse_autohide(on),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                // ⚠️ 自绘终端还没有接鼠标 ⇒ 没有「系统指针」可藏。
+                let _ = on;
+                v.queue_draw();
+            }
         }
     }
 
     /// 回滚缓冲行数。
     pub fn set_scrollback_lines(&self, n: i64) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.set_scrollback_lines(n),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                // ⚠️ ghostty 的回滚缓冲是**按字节**限的（内核 Options
+                // 里的 max_scrollback），不是按行 ⇒ 这里只能忽略。
+                let _ = n;
+                v.queue_draw();
+            }
         }
     }
 
     /// 当前回滚缓冲行数（录制时用来判断「行被挤掉了没有」）。
     pub fn scrollback_lines(&self) -> i64 {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.scrollback_lines(),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.scrollback_lines(),
         }
     }
 
@@ -168,21 +301,30 @@ impl TermView {
     /// 把**远端来的字节**喂给终端。
     pub fn feed(&self, bytes: &[u8]) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.feed(bytes),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.feed(bytes),
         }
     }
 
     /// 把**用户敲的字节**写给子进程。
     pub fn feed_child(&self, bytes: &[u8]) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.feed_child(bytes),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.feed_child(bytes),
         }
     }
 
     /// 清屏 / 复位（重连时用）。
     pub fn reset(&self, hard: bool, clear: bool) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.reset(hard, clear),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.reset(hard, clear),
         }
     }
 
@@ -191,21 +333,30 @@ impl TermView {
     /// 行数。
     pub fn row_count(&self) -> i64 {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.row_count(),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.row_count(),
         }
     }
 
     /// 列数。
     pub fn column_count(&self) -> i64 {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.column_count(),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.column_count(),
         }
     }
 
     /// 设置终端尺寸（列 × 行）。
     pub fn set_size(&self, cols: i64, rows: i64) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.set_size(cols, rows),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.set_size(cols, rows),
         }
     }
 
@@ -215,9 +366,16 @@ impl TermView {
     ///
     /// ⚠️ 两个坑（VTE 后端的说明里有）：`cursor_position()` 返回的是
     /// **(列, 行)**，顺序反直觉；行号是**绝对**的。
+    ///
+    /// ⚠️ ghostty 后端给的是**视口内**的行号（内核的 `cursor_y()`）——
+    /// 视口滚下去之后它就不变了。录制那边要的是绝对行号 ⇒ ghostty
+    /// 后端的录制**暂时不准**（阶段 C5 再补）。
     pub fn cursor_row(&self) -> i64 {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::cursor_row(t),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.cursor_row(),
         }
     }
 
@@ -225,16 +383,25 @@ impl TermView {
     ///
     /// ⚠️ **统一产出 ANSI**（不是 HTML）——两个后端的取法不同
     /// （VTE 给 HTML、ghostty 给 VT 序列），但上层（录制/日志）只认 ANSI。
+    ///
+    /// ⚠️ ghostty 后端**只能给视口**（内核的 Formatter 只格式化当前
+    /// 视口）⇒ 区间落在视口外时给空串。
     pub fn ansi_rows(&self, start: i64, end: i64) -> Vec<String> {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::ansi_rows(t, start, end),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.ansi_rows(start, end),
         }
     }
 
     /// 取屏幕文字（粗判「看见提示符了吗」用，不带样式）。
     pub fn screen_text(&self, rows: i64, cols: i64) -> String {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::screen_text(t, rows, cols),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.screen_text(rows, cols),
         }
     }
 
@@ -244,7 +411,10 @@ impl TermView {
     /// 终端日志与 PTY 自动应答都靠它扫屏幕。
     pub fn visible_text(&self) -> Option<String> {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::visible_text(t),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.visible_text(),
         }
     }
 
@@ -253,21 +423,30 @@ impl TermView {
     /// 设置查找模式（**普通文本**，不是正则）。
     pub fn search_set_pattern(&self, text: Option<&str>) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::search_set_pattern(t, text),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.search_set_pattern(text),
         }
     }
 
     /// 找下一个（找到返回 true）。
     pub fn search_find_next(&self) -> bool {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.search_find_next(),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.search_find_next(),
         }
     }
 
     /// 找上一个（找到返回 true）。
     pub fn search_find_previous(&self) -> bool {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.search_find_previous(),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.search_find_previous(),
         }
     }
 
@@ -276,14 +455,24 @@ impl TermView {
     /// 复制选区到剪贴板。
     pub fn copy_selection(&self) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::copy_selection(t),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                // ⚠️ ghostty 的选区还没接（内核有 selection 模块，
+                // 但我们没做鼠标拖选）⇒ 暂时无事可做。
+                v.copy_selection();
+            }
         }
     }
 
     /// 从剪贴板粘贴。
     pub fn paste_clipboard(&self) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::paste_clipboard(t),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.paste_clipboard(),
         }
     }
 
@@ -292,22 +481,34 @@ impl TermView {
     /// 接管子进程（ssh 起来之后调用，让终端知道 pid）。
     pub fn watch_child(&self, pid: glib::Pid) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.watch_child(pid),
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                // ⚠️ ghostty 后端不接管子进程——**我们自己管**（PTY 读
+                // 线程结束时就知道子进程没了）。
+                let _ = pid;
+                v.watch_child();
+            }
         }
     }
 
     /// 子进程退出回调（参数是退出状态码）。
     pub fn connect_child_exited<F: Fn(i32) + 'static>(&self, cb: F) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => {
                 t.connect_child_exited(move |_t, status| cb(status));
             }
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.connect_child_exited(cb),
         }
     }
 
     /// 远程标题变化回调（OSC 0/2）。
     pub fn connect_title_changed<F: Fn(&str) + 'static>(&self, cb: F) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => {
                 t.connect_window_title_notify(move |t| {
                     #[allow(deprecated)]
@@ -317,12 +518,15 @@ impl TermView {
                     }
                 });
             }
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.connect_title_changed(cb),
         }
     }
 
     /// OSC 7 目录变化回调（`file://` URI）。
     pub fn connect_cwd_changed<F: Fn(&str) + 'static>(&self, cb: F) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => {
                 t.connect_termprop_changed(None, move |t, prop| {
                     if prop != "vte.current.directory" {
@@ -336,6 +540,8 @@ impl TermView {
                     }
                 });
             }
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.connect_cwd_changed(cb),
         }
     }
 
@@ -344,16 +550,18 @@ impl TermView {
     /// 把 PTY 交给终端（子进程的输出/输入都走它）。
     ///
     /// ⚠️ **Linux 上必须先接 PTY 再 spawn**（VTE 自己读 master 端）。
+    ///
+    /// ⚠️ ghostty 后端：**ghostty 不碰 PTY** ⇒ 这里要起读线程把
+    /// master 的输出喂给内核，并把 pty 留下来给「写给子进程」用。
     pub fn attach_pty(&self, pty: &crate::platform::pty::PtySession) {
         match self {
+            #[cfg(target_os = "linux")]
             TermView::Vte(t) => {
                 #[cfg(target_os = "linux")]
                 t.set_pty(Some(pty.vte_pty()));
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let _ = pty;
-                }
             }
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => v.attach_pty(pty),
         }
     }
 }

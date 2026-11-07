@@ -248,7 +248,7 @@ fn save_to(path: &std::path::Path, key: &str, p: &DbProfile) -> bool {
         if std::fs::create_dir_all(dir).is_err() {
             return false;
         }
-        let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let _ = crate::platform::perm::set_private_dir(dir);
     }
     let kf = KeyFile::new();
     let _ = kf.load_from_file(path, glib::KeyFileFlags::NONE);
@@ -298,7 +298,7 @@ fn save_to(path: &std::path::Path, key: &str, p: &DbProfile) -> bool {
     if std::fs::write(&tmp, data.as_bytes()).is_err() {
         return false;
     }
-    let _ = std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    let _ = crate::platform::perm::set_private_file(&tmp);
     if std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;

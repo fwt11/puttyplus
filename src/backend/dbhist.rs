@@ -185,7 +185,7 @@ fn write_kf(path: &std::path::Path, kf: &KeyFile) -> bool {
         if std::fs::create_dir_all(dir).is_err() {
             return false;
         }
-        let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let _ = crate::platform::perm::set_private_dir(dir);
     }
     let data = kf.to_data();
     let nanos = std::time::SystemTime::now()
@@ -201,7 +201,7 @@ fn write_kf(path: &std::path::Path, kf: &KeyFile) -> bool {
         return false;
     }
     // 0600：里面可能有密码之类的敏感 SQL
-    let _ = std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    let _ = crate::platform::perm::set_private_file(&tmp);
     if std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;

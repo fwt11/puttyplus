@@ -3003,6 +3003,9 @@ mod tests {
         assert_eq!(d.encode("x\ny\n"), b"x\ny\n");
     }
 
+    /// ⚠️ **POSIX 权限位只有 Unix 有**（Windows 上没有 ⇒ 整个用例
+    /// 只在 Unix 上跑）。
+    #[cfg(unix)]
     #[test]
     fn local_save_is_atomic_and_keeps_mode() {
         use std::os::unix::fs::PermissionsExt;

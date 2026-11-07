@@ -564,24 +564,12 @@ fn write_kf_at(p: &std::path::Path, kf: &glib::KeyFile) -> Result<(), String> {
 
 /// 写文件并保证只有本人可读（unix 下建文件时就是 0600，不留窗口）。
 fn write_private(p: &std::path::Path, data: &[u8]) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(p)
-            .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
-        f.write_all(data)
-            .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(p, data).map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
-    }
+    use std::io::Write;
+    // ⚠️ 平台层负责「建的时候就是 0600」（Unix 留窗口的问题在那边解决）
+    let mut f = crate::platform::perm::open_private_file(p)
+        .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
+    f.write_all(data)
+        .map_err(|e| trf!("写入 {v0} 失败: {e}", e = e, v0 = p.display()))?;
     set_private(p);
     Ok(())
 }

@@ -21,19 +21,26 @@ opt-level = "s"
 default = []
 # 终端第二引擎：libghostty-vt（Ghostty 的终端内核，跨平台都有）。
 #
-# ⚠️ **默认关闭**：Linux 侧终端仍走 VTE（主线零回归），所以日常构建
-# 不需要 Zig，CI 的 Linux job 也一行不用改。Windows 版的终端后端
-# 走这个引擎（阶段 C3 起）。
+# ⚠️ **Linux 上默认关闭**：Linux 侧终端仍走 VTE（主线零回归），所以
+# 日常构建不需要 Zig，CI 的 Linux job 也一行不用改。开了这个特性
+# 就能在 Linux 上**试跑 ghostty 后端**（自测用）。
 #
-# ⚠️ 打开这个特性会**编译 libghostty-vt** ⇒ 需要 **Zig 0.17.x**
-# （ZIG 环境变量或 PATH 里的 `zig`）。详见 `docs/跨平台-构建说明.md`。
+# ⚠️ **Windows 上是常驻的**（见下面的 `[target.'cfg(windows)']` 段）——
+# Windows 没有 VTE，终端后端只能是 ghostty ⇒ Windows 构建**不需要**
+# 额外加特性。
+#
+# ⚠️ 编译 libghostty-vt 需要 **Zig 0.17.x**（ZIG 环境变量或 PATH 里的
+# `zig`）。详见 `docs/跨平台-构建说明.md`。
 ghostty = ["dep:ghostty-vt"]
 
 [dependencies]
 gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
 glib = "0.22"
-vte4 = { version = "0.10", features = ["v0_80"] }
 # libghostty-vt 的安全封装（FFI 细节由 src/termview/ghostty.rs 封死）
+#
+# ⚠️ **Linux 上是可选的**（`ghostty` 特性才编 ⇒ 才需要 Zig）；
+# **Windows 上是常驻的**（见下面的 `[target.'cfg(windows)']` 段）——
+# Windows 没有 VTE，终端后端只能是它。
 ghostty-vt = { version = "0.8", optional = true }
 russh = { version = "0.63", default-features = false, features = ["rsa", "flate2", "ring"] }
 russh-sftp = "3.0"
@@ -58,6 +65,24 @@ tokio-postgres = "0.7"
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 futures-util = { version = "0.3", default-features = false }
 
+# VTE 只在 Linux 上有（libvte 2.91 是 Linux 专属的 GTK 库）⇒
+# 依赖按平台收口。Windows 上编译不过 vte4-sys（它要找系统的 vte-2.91）。
+[target.'cfg(target_os = "linux")'.dependencies]
+vte4 = { version = "0.10", features = ["v0_80"] }
+
+# Windows：终端后端是 ghostty（常驻）+ ConPTY 的 Win32 调用。
+[target.'cfg(windows)'.dependencies]
+ghostty-vt = "0.8"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_SystemServices",
+] }
+
 # 终端内核冒烟（阶段 C2）：只有开了 `ghostty` 特性才编（需要 Zig 0.17）
 [[example]]
 name = "ghostty_vt_smoke"
@@ -67,4 +92,9 @@ required-features = ["ghostty"]
 # 自绘终端控件冒烟（阶段 C3）：需要 `ghostty` 特性（要 Zig 0.17）
 [[example]]
 name = "ghostty_view_smoke"
+required-features = ["ghostty"]
+
+# ghostty 后端的真会话冒烟（阶段 C4）：需要 `ghostty` 特性（要 Zig 0.17）
+[[example]]
+name = "ghostty_session_smoke"
 required-features = ["ghostty"]

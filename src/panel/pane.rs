@@ -338,7 +338,6 @@ fn update_name_scroll(
 
 /// 读取本地目录并按名称排序（目录优先由 ListStore 排序函数处理）。
 pub fn read_local_dir(cwd: &str) -> Result<Vec<RowData>, String> {
-    use std::os::unix::fs::MetadataExt;
     let rd = std::fs::read_dir(cwd).map_err(|e| format!("{e}"))?;
     let mut rows = Vec::new();
     for ent in rd.flatten() {
@@ -346,9 +345,13 @@ pub fn read_local_dir(cwd: &str) -> Result<Vec<RowData>, String> {
         let Ok(md) = ent.metadata() else { continue };
         let is_dir = md.is_dir();
         rows.push(RowData {
-            perm: crate::backend::perm_string(md.mode(), is_dir, false),
+            perm: crate::backend::perm_string(
+                crate::platform::perm::mode_of(&md),
+                is_dir,
+                false,
+            ),
             hidden: name.starts_with('.'),
-            mtime: md.mtime(),
+            mtime: crate::platform::perm::mtime_of(&md),
             size: if is_dir { 0 } else { md.len() },
             name,
             is_dir,
