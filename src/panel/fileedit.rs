@@ -114,6 +114,13 @@ pub struct FileEdit {
     /// 当前是否只读（= 用户选查看 或 内容不是合法 UTF-8）
     readonly: Cell<bool>,
     view: gtk::TextView,
+    /// 正文区（行号栏 + 正文，阶段 105）。
+    ///
+    /// 载入中时它**整个藏起来**，换成占位提示；内容到了再放回来。
+    body: gtk::Widget,
+    /// **载入占位层**（阶段 105）：内容还没到的这段时间里盖在正文上的
+    /// 提示盒（转圈 + 一句话）。读完（或读失败）后这一层被摘掉。
+    placeholder: RefCell<Option<Rc<Placeholder>>>,
     buffer: gtk::TextBuffer,
     /// 行号栏（左边的窄条）
     gutter: gtk::TextView,
@@ -255,6 +262,103 @@ impl Decoded {
     }
 }
 
+/// 载入占位层（阶段 105）。
+///
+/// **为什么需要它**：双击远程文件后，内容要等 SFTP 读回来才有；文件大
+/// 或者网速慢时这段等待可以是几十秒。以前这段等待里界面**一点变化都没有**
+/// —— 用户双击完看到的还是原封不动的文件列表，很容易以为"双击没生效"
+/// 于是又点一遍（于是发两次请求）。
+///
+/// 现在先开一个占位页（转圈 + 「正在读取 xxx…」），内容到了自动换成正文。
+struct Placeholder {
+    /// 占位盒（Overlay 的 overlay 子控件）
+    box_: gtk::Box,
+    /// 转圈（读失败时要停下来）
+    spinner: gtk::Spinner,
+    /// 提示文字
+    label: gtk::Label,
+}
+
+/// 建载入占位层：转圈 + 一句提示。
+fn build_placeholder(msg: &str) -> Placeholder {
+    // ⚠️ **盒子要铺满**（hexpand/vexpand）：Overlay 的 overlay 子控件默认
+    // 按内容取大小，不铺满的话底下那块空 TextView 会在旁边露出来，
+    // 看着像"编辑器已经打开了但是空的"。
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    box_.set_hexpand(true);
+    box_.set_vexpand(true);
+    box_.add_css_class("pp-placeholder");
+
+    // 内容居中：单独一层 —— 盒子自己得铺满，不能靠它居中
+    let inner = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    inner.set_halign(gtk::Align::Center);
+    inner.set_valign(gtk::Align::Center);
+
+    let spinner = gtk::Spinner::new();
+    spinner.set_spinning(true);
+    spinner.set_size_request(32, 32);
+
+    let label = gtk::Label::new(Some(msg));
+    label.add_css_class("pp-hint");
+    label.set_wrap(true);
+    label.set_justify(gtk::Justification::Center);
+    label.set_max_width_chars(48);
+
+    inner.append(&spinner);
+    inner.append(&label);
+    box_.append(&inner);
+    Placeholder { box_, spinner, label }
+}
+
+/// 摘掉载入占位层（阶段 105）：内容到了就调它。
+fn drop_placeholder(e: &Rc<FileEdit>) {
+    let Some(ph) = e.placeholder.borrow_mut().take() else {
+        return;
+    };
+    // 正文放回来，占位盒摘掉
+    e.body.set_visible(true);
+    ph.box_.unparent();
+}
+
+/// 占位层改成失败提示（阶段 105）：转圈停掉、文字换成错误。
+///
+/// 别让用户对着一个永远在转圈的页面发呆 —— 那看着像"还在慢慢传"，
+/// 实际上早就失败了。
+fn fail_placeholder(e: &Rc<FileEdit>, err: &str) {
+    let ph = e.placeholder.borrow();
+    let Some(ph) = ph.as_ref() else { return };
+    ph.spinner.set_spinning(false);
+    ph.label.set_text(&trf!("读取失败：{v0}", v0 = err));
+    ph.label.add_css_class("pp-err-text");
+}
+
+/// 冒烟用：某个路径的编辑器现在处于什么状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadState {
+    /// 没有这个编辑器
+    Absent,
+    /// 还在载入（占位层还在；参数是提示文字）
+    Loading(String),
+    /// 内容已经到位
+    Loaded,
+}
+
+/// 冒烟用：查某个路径的载入状态。
+pub fn load_state(st: &Rc<PanelState>, path: &str) -> LoadState {
+    let e = st
+        .file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .cloned();
+    let Some(e) = e else { return LoadState::Absent };
+    let ph = e.placeholder.borrow();
+    match ph.as_ref() {
+        Some(p) => LoadState::Loading(p.label.text().to_string()),
+        None => LoadState::Loaded,
+    }
+}
+
 /// 可疑二进制：NUL、UTF-16 BOM，或控制字符占比超过 30%。
 /// 只看前 8 KiB——看全部反而会被文件中段的一小段二进制误伤。
 fn looks_binary(data: &[u8]) -> bool {
@@ -309,6 +413,27 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         return;
     }
     let id = next_id();
+
+    // 阶段 105：**先开一个占位页**，再去发请求。
+    //
+    // 以前这里是「发请求 → 等回包 → 才建页」，中间这段时间界面一点变化都
+    // 没有。文件大或者网速慢时这段等待能到几十秒 ⇒ 用户双击完看到的还是
+    // 原封不动的列表，很容易以为双击没生效（于是又点一遍，发两次请求）。
+    //
+    // 现在立刻开页：转圈 + 「正在读取 xxx…」，内容到了自动换成正文。
+    let dec = Decoded::decode(b"");
+    let e = build(
+        st,
+        id,
+        true,
+        path,
+        readonly,
+        &dec,
+        Some(&trf!("正在读取 {v0}…", v0 = path_basename(path))),
+    );
+    st.file_edits.borrow_mut().push(Rc::clone(&e));
+    attach_tab(st, &e);
+
     st.pending_file_reads.borrow_mut().insert(id, readonly);
     // ⚠️ **先记下"怎么重发"**（阶段 99）：断线失败时要靠它重试同一次读
     super::remember_retry(
@@ -329,6 +454,8 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         },
     ) {
         st.pending_file_reads.borrow_mut().remove(&id);
+        // 发出去了又失败了：占位层直接改成失败提示（别留个永远转圈的页）
+        fail_placeholder(&e, &tr("SFTP 尚未连接，无法读取远程文件。"));
         dialogs::show_error(
             st.topwin().as_ref(),
             tr("无法打开文件"),
@@ -347,8 +474,15 @@ pub fn on_read(st: &Rc<PanelState>, id: u64, path: &str, result: Result<Vec<u8>,
         e.loading.set(false);
         // 重新载入期间视图被临时锁成只读；失败时要恢复原可写性，
         // 不能因为一次读取失败就把编辑器永久锁住
-        e.view.set_editable(!e.readonly.get());
-        e.view.set_cursor_visible(!e.readonly.get());
+        //
+        // ⚠️ **占位页例外**（阶段 105）：那是"首次打开"，底下还是空的 ——
+        // 此刻放开编辑，用户敲进去的字会被回包整段覆盖掉。继续锁着，
+        // 由 `apply_bytes` 在内容到位后按真正的只读状态恢复。
+        let placeholder = e.placeholder.borrow().is_some();
+        if !placeholder {
+            e.view.set_editable(!e.readonly.get());
+            e.view.set_cursor_visible(!e.readonly.get());
+        }
         update_ui(e);
     }
     match result {
@@ -362,6 +496,11 @@ pub fn on_read(st: &Rc<PanelState>, id: u64, path: &str, result: Result<Vec<u8>,
             }
         }
         Err(err) => {
+            // 阶段 105：占位层改成失败提示（转圈停掉 + 红字）——
+            // 别让用户对着一个永远在转圈的页面发呆。
+            if let Some(e) = &existing {
+                fail_placeholder(e, &err);
+            }
             let parent = existing
                 .as_ref()
                 .map(|e| e.win.clone())
@@ -574,6 +713,9 @@ fn apply_bytes(
         e.loading.set(true);
         e.buffer.set_text(&dec.text);
         e.loading.set(false);
+        // 阶段 105：内容到了 ⇒ 占位层（首次打开时的「正在读取…」）摘掉，
+        // 正文露出来。
+        drop_placeholder(&e);
         e.dirty.set(false);
         e.size.set(dec.bytes);
         // 重新载入可能换了语言（同一个路径，内容变了）
@@ -590,7 +732,7 @@ fn apply_bytes(
         return Ok(());
     }
 
-    let e = build(st, id, remote, path, base_readonly, &dec);
+    let e = build(st, id, remote, path, base_readonly, &dec, None);
     st.file_edits.borrow_mut().push(Rc::clone(&e));
     attach_tab(st, &e);
     e.buffer.place_cursor(&e.buffer.start_iter());
@@ -716,6 +858,9 @@ fn build(
     path: &str,
     base_readonly: bool,
     dec: &Decoded,
+    // **载入提示**（阶段 105）：`Some(文案)` = 这是个**占位页**，正文还没
+    // 到，先盖一层「正在读取…」。`None` = 内容已经在手上，直接开正文。
+    pending: Option<&str>,
 ) -> Rc<FileEdit> {
     // **宿主窗口 = 主窗口**（阶段 12：编辑器不再是独立窗口了）。
     // 对话框（未保存确认、保存失败…）挂在它下面。
@@ -898,6 +1043,12 @@ fn build(
     view.add_css_class("pp-editor");
     let buffer = view.buffer();
     buffer.set_enable_undo(true);
+    // ⚠️ **占位页不许编辑**（阶段 105）：底下是空的，能敲字的话用户会以为
+    // 在编辑文件 —— 而他敲的内容马上会被回包整段覆盖掉。
+    if pending.is_some() {
+        view.set_editable(false);
+        view.set_cursor_visible(false);
+    }
 
     // ---- 行号栏 ----
     // 单独一个 TextView，靠"影子字符"把行高撑成和正文一致（见 rebuild_gutter）。
@@ -1008,9 +1159,27 @@ fn build(
         gutter.add_controller(sc);
     }
 
+    // ---- 正文区 ----
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.append(&gutter_sw);
     row.append(&sw);
+
+    // ⚠️ **占位页把正文整块藏起来**（阶段 105）：首次打开远程文件时内容
+    // 还在路上，得先显示一层「正在读取…」。
+    //
+    // ⚠️ **别用 Overlay 浮在正文上面**：Overlay 的 overlay 子控件按**自然
+    // 尺寸**摆（不铺满），于是左边的行号栏会露出来（上面还挂着个「1」），
+    // 看着像"已经打开了一个空文件"。直接顶替掉正文的位置最干净。
+    let placeholder = match pending {
+        Some(msg) => {
+            let ph = build_placeholder(msg);
+            row.set_visible(false);
+            // 插在提示条下面、正文原来的位置
+            root.insert_child_after(&ph.box_, Some(&notice));
+            Some(Rc::new(ph))
+        }
+        None => None,
+    };
     root.append(&row);
 
     let status = gtk::Label::new(None);
@@ -1069,6 +1238,8 @@ fn build(
         base_readonly,
         readonly: Cell::new(base_readonly || !dec.valid_utf8),
         view: view.clone(),
+        body: row.clone().upcast(),
+        placeholder: RefCell::new(placeholder),
         buffer: buffer.clone(),
         gutter,
         gutter_scroll: gutter_sw.clone(),
@@ -1124,7 +1295,11 @@ fn build(
     // 先塞文本，再把 loading 放下，避免 set_text 触发 dirty
     e.buffer.set_text(&dec.text);
 
-    e.loading.set(false);
+    // ⚠️ **占位页保持 loading**（阶段 105）：状态栏要显示「正在载入…」，
+    // 关闭时的检查也靠它（见 attach_tab 的 on_close）。
+    if pending.is_none() {
+        e.loading.set(false);
+    }
     // 语言判定 + 行号 + 高亮
     e.lang.set(Lang::detect(path, first_line(&dec.text)));
     rebuild_gutter(&e);

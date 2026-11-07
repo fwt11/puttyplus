@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1665] = [
+pub static EN: [(&str, &str); 1667] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1138,6 +1138,7 @@ pub static EN: [(&str, &str); 1665] = [
     ("正在扫描本地与远程目录…", "Scanning the local and remote directories…"),
     ("正在搜索「{kw}」…", "Searching for \"{kw}\"…"),
     ("正在改表结构…", "Changing the table structure…"),
+    ("正在读取 {v0}…", "Reading {v0}…"),
     ("正在读取表结构…", "Reading the table structure…"),
     ("正在读定义…", "Reading the definition…"),
     ("正在读表结构…", "Reading the table structure…"),
@@ -1453,6 +1454,7 @@ pub static EN: [(&str, &str); 1665] = [
     ("读取 {v0} 失败：{x}", "Failed to read {v0}: {x}"),
     ("读取临时目录失败：{e}", "Failed to read the temporary directory: {e}"),
     ("读取凭据库失败: {e}", "Failed to read the credential vault: {e}"),
+    ("读取失败：{v0}", "Failed to read: {v0}"),
     ("读取文件失败：{e}", "Failed to read the file: {e}"),
     ("读取本地数据库桥接端口失败: {e}", "Failed to read the local database bridge port: {e}"),
     ("读取本地目录失败", "Failed to read the local directory"),
