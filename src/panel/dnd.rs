@@ -48,6 +48,8 @@ use std::time::Duration;
 use gtk::gdk;
 use gtk::prelude::*;
 
+use super::xdnd11;
+
 /// 远程路径行用的自定义 mime（拖拽源用）。
 pub const REMOTE_MIME: &str = "application/x-puttyplus-remote";
 
@@ -182,6 +184,16 @@ where
     let dst = gtk::DropTargetAsync::new(None, gdk::DragAction::COPY);
     let on_result = Rc::new(on_result);
 
+    // 弱引用拿回控件：X11 直读要知道「收到拖放的窗口」是谁（落点窗口）。
+    //
+    // ⚠️ 抓**强引用**就是「控件 → 控制器 → 闭包 → 控件」的**引用环**，
+    // 控件永远释放不掉（AGENTS.md 的红线）。
+    let weak_widget: glib::WeakRef<gtk::Widget> = {
+        let mut wr = glib::WeakRef::new();
+        wr.set(Some(w));
+        wr
+    };
+
     dst.connect_accept(move |_d, drop| formats_satisfy(&drop.formats(), want));
 
     // 告诉源「我接受复制」——不接的话源会当场把拖拽撤了。
@@ -212,6 +224,24 @@ where
 
         match want {
             Want::Files => {
+                // ★ 先走 **X11 直读**（见 `xdnd11` 的说明）：GDK4 的读法用
+                //   「隐藏 leader 窗口 + CurrentTime」去问源端，老式源端
+                //   （Deepin 文件管理器 = Qt5）会**直接拒绝** ⇒ 一个字节都
+                //   拿不到。自己按 XDND 惯例再问一次就能拿到。
+                //
+                // 只在「确实有跨进程拖拽」时才会真等（程序内部拖拽时选区没有
+                // 持有者，`xdnd11` 会立刻返回 `None`），不会拖慢内部拖拽。
+                if let Some(text) = weak_widget
+                    .upgrade()
+                    .and_then(|w| xdnd11::read_uri_list(&w))
+                {
+                    let paths = parse_uri_list(&text);
+                    if !paths.is_empty() && !done.replace(true) {
+                        on_result(DropResult::Paths(paths));
+                        drop_finish.finish(gdk::DragAction::COPY);
+                        return true;
+                    }
+                }
                 // 本地文件：读原始的 `text/uri-list`。
                 //
                 // ⚠️ 不用 `GdkFileList` 类型：那个类型靠 GDK 的反序列化表

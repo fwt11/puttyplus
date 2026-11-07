@@ -31,6 +31,7 @@ pub mod relayui;
 pub mod sessopt;
 pub mod syntax;
 pub mod worker;
+pub mod xdnd11;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -2115,10 +2116,10 @@ pub fn enable_drop_upload(st: &Rc<PanelState>, term: &vte4::Terminal) {
 
 /// 「粘贴上传」：把**剪贴板里的本地文件**传到当前远程目录。
 ///
-/// **为什么要有它**：X11 的拖拽传文件依赖源程序提供选区数据，而 Deepin
-/// 文件管理器（Qt）**声明了类型却不提供数据**（详见 `clipfiles` 模块的
-/// 说明）⇒ 拖不进去是源侧的限制。但它的**剪贴板是好的**（复制文件后
-/// 剪贴板里有 `text/uri-list`），所以这条路一定走得通。
+/// **为什么要有它**：X11 的拖拽传文件依赖源程序提供选区数据，而源程序
+/// （Deepin 文件管理器 = Qt）**挑问法**（详见 `xdnd11` 模块的说明）。
+/// 拖拽这条路万一不通，还有剪贴板这条更直白的路 —— 而且它的**剪贴板是
+/// 好的**（复制文件后剪贴板里有 `text/uri-list`）。
 pub fn on_paste_upload(st: &Rc<PanelState>) {
     let weak = Rc::downgrade(st);
     clipfiles::read_local_paths(move |paths| {

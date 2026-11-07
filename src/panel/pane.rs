@@ -897,10 +897,10 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
     if remote {
         // 「粘贴上传」：把**剪贴板里的本地文件**传到当前远程目录。
         //
-        // **为什么需要它**：X11 的拖拽传文件要源程序提供选区数据，而
-        // Deepin 文件管理器（Qt）声明了类型却**从不提供数据** ⇒ 拖不进去
-        // 是源侧的限制。但它的剪贴板是好的（复制文件后剪贴板里有
-        // `text/uri-list`），所以这条路一定走得通。
+        // **为什么要有它**：X11 的拖拽传文件要源程序提供选区数据，而 Deepin
+        // 文件管理器（Qt）**挑问法**（时间戳或请求方窗口要对得上，见
+        // `super::xdnd11` 的说明）。拖拽这条路万一不通，还有剪贴板这条
+        // 更直白的路：`Ctrl+C` 复制 → 这里粘贴上传。
         let b = add("edit-paste-symbolic", tr("粘贴上传"), false);
         b.set_tooltip_text(Some(tr("把剪贴板里的本地文件上传到远程当前目录")));
         let st2 = Rc::clone(st);
