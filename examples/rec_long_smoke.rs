@@ -61,7 +61,7 @@ fn main() {
 
     // 基线：开始录制时的光标行号
     pump(Instant::now() + Duration::from_millis(300));
-    let mut prev_row = term::cursor_row(&t);
+    let mut prev_row = puttyplus::termview::vte::cursor_row(&t);
     let mut captured: Vec<String> = Vec::new();
     let mut polls = 0usize;
 
@@ -70,11 +70,11 @@ fn main() {
     while Instant::now() < deadline {
         pump(Instant::now() + Duration::from_millis(250));
         polls += 1;
-        let cur = term::cursor_row(&t);
+        let cur = puttyplus::termview::vte::cursor_row(&t);
         if cur <= prev_row {
             continue;
         }
-        captured.extend(term::ansi_rows(&t, prev_row, cur - 1));
+        captured.extend(puttyplus::termview::vte::ansi_rows(&t, prev_row, cur - 1));
         prev_row = cur;
     }
 

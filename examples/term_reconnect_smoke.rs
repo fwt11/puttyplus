@@ -51,11 +51,7 @@ fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
 /// **范围要给得宽松**：终端没被 realize 时 VTE 的行列数是 0，按实际行列
 /// 取就只有 1×1 的内容；这里直接要 200 行 × 400 列，让 VTE 自己裁剪。
 fn screen_text(pane: &TermPane) -> String {
-    let term = pane.terminal();
-    match term.text_range_format(vte4::Format::Text, 0, 0, 199, 399).0 {
-        Some(t) => t.to_string(),
-        None => String::new(),
-    }
+    pane.terminal().screen_text(200, 400)
 }
 
 /// 屏幕上有没有 shell 提示符。
@@ -190,12 +186,7 @@ fn subtab_rebuild_case(opts: &ConnOptions) {
     // 重建出来的终端是活的：自己会 spawn 一条 SSH 会话，出提示符才算数
     let again = wait_until(25_000, || {
         tabs.current_terminal()
-            .map(|t| {
-                t.text_range_format(vte4::Format::Text, 0, 0, 199, 399)
-                    .0
-                    .map(|s| has_prompt(&s.to_string()))
-                    .unwrap_or(false)
-            })
+            .map(|t| has_prompt(&t.screen_text(200, 400)))
             .unwrap_or(false)
     });
     assert!(again, "重建后的终端没有建立会话");

@@ -14,7 +14,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use vte4::prelude::*;
 
 use crate::settings::{self, QuickCmd};
 
@@ -137,7 +136,7 @@ fn quote_arg(v: &str) -> String {
 /* ---------------- 发送 ---------------- */
 
 /// 把一行命令发到指定终端（末尾补换行）。
-fn send_to_terminal(term: &vte4::Terminal, line: &str) {
+fn send_to_terminal(term: &crate::termview::TermView, line: &str) {
     let line = line.trim_end();
     if line.is_empty() {
         return;
@@ -146,7 +145,7 @@ fn send_to_terminal(term: &vte4::Terminal, line: &str) {
 }
 
 /// 点一条命令：没占位符直接发，有占位符先问参数。
-fn run(st: &Rc<PanelState>, term: &vte4::Terminal, c: &QuickCmd) {
+fn run(st: &Rc<PanelState>, term: &crate::termview::TermView, c: &QuickCmd) {
     let ph = parse_placeholders(&c.cmd);
     if ph.is_empty() {
         send_to_terminal(term, &c.cmd);
@@ -226,11 +225,11 @@ fn run(st: &Rc<PanelState>, term: &vte4::Terminal, c: &QuickCmd) {
 ///
 /// `term` 是命令最终要敲进去的终端（分屏后是当前活动那一块），
 /// `anchor` 只是弹层的锚点控件（标签头按钮 / 终端本身）。
-pub fn open_popover(st: &Rc<PanelState>, term: &vte4::Terminal, anchor: &gtk::Widget) {
+pub fn open_popover(st: &Rc<PanelState>, term: &crate::termview::TermView, anchor: &gtk::Widget) {
     let pop = crate::menu::popover(anchor);
     // 快捷键（Ctrl+Shift+K）的锚点是整个终端。不指定位置的话 GTK 会按终端
     // 底边摆，弹层跑到窗口最下面；固定到终端左上角，视觉上仍贴着标签栏。
-    if anchor.downcast_ref::<vte4::Terminal>().is_some() {
+    if crate::termview::TermView::is_terminal_widget(anchor) {
         pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(8, 8, 1, 1)));
     }
     let vbox = crate::menu::body();

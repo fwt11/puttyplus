@@ -21,3 +21,4 @@ pub mod exe;
 pub mod locale;
 pub mod notify;
 pub mod paths;
+pub mod pty;

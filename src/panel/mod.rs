@@ -154,7 +154,7 @@ pub struct PanelState {
     /// 认证优先级（2.2）；同上，重连时随 Connect 下发
     pub auth_order: Cell<crate::args::AuthOrder>,
     /// 本标签的终端（会话选项对话框要即时改字号/响铃）
-    pub term: RefCell<Option<vte4::Terminal>>,
+    pub term: RefCell<Option<crate::termview::TermView>>,
     pub exec_fail: Cell<i32>,
     pub follow_poll_dead: Cell<bool>,
     pub follow_last: RefCell<Option<String>>,
@@ -734,7 +734,7 @@ pub fn set_term_spawn(st: &Rc<PanelState>, t: i64) {
 
 /// 把本标签的终端交给面板：会话选项对话框要即时改字号/响铃，
 /// 不用穿过 Tabs 再回来。
-pub fn set_term(st: &Rc<PanelState>, term: &vte4::Terminal) {
+pub fn set_term(st: &Rc<PanelState>, term: &crate::termview::TermView) {
     *st.term.borrow_mut() = Some(term.clone());
 }
 
@@ -1965,7 +1965,7 @@ pub fn on_open_session_opts(st: &Rc<PanelState>) {
 }
 
 /// 快速命令入口（标签头按钮 / Ctrl+Shift+K）：把命令敲进 `term` 那个终端。
-pub fn on_open_quickcmds(st: &Rc<PanelState>, term: &vte4::Terminal, anchor: &gtk::Widget) {
+pub fn on_open_quickcmds(st: &Rc<PanelState>, term: &crate::termview::TermView, anchor: &gtk::Widget) {
     quickcmd::open_popover(st, term, anchor);
 }
 
@@ -2210,10 +2210,10 @@ pub fn on_drop_result(st: &Rc<PanelState>, res: dnd::DropResult) {
 /// ⚠️ 闭包只抓**弱引用**：拖放控制器挂在终端上，终端属于 PanelState 的
 /// 控件树；抓强引用就是「PanelState → 终端 → 控制器 → PanelState」
 /// 的**引用环**，面板永远释放不掉（AGENTS.md 的红线）。
-pub fn enable_drop_upload(st: &Rc<PanelState>, term: &vte4::Terminal) {
+pub fn enable_drop_upload(st: &Rc<PanelState>, term: &crate::termview::TermView) {
     let weak = Rc::downgrade(st);
     dnd::attach(
-        term.upcast_ref::<gtk::Widget>(),
+        term.widget(),
         dnd::Want::Files,
         move |res| {
             let Some(st) = weak.upgrade() else { return };

@@ -14,7 +14,6 @@ use std::time::Instant;
 
 use gtk::gio;
 use gtk::prelude::*;
-use vte4::prelude::*;
 
 use crate::replay::{self, Cast, EventKind};
 use crate::i18n::tr;
@@ -121,7 +120,7 @@ pub fn open(path: &Path) -> Result<(), String> {
 
 struct Player {
     cast: Cast,
-    term: vte4::Terminal,
+    term: crate::termview::TermView,
     /// 下一条要处理的事件下标
     idx: Cell<usize>,
     playing: Cell<bool>,
@@ -360,12 +359,11 @@ fn build(path: &Path, cast: Cast) {
         win.set_transient_for(Some(&p));
     }
 
-    let term = vte4::Terminal::new();
-    term.set_hexpand(true);
-    term.set_vexpand(true);
+    let term = crate::termview::TermView::new();
+    term.set_expand(true, true);
     term.set_scrollback_lines(0);
-    crate::term::apply_colors(&term);
-    crate::term::set_appearance(&term, None, None);
+    term.apply_colors();
+    term.set_appearance(None, None);
     term.set_size(cast.cols, cast.rows);
 
     let play_btn = gtk::Button::with_label(tr("▶ 播放"));
@@ -449,7 +447,7 @@ fn build(path: &Path, cast: Cast) {
     root.append(&bar);
     let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
     root.append(&sep);
-    root.append(&term);
+    root.append(term.widget());
     root.append(&sep);
     root.append(&input_lbl);
 

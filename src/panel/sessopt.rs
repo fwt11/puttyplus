@@ -157,7 +157,7 @@ pub fn open(st: &Rc<PanelState>) {
         st2.auth_order.set(ov.auth_order.unwrap_or_default());
         if let Some(term) = st2.term.borrow().as_ref() {
             // 字号留空 = 沿用连接的默认值 ⇒ 用当前生效值兜底（阶段 69 之二）
-            crate::term::set_appearance(term, font.or(st2.opts.font_size), ov.bell);
+            term.set_appearance(font.or(st2.opts.font_size), ov.bell);
         }
         dlg.destroy();
     });

@@ -12,11 +12,11 @@ use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
-use vte4 as vte;
-use vte4::prelude::*;
 
 use crate::args::ConnOptions;
 use crate::menu;
+use crate::platform::pty::PtySession;
+use crate::termview::TermView;
 use crate::util::find_program_in_path;
 use crate::i18n::tr;
 use crate::trf;
@@ -274,7 +274,7 @@ pub enum ReadyCmd {
 }
 
 pub(crate) struct TermInner {
-    term: vte::Terminal,
+    term: TermView,
     search_bar: gtk::SearchBar,
     search_entry: gtk::Entry,
     /// 查找条的「上一个」按钮（阶段 84）
@@ -308,7 +308,7 @@ pub(crate) struct TermInner {
     /// ⚠️ 钩子拿到的是**终端**，不是 TermPane：闭包一旦捕获 TermPane，
     /// 就是「TermPane → ready_hook → TermPane」的**引用环**，面板永远
     /// 释放不掉（AGENTS.md 的红线）。
-    ready_hook: RefCell<Option<Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static>>>,
+    ready_hook: RefCell<Option<Box<dyn Fn(&TermView, ReadyCmd) + 'static>>>,
     /// **重连钩子**（阶段 99）：这条终端**重连**时调一次。
     ///
     /// 干什么用：「重新连接终端」时**顺带把断了的 SFTP 也救回来**——
@@ -435,20 +435,19 @@ impl TermPane {
 
     /// 一个独立终端：独占一条 SSH 连接（分屏的每个 pane 各来一个）。
     pub fn new(opts: &ConnOptions) -> TermPane {
-        let term = vte::Terminal::new();
+        let term = TermView::new();
 
         // ⚠️ 阶段 69：终端字号的**全局默认**（首选项中心 →「终端」页）。
         // 优先级：连接里设的字号 > 全局默认 > 终端内置的 10.5。
         // 以前只有前两档 ⇒ 想"把终端字体调大"得逐条连接去改（审计 P1-4）。
-        set_appearance(
-            &term,
+        term.set_appearance(
             opts.font_size.or_else(crate::settings::term_font_size),
             opts.bell,
         );
         term.set_mouse_autohide(true);
         term.set_size(100, 32);
         term.set_scrollback_lines(10_000);
-        apply_colors(&term);
+        term.apply_colors();
 
         // 搜索条（默认收起；Ctrl+F 呼出）
         //
@@ -463,9 +462,9 @@ impl TermPane {
         {
             let term2 = term.clone();
             search_entry.connect_changed(move |e| {
-                let pat = regex_escape(&e.text());
-                let rx = vte::Regex::for_match(&pat, 0).ok();
-                term2.search_set_regex(rx.as_ref(), 0);
+                // ⚠️ 传**普通文本**（不是正则）：转义由后端做
+                // （VTE 那边是 PCRE，ghostty 那边是字面量）。
+                term2.search_set_pattern(Some(&e.text()));
             });
         }
         {
@@ -625,8 +624,7 @@ impl TermPane {
         // 不挂滚动条：回滚只用鼠标滚轮（wezterm / deepin-terminal 的分屏
         // 也是这样），终端因此能用到面板的最后一列像素。VTE 自己处理滚轮。
         // VTE 终端必须显式 expand，否则最大化后 Box 剩余空间留白在右侧
-        term.set_hexpand(true);
-        term.set_vexpand(true);
+        term.set_expand(true, true);
 
         let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // 分屏后每块面板的最小可用尺寸（再小就没法看终端了）
@@ -635,7 +633,7 @@ impl TermPane {
         box_.set_vexpand(true);
         box_.append(&inner.banner);
         box_.append(&search_bar);
-        box_.append(&term);
+        box_.append(term.widget());
 
         connect_signals(&inner);
         install_broadcast_capture(&inner);
@@ -673,7 +671,7 @@ impl TermPane {
         self.box_.upcast_ref()
     }
 
-    pub fn terminal(&self) -> &vte::Terminal {
+    pub fn terminal(&self) -> &TermView {
         &self.inner.term
     }
 
@@ -754,7 +752,7 @@ impl TermPane {
 
     /// 按当前配色方案重刷本面板（4.1）。切方案时对所有面板调一次。
     pub fn apply_palette(&self) {
-        apply_palette(&self.inner.term, crate::theme::palette());
+        self.inner.term.apply_palette(crate::theme::palette());
     }
 
     /// 装/卸按键广播钩子。钩子捕获不到 self，按键只以字节形式出去。
@@ -776,7 +774,7 @@ impl TermPane {
     ///
     /// ⚠️ 闭包里**别捕获 TermPane 自己**（那是自引用，终端永远释放不掉）。
     /// 钩子收到的是终端本身，往里写字节就行。
-    pub fn set_ready_hook<F: Fn(&vte::Terminal, ReadyCmd) + 'static>(&self, f: F) {
+    pub fn set_ready_hook<F: Fn(&TermView, ReadyCmd) + 'static>(&self, f: F) {
         *self.inner.ready_hook.borrow_mut() = Some(Box::new(f));
     }
 
@@ -954,7 +952,7 @@ fn log_write(log: &mut TermLog, lines: &[String]) {
 fn log_poll(inner: &Rc<TermInner>) -> glib::ControlFlow {
     let snapshot: Vec<String> = inner
         .term
-        .text_format(vte::Format::Text)
+        .visible_text()
         .map(|s| s.lines().map(str::to_string).collect())
         .unwrap_or_default();
     let mut slot = inner.log.borrow_mut();
@@ -1005,7 +1003,7 @@ impl TermPane {
         let prev: Vec<String> = self
             .inner
             .term
-            .text_format(vte::Format::Text)
+            .visible_text()
             .map(|s| s.lines().map(str::to_string).collect())
             .unwrap_or_default();
 
@@ -1206,36 +1204,6 @@ struct TermRec {
     src: glib::SourceId,
 }
 
-/// VTE 的**光标绝对行号**。
-///
-/// ⚠⚠ 两个坑，踩过就懂：
-///   1. `cursor_position()` 返回 **(列, 行)**，顺序反直觉。写反了会把列当行用，
-///      症状是"录到的全是空行"。VTE 官方文档原话：
-///      *"The row coordinate is absolute."*（行号是绝对的，从终端启动起算）
-///   2. `text_range_format(0, 0, rows-1, cols-1)` 取到的**不是屏幕**，
-///      而是**会话历史最前面的 rows 行**——那几行早就滚走了，
-///      之后再也不会变 ⇒ 采样多少次都是"没变化" ⇒ **什么也录不下来**。
-///      （实测：一次性 2000 行输出，老实现录到 **0 行**。）
-pub fn cursor_row(term: &vte::Terminal) -> i64 {
-    term.cursor_position().1
-}
-
-/// 取绝对行号区间 `[start, end]` 的**带颜色**屏幕行（每行一段 ANSI）。
-///
-/// 行数 = `end - start + 1`。区间前头若超出滚动缓冲保留范围，
-/// 那几行取回来是**空串**——那部分是真丢了（`rec_poll` 里在数）。
-pub fn ansi_rows(term: &vte::Terminal, start: i64, end: i64) -> Vec<String> {
-    if end < start {
-        return Vec::new();
-    }
-    let cols = term.column_count().max(1);
-    let (html, _) = term.text_range_format(vte::Format::Html, start, 0, end, cols - 1);
-    match html {
-        Some(h) => crate::replay::ansi_lines(&h),
-        None => Vec::new(),
-    }
-}
-
 /// 敲完一行（光标下移）时，那一行该怎么处理（**纯函数**，好单测）。
 ///
 /// 背景：光标行（正在敲的那行）现在会**逐次重写**录下来 ⇒ 敲完回车时，
@@ -1316,8 +1284,8 @@ impl RecSampler {
     /// 采一次样，把新增/重写的内容写进录制文件。
     ///
     /// 返回**本次丢掉**的行数（输出太快、被滚动缓冲挤掉了）。
-    pub fn sample(&mut self, term: &vte::Terminal, rec: &mut crate::replay::Recorder) -> usize {
-        let cur = cursor_row(term);
+    pub fn sample(&mut self, term: &TermView, rec: &mut crate::replay::Recorder) -> usize {
+        let cur = term.cursor_row();
         if cur < self.prev_row {
             // 光标行号往回走了（`clear` 之类）：重建基线，别把旧行再录一遍。
             // ⚠ 回放端的游标还停在原处 ⇒ 之后的行会**整体错位**——
@@ -1331,7 +1299,7 @@ impl RecSampler {
             // ⚠ 为什么是"重写"而不是"追加"：正在敲的那行是**同一行**，
             // 追加会变成一行行往下堆（屏幕上看着像刷了一屏命令）。
             // 重写用 `\r` + 清行，和真终端一个路数 ⇒ 回放端（真 VTE）还原。
-            let text = ansi_rows(term, cur, cur).first().cloned().unwrap_or_default();
+            let text = term.ansi_rows(cur, cur).first().cloned().unwrap_or_default();
             // 空行且从没显示过 ⇒ 什么都不用录（刚起手，光标后面还没东西）
             if text != self.cur_text && !(text.is_empty() && !self.cur_shown) {
                 rec.output_raw(&rewrite_line(&text));
@@ -1349,21 +1317,21 @@ impl RecSampler {
         let lost = (oldest - self.prev_row).max(0) as usize;
         // 敲完的那一行 = 上一次采样时的光标行（= prev_row）
         let done_row = self.prev_row;
-        let done_text = ansi_rows(term, done_row, done_row)
+        let done_text = term.ansi_rows(done_row, done_row)
             .first()
             .cloned()
             .unwrap_or_default();
         match done_line_action(self.cur_shown, &self.cur_text, &done_text) {
             DoneLine::RecordInBatch => {
                 // 这行从没显示过（敲得比采样快）⇒ 照旧批量录进去
-                let lines = ansi_rows(term, done_row, cur - 1);
+                let lines = term.ansi_rows(done_row, cur - 1);
                 rec.output(&lines);
             }
             DoneLine::Skip => {
                 // 显示过、且已是最终态 ⇒ 批量里跳过它；
                 // 但**光标得挪到下一行**（回放端的游标还停在那行）
                 rec.output_raw("\r\n");
-                let lines = ansi_rows(term, done_row + 1, cur - 1);
+                let lines = term.ansi_rows(done_row + 1, cur - 1);
                 rec.output(&lines);
             }
             DoneLine::RewriteThenSkip => {
@@ -1371,7 +1339,7 @@ impl RecSampler {
                 // 再挪到下一行
                 rec.output_raw(&rewrite_line(&done_text));
                 rec.output_raw("\r\n");
-                let lines = ansi_rows(term, done_row + 1, cur - 1);
+                let lines = term.ansi_rows(done_row + 1, cur - 1);
                 rec.output(&lines);
             }
         }
@@ -1393,7 +1361,7 @@ impl RecSampler {
 fn rec_poll(inner: &Rc<TermInner>) -> glib::ControlFlow {
     let cols = inner.term.column_count().max(1);
     let rows = inner.term.row_count().max(1);
-    let cur = cursor_row(&inner.term);
+    let cur = inner.term.cursor_row();
     // 借用只在这段里，别跨出去——`sync_rec_ui` 还要再借一次同一个 RefCell
     let mut lost_now = 0usize;
     {
@@ -1458,7 +1426,7 @@ impl TermPane {
         let rows = self.inner.term.row_count().max(1);
         // 基线 = 开始录制时的光标行号。之后每采样一次，
         // 光标行号涨到哪儿就是录到哪儿（见 `rec_poll`）。
-        let prev_row = cursor_row(&self.inner.term);
+        let prev_row = self.inner.term.cursor_row();
         let rec = crate::replay::Recorder::start(
             &path,
             cols,
@@ -1579,7 +1547,7 @@ fn connect_signals(inner: &Rc<TermInner>) {
     // 会话结束提示
     {
         let inner = Rc::clone(inner);
-        term.connect_child_exited(move |_t, status| {
+        term.connect_child_exited(move |status| {
             inner.autofeed_on.set(false);
             inner.child_alive.set(false);
             // asciicast v3 的 `x` 事件：会话退出码（回放时看得出是正常退出还是出错退出）
@@ -1610,13 +1578,9 @@ fn connect_signals(inner: &Rc<TermInner>) {
     // 远程标题（OSC 0/2）→ 回调（标签头/窗口标题）
     {
         let inner = Rc::clone(inner);
-        term.connect_window_title_notify(move |t| {
-            #[allow(deprecated)]
-            let title = t.window_title();
-            if let Some(title) = title.filter(|s| !s.is_empty()) {
-                if let Some(cb) = inner.title_cb.borrow().as_ref() {
-                    cb(&title);
-                }
+        term.connect_title_changed(move |title| {
+            if let Some(cb) = inner.title_cb.borrow().as_ref() {
+                cb(title);
             }
         });
     }
@@ -1624,17 +1588,9 @@ fn connect_signals(inner: &Rc<TermInner>) {
     // OSC 7 目录跟随
     {
         let inner = Rc::clone(inner);
-        term.connect_termprop_changed(None, move |t, prop| {
-            if prop != "vte.current.directory" {
-                return;
-            }
-            #[allow(deprecated)]
-            if let Some(uri) = t.current_directory_uri() {
-                if !uri.is_empty() {
-                    if let Some(cb) = inner.cwd_cb.borrow().as_ref() {
-                        cb(&uri);
-                    }
-                }
+        term.connect_cwd_changed(move |uri| {
+            if let Some(cb) = inner.cwd_cb.borrow().as_ref() {
+                cb(uri);
             }
         });
     }
@@ -1830,7 +1786,7 @@ fn next_hint() -> &'static str {
 
 fn install_context_menu(inner: &Rc<TermInner>) {
     let term = inner.term.clone();
-    let pop = menu::popover(&term);
+    let pop = menu::popover(term.widget());
 
     let vbox = menu::body();
 
@@ -1851,7 +1807,7 @@ fn install_context_menu(inner: &Rc<TermInner>) {
         let w = weak_btns.clone();
         b_copy.connect_clicked(move |_| {
             if let Some(i) = w.upgrade() {
-                i.term.copy_clipboard_format(vte::Format::Text);
+                i.term.copy_selection();
             }
         });
     }
@@ -1860,7 +1816,7 @@ fn install_context_menu(inner: &Rc<TermInner>) {
         let w = weak_btns.clone();
         b_paste.connect_clicked(move |_| {
             if let Some(i) = w.upgrade() {
-                <vte::Terminal as vte::TerminalExt>::paste_clipboard(&i.term);
+                i.term.paste_clipboard();
             }
         });
     }
@@ -1920,44 +1876,17 @@ fn install_middle_click_paste(inner: &Rc<TermInner>) {
     gesture.set_button(2);
     gesture.connect_pressed(|g, _n, _x, _y| {
         if g.current_button() == 2 {
-            if let Some(t) = term_of_gesture(g) {
-                <vte::Terminal as vte::TerminalExt>::paste_clipboard(&t);
+            if let Some(t) = g.widget().and_then(|w| TermView::from_widget(&w)) {
+                t.paste_clipboard();
             }
         }
     });
     term.add_controller(gesture);
 }
 
-/// 从控件自身反查它所属的终端。
-///
-/// 闭包里抓一份 `vte::Terminal` 看着省事，实则构成
-/// 控件 → controller → 闭包 → 控件 的强引用环，关掉标签也回收不掉。
-fn term_of_gesture(g: &gtk::GestureClick) -> Option<vte::Terminal> {
-    g.widget().and_downcast::<vte::Terminal>()
-}
 
 /* ---------------- 颜色 ---------------- */
 
-/// 字号与响铃（1.5 会话级覆盖）。两处都要即时生效：开标签时一次，
-/// 会话选项对话框改完再一次。
-///
-/// ⚠️ 字号优先级：**会话/连接里设的 > 全局默认（首选项中心）> 内置 10.5**。
-/// 全局兜底放在这里（而不是每个调用点各自拼）——会话选项改完要**立即**
-/// 生效，那条路径也得用全局默认值，否则"没设过字号"的会话在改一次响铃后
-/// 字号会跳回 10.5。
-pub fn set_appearance(term: &vte::Terminal, font_size: Option<f64>, bell: Option<bool>) {
-    let font_env = std::env::var("PUTTYPLUS_FONT").unwrap_or_default();
-    let font = if font_env.is_empty() {
-        let size = font_size
-            .or_else(crate::settings::term_font_size)
-            .unwrap_or(10.5);
-        format!("Monospace {size}")
-    } else {
-        font_env
-    };
-    term.set_font(Some(&gtk::pango::FontDescription::from_string(&font)));
-    term.set_audible_bell(bell.unwrap_or(true));
-}
 
 /// 往终端右键菜单尾部追加本面板的条目（分屏 / 广播 / 日志）。
 ///
@@ -2033,7 +1962,7 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
                 let term = term.clone();
                 glib::idle_add_local_once(move || {
                     let t2 = term.clone();
-                    crate::panel::on_open_quickcmds(&st, &t2, t2.upcast_ref());
+                    crate::panel::on_open_quickcmds(&st, &t2, t2.widget());
                 });
             });
             vbox.append(&b);
@@ -2147,19 +2076,7 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
 
 
 
-/// 终端配色（4.1）。与界面主题各选各的：界面浅色不代表终端也要浅色。
-pub fn apply_colors(term: &vte::Terminal) {
-    apply_palette(term, crate::theme::palette());
-}
 
-fn apply_palette(term: &vte::Terminal, p: crate::theme::Palette) {
-    let (fgs, bgs, hex) = p.colors();
-    let pal: Vec<gdk::RGBA> = hex.iter().filter_map(|h| gdk::RGBA::parse(*h).ok()).collect();
-    let pal_ref: Vec<&gdk::RGBA> = pal.iter().collect();
-    let fg = gdk::RGBA::parse(fgs).unwrap();
-    let bg = gdk::RGBA::parse(bgs).unwrap();
-    term.set_colors(Some(&fg), Some(&bg), &pal_ref);
-}
 
 /* ---------------- spawn ---------------- */
 
@@ -2173,49 +2090,6 @@ const READY_PROBE_MS: i64 = 2500;
 const READY_QUIET_MS: i64 = 900;
 /// 最多等这么久（远端一声不吭时的兜底）（毫秒）。
 const READY_MAX_WAIT_MS: i64 = 8000;
-
-/// 读终端屏幕上的文字（前 60 行 × 250 列）。
-///
-/// 与 `examples/fileops_smoke.rs` 的 `screen_text` 同一个读法
-/// （VTE 0.80 还没有 `text()`，只能按区域取）。
-fn screen_text(term: &vte::Terminal) -> String {
-    term.text_range_format(vte::Format::Text, 0, 0, 59, 249)
-        .0
-        .map(|s| s.to_string())
-        .unwrap_or_default()
-}
-
-/// pty 的本地行规程是不是已经切到 **raw 模式**（ICANON / ECHO 关掉）。
-///
-/// ssh **认证通过之后**才把本地 tty 切到 raw；那之前往里写字节会被
-/// **本地回显**（屏幕上凭空多一行命令）并**缓冲**在本地行规程里，
-/// 等 ssh 切 raw 才转发给远端 —— 那会儿远端可能还停在**登录流程**
-/// 里，命令就被吃掉了（用户实测：堡垒机上 `cd` 没执行）。
-///
-/// ⚠ pty 的 **master 与 slave 共用同一份 termios**（实测：slave 切 raw
-/// 后 master 的 `c_lflag` 同步变了），所以拿 VTE 给的 master fd 查就行。
-fn pty_is_raw(pty: &vte::Pty) -> bool {
-    #[cfg(unix)]
-    {
-        let mut tio: libc::termios = unsafe { std::mem::zeroed() };
-        // SAFETY: `tio` 是本函数栈上的零初始化结构；`fd` 由 VTE 持有且有效；
-        // `tcgetattr` 只往里写，不读未初始化内存。
-        let rc = unsafe { libc::tcgetattr(pty.fd().as_raw_fd(), &mut tio) };
-        if rc != 0 {
-            // 取不到 ⇒ 当作还没切 raw（宁可多等，也别写出本地回显的噪声）
-            return false;
-        }
-        tio.c_lflag & libc::ICANON == 0 && tio.c_lflag & libc::ECHO == 0
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows 的 ConPTY **没有本地行规程** ⇒ 不存在「本地回显」，
-        // 也就没有「认证前写进去会被缓冲、随后被登录流程吃掉」的问题
-        // ⇒ 一律当作已经 raw。
-        let _ = pty;
-        true
-    }
-}
 
 /// 屏幕最后一行像不像 shell 提示符。
 ///
@@ -2261,10 +2135,10 @@ pub fn screen_has_prompt(text: &str) -> bool {
 /// ⚠️ 远端一声不吭（没有 MOTD、也没有提示符）时靠 `READY_MAX_WAIT_MS`
 ///    兜底。
 fn feed_when_remote_ready(
-    term: &vte::Terminal,
-    hook: Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static>,
+    term: &TermView,
+    hook: Box<dyn Fn(&TermView, ReadyCmd) + 'static>,
     inner: std::rc::Weak<TermInner>,
-    pty: vte::Pty,
+    pty: PtySession,
 ) {
     let term = term.clone();
     let hook = Rc::new(hook);
@@ -2286,7 +2160,7 @@ fn feed_when_remote_ready(
 
             let now = glib::monotonic_time() / 1000;
             let elapsed = now - start;
-            let text = screen_text(&term);
+            let text = term.screen_text(60, 250);
             let changed = {
                 let cur = last_text.borrow();
                 text != *cur
@@ -2299,7 +2173,7 @@ fn feed_when_remote_ready(
             // 才切）。没切就写 ⇒ 字节被**本地回显**（屏幕上凭空多一行
             // 命令）并**缓冲**在本地行规程里，等 ssh 切 raw 后才转发给
             // 远端 —— 那时远端可能还停在登录流程里，命令被吃掉。
-            let raw = pty_is_raw(&pty);
+            let raw = pty.is_raw();
 
             // ① **看见 shell 提示符** ⇒ shell 起来了，命令直接发
             //    （落进的是真 shell，不会被任何登录脚本吃掉）。
@@ -2361,27 +2235,23 @@ fn spawn_term(inner: &Rc<TermInner>) {
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
     let env_ref: Vec<&str> = env.iter().map(String::as_str).collect();
 
-    let pty = match vte::Pty::new_sync(vte::PtyFlags::empty(), None::<&gio::Cancellable>) {
+    let pty = match PtySession::new() {
         Ok(p) => p,
         Err(e) => {
             alert::<gtk::Window>(None, &trf!("创建 PTY 失败：{e}", e = e));
             return;
         }
     };
-    inner.term.set_pty(Some(&pty));
+    inner.term.attach_pty(&pty);
 
     let inner_cb = Rc::clone(inner);
     // 克隆一份 pty 给就绪钩子：要读它的 termios 判断 ssh 有没有把本地
     // tty 切到 raw（VTE 自己那份随后随 `term.set_pty` 一起活着）。
     let pty_cb = pty.clone();
     pty.spawn_async(
-        Some(cwd.as_str()),
+        cwd.as_str(),
         &argv_ref,
         &env_ref,
-        glib::SpawnFlags::SEARCH_PATH,
-        || {},
-        -1,
-        None::<&gio::Cancellable>,
         move |res| match res {
             Ok(pid) => {
                 inner_cb.child_alive.set(true);
@@ -2416,7 +2286,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 let user_hook = inner_cb.ready_hook.borrow_mut().take();
                 if !pending.is_empty() || user_hook.is_some() {
                     let pending = RefCell::new(Some(pending));
-                    let hook: Box<dyn Fn(&vte::Terminal, ReadyCmd) + 'static> =
+                    let hook: Box<dyn Fn(&TermView, ReadyCmd) + 'static> =
                         Box::new(move |term, what| {
                             if let Some(h) = &user_hook {
                                 h(term, what);
@@ -2503,7 +2373,7 @@ fn autofeed_cb(inner: &Rc<TermInner>) -> glib::ControlFlow {
         return glib::ControlFlow::Break;
     }
 
-    let Some(txt) = inner.term.text_format(vte::Format::Text) else {
+    let Some(txt) = inner.term.visible_text() else {
         return glib::ControlFlow::Continue;
     };
     let lines: Vec<&str> = txt.split('\n').collect();

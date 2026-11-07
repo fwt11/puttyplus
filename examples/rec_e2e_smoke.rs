@@ -73,14 +73,8 @@ fn plain(s: &str) -> String {
 
 /// 终端屏幕上的文字（范围给得宽松：终端没 realize 时行列数是 0）。
 fn screen_text(pane: &TermPane) -> String {
-    match pane
-        .terminal()
-        .text_range_format(vte4::Format::Text, 0, 0, 199, 399)
-        .0
-    {
-        Some(t) => t.to_string(),
-        None => String::new(),
-    }
+    // ⚠️ 范围给得宽松：终端没 realize 时行列数是 0
+    pane.terminal().screen_text(200, 400)
 }
 
 /// 屏幕上有没有 shell 提示符（各家不一样，都认）。
@@ -106,7 +100,7 @@ fn replay_rows(cast: &replay::Cast, n: i64) -> Vec<String> {
     pump(300);
     let rows: Vec<String> = (0..n)
         .map(|r| {
-            puttyplus::term::ansi_rows(&vt, r, r)
+            puttyplus::termview::vte::ansi_rows(&vt, r, r)
                 .first()
                 .map(|s| plain(s))
                 .unwrap_or_default()

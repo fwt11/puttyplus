@@ -14,7 +14,6 @@ use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
-use vte4::prelude::*;
 use puttyplus::i18n::tr;
 use puttyplus::trf;
 
@@ -348,12 +347,12 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
                     }
                     shortcuts::Id::Copy => {
                         if let Some(term) = tabs.current_terminal() {
-                            term.copy_clipboard_format(vte4::Format::Text);
+                            term.copy_selection();
                         }
                     }
                     shortcuts::Id::Paste => {
                         if let Some(term) = tabs.current_terminal() {
-                            <vte4::Terminal as vte4::TerminalExt>::paste_clipboard(&term);
+                            term.paste_clipboard();
                         }
                     }
                     shortcuts::Id::ToggleBroadcast => tabs::toggle_broadcast(),
@@ -373,7 +372,7 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
                             panel::on_open_quickcmds(
                                 &st,
                                 &term,
-                                term.upcast_ref::<gtk::Widget>(),
+                                term.widget(),
                             );
                         }
                     }
@@ -516,7 +515,7 @@ fn app_menubar(
         let t = Rc::clone(tabs);
         act!("copy", move || {
             if let Some(term) = t.current_terminal() {
-                term.copy_clipboard_format(vte4::Format::Text);
+                term.copy_selection();
             }
         });
     }
@@ -524,7 +523,7 @@ fn app_menubar(
         let t = Rc::clone(tabs);
         act!("paste", move || {
             if let Some(term) = t.current_terminal() {
-                <vte4::Terminal as vte4::TerminalExt>::paste_clipboard(&term);
+                term.paste_clipboard();
             }
         });
     }
@@ -620,7 +619,7 @@ fn app_menubar(
             if let (Some(st), Some(term)) = (t.current_panel_state(), t.current_terminal()) {
                 // 等菜单栏弹层关掉再弹快速命令，避免两个 Popover 抢同一个 grab
                 glib::idle_add_local_once(move || {
-                    panel::on_open_quickcmds(&st, &term, term.upcast_ref::<gtk::Widget>());
+                    panel::on_open_quickcmds(&st, &term, term.widget());
                 });
             }
         });
@@ -709,8 +708,8 @@ fn sync_window_title(win: &gtk::ApplicationWindow, tabs: &Rc<tabs::Tabs>) {
 }
 
 /// 从终端 widget 向上找同级 SearchBar 并切换（避免 Tab 持 TermPane 的循环依赖）。
-fn toggle_search_for(term: &vte4::Terminal) {
-    let mut w: Option<gtk::Widget> = term.upcast_ref::<gtk::Widget>().parent();
+fn toggle_search_for(term: &puttyplus::termview::TermView) {
+    let mut w: Option<gtk::Widget> = term.widget().parent();
     while let Some(p) = w {
         if let Some(vbox) = p.downcast_ref::<gtk::Box>() {
             if vbox.orientation() == gtk::Orientation::Vertical {

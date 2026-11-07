@@ -106,11 +106,7 @@ fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
 
 /// 终端屏幕上的文字（范围给得宽松，VTE 自己裁剪）。
 fn screen_text(pane: &TermPane) -> String {
-    let term = pane.terminal();
-    match term.text_range_format(vte4::Format::Text, 0, 0, 199, 399).0 {
-        Some(t) => t.to_string(),
-        None => String::new(),
-    }
+    pane.terminal().screen_text(200, 400)
 }
 
 /// 屏幕上有没有 shell 提示符（bash 默认 PS1 是 `bash-5.2$ `）。

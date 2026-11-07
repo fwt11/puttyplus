@@ -54,7 +54,7 @@ fn plain(s: &str) -> String {
 fn screen(t: &vte4::Terminal, n: i64) -> Vec<String> {
     (0..n)
         .map(|r| {
-            term::ansi_rows(t, r, r)
+            puttyplus::termview::vte::ansi_rows(t, r, r)
                 .first()
                 .map(|s| plain(s))
                 .unwrap_or_default()
@@ -119,31 +119,31 @@ fn main() {
     let cols = t.column_count().max(1);
     let rows = t.row_count().max(1);
     let mut rec = replay::Recorder::start(&path, cols, rows, "typing").expect("应能建 .cast");
-    let mut sampler = term::RecSampler::new(term::cursor_row(&t));
+    let mut sampler = term::RecSampler::new(puttyplus::termview::vte::cursor_row(&t));
 
     // 提示符先出现
     t.feed(b"$ ");
     pump(120);
-    sampler.sample(&t, &mut rec);
+    sampler.sample(&puttyplus::termview::TermView::from_vte(t.clone()), &mut rec);
 
     // 一个字一个字地敲 "ls -la"
     for ch in ["l", "s", " ", "-", "l", "a"] {
         t.feed(ch.as_bytes());
         pump(120);
-        sampler.sample(&t, &mut rec);
+        sampler.sample(&puttyplus::termview::TermView::from_vte(t.clone()), &mut rec);
     }
 
     // 回车 → 光标下移
     t.feed(b"\r\n");
     pump(120);
-    sampler.sample(&t, &mut rec);
+    sampler.sample(&puttyplus::termview::TermView::from_vte(t.clone()), &mut rec);
 
     // 远端的输出 + 下一个提示符
     t.feed(b"file1\r\nfile2\r\n$ ");
     pump(120);
-    sampler.sample(&t, &mut rec);
+    sampler.sample(&puttyplus::termview::TermView::from_vte(t.clone()), &mut rec);
     // 再采一次：新的提示符那行才被录下来
-    sampler.sample(&t, &mut rec);
+    sampler.sample(&puttyplus::termview::TermView::from_vte(t.clone()), &mut rec);
     rec.stop();
 
     let cast = replay::load(&path).expect("应能解析");
@@ -216,11 +216,11 @@ fn main() {
     pump(150);
 
     let mut rec2 = replay::Recorder::start(&path2, cols, rows, "fast").expect("应能建 .cast");
-    let mut sampler2 = term::RecSampler::new(term::cursor_row(&t2));
+    let mut sampler2 = term::RecSampler::new(puttyplus::termview::vte::cursor_row(&t2));
     // 提示符 + 命令 + 回车 + 输出，**一口气**喂进去（相当于一个采样周期内敲完）
     t2.feed(b"$ cmd\r\nout\r\n");
     pump(150);
-    sampler2.sample(&t2, &mut rec2);
+    sampler2.sample(&puttyplus::termview::TermView::from_vte(t2.clone()), &mut rec2);
     rec2.stop();
 
     let cast2 = replay::load(&path2).expect("应能解析");

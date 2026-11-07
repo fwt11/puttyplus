@@ -89,12 +89,7 @@ fn main() {
     // ---- 1) 等真的连上（远端提示符出现） ----
     let up = wait_until(25_000, || {
         tabs.current_terminal()
-            .map(|t| {
-                t.text_range_format(vte4::Format::Text, 0, 0, 199, 399)
-                    .0
-                    .map(|s| has_prompt(&s.to_string()))
-                    .unwrap_or(false)
-            })
+            .map(|t| has_prompt(&t.screen_text(200, 400)))
             .unwrap_or(false)
     });
     assert!(up, "没连上 {host}:{port}（本地测试 sshd 在跑吗？）");

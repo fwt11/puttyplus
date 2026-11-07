@@ -50,11 +50,7 @@ fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
 /// **范围要给得宽松**：终端没被 realize 时 VTE 的行列数是 0，按实际行列
 /// 取就只有 1×1 的内容；这里直接要 200 行 × 400 列，让 VTE 自己裁剪。
 fn screen_text(pane: &TermPane) -> String {
-    let term = pane.terminal();
-    match term.text_range_format(vte4::Format::Text, 0, 0, 199, 399).0 {
-        Some(t) => t.to_string(),
-        None => String::new(),
-    }
+    pane.terminal().screen_text(200, 400)
 }
 
 /// 屏幕上有没有 shell 提示符。
@@ -203,7 +199,7 @@ fn main() {
     // 文本），我们接 `text/uri-list`（本地文件），两者不抢。
     let term = st.term.borrow().clone().expect("应有终端");
     assert!(
-        has_async_drop_target(&term),
+        has_async_drop_target(term.widget()),
         "终端上没挂接本地文件的拖放接收器——拖文件到终端不会触发上传"
     );
     println!("[3] 终端上挂着接本地文件的拖放接收器（拖文件进来 = 上传）");
@@ -432,7 +428,7 @@ fn shot(path: &str) {
 ///
 /// 只看"有没有拖放接收器"也不够——VTE 自带的是同步版（接 String，拖选
 /// 文本），接的类型不对，拖文件进来照样没反应。
-fn has_async_drop_target(term: &vte4::Terminal) -> bool {
+fn has_async_drop_target(term: &gtk::Widget) -> bool {
     let model = term.observe_controllers();
     for i in 0..model.n_items() {
         let Some(c) = model.item(i) else { continue };

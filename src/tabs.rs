@@ -6,7 +6,6 @@ use std::rc::{Rc, Weak};
 
 use gtk::gdk;
 use gtk::prelude::*;
-use vte4::TerminalExt;
 
 use crate::args::ConnOptions;
 use crate::connmgr;
@@ -49,7 +48,7 @@ pub struct Tab {
     pub page: gtk::Widget,
     pub panel_st: Rc<panel::PanelState>,
     /// 该标签的终端（Ctrl+F 搜索用）
-    pub term: vte4::Terminal,
+    pub term: crate::termview::TermView,
     /// 标签头（远程经 OSC 0/2 设置标题时更新文字）
     pub label: gtk::Label,
     /// 标签头左侧的连接状态点（颜色跟面板状态走）
@@ -1717,7 +1716,7 @@ impl Tabs {
     }
 
     /// 当前标签的终端（欢迎页无终端）。
-    pub fn current_terminal(&self) -> Option<vte4::Terminal> {
+    pub fn current_terminal(&self) -> Option<crate::termview::TermView> {
         let cur = self.notebook.current_page()?;
         let page = self.notebook.nth_page(Some(cur))?;
         let tabs = self.tabs.borrow();
@@ -2290,7 +2289,7 @@ pub fn remote_targets(
         .unwrap_or_default()
 }
 
-pub fn current_terminal() -> Option<vte4::Terminal> {
+pub fn current_terminal() -> Option<crate::termview::TermView> {
     TABS.with(|w| w.borrow().clone())
         .and_then(|t| t.current_terminal())
 }

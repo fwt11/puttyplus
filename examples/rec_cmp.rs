@@ -78,13 +78,13 @@ fn main() {
 
     // 采样：跟 `term::rec_poll` 同一套逻辑
     // ⚠ 基线要在**输出之前**取（子进程先睡 0.6s）
-    let mut prev = term::cursor_row(&t);
+    let mut prev = puttyplus::termview::vte::cursor_row(&t);
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         pump(100);
-        let cur = term::cursor_row(&t);
+        let cur = puttyplus::termview::vte::cursor_row(&t);
         if cur > prev {
-            let lines = term::ansi_rows(&t, prev, cur - 1);
+            let lines = puttyplus::termview::vte::ansi_rows(&t, prev, cur - 1);
             rec.output(&lines);
             prev = cur;
         }

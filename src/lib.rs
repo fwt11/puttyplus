@@ -32,6 +32,7 @@ pub mod shortcutsui;
 pub mod sidebar;
 pub mod tabs;
 pub mod term;
+pub mod termview;
 pub mod terms;
 pub mod theme;
 pub mod topbar;

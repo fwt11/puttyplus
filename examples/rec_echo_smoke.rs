@@ -28,11 +28,11 @@ fn pump(ms: u64) {
 
 /// 抓一次"新渲染出来的行"（与 `term::rec_poll` 同一套逻辑）。
 fn capture(t: &vte4::Terminal, prev: &mut i64) -> Vec<String> {
-    let cur = term::cursor_row(t);
+    let cur = puttyplus::termview::vte::cursor_row(t);
     if cur <= *prev {
         return Vec::new();
     }
-    let rows = term::ansi_rows(t, *prev, cur - 1);
+    let rows = puttyplus::termview::vte::ansi_rows(t, *prev, cur - 1);
     *prev = cur;
     rows
 }
@@ -57,7 +57,7 @@ fn main() {
     let rows = t.row_count().max(1);
     let mut rec = replay::Recorder::start(&path, cols, rows, "echo").expect("应能建 .cast");
 
-    let mut prev = term::cursor_row(&t);
+    let mut prev = puttyplus::termview::vte::cursor_row(&t);
 
     /* ---- 1. 普通命令：远端回显 "ls" ---- */
     t.feed(b"$ ");
