@@ -27,7 +27,6 @@ pub mod replayui;
 pub mod settings;
 pub mod settingsui;
 pub mod shortcuts;
-pub mod statusbar;
 pub mod shortcutsui;
 pub mod sidebar;
 pub mod tabs;

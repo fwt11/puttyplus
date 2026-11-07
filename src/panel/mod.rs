@@ -833,8 +833,6 @@ pub fn refresh_active_marks() {
     crate::sidebar::refresh();
     // 标签上的状态点也是聚合的（SFTP + 终端 + 数据库）⇒ 一起刷（阶段 65）
     crate::tabs::refresh_dots();
-    // 顶栏状态区也显示聚合状态（阶段 77c-2）⇒ 一起刷
-    crate::statusbar::refresh_all();
 }
 
 /// 注册状态变化钩子（标签栏状态点用），注册后立刻用当前状态回调一次。
@@ -1380,8 +1378,6 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             queue::flush(st);
         }
         PanelEvent::XferDrained { results } => {
-            // 传输状态变了 ⇒ 顶栏状态区的第四维要跟着变（阶段 77c-2）
-            crate::statusbar::refresh_all();
             // 整个传输队列清空（不是每个提交批次）→ 通知 + 有失败/取消时
             // 汇总一次。追加的新批次在同一个窗口里，不会提前弹。
             pane::clear_progress(&st.pane(true));

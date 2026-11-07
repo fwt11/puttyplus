@@ -188,8 +188,6 @@ pub fn ensure(st: &Rc<PanelState>) {
 
 /// 新传输项入队：建行 + 保存行引用。
 pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
-    // 传输开始了 ⇒ 状态区的第四维从「空闲」变「传输中」（阶段 77c-2）
-    crate::statusbar::refresh_all();
     ensure(st);
     let qu = st.queue_ui.borrow();
     let Some(qu) = qu.as_ref() else { return };

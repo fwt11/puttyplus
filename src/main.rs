@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use puttyplus::{
     about, appicon, args, backend, bridge, connmgr, density, keyui, menu, notify, panel, replayui,
-    settings, settingsui, sidebar, shortcuts, shortcutsui, statusbar, tabs, term, theme, topbar,
+    settings, settingsui, sidebar, shortcuts, shortcutsui, tabs, term, theme, topbar,
     topmenus, util, vault, vaultui,
 };
 use topmenus::{MenuEntry, TOP_MENUS};
@@ -193,7 +193,7 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
         // **完全相同**：`NewEntry::items()` 对 TopBar / Sidebar 都给全集），
         // 顶栏再放一个就是重复 ⇒ 删掉，功能一点不丢。
         //
-        // 顶栏右端现在只剩：全局状态 chip + 窗口按钮。
+        // 顶栏右端现在只剩：窗口按钮。
 
         // ⚠️ 这里**不再放凭据库状态标志**（阶段 92）。
         //
@@ -209,17 +209,17 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
         // 代价：侧栏收起时看不到凭据库状态。但侧栏收起时用户在看终端/
         // 工作台，不是配连接的时候；真要查，工具 → 凭据库管理器里也有。
 
-        // **全局状态区**（阶段 77c-2 / 审计 P1-9）：顶栏常驻一个 chip，
-        // 显示**当前窗口当前会话**的聚合状态，tooltip 里把四个维度
-        // （文件面板 / 终端 / 数据库 / 传输）逐条说清。
+        // ⚠️ **这里原来有一个「全局状态区」chip**（阶段 77c-2 / 审计 P1-9），
+        // 正常时只显示「已连接」三个字。
         //
-        // ⚠️ 以前这四个状态**散在四个地方**（标签点 / 终端 banner /
-        // DB 状态行 / 传输队列窗口），用户想知道"现在到底怎么了"得
-        // 一个一个去找。
-        {
-            let b_status = statusbar::build(Rc::clone(&tabs));
-            header.pack_end(&b_status);
-        }
+        // **用户 2026-11-07 明确要求删掉**：它**不指示是哪一条连接**——
+        // 连着多台服务器时，"已连接"说的是哪台根本说不清；而"连上了"这件事
+        // 本身也不是什么需要一直挂在顶栏的消息。
+        //
+        // 删了之后信息**没丢**：每个标签头上本来就有**聚合状态点**
+        // （`tabs::update_dot`：● 已连 / ◐ 连接中 / ○ 还没连，tooltip 说清
+        // 是文件面板、终端还是数据库出的问题）⇒ "哪台离线了"在**对应的标签
+        // 上**看得见，正是用户要的位置。
 
         // 菜单栏（文件/编辑/会话/视图/帮助）：入口不再只有图标，
         // 与 PuTTY 用户的菜单使用习惯也对得上
@@ -247,9 +247,6 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
             // ⚠️ 阶段 75：顶栏里的标题也跟着走（欢迎页回落应用名）
             ht.set_text(&title);
             ht.set_tooltip_text(Some(&title));
-            // ⚠️ 状态区跟着当前标签走（阶段 77c-2）：状态区显示的是
-            // **当前会话**的状态 ⇒ 切了标签就得刷新。
-            statusbar::refresh_all();
         });
     }
 
