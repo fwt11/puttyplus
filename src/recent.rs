@@ -24,7 +24,7 @@ fn path() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    glib::user_config_dir().join("puttyplus").join("recent.ini")
+    crate::platform::paths::config_dir().join("recent.ini")
 }
 
 const SEP: char = '\u{1f}';

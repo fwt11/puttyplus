@@ -303,7 +303,12 @@ impl ConnOptions {
     /// 解析 argv（不含 argv[0]）；warnings 收集人类可读警告。
     pub fn parse(args: &[String], warnings: &mut Vec<String>) -> ConnOptions {
         let sshpass = std::env::var("SSHPASS").ok().filter(|s| !s.is_empty());
-        ConnOptions::parse_impl(args, &glib::home_dir(), sshpass.as_deref(), warnings)
+        ConnOptions::parse_impl(
+            args,
+            &crate::platform::paths::home(),
+            sshpass.as_deref(),
+            warnings,
+        )
     }
 
     /// 可注入 home 与 SSHPASS 的解析核心，便于单测。

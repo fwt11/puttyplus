@@ -24,11 +24,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gtk::prelude::*;
-
 /// 剪贴板（系统剪贴板）。
+///
+/// ⚠️ 跨平台版统一走 `platform::clipboard`（阶段 C0）——
+/// GTK4 的剪贴板本身跨平台，这里只是收口。
 fn clipboard() -> Option<gtk::gdk::Clipboard> {
-    gtk::gdk::Display::default().map(|d| d.clipboard())
+    crate::platform::clipboard::clipboard()
 }
 
 /// 剪贴板文本 → 本地路径列表。

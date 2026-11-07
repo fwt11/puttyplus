@@ -35,7 +35,7 @@ fn path() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    glib::user_config_dir().join("puttyplus").join("settings.ini")
+    crate::platform::paths::config_dir().join("settings.ini")
 }
 
 pub fn columns(remote: bool) -> ColumnsCfg {

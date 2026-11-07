@@ -468,7 +468,7 @@ fn ppk_is_encrypted(data: &str) -> bool {
 
 /// ~/.ssh 目录（存在的才返回）。
 pub fn ssh_dir() -> Option<PathBuf> {
-    let d = gtk::glib::home_dir().join(".ssh");
+    let d = crate::platform::paths::home().join(".ssh");
     d.is_dir().then_some(d)
 }
 

@@ -1009,7 +1009,9 @@ fn cmd_arg(a: &mut Vec<String>, v: &str) {
 /// 用选中条目派生新窗口。密码通过 PUTTYPLUS_PW_SESSION 传递，
 /// 不进 argv（修复 C 版 ps 可见问题）。
 fn spawn_self(e: &ConnEntry) -> Result<(), String> {
-    let exe = std::fs::read_link("/proc/self/exe").map_err(|err| err.to_string())?;
+    // ⚠️ 跨平台版走 `platform::exe`（Linux 仍是 `/proc/self/exe`，
+    // Windows 用 `current_exe()`）——**错误行为与改造前一致**（原样透传 io 错误）。
+    let exe = crate::platform::exe::self_exe_path().map_err(|err| err.to_string())?;
     let mut cmd = std::process::Command::new(exe);
     for a in spawn_self_args(e) {
         cmd.arg(a);

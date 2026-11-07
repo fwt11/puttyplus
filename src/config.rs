@@ -293,7 +293,7 @@ pub fn putty_sessions_dir_with_home(home: &Path) -> PathBuf {
 }
 
 pub fn putty_sessions_dir() -> PathBuf {
-    putty_sessions_dir_with_home(&glib::home_dir())
+    putty_sessions_dir_with_home(&crate::platform::paths::home())
 }
 
 /// 会话文件名的逆变换：%XX → 原字节。
@@ -335,7 +335,7 @@ pub fn list_putty_sessions_with_home(home: &Path) -> Vec<String> {
 }
 
 pub fn list_putty_sessions() -> Vec<String> {
-    list_putty_sessions_with_home(&glib::home_dir())
+    list_putty_sessions_with_home(&crate::platform::paths::home())
 }
 
 /// 写一个 PuTTY 会话文件（导出方向）。
@@ -403,11 +403,11 @@ pub fn write_putty_session(
 /* ---- 便捷封装：用真实主目录 ---- */
 
 pub fn resolve_ssh_config_alias(o: &mut ConnOptions) {
-    resolve_ssh_config_alias_with_home(o, &glib::home_dir());
+    resolve_ssh_config_alias_with_home(o, &crate::platform::paths::home());
 }
 
 pub fn list_ssh_aliases() -> Vec<SshHostAlias> {
-    list_ssh_aliases_with_home(&glib::home_dir())
+    list_ssh_aliases_with_home(&crate::platform::paths::home())
 }
 
 pub fn load_putty_session(
@@ -415,7 +415,7 @@ pub fn load_putty_session(
     name: &str,
     warnings: &mut Vec<String>,
 ) -> bool {
-    load_putty_session_with_home(o, name, &glib::home_dir(), warnings)
+    load_putty_session_with_home(o, name, &crate::platform::paths::home(), warnings)
 }
 
 #[cfg(test)]

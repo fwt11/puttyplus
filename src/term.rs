@@ -4,6 +4,7 @@
 //! OSC 7 目录跟随回调。
 
 use std::cell::{Cell, RefCell};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
@@ -26,8 +27,11 @@ const AUTOFEEED_MS: u64 = 30_000;
 /* ---------------- askpass 模式 ---------------- */
 
 /// 自身可执行文件路径，用于 SSH_ASKPASS 自我调用判定。
+///
+/// ⚠️ 跨平台版走 `platform::exe`（Linux 仍是 `/proc/self/exe`，
+/// Windows 用 `current_exe()`）——**判定语义不变**，见 `platform::exe` 的说明。
 fn self_exe_path() -> Option<std::path::PathBuf> {
-    std::fs::read_link("/proc/self/exe").ok()
+    crate::platform::exe::self_exe_path().ok()
 }
 
 /// askpass 模式：ssh 会以 [提示文本] 为参数调用本程序并读取 stdout。
@@ -41,8 +45,10 @@ pub fn run_askpass(args_after_prog: &[String]) -> bool {
     if !is_askpass {
         if let (Some(pw), Some(ap)) = (&pw, &ap) {
             if !pw.is_empty() && !ap.is_empty() {
-                if let (Some(selfp), Ok(rap)) = (self_exe_path(), std::fs::canonicalize(ap)) {
-                    if rap == selfp {
+                // ⚠️ 判定「SSH_ASKPASS 指的就是我自己」：两边都解析符号链接再比
+                // （`platform::exe::same_file`）——软链接调用也算数。
+                if let Some(selfp) = self_exe_path() {
+                    if crate::platform::exe::same_file(&selfp, std::path::Path::new(&ap)) {
                         is_askpass = true;
                     }
                 }
@@ -176,9 +182,7 @@ pub fn build_plink_argv(o: &ConnOptions) -> Option<Vec<String>> {
 
 /// telnet/串口：自桥接子进程 argv。
 fn build_bridge_argv(o: &ConnOptions) -> Option<Vec<String>> {
-    let selfp = std::fs::read_link("/proc/self/exe")
-        .or_else(|_| std::env::current_exe())
-        .ok()?;
+    let selfp = crate::platform::exe::self_exe_path().ok()?;
     let selfs = selfp.to_string_lossy().into_owned();
     match o.proto.as_str() {
         "telnet" => Some(vec![
@@ -2191,15 +2195,26 @@ fn screen_text(term: &vte::Terminal) -> String {
 /// ⚠ pty 的 **master 与 slave 共用同一份 termios**（实测：slave 切 raw
 /// 后 master 的 `c_lflag` 同步变了），所以拿 VTE 给的 master fd 查就行。
 fn pty_is_raw(pty: &vte::Pty) -> bool {
-    let mut tio: libc::termios = unsafe { std::mem::zeroed() };
-    // SAFETY: `tio` 是本函数栈上的零初始化结构；`fd` 由 VTE 持有且有效；
-    // `tcgetattr` 只往里写，不读未初始化内存。
-    let rc = unsafe { libc::tcgetattr(pty.fd().as_raw_fd(), &mut tio) };
-    if rc != 0 {
-        // 取不到 ⇒ 当作还没切 raw（宁可多等，也别写出本地回显的噪声）
-        return false;
+    #[cfg(unix)]
+    {
+        let mut tio: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `tio` 是本函数栈上的零初始化结构；`fd` 由 VTE 持有且有效；
+        // `tcgetattr` 只往里写，不读未初始化内存。
+        let rc = unsafe { libc::tcgetattr(pty.fd().as_raw_fd(), &mut tio) };
+        if rc != 0 {
+            // 取不到 ⇒ 当作还没切 raw（宁可多等，也别写出本地回显的噪声）
+            return false;
+        }
+        tio.c_lflag & libc::ICANON == 0 && tio.c_lflag & libc::ECHO == 0
     }
-    tio.c_lflag & libc::ICANON == 0 && tio.c_lflag & libc::ECHO == 0
+    #[cfg(not(unix))]
+    {
+        // Windows 的 ConPTY **没有本地行规程** ⇒ 不存在「本地回显」，
+        // 也就没有「认证前写进去会被缓冲、随后被登录流程吃掉」的问题
+        // ⇒ 一律当作已经 raw。
+        let _ = pty;
+        true
+    }
 }
 
 /// 屏幕最后一行像不像 shell 提示符。

@@ -21,6 +21,7 @@ pub mod menu;
 pub mod newmenu;
 pub mod notify;
 pub mod panel;
+pub mod platform;
 pub mod recent;
 pub mod replay;
 pub mod replayui;

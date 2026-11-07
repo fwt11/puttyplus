@@ -347,6 +347,12 @@ pub fn desktop_action(
     // 通知根本发不出去（`notify_proxy()` 返回 None），但用户仍然应该
     // 能回看"刚才发生了什么"。
     record(title, body);
+    // ⚠️ **非 Unix 平台没有会话总线** ⇒ D-Bus 那套发不出去，
+    // 直接返回 false，让调用方走「状态栏写一句」的兜底
+    // （见 `platform::notify::desktop_available`）。
+    if !crate::platform::notify::desktop_available() {
+        return false;
+    }
     let Some(proxy) = notify_proxy() else {
         return false;
     };

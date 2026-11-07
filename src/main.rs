@@ -4,8 +4,8 @@
 use std::rc::Rc;
 
 use puttyplus::{
-    about, appicon, args, backend, bridge, connmgr, density, keyui, menu, notify, panel, replayui,
-    settings, settingsui, sidebar, shortcuts, shortcutsui, tabs, term, theme, topbar,
+    about, appicon, args, backend, bridge, connmgr, density, keyui, menu, notify, panel, platform,
+    replayui, settings, settingsui, sidebar, shortcuts, shortcutsui, tabs, term, theme, topbar,
     topmenus, util, vault, vaultui,
 };
 use topmenus::{MenuEntry, TOP_MENUS};
@@ -39,9 +39,8 @@ fn main() {
     }
 
     // 与 C 版一致：setlocale(LC_ALL, "")，使 strerror 等按 locale 本地化
-    unsafe {
-        libc::setlocale(libc::LC_ALL, c"".as_ptr());
-    }
+    // （非 Unix 平台不走这条路，见 platform::locale 的说明）
+    crate::platform::locale::init();
 
     /* 参数解析必须在 GUI 初始化之前：堡垒机生成的临时会话/密码文件
      * 会在客户端启动后立即被删除，GTK 初始化有显示服务器往返耗时。

@@ -327,7 +327,7 @@ fn generate_key(
     passphrase: Option<&str>,
     comment: &str,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    let dir = gtk::glib::home_dir().join(".ssh");
+    let dir = crate::platform::paths::home().join(".ssh");
     keymgr::generate_to_files(algo, &dir, stem, passphrase, comment)
 }
 

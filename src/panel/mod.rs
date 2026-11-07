@@ -31,6 +31,11 @@ pub mod relayui;
 pub mod sessopt;
 pub mod syntax;
 pub mod worker;
+/// X11 选区直读（阶段 101）—— **只在 X11/Unix 上存在**。
+///
+/// Windows 上没有 X11 选区协议 ⇒ 拖拽传文件走**剪贴板**那条路
+/// （`clipfiles::read_local_paths`，见「粘贴上传」）。
+#[cfg(unix)]
 pub mod xdnd11;
 
 use std::cell::{Cell, RefCell};

@@ -48,6 +48,8 @@ use std::time::Duration;
 use gtk::gdk;
 use gtk::prelude::*;
 
+/// X11 选区直读（阶段 101）—— 只有 X11/Unix 才有这个协议。
+#[cfg(unix)]
 use super::xdnd11;
 
 /// 远程路径行用的自定义 mime（拖拽源用）。
@@ -231,6 +233,10 @@ where
                 //
                 // 只在「确实有跨进程拖拽」时才会真等（程序内部拖拽时选区没有
                 // 持有者，`xdnd11` 会立刻返回 `None`），不会拖慢内部拖拽。
+                //
+                // ⚠️ **X11 专有**：Windows/macOS 没有选区转换协议 ⇒ 这一步
+                //    整个不存在，直接走下面的 `text/uri-list` 标准读法。
+                #[cfg(unix)]
                 if let Some(text) = weak_widget
                     .upgrade()
                     .and_then(|w| xdnd11::read_uri_list(&w))

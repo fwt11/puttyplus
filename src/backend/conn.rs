@@ -166,11 +166,17 @@ impl russh::client::Handler for HostKeyHandler {
 fn strerror_local(e: &russh::Error) -> String {
     if let russh::Error::IO(ioerr) = e {
         if let Some(errno) = ioerr.raw_os_error() {
-            unsafe {
-                let msg = libc::strerror(errno);
-                if !msg.is_null() {
-                    return std::ffi::CStr::from_ptr(msg).to_string_lossy().into_owned();
-                }
+            // ⚠️ Unix 上走 `libc::strerror`（与 C 版同源，按 locale 本地化）；
+            // Windows 上**不能**用它 —— 那里返回的是 ANSI 代码页字节
+            // （简体中文机器上是 GBK），塞进 GTK 就是乱码 ⇒ 用 Rust 自带的
+            // ASCII 描述。见 `platform::locale::strerror`。
+            #[cfg(unix)]
+            {
+                return crate::platform::locale::strerror(errno);
+            }
+            #[cfg(not(unix))]
+            {
+                return ioerr.to_string();
             }
         }
     }
