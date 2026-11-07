@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1657] = [
+pub static EN: [(&str, &str); 1658] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1145,6 +1145,7 @@ pub static EN: [(&str, &str); 1657] = [
     ("正在连接数据库…", "Connecting to the database…"),
     ("每页取多少行（改了会重新查）", "How many rows to fetch per page (changing this re-queries)"),
     ("比较方式", "Comparison"),
+    ("没拿到文件数据，请改用「上传…」", "No file data received; please use \"Upload…\" instead"),
     ("没有传输项", "No transfer items"),
     ("没有占位符：点按钮直接发送", "No placeholders: the button sends it directly"),
     ("没有可导入的数据行", "There are no data rows to import"),

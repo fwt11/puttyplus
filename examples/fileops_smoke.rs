@@ -197,16 +197,16 @@ fn main() {
     );
     println!("[2] Tabs::open_term_at 开出的新终端也进了 {target}");
 
-    // ---- 3) 终端上挂着 FileList 的 DropTarget ----
+    // ---- 3) 终端上挂着接本地文件的拖放接收器 ----
     //
     // 拖文件到终端 = 上传到当前远程目录。VTE 自己的拖放接 String（拖选
-    // 文本），我们接 FileList（`text/uri-list`），两者不抢。
+    // 文本），我们接 `text/uri-list`（本地文件），两者不抢。
     let term = st.term.borrow().clone().expect("应有终端");
     assert!(
-        has_filelist_drop(&term),
-        "终端上没挂 FileList 的 DropTarget——拖文件到终端不会触发上传"
+        has_async_drop_target(&term),
+        "终端上没挂接本地文件的拖放接收器——拖文件到终端不会触发上传"
     );
-    println!("[3] 终端上挂着 FileList 的 DropTarget（拖文件进来 = 上传）");
+    println!("[3] 终端上挂着接本地文件的拖放接收器（拖文件进来 = 上传）");
 
     // ---- 4) 拖拽上传真的把文件传到远端 ----
     //
@@ -345,22 +345,20 @@ fn shot(path: &str) {
     println!("[截图] {path}：{:?}", st.map(|s| s.success()));
 }
 
-/// 终端上是否挂了**接 `gdk::FileList`** 的 DropTarget。
+/// 终端上是否挂了**接本地文件**的拖放接收器。
 ///
-/// 只看"有没有 DropTarget"不够——VTE 自带的那个接的是 String（拖选
+/// ⚠️ 现在用的是 `gtk::DropTargetAsync`（不是同步版 `gtk::DropTarget`）：
+/// 同步版在「读数据没回调」时会把自己**永久卡死**（`self->drop` 不清），
+/// 之后这个控件上的所有拖拽全部失灵——详见 `panel::dnd` 的说明。
+///
+/// 只看"有没有拖放接收器"也不够——VTE 自带的是同步版（接 String，拖选
 /// 文本），接的类型不对，拖文件进来照样没反应。
-fn has_filelist_drop(term: &vte4::Terminal) -> bool {
+fn has_async_drop_target(term: &vte4::Terminal) -> bool {
     let model = term.observe_controllers();
     for i in 0..model.n_items() {
         let Some(c) = model.item(i) else { continue };
-        let Some(dt) = c.downcast_ref::<gtk::DropTarget>() else {
-            continue;
-        };
-        let types = dt.types();
-        for ty in types.iter() {
-            if *ty == gtk::gdk::FileList::static_type() {
-                return true;
-            }
+        if c.downcast_ref::<gtk::DropTargetAsync>().is_some() {
+            return true;
         }
     }
     false

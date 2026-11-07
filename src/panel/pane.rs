@@ -894,7 +894,6 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::relayui::send_to_server(&st2));
     }
-
     vb.append(&crate::menu::sep());
     {
         let b = add("folder-new-symbolic", tr("新建文件夹"), false);
@@ -1109,12 +1108,18 @@ mod tests {
 }
 
 /* ---------------- 拖拽 ----------------
- * 远程源：application/x-puttyplus-remote（纯路径行） + text/plain
- * 本地源：text/uri-list（file:// URI，\r\n 分隔）
- * 远程目标：FileList（本地/外部 uri-list）→ 上传
- * 本地目标：String（远程路径行）→ 下载；FileList（外部）→ 复制进本目录
- * 同面板自拖忽略（drag_from 记录源面板） */
+ * 远程源：类型化字符串 + application/x-puttyplus-remote + text/plain
+ *         （远端路径行，一行一个绝对路径）
+ * 本地源：类型化 GdkFileList + text/uri-list（file:// URI，\r\n 分隔）
+ * 远程目标：要「本地文件」⇒ 上传
+ * 本地目标：要「远端路径行」⇒ 下载；要「本地文件」⇒ 复制进本目录
+ *
+ * ⚠️ 目标一律走 `super::dnd`（`GtkDropTargetAsync`）而不是
+ * `gtk::DropTarget`：同步版一次「没落下的拖拽」会把 `self->drop`
+ * 留在控件上，**之后所有拖拽全部哑掉**（详见 `dnd.rs` 的说明）。
+ */
 
+/** 拖拽源：本地文件 / 远端路径行。 */
 fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
     // ---- 源 ----
     let src = gtk::DragSource::new();
@@ -1133,19 +1138,11 @@ fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
             if paths.is_empty() {
                 return None;
             }
-            let prov = if remote {
-                gdk::ContentProvider::for_bytes(
-                    "application/x-puttyplus-remote",
-                    &glib::Bytes::from(paths.join("\n").as_bytes()),
-                )
+            Some(if remote {
+                super::dnd::paths_provider(&paths)
             } else {
-                let uris: Vec<String> = paths.iter().map(|p| format!("file://{p}")).collect();
-                gdk::ContentProvider::for_bytes(
-                    "text/uri-list",
-                    &glib::Bytes::from((uris.join("\r\n") + "\r\n").as_bytes()),
-                )
-            };
-            Some(prov)
+                super::dnd::files_provider(&paths)
+            })
         });
     }
     {
@@ -1162,72 +1159,55 @@ fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
     view.add_controller(src);
 
     // ---- 目标 ----
-    // gtk4-rs 的 DropTarget 为单 GType：FileList（uri-list）与 String（远程
-    // 路径行）各挂一个。
+    //
+    // ⚠️ 抓**弱引用**：控制器挂在 view 上，view 属于 PanelState 的控件树；
+    // 抓强引用就是「PanelState → view → 控制器 → PanelState」的**引用环**，
+    // 面板永远释放不掉（AGENTS.md 的红线）。
     {
-        // ⚠️ 抓**弱引用**：DropTarget 挂在 view 上，view 属于 PanelState
-        // 的控件树；抓强引用就是「PanelState → view → DropTarget →
-        // PanelState」的**引用环**，面板永远释放不掉（AGENTS.md 的红线）。
         let weak = Rc::downgrade(st);
-        let dst = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-        dst.connect_drop(move |_dt, value, _x, _y| {
-            let Some(st) = weak.upgrade() else {
-                return false;
-            };
-            if st.drag_from.get() == Some(remote) {
-                return false; // 同面板自拖忽略
-            }
-            let Ok(fl) = value.get::<gdk::FileList>() else {
-                return false;
-            };
-            let cwd = st.pane_cwd(remote);
-            let paths: Vec<String> = fl
-                .files()
-                .iter()
-                .map(|f| {
-                    f.path()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                })
-                .filter(|p| !p.is_empty())
-                .collect();
-            if paths.is_empty() {
-                return false;
-            }
-            if remote {
-                // 拖到**远程文件列表** = 上传（跟拖到终端同一个入口）
-                super::drop_upload_files(&st, &fl)
-            } else {
-                super::copy_uris_into_local(&st, &paths, &cwd);
-                true
-            }
-        });
-        view.add_controller(dst);
+        let r = remote;
+        super::dnd::attach(
+            view.upcast_ref::<gtk::Widget>(),
+            super::dnd::Want::Files,
+            move |res| {
+                let Some(st) = weak.upgrade() else { return };
+                if st.drag_from.get() == Some(r) {
+                    return; // 同面板自拖忽略
+                }
+                match res {
+                    super::dnd::DropResult::Paths(paths) => {
+                        if r {
+                            // 拖到**远程文件列表** = 上传（跟拖到终端同一个入口）
+                            super::drop_upload_paths(&st, paths);
+                        } else {
+                            // 拖到**本地文件列表** = 复制进当前目录（非递归，与 C 版一致）
+                            let cwd = st.pane_cwd(false);
+                            super::copy_uris_into_local(&st, &paths, &cwd);
+                        }
+                    }
+                    super::dnd::DropResult::NoData => {
+                        // 没拿到数据要说清楚（源端可能根本不给数据）
+                        super::on_drop_result(&st, super::dnd::DropResult::NoData);
+                    }
+                }
+            },
+        );
     }
     if !remote {
         // 同上：弱引用，别把 PanelState 钉死。
         let weak = Rc::downgrade(st);
-        let dst = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::COPY);
-        dst.connect_drop(move |_dt, value, _x, _y| {
-            let Some(st) = weak.upgrade() else {
-                return false;
-            };
-            if st.drag_from.get() == Some(false) {
-                return false;
-            }
-            let txt = value.get::<String>().unwrap_or_default();
-            let paths: Vec<String> = txt
-                .split('\n')
-                .map(str::trim)
-                .filter(|l| l.starts_with('/'))
-                .map(str::to_string)
-                .collect();
-            if paths.is_empty() {
-                return false;
-            }
-            super::start_downloads(&st, paths);
-            true
-        });
-        view.add_controller(dst);
+        super::dnd::attach(
+            view.upcast_ref::<gtk::Widget>(),
+            super::dnd::Want::Paths,
+            move |res| {
+                let Some(st) = weak.upgrade() else { return };
+                if st.drag_from.get() == Some(false) {
+                    return; // 本地面板自己拖出来的（那是上传方向）
+                }
+                if let super::dnd::DropResult::Paths(paths) = res {
+                    super::start_downloads(&st, paths);
+                }
+            },
+        );
     }
 }

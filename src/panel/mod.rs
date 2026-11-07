@@ -16,6 +16,7 @@ pub mod dbtree;
 pub mod dbui;
 pub mod closeguard;
 pub mod dialogs;
+pub mod dnd;
 pub mod fileedit;
 pub mod fwdmgr;
 pub mod mirrorui;
@@ -2031,16 +2032,10 @@ pub fn start_uploads(st: &Rc<PanelState>, lpaths: Vec<String>) {
 /// `gdk::FileList` → 本地路径列表。
 ///
 /// **为什么抽成独立函数**：GTK **没有"模拟一次拖放"的 API**——
-/// `DropTarget` 的 `drop` 回调只有真的拖一次才会触发，手工拖没法
-/// 自动化验证。把"取路径"和"发起上传"拆开之后，冒烟可以直接调
-/// 同一段代码验（见 `drop_upload_files`）。
-pub fn filelist_paths(fl: &gdk::FileList) -> Vec<String> {
-    fl.files()
-        .iter()
-        .filter_map(|f| f.path().map(|p| p.to_string_lossy().into_owned()))
-        .filter(|p| !p.is_empty())
-        .collect()
-}
+/// drop 回调只有真的拖一次才会触发，手工拖没法自动化验证。把"取路径"
+/// 和"发起上传"拆开之后，冒烟可以直接调同一段代码验
+/// （见 `drop_upload_files`）。
+pub use dnd::filelist_paths;
 
 /// 拖拽上传的**实际动作**：把 FileList 里的文件传到当前远程目录。
 ///
@@ -2058,28 +2053,63 @@ pub fn drop_upload_files(st: &Rc<PanelState>, fl: &gdk::FileList) -> bool {
     true
 }
 
+/// 拖拽上传的入口（按**路径列表**）。
+///
+/// ⚠️ **空列表不能静默吞掉**：拖进来却什么都没发生，是这个功能历史上
+/// 最容易被当成「坏了」的表现（用户完全看不出到底是拖放没触发，还是
+/// 传完了但界面没刷新）。所以这里给一句人话提示。
+pub fn drop_upload_paths(st: &Rc<PanelState>, paths: Vec<String>) -> bool {
+    if paths.is_empty() {
+        set_remote_status(
+            st,
+            crate::theme::State::Warn,
+            &tr("拖进来的东西里没有可上传的本地文件"),
+        );
+        return false;
+    }
+    start_uploads(st, paths);
+    true
+}
+
+/// 一次拖放的落地处理：**拿到路径就传，没拿到就说清楚**。
+///
+/// ⚠️ 「没拿到数据」必须**说出来**：X11 上源端可以接了拖拽却never应答，
+/// 这时用户看到的现象和「拖拽根本没触发」一模一样 —— 不提示的话，用户
+/// 只会一次次重拖，然后以为功能坏了。
+pub fn on_drop_result(st: &Rc<PanelState>, res: dnd::DropResult) {
+    match res {
+        dnd::DropResult::Paths(paths) => {
+            drop_upload_paths(st, paths);
+        }
+        dnd::DropResult::NoData => {
+            set_remote_status(
+                st,
+                crate::theme::State::Warn,
+                &tr("没拿到文件数据，请改用「上传…」"),
+            );
+        }
+    }
+}
+
 /// 给终端挂上「**拖文件进来 = 上传到当前远程目录**」。
 ///
-/// ⚠️ **只接 `gdk::FileList`（`text/uri-list`）**：VTE 自己的拖放是**拖选
+/// ⚠️ **只接本地文件**（`text/uri-list`）：VTE 自己的拖放是**拖选
 /// 文本**（接 String），两者类型不同、互不抢——从终端往外拖文本到编辑器
 /// 的老功能不受影响。
 ///
-/// ⚠️ 闭包只抓**弱引用**：DropTarget 挂在终端上，终端属于 PanelState 的
-/// 控件树；抓强引用就是「PanelState → 终端 → DropTarget → PanelState」
+/// ⚠️ 闭包只抓**弱引用**：拖放控制器挂在终端上，终端属于 PanelState 的
+/// 控件树；抓强引用就是「PanelState → 终端 → 控制器 → PanelState」
 /// 的**引用环**，面板永远释放不掉（AGENTS.md 的红线）。
 pub fn enable_drop_upload(st: &Rc<PanelState>, term: &vte4::Terminal) {
-    let dst = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
     let weak = Rc::downgrade(st);
-    dst.connect_drop(move |_dt, value, _x, _y| {
-        let Some(st) = weak.upgrade() else {
-            return false;
-        };
-        let Ok(fl) = value.get::<gdk::FileList>() else {
-            return false;
-        };
-        drop_upload_files(&st, &fl)
-    });
-    term.add_controller(dst);
+    dnd::attach(
+        term.upcast_ref::<gtk::Widget>(),
+        dnd::Want::Files,
+        move |res| {
+            let Some(st) = weak.upgrade() else { return };
+            on_drop_result(&st, res);
+        },
+    );
 }
 
 pub fn start_downloads(st: &Rc<PanelState>, rpaths: Vec<String>) {
