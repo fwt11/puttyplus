@@ -2462,10 +2462,9 @@ mod tests {
     use super::*;
 
     fn tmp_ini(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("pp_connmgr_test_{}_{:?}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d.join("connections.ini")
+        // ⚠ 目录**进程退出时删**（见 `util::testutil`）—— 以前只建不删，
+        // 每跑一轮 `cargo test` 就在 /tmp 里留一批 `pp_connmgr_test_*`。
+        crate::util::testutil::temp_dir("pp_connmgr_test", tag).join("connections.ini")
     }
 
     #[test]

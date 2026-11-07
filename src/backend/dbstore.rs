@@ -352,9 +352,14 @@ mod tests {
     use super::*;
 
     fn tmp_ini(tag: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join(format!("dbstore-{tag}-{}.ini", std::process::id()))
+        // ⚠ 文件放在一个临时目录里，**进程退出时整块删**（见
+        // `util::testutil`）—— 以前这些 .ini 直接落在 `target/` 里，
+        // 每次跑测试都多留一批。
+        let dir = crate::util::testutil::temp_dir_in(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
+            &format!("dbstore-tests-{}-{tag}", std::process::id()),
+        );
+        dir.join(format!("{tag}.ini"))
     }
 
     fn profile(name: &str, port: u16) -> DbProfile {

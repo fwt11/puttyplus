@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn 剪贴板文本只留真存在的文件() {
-        let real = std::env::temp_dir().join("pp_clip_test.txt");
+        let real = crate::util::testutil::temp_dir("pp_clip_test", "text").join("clip_test.txt");
         std::fs::write(&real, b"x").unwrap();
         let text = format!(
             "{}\n/tmp/绝对不存在/xxx.txt\n随便一段文字\n",
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn 剪贴板_uri列表能解出路径() {
-        let real = std::env::temp_dir().join("pp_clip_test2.txt");
+        let real = crate::util::testutil::temp_dir("pp_clip_test", "uri").join("clip_test2.txt");
         std::fs::write(&real, b"x").unwrap();
         let text = format!("file://{}\n", real.to_string_lossy());
         let paths = local_paths_from_text(&text);

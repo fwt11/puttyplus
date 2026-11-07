@@ -137,18 +137,64 @@ pub fn utf8_sanitize(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 pub(crate) mod testutil {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, Once};
 
-    /// 建一个隔离的临时“主目录”用于 config/args 单测。
-    pub fn temp_home(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "pp_rust_test_{}_{:?}",
-            tag,
-            std::process::id()
-        ));
+    /// 本进程建过的临时目录（进程退出时统一删掉）。
+    static DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// atexit 回调：把本进程建过的临时目录全删掉。
+    ///
+    /// ⚠ **为什么用 atexit，而不是"测试函数一结束就删"的 RAII 守卫**：
+    /// 这些目录是**临时 HOME**（测试会 `set_var("HOME", …)`），而 HOME 是
+    /// **进程全局**的 ⇒ 并行测试之间本来就可能互相踩。目录**中途**被删
+    /// 会让踩到它的那个测试读到"目录不存在"（以前只是读到别人的内容，
+    /// 碰巧还能过）⇒ 删得太早反而会把并行测试搞挂。
+    /// atexit 在**测试全跑完、进程正常退出**时统一清 ⇒ 既满足"跑完就没"，
+    /// 又不在运行中把别人的 HOME 删了。
+    extern "C" fn cleanup_at_exit() {
+        let dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
+        for d in dirs.iter() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// 登记一个"进程退出时要删"的目录（第一次登记时挂上 atexit 钩子）。
+    fn register(dir: &Path) {
+        static HOOK: Once = Once::new();
+        HOOK.call_once(|| unsafe {
+            // ⚠ 回调必须是 `extern "C" fn()`（不带参数、不捕获环境）⇒
+            // 要访问的东西只能放在**静态**里。
+            libc::atexit(cleanup_at_exit);
+        });
+        DIRS.lock().unwrap().push(dir.to_path_buf());
+    }
+
+    /// 建一个隔离的临时目录（`/tmp/<prefix>_<tag>_<pid>`），**进程退出时删**。
+    ///
+    /// ⚠ 名字里带 PID ⇒ 同一台机器上并行跑两个测试进程不会互相踩。
+    pub fn temp_dir(prefix: &str, tag: &str) -> PathBuf {
+        temp_dir_in(
+            std::env::temp_dir(),
+            &format!("{prefix}_{tag}_{:?}", std::process::id()),
+        )
+    }
+
+    /// 同 `temp_dir`，但建在指定父目录下（子目录名自定）。
+    pub fn temp_dir_in(base: PathBuf, name: &str) -> PathBuf {
+        let d = base.join(name);
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
+        register(&d);
         d
+    }
+
+    /// 建一个隔离的临时“主目录”用于 config/args 单测。
+    ///
+    /// ⚠ **以前这个目录只建不删** ⇒ `cargo test --lib` 每跑一轮就在
+    /// `/tmp` 里留一批 `pp_rust_test_*`（一轮两百多个，越跑越多）。
+    pub fn temp_home(tag: &str) -> PathBuf {
+        temp_dir("pp_rust_test", tag)
     }
 }
 

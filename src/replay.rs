@@ -1064,8 +1064,7 @@ mod tests {
 
     #[test]
     fn v3_增量时间能读回来() {
-        let dir = std::env::temp_dir().join("pp-replay-v3-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::util::testutil::temp_dir("pp_replay", "v3");
         let p = dir.join("t.cast");
         let _ = std::fs::remove_file(&p);
         // 手写一个 asciinema 3.x 样子的文件：时间是**距上一条的间隔**
@@ -1092,8 +1091,7 @@ mod tests {
 
     #[test]
     fn v2_绝对时间照旧能读() {
-        let dir = std::env::temp_dir().join("pp-replay-v2-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::util::testutil::temp_dir("pp_replay", "v2");
         let p = dir.join("t.cast");
         let _ = std::fs::remove_file(&p);
         let text = concat!(
