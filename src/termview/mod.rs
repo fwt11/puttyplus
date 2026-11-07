@@ -30,6 +30,12 @@ pub mod vte;
 #[cfg(feature = "ghostty")]
 pub mod ghostty;
 
+/// ghostty 自绘终端控件（跨平台版 阶段 C3 起）。
+///
+/// ⚠️ 需要 `ghostty` 特性。
+#[cfg(feature = "ghostty")]
+pub mod ghostty_view;
+
 use gtk::prelude::*;
 use glib::prelude::*;
 use vte4::prelude::*;

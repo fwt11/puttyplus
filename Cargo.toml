@@ -63,3 +63,8 @@ futures-util = { version = "0.3", default-features = false }
 name = "ghostty_vt_smoke"
 required-features = ["ghostty"]
 
+
+# 自绘终端控件冒烟（阶段 C3）：需要 `ghostty` 特性（要 Zig 0.17）
+[[example]]
+name = "ghostty_view_smoke"
+required-features = ["ghostty"]

@@ -22,13 +22,17 @@
 //! 这个类型只能在**创建它的那个线程**上用（GTK 主线程）。
 
 use ghostty_vt::fmt::{Format, Formatter, FormatterOptions};
+use ghostty_vt::key::{Action, Encoder, Key, Mods};
 use ghostty_vt::search::Search;
 use ghostty_vt::terminal::{Event, Options, Terminal};
+
+pub use ghostty_vt::key::{Action as KeyAction, Key as KeyCode, Mods as KeyMods};
 
 /// ghostty 终端内核的句柄。
 pub struct GhosttyTerm {
     term: Terminal,
     search: Search,
+    encoder: Encoder,
 }
 
 impl GhosttyTerm {
@@ -42,7 +46,12 @@ impl GhosttyTerm {
             ..Options::default()
         })?;
         let search = Search::new(&term)?;
-        Ok(GhosttyTerm { term, search })
+        let encoder = Encoder::new()?;
+        Ok(GhosttyTerm {
+            term,
+            search,
+            encoder,
+        })
     }
 
     /* ---------------- 输出 ---------------- */
@@ -207,6 +216,55 @@ impl GhosttyTerm {
     pub fn reset(&mut self) {
         self.term.reset();
     }
+
+    /* ---------------- 渲染 ---------------- */
+
+    /// 把内核的当前画面交给渲染状态（增量刷新机制）。
+    ///
+    /// ⚠️ 返回的快照**借用渲染状态** ⇒ 渲染状态在那期间不能动
+    /// （`Snapshot` 借用的是 `rs`，不是 `self`）。
+    pub fn update_render<'s>(
+        &mut self,
+        rs: &'s mut ghostty_vt::render::RenderState,
+    ) -> Result<ghostty_vt::render::Snapshot<'s>, ghostty_vt::Error> {
+        rs.update(&self.term)
+    }
+
+    /* ---------------- 按键编码 ---------------- */
+
+    /// 按键事件 → **要写给子进程的字节**。
+    ///
+    /// ⚠️ `text` 是**这个键产生的文字**（键盘布局给出的字符；
+    /// 中文输入法的 commit 也走这里）。传 `None` 时编码器只按
+    /// 逻辑键 + 修饰键推。
+    ///
+    /// ⚠️ 中文 commit 时**不要**传 C0 控制字符（U+0000–U+001F、
+    /// U+007F）——那种情况传 `None`，让编码器按逻辑键来。
+    pub fn encode_key(
+        &mut self,
+        action: Action,
+        key: Key,
+        mods: Mods,
+        text: Option<&str>,
+    ) -> Vec<u8> {
+        let Ok(mut ev) = ghostty_vt::key::Event::new() else {
+            return Vec::new();
+        };
+        ev.set_action(action);
+        ev.set_key(key);
+        ev.set_mods(mods);
+        if let Some(t) = text {
+            ev.set_utf8(Some(t.to_string()));
+        }
+        // 终端的模式（应用光标键、kitty 键盘协议……）会变 ⇒
+        // 每次编码前重新从终端同步一次。
+        self.encoder.set_options_from_terminal(&self.term);
+        let mut out = Vec::new();
+        if self.encoder.encode_to_vec(&ev, &mut out).is_err() {
+            return Vec::new();
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +301,42 @@ mod tests {
         let text = t.screen_text();
         assert!(text.contains("abc"), "实际：{text:?}");
         assert!(text.contains("def"), "实际：{text:?}");
+    }
+
+    /* ---------------- 按键编码 ---------------- */
+
+    #[test]
+    fn 回车键编成回车() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let b = t.encode_key(Action::Press, Key::Enter, Mods::empty(), None);
+        assert_eq!(b, b"\r");
+    }
+
+    #[test]
+    fn 控制键加字母编成控制码() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let b = t.encode_key(Action::Press, Key::C, Mods::CTRL, None);
+        assert_eq!(b, b"\x03");
+    }
+
+    #[test]
+    fn 普通字母编成自己() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let b = t.encode_key(Action::Press, Key::A, Mods::empty(), Some("a"));
+        assert_eq!(b, b"a");
+    }
+
+    #[test]
+    fn 方向键编成CSI序列() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let b = t.encode_key(Action::Press, Key::ArrowUp, Mods::empty(), None);
+        assert_eq!(b, b"\x1b[A");
+    }
+
+    #[test]
+    fn 中文commit编成UTF8字节() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let b = t.encode_key(Action::Press, Key::Unidentified, Mods::empty(), Some("中"));
+        assert_eq!(b, "中".as_bytes());
     }
 }
