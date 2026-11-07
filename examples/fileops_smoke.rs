@@ -274,6 +274,33 @@ fn main() {
     shot("/tmp/pp_ctx_menu.png");
     println!("[5] 右键菜单里有「在此处打开终端」（本地面板没有）");
 
+    // ---- 6) 「粘贴上传」这条兜底路能用 ----
+    //
+    // X11 的拖拽传文件要源程序提供选区数据，而 Deepin 文件管理器（Qt）
+    // **声明了类型却从不提供数据** ⇒ 拖不进去是源侧的限制。它的**剪贴板
+    // 是好的**（复制文件后剪贴板里有 `text/uri-list`），所以「粘贴上传」
+    // 才是那条一定走得通的路。这里验它的解析部分。
+    let clip_name = format!("pp_fileops_clip_{}.txt", std::process::id());
+    let clip_local = std::path::PathBuf::from(std::env::temp_dir()).join(&clip_name);
+    std::fs::write(&clip_local, b"puttyplus paste upload ok\n").expect("写临时文件");
+    let clip_text = format!(
+        "file://{}\n",
+        clip_local.to_string_lossy().replace(' ', "%20")
+    );
+    let clip_paths = panel::clipfiles::local_paths_from_text(&clip_text);
+    assert_eq!(
+        clip_paths,
+        vec![clip_local.to_string_lossy().into_owned()],
+        "剪贴板里的 file:// URI 没解析成本地路径"
+    );
+    // 剪贴板里是普通文字时不该误判成文件
+    assert!(
+        panel::clipfiles::local_paths_from_text("随便一段文字\n/etc/passwdx\n").is_empty(),
+        "剪贴板里的普通文字被误判成了文件"
+    );
+    let _ = std::fs::remove_file(&clip_local);
+    println!("[6] 「粘贴上传」的剪贴板解析正常");
+
     println!("fileops smoke ok");
 }
 

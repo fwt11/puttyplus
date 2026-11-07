@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1658] = [
+pub static EN: [(&str, &str); 1661] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -475,6 +475,7 @@ pub static EN: [(&str, &str); 1658] = [
     ("刷新", "Refresh"),
     ("刷新对象树：重新查一遍这个库", "Refresh the object tree: query the database again"),
     ("刷新目录", "Refresh the directory"),
+    ("剪贴板里没有可上传的本地文件", "No local files to upload in the clipboard"),
     ("加一条转发规则（类型与机制在弹出的对话框里选）。", "Add a forwarding rule (pick the type and the mechanism in the dialog)."),
     ("加口令失败: {e}", "Failed to set the passphrase: {e}"),
     ("加唯一索引「{v0}」——现有数据里有重复值就会失败", "Add a unique index \"{v0}\" — it fails if the existing data contains duplicates"),
@@ -866,6 +867,7 @@ pub static EN: [(&str, &str); 1658] = [
     ("把上面列表里的规则整份存进这条连接的配置（覆盖式）：\n下次连接自动带上。\n保存的是列表，不是下面表单里填的内容。", "Store the whole list of rules above in the configuration of this connection (overwriting it):\nThey are applied automatically on the next connection.\nWhat is saved is the list, not the content of the form below."),
     ("把会话录成 asciicast v3（.cast），右键终端「打开 .cast 回放」可回放。\n录的是屏幕渲染出来的行（带颜色），不是原始字节流：\n· 你敲的命令会一个个敲出来（光标行逐次重写）；\n· 输入事件不录，所以文件里不会有你敲的密码；\n· 已经输出完的行被反复改写只留最后一次（进度条这类）；\n· 终端被清屏会漏；\n· 输出快过采样间隔、把滚动缓冲挤爆时会丢（横幅上会写丢了多少行）。\nCtrl+Shift+O 随时打开回放窗口。", "Record the session as asciicast v3 (.cast); right-click the terminal and pick \"Open a .cast replay…\" to play it back.\nWhat is recorded are the lines rendered on the screen (with colours), not the raw byte stream:\n· the commands you type are typed out one by one (the cursor line is rewritten each time);\n· input events are not recorded, so the file will not contain the password you typed;\n· a line that is rewritten over and over only keeps its last version (progress bars and the like);\n· lines lost when the terminal is cleared;\n· output faster than the sampling interval can get lost when the scroll buffer overflows (the banner says how many lines were lost).\nCtrl+Shift+O opens the replay window at any time."),
     ("把列「{v0}」改成 NOT NULL——现有 NULL 值会让语句失败", "Change column \"{v0}\" to NOT NULL — existing NULL values make the statement fail"),
+    ("把剪贴板里的本地文件上传到远程当前目录", "Upload the local files in the clipboard to the remote current directory"),
     ("把字段 / 索引 / 外键的改动写进库", "Write the field / index / foreign key changes into the database"),
     ("把定义文本复制到剪贴板", "Copy the definition text to the clipboard"),
     ("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里", "Export the whole table to a local file (CSV / SQL / JSON), or import a local CSV into the table"),
@@ -1310,6 +1312,7 @@ pub static EN: [(&str, &str); 1658] = [
     ("类型：{v0}", "Type: {v0}"),
     ("粘贴", "Paste"),
     ("粘贴 (Ctrl+V)", "Paste (Ctrl+V)"),
+    ("粘贴上传", "Paste & Upload"),
     ("粘贴剪贴板", "Paste from the clipboard"),
     ("系统随机数不可用（{e}），拒绝生成私钥", "The system random source is not available ({e}), refusing to generate a private key"),
     ("索引", "Index"),

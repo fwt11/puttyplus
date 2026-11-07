@@ -894,6 +894,19 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
         let st2 = Rc::clone(st);
         b.connect_clicked(move |_| super::relayui::send_to_server(&st2));
     }
+    if remote {
+        // 「粘贴上传」：把**剪贴板里的本地文件**传到当前远程目录。
+        //
+        // **为什么需要它**：X11 的拖拽传文件要源程序提供选区数据，而
+        // Deepin 文件管理器（Qt）声明了类型却**从不提供数据** ⇒ 拖不进去
+        // 是源侧的限制。但它的剪贴板是好的（复制文件后剪贴板里有
+        // `text/uri-list`），所以这条路一定走得通。
+        let b = add("edit-paste-symbolic", tr("粘贴上传"), false);
+        b.set_tooltip_text(Some(tr("把剪贴板里的本地文件上传到远程当前目录")));
+        let st2 = Rc::clone(st);
+        b.connect_clicked(move |_| super::on_paste_upload(&st2));
+    }
+
     vb.append(&crate::menu::sep());
     {
         let b = add("folder-new-symbolic", tr("新建文件夹"), false);
