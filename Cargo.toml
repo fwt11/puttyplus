@@ -17,10 +17,24 @@ codegen-units = 1
 panic = "abort"
 opt-level = "s"
 
+[features]
+default = []
+# 终端第二引擎：libghostty-vt（Ghostty 的终端内核，跨平台都有）。
+#
+# ⚠️ **默认关闭**：Linux 侧终端仍走 VTE（主线零回归），所以日常构建
+# 不需要 Zig，CI 的 Linux job 也一行不用改。Windows 版的终端后端
+# 走这个引擎（阶段 C3 起）。
+#
+# ⚠️ 打开这个特性会**编译 libghostty-vt** ⇒ 需要 **Zig 0.17.x**
+# （ZIG 环境变量或 PATH 里的 `zig`）。详见 `docs/跨平台-构建说明.md`。
+ghostty = ["dep:ghostty-vt"]
+
 [dependencies]
 gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
 glib = "0.22"
 vte4 = { version = "0.10", features = ["v0_80"] }
+# libghostty-vt 的安全封装（FFI 细节由 src/termview/ghostty.rs 封死）
+ghostty-vt = { version = "0.8", optional = true }
 russh = { version = "0.63", default-features = false, features = ["rsa", "flate2", "ring"] }
 russh-sftp = "3.0"
 tokio = { version = "1", features = ["macros", "time", "sync", "io-util", "fs", "process", "net"] }
@@ -43,3 +57,9 @@ rand_core = "0.10"
 tokio-postgres = "0.7"
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 futures-util = { version = "0.3", default-features = false }
+
+# 终端内核冒烟（阶段 C2）：只有开了 `ghostty` 特性才编（需要 Zig 0.17）
+[[example]]
+name = "ghostty_vt_smoke"
+required-features = ["ghostty"]
+

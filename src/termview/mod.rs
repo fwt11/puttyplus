@@ -24,6 +24,12 @@
 
 pub mod vte;
 
+/// ghostty 终端内核（跨平台版 阶段 C2 起）。
+///
+/// ⚠️ 需要 `ghostty` 特性（会编译 libghostty-vt ⇒ 要 Zig 0.17）。
+#[cfg(feature = "ghostty")]
+pub mod ghostty;
+
 use gtk::prelude::*;
 use glib::prelude::*;
 use vte4::prelude::*;
