@@ -306,10 +306,15 @@ fn main() {
     // 用户 2026-11-07 报「拖拽上传时从界面上看不出来是否有文件上传」⇒
     // 这里钉住两条：**队列按钮**（角标数字 + 忙态）与**远程面板状态行**
     // （追加「上传中 N 个」）。
+    //
+    // ⚠️ 还钉一条用户随后报的：**传完了按钮旁边不许剩个蓝色胶囊**
+    // （角标 Label 是常驻的 ⇒ 底色必须跟着数字一起撤）。
     {
-        let (badge, busy) = panel::queue::btn_state(&st).expect("面板上应有「传输队列」按钮");
+        let (badge, busy, badge_on) =
+            panel::queue::btn_state(&st).expect("面板上应有「传输队列」按钮");
         assert_eq!(badge, "", "空闲时角标不该有数字");
         assert!(!busy, "空闲时不该是忙态");
+        assert!(!badge_on, "空闲时角标不该带底色（会剩一个蓝胶囊）");
 
         // 造一个「正在传」的条目 ⇒ 角标与忙态要跟上
         let shared = panel::worker::XferShared::new();
@@ -324,9 +329,10 @@ fn main() {
         });
         panel::queue::refresh_btn(&st);
         pump(80);
-        let (badge, busy) = panel::queue::btn_state(&st).unwrap();
+        let (badge, busy, badge_on) = panel::queue::btn_state(&st).unwrap();
         assert_eq!(badge, "1", "有一个在传 ⇒ 角标显示 1");
         assert!(busy, "有东西在传 ⇒ 按钮要是忙态");
+        assert!(badge_on, "有数字 ⇒ 角标要有底色");
         let txt = st.pane(true).status_lbl.text().to_string();
         assert!(
             txt.contains("上传中 1 个"),
@@ -337,9 +343,13 @@ fn main() {
         st.items.borrow_mut().clear();
         panel::queue::refresh_btn(&st);
         pump(80);
-        let (badge, busy) = panel::queue::btn_state(&st).unwrap();
+        let (badge, busy, badge_on) = panel::queue::btn_state(&st).unwrap();
         assert_eq!(badge, "", "传完了角标要清空");
         assert!(!busy, "传完了不该还是忙态");
+        assert!(
+            !badge_on,
+            "传完了角标不该留底色（用户 2026-11-07：别剩个蓝色的块）"
+        );
     }
     println!("[7] 传输进行中：队列按钮有角标 + 忙态，状态行有提示");
 

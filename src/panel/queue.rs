@@ -207,6 +207,15 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
                     // ⚠️ **不 hide，只是把文字清空**：角标 `width_chars(1)`
                     // 已经预留了一格宽 ⇒ 出现/消失时工具栏不会左右跳。
                     l.set_text(&if n > 0 { n.to_string() } else { String::new() });
+                    // ⚠️ **底色只在真有数字时才上**（用户 2026-11-07 报：
+                    // 「上传结束了还是这样，结束了就不要这个蓝色的块了吧」——
+                    // 底色/圆角/内边距全在 `.pp-xfer-badge-on` 里 ⇒ 空闲时
+                    // 角标 Label 只剩一格空白，不会在按钮旁挂个蓝胶囊）。
+                    if n > 0 {
+                        l.add_css_class("pp-xfer-badge-on");
+                    } else {
+                        l.remove_css_class("pp-xfer-badge-on");
+                    }
                 }
                 if let Some(i) = c.downcast_ref::<gtk::Image>() {
                     i.set_icon_name(Some(if n > 0 {
@@ -239,25 +248,32 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
     super::render_status(st);
 }
 
-/// 冒烟用：队列按钮的当前状态（**角标文字**, 是否忙态）。
+/// 冒烟用：队列按钮的当前状态
+/// （**角标文字**, 是否忙态, 角标**有没有底色**）。
 ///
 /// `None` = 面板上还没有这个按钮（面板还没建）。
-pub fn btn_state(st: &Rc<PanelState>) -> Option<(String, bool)> {
+///
+/// ⚠️ 第三个值（有没有底色）是给「传完了不该剩个蓝胶囊」这条钉住的
+/// （用户 2026-11-07 报）—— 底色类 `.pp-xfer-badge-on` 只在真有数字时
+/// 才挂上。
+pub fn btn_state(st: &Rc<PanelState>) -> Option<(String, bool, bool)> {
     let b = st.queue_btn.borrow().clone()?;
     let mut badge = String::new();
+    let mut badge_on = false;
     if let Some(child) = b.child() {
         if let Some(row) = child.downcast_ref::<gtk::Box>() {
             let mut cur = row.first_child();
             while let Some(c) = cur {
                 if let Some(l) = c.downcast_ref::<gtk::Label>() {
                     badge = l.text().to_string();
+                    badge_on = l.has_css_class("pp-xfer-badge-on");
                     break;
                 }
                 cur = c.next_sibling();
             }
         }
     }
-    Some((badge, b.has_css_class("pp-xfer-busy")))
+    Some((badge, b.has_css_class("pp-xfer-busy"), badge_on))
 }
 
 /// 新传输项入队：建行 + 保存行引用。

@@ -851,14 +851,22 @@ const COMPONENTS: &str = r#"
 .pp-chip-err { background-color: mix(@pp_err, @pp_bg, 0.82); color: @pp_fg; }
 /* 传输队列按钮的**数量角标**（阶段 102）：还在传几个。
    ⚠️ 别复用 `.pp-chip`：那个类带着状态色语义（绿=正常 / 黄=警告 /
-   红=出错），角标说的是"数量"，不是"状态"。 */
+   红=出错），角标说的是"数量"，不是"状态"。
+
+   ⚠️ **底色必须只在"真有数字"时才上**（`.pp-xfer-badge-on`）：
+   角标 Label 是**常驻**的（空闲时只清空文字、不 hide ⇒ 工具栏不会抖），
+   要是底色也常驻 ⇒ **传完了还剩一个蓝色胶囊挂在按钮旁边**
+   （用户 2026-11-07 报）。所以底色/圆角/内边距全放进 `-on` 类，
+   空闲时这个 Label 只占 `width_chars(1)` 的空白。 */
 .pp-xfer-badge {
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.pp-xfer-badge-on {
   background-color: @pp_accent;
   color: @pp_on_accent;
   border-radius: 9px;
   padding: 0px 5px;
-  font-size: 0.8em;
-  font-weight: 600;
 }
 /* 传输队列按钮的**忙态**（阶段 102）：有东西在传。
    ⚠️ **别给这个按钮加 `flat`**：Adwaita 的 `button.flat` 是
