@@ -527,12 +527,34 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
 
         // 传输队列：会话级窗口，但传东西时经常要看，直接放按钮不藏进 ⋯。
         // 目录镜像放在**本地面板**（源目录在本地，推送方向本地 → 远端）。
-        let queue = icon_btn("view-list-symbolic", tr("传输队列"));
+        //
+        // ⚠ 按钮上带一个**数量角标**（阶段 102）：传输进行中时角标显示
+        // 「还在传几个」，空闲时藏起来。角标是这个按钮**唯一的信息增量**
+        // ——图标本身不会变，用户扫一眼就知道"有没有东西在传、还有几件"。
+        let queue = gtk::Button::new();
+        {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            let img = gtk::Image::from_icon_name("view-list-symbolic");
+            img.set_pixel_size(16);
+            let badge = gtk::Label::new(None);
+            badge.add_css_class("pp-xfer-badge");
+            // 固定一格宽 ⇒ 空闲时也不占地方，传输中出现/消失时
+            // 工具栏不会左右跳
+            badge.set_width_chars(1);
+            row.append(&img);
+            row.append(&badge);
+            queue.set_child(Some(&row));
+        }
+        queue.add_css_class("flat");
+        crate::a11y::watch_tooltip(&queue);
+        queue.set_tooltip_text(Some(tr("传输队列")));
         {
             let st2 = Rc::clone(st);
             queue.connect_clicked(move |_| super::on_open_queue(&st2));
         }
         toolbar.append(&queue);
+        // 队列刷新时要用它刷忙态与角标 ⇒ 交一份给 PanelState（阶段 102）
+        st.queue_btn.replace(Some(queue));
     } else {
         // 目录镜像：把本地当前目录单向推到远端当前目录，源在本地，
         // 入口跟着源走（以前挂在远程面板的 ⋯ 里，语义是反的）。

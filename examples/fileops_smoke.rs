@@ -301,6 +301,48 @@ fn main() {
     let _ = std::fs::remove_file(&clip_local);
     println!("[6] 「粘贴上传」的剪贴板解析正常");
 
+    // ---- 7) 传输进行中：队列按钮有角标 + 忙态，状态行有提示 ----
+    //
+    // 用户 2026-11-07 报「拖拽上传时从界面上看不出来是否有文件上传」⇒
+    // 这里钉住两条：**队列按钮**（角标数字 + 忙态）与**远程面板状态行**
+    // （追加「上传中 N 个」）。
+    {
+        let (badge, busy) = panel::queue::btn_state(&st).expect("面板上应有「传输队列」按钮");
+        assert_eq!(badge, "", "空闲时角标不该有数字");
+        assert!(!busy, "空闲时不该是忙态");
+
+        // 造一个「正在传」的条目 ⇒ 角标与忙态要跟上
+        let shared = panel::worker::XferShared::new();
+        shared.lock().unwrap().state = panel::worker::XferState::Run;
+        st.items.borrow_mut().push(panel::queue::QueueItem {
+            id: 9_999_999,
+            src: "/tmp/pp_fake.txt".into(),
+            dst_dir: "/tmp".into(),
+            upload: true,
+            kind: panel::worker::XferKind::Transfer,
+            shared,
+        });
+        panel::queue::refresh_btn(&st);
+        pump(80);
+        let (badge, busy) = panel::queue::btn_state(&st).unwrap();
+        assert_eq!(badge, "1", "有一个在传 ⇒ 角标显示 1");
+        assert!(busy, "有东西在传 ⇒ 按钮要是忙态");
+        let txt = st.pane(true).status_lbl.text().to_string();
+        assert!(
+            txt.contains("上传中 1 个"),
+            "状态行要说明在传什么：{txt}"
+        );
+
+        // 清掉 ⇒ 角标与忙态都要撤（传完了还挂着 = 用户以为还在传）
+        st.items.borrow_mut().clear();
+        panel::queue::refresh_btn(&st);
+        pump(80);
+        let (badge, busy) = panel::queue::btn_state(&st).unwrap();
+        assert_eq!(badge, "", "传完了角标要清空");
+        assert!(!busy, "传完了不该还是忙态");
+    }
+    println!("[7] 传输进行中：队列按钮有角标 + 忙态，状态行有提示");
+
     println!("fileops smoke ok");
 }
 

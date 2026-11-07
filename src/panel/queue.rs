@@ -186,8 +186,84 @@ pub fn ensure(st: &Rc<PanelState>) {
     }));
 }
 
+/// 刷新文件面板工具栏上「传输队列」按钮的忙态与数量角标（阶段 102）。
+///
+/// ⚠️ **什么时候调**：队列每次刷新（`flush`）都调 ⇒ 数量自己跟着变，
+/// 不用各处手动同步（入队 / 传完 / 取消都会走到 flush）。
+///
+/// ⚠️ **别在 `st.items` 借用的期间调它**：它要读队列条目算数量 ⇒
+/// `flush` 里必须先 `drop(items)` 再调（否则 `RefCell` 双重借用 panic）。
+pub fn refresh_btn(st: &Rc<PanelState>) {
+    let Some(b) = st.queue_btn.borrow().clone() else { return };
+    let running = super::xfer_running(st);
+    let n = running.total();
+
+    // 角标 + 图标
+    if let Some(child) = b.child() {
+        if let Some(row) = child.downcast_ref::<gtk::Box>() {
+            let mut cur = row.first_child();
+            while let Some(c) = cur {
+                if let Some(l) = c.downcast_ref::<gtk::Label>() {
+                    // ⚠️ **不 hide，只是把文字清空**：角标 `width_chars(1)`
+                    // 已经预留了一格宽 ⇒ 出现/消失时工具栏不会左右跳。
+                    l.set_text(&if n > 0 { n.to_string() } else { String::new() });
+                }
+                if let Some(i) = c.downcast_ref::<gtk::Image>() {
+                    i.set_icon_name(Some(if n > 0 {
+                        "content-loading-symbolic"
+                    } else {
+                        "view-list-symbolic"
+                    }));
+                }
+                cur = c.next_sibling();
+            }
+        }
+    }
+
+    if n > 0 {
+        // tooltip 说清方向：「上传中 2 个」比「2 个进行中」有用
+        let what = running.label().unwrap_or_default();
+        b.set_tooltip_text(Some(&trf!("传输队列（{x}）", x = what)));
+        // ⚠️ **忙态必须去掉 `flat`**：Adwaita 的 `button.flat` 是
+        // `background-color: transparent`，优先级比自定义类高 —— 底色没了
+        // 就还是那个灰图标（`.pp-chip` 踩过同一个坑，见 theme.rs）。
+        b.remove_css_class("flat");
+        b.add_css_class("pp-xfer-busy");
+    } else {
+        b.set_tooltip_text(Some(tr("传输队列")));
+        b.remove_css_class("pp-xfer-busy");
+        b.add_css_class("flat");
+    }
+
+    // 状态行上的「传输中 N 个」也跟着变（数量变了要重画）
+    super::render_status(st);
+}
+
+/// 冒烟用：队列按钮的当前状态（**角标文字**, 是否忙态）。
+///
+/// `None` = 面板上还没有这个按钮（面板还没建）。
+pub fn btn_state(st: &Rc<PanelState>) -> Option<(String, bool)> {
+    let b = st.queue_btn.borrow().clone()?;
+    let mut badge = String::new();
+    if let Some(child) = b.child() {
+        if let Some(row) = child.downcast_ref::<gtk::Box>() {
+            let mut cur = row.first_child();
+            while let Some(c) = cur {
+                if let Some(l) = c.downcast_ref::<gtk::Label>() {
+                    badge = l.text().to_string();
+                    break;
+                }
+                cur = c.next_sibling();
+            }
+        }
+    }
+    Some((badge, b.has_css_class("pp-xfer-busy")))
+}
+
 /// 新传输项入队：建行 + 保存行引用。
 pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
+    // 传输开始了 ⇒ 文件面板工具栏上的「传输队列」按钮变忙态（阶段 102）
+    refresh_btn(st);
     ensure(st);
     let qu = st.queue_ui.borrow();
     let Some(qu) = qu.as_ref() else { return };
@@ -315,6 +391,10 @@ pub fn flush(st: &Rc<PanelState>) {
             }
         }
     }
+    // ⚠️ **先放掉 `st.items` 的借用**再刷按钮：刷新要读队列算"还在传几个"
+    // ⇒ 借用没放掉就是 RefCell 双重借用 panic。
+    drop(items);
+    refresh_btn(st);
 }
 
 /// 取消选中行：运行中的置取消标志，等待中的直接标记取消。

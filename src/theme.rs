@@ -849,6 +849,26 @@ const COMPONENTS: &str = r#"
 }
 .pp-chip-warn { background-color: mix(@pp_warn, @pp_bg, 0.84); color: @pp_fg; }
 .pp-chip-err { background-color: mix(@pp_err, @pp_bg, 0.82); color: @pp_fg; }
+/* 传输队列按钮的**数量角标**（阶段 102）：还在传几个。
+   ⚠️ 别复用 `.pp-chip`：那个类带着状态色语义（绿=正常 / 黄=警告 /
+   红=出错），角标说的是"数量"，不是"状态"。 */
+.pp-xfer-badge {
+  background-color: @pp_accent;
+  color: @pp_on_accent;
+  border-radius: 9px;
+  padding: 0px 5px;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+/* 传输队列按钮的**忙态**（阶段 102）：有东西在传。
+   ⚠️ **别给这个按钮加 `flat`**：Adwaita 的 `button.flat` 是
+   `background-color: transparent`，优先级比自定义类高 ⇒ 底色没了
+   （`.pp-chip` 踩过同一个坑）⇒ 忙态时把 `flat` 摘掉再上这个类。 */
+button.pp-xfer-busy {
+  background-color: @pp_accent_soft;
+  color: @pp_fg;
+  border: 1px solid @pp_accent;
+}
 /* 凭据库状态标志：绿=已启用且加密（这是"一切正常"） */
 .pp-chip-ok { background-color: mix(@pp_ok, @pp_bg, 0.84); color: @pp_fg; }
 /* 凭据库状态标志（侧栏标题栏）：它是个**状态**，不是标题栏里的主按钮。

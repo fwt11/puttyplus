@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1661] = [
+pub static EN: [(&str, &str); 1665] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -218,6 +218,7 @@ pub static EN: [(&str, &str); 1661] = [
     ("上传", "Upload"),
     ("上传 {v0} 个（{v1}）、建目录 {v2} 个、删除 {v3} 个", "Uploaded {v0} ({v1}), created {v2} directories, deleted {v3}"),
     ("上传…", "Upload…"),
+    ("上传中 {u} 个", "Uploading {u}"),
     ("上传选中的本地文件到远程当前目录", "Upload the selected local files to the remote current directory"),
     ("上移", "Move up"),
     ("下一个", "Next"),
@@ -225,6 +226,7 @@ pub static EN: [(&str, &str); 1661] = [
     ("下一页", "Next page"),
     ("下移", "Move down"),
     ("下载…", "Download…"),
+    ("下载中 {d} 个", "Downloading {d}"),
     ("下载选中的远程文件到本地当前目录（也可以直接拖到本地面板）", "Download the selected remote files to the local current directory (you can also drag them to the local panel)"),
     ("不保存关闭", "Close without saving"),
     ("不同值个数", "Number of distinct values"),
@@ -285,6 +287,7 @@ pub static EN: [(&str, &str); 1661] = [
     ("传完比一遍远程文件的摘要；没校验过就显示「未校验」", "Compare the digest of the remote file after the transfer; files that were never checked show \"not verified\""),
     ("传输", "Transfer"),
     ("传输中", "Transferring"),
+    ("传输中 {n} 个", "Transferring {n}"),
     ("传输全部跳过", "Skipped all transfers"),
     ("传输完成", "Transfer complete"),
     ("传输完成、连接失败这些事会记在这里，错过桌面通知也还能回看。", "Finished transfers, failed connections and the like are recorded here, so you can still look them up if you missed the desktop notification."),
@@ -295,6 +298,7 @@ pub static EN: [(&str, &str); 1661] = [
     ("传输队列", "Transfer queue"),
     ("传输队列 — PuTTYPlus", "Transfer queue — PuTTYPlus"),
     ("传输队列…", "Transfer queue…"),
+    ("传输队列（{x}）", "Transfer queue ({x})"),
     ("例程", "Routine"),
     ("侧栏", "Sidebar"),
     ("侧栏宽度", "Sidebar width"),

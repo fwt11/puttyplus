@@ -161,6 +161,12 @@ pub struct PanelState {
     pub next_check: Cell<u64>,
     pub items: RefCell<Vec<QueueItem>>,
     pub queue_ui: RefCell<Option<QueueUi>>,
+    /// 文件面板工具栏上的「传输队列」按钮（阶段 102）。
+    ///
+    /// 传输进行中时它要变忙态并带**进行中数量角标** ⇒ 队列刷新时得能
+    /// 找到它。⚠️ 按钮挂在面板上，面板属于本状态的控件树 ⇒ 这里存
+    /// **强引用**不会成环（按钮不反过来抓 `PanelState`）。
+    pub queue_btn: RefCell<Option<gtk::Button>>,
 
     /* 进程内端口转发（worker → Forwards 事件回填；状态栏摘要、tooltip 明细、
        转发管理窗口共用同一份视图快照，含停用项与失败原因） */
@@ -358,6 +364,7 @@ impl SftpPanel {
             next_check: Cell::new(1),
             items: RefCell::new(Vec::new()),
             queue_ui: RefCell::new(None),
+            queue_btn: RefCell::new(None),
             mirror_ui: RefCell::new(None),
             file_edits: RefCell::new(Vec::new()),
             pending_file_reads: RefCell::new(HashMap::new()),
@@ -851,17 +858,115 @@ pub fn reapply_status(st: &Rc<PanelState>) {
     render_status(st);
 }
 
+/// 传输进行中的条目数（按方向分，阶段 102）。
+///
+/// ⚠️ **只数"还在传"的**（`Run` / `Wait`）：传完的、失败的、取消的都不算
+/// —— 否则传完了角标还挂着，用户以为还在传。
+///
+/// ⚠️ `st.items` 里**完成的条目不会被自动清掉**（只有用户在队列窗口里
+/// 「清除已完成」才清）⇒ 判定必须看 `shared.state`，不能看列表长度。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XferRunning {
+    /// 还在传的上传条目数。
+    pub upload: usize,
+    /// 还在传的下载条目数。
+    pub download: usize,
+}
+
+impl XferRunning {
+    /// 还在传的条目总数。
+    pub fn total(&self) -> usize {
+        self.upload + self.download
+    }
+
+    /// 状态行 / tooltip 上显示的那一句（`None` = 现在没在传）。
+    ///
+    /// ⚠️ **分方向说**：上传和下载对用户是两件事（一个往远端送、一个从
+    /// 远端取），混成「传输中 2 个」用户还得自己猜是哪个方向。
+    pub fn label(&self) -> Option<String> {
+        match (self.upload, self.download) {
+            (0, 0) => None,
+            (u, 0) => Some(trf!("上传中 {u} 个", u = u)),
+            (0, d) => Some(trf!("下载中 {d} 个", d = d)),
+            (u, d) => Some(trf!("传输中 {n} 个", n = u + d)),
+        }
+    }
+}
+
+/// 传输进行中的条目数（按方向分）。
+pub fn xfer_running(st: &Rc<PanelState>) -> XferRunning {
+    let states: Vec<(worker::XferState, bool)> = st
+        .items
+        .borrow()
+        .iter()
+        .map(|it| {
+            let state = it.shared.lock().map(|g| g.state).unwrap_or(worker::XferState::Wait);
+            (state, it.upload)
+        })
+        .collect();
+    count_running(&states)
+}
+
+/// 从「（状态, 是不是上传）」算还在传几个（**纯函数**，方便单测）。
+pub fn count_running(states: &[(worker::XferState, bool)]) -> XferRunning {
+    let mut r = XferRunning::default();
+    for (state, upload) in states {
+        if !matches!(
+            state,
+            worker::XferState::Run | worker::XferState::Wait
+        ) {
+            continue;
+        }
+        if *upload {
+            r.upload += 1;
+        } else {
+            r.download += 1;
+        }
+    }
+    r
+}
+
+/// 传输进行中的条目总数。
+pub fn xfer_running_count(st: &Rc<PanelState>) -> usize {
+    xfer_running(st).total()
+}
+
 fn render_status(st: &Rc<PanelState>) {
     let Some((level, text, tip)) = st.status.borrow().clone() else {
         return;
     };
     let lbl = st.pane(true).status_lbl.clone();
+    // 传输中 ⇒ 状态行追加「上传中 N 个」（阶段 102）。
+    //
+    // ⚠️ **追加而不是替换**：状态行平时显示的是「已连接 user@host:port」，
+    // 那是常驻信息；直接拿它改成「开始上传…」会把连接信息抹掉。追加在后面，
+    // 连接信息还在（完整内容在 tooltip 里）。
+    //
+    // ⚠️ 追加的那截**单独上色**（绿）：它是"现在有事在发生"，跟常驻的
+    // 连接信息不是一回事 ⇒ 扫一眼就能看见。
+    let running = xfer_running(st);
+    let hint = running.label();
     let esc = glib::markup_escape_text(&text);
-    lbl.set_markup(&format!("<span foreground='{}'>●</span> {}",
-        crate::theme::state_hex(level),
-        esc.as_str()
-    ));
+    let markup = match &hint {
+        None => format!(
+            "<span foreground='{}'>●</span> {}",
+            crate::theme::state_hex(level),
+            esc.as_str()
+        ),
+        Some(h) => format!(
+            "<span foreground='{}'>●</span> {}<span foreground='{}'>｜{}</span>",
+            crate::theme::state_hex(level),
+            esc.as_str(),
+            crate::theme::state_hex(crate::theme::State::Ok),
+            glib::markup_escape_text(h).as_str()
+        ),
+    };
+    lbl.set_markup(&markup);
     // 工具栏宽度有限，显示可截断；完整信息悬停可看
+    let tip = match &hint {
+        None => tip,
+        Some(h) => format!("{tip}\n{h}"),
+    };
     lbl.set_tooltip_text(Some(&tip));
     // 通知外部（标签栏状态点）
     if let Some(h) = st.status_hook.borrow().as_ref() {
@@ -1378,6 +1483,8 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             queue::flush(st);
         }
         PanelEvent::XferDrained { results } => {
+            // 队列空了 ⇒ 忙态与角标要撤掉（阶段 102）
+            queue::refresh_btn(&st);
             // 整个传输队列清空（不是每个提交批次）→ 通知 + 有失败/取消时
             // 汇总一次。追加的新批次在同一个窗口里，不会提前弹。
             pane::clear_progress(&st.pane(true));
@@ -2267,7 +2374,7 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode, retry_op_matches, usable_local_dir, RetryOp};
+    use super::{count_running, percent_decode, retry_op_matches, usable_local_dir, RetryOp};
     use crate::panel::worker::SimpleOp;
 
     #[test]
@@ -2343,5 +2450,46 @@ mod tests {
             "不存在的目录不恢复"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn 传输计数只算还在传的() {
+        use crate::panel::worker::XferState as S;
+        // 传完的、失败的、取消的**都不算**还在传 ⇒ 角标不能一直挂着
+        let r = count_running(&[
+            (S::Run, true),
+            (S::Wait, true),
+            (S::Done, true),
+            (S::Err, true),
+            (S::Cancel, true),
+            (S::Skip, true),
+        ]);
+        assert_eq!(r.upload, 2, "只有 Run/Wait 算：{r:?}");
+        assert_eq!(r.download, 0);
+        assert_eq!(r.total(), 2);
+        // 空的 ⇒ 什么都不显示（状态行不留「传输中 0 个」）
+        assert!(count_running(&[]).label().is_none());
+    }
+
+    #[test]
+    fn 传输提示分方向说() {
+        use crate::panel::worker::XferState as S;
+        // 只上传 ⇒ 说上传
+        assert_eq!(
+            count_running(&[(S::Run, true)]).label().unwrap(),
+            "上传中 1 个"
+        );
+        // 只下载 ⇒ 说下载
+        assert_eq!(
+            count_running(&[(S::Run, false)]).label().unwrap(),
+            "下载中 1 个"
+        );
+        // 两个方向都有 ⇒ 说不清方向，就只说「传输中」
+        assert_eq!(
+            count_running(&[(S::Run, true), (S::Run, false)])
+                .label()
+                .unwrap(),
+            "传输中 2 个"
+        );
     }
 }
