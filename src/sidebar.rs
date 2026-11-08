@@ -1739,15 +1739,29 @@ pub fn opts_for_recent(r: &recent::RecentConn, entries: &[ConnEntry]) -> ConnOpt
     o.title = Some(r.label.clone());
     // ref 名回查密码（最近记录不落密码）
     if let Some(name) = &r.ref_name {
-        if let Some(e) = entries.iter().find(|e| &e.name == name) {
-            o.password = e.password.clone();
-            // **把会话名带上**：自定义条目的会话键是 `s:<名字>`，
-            // 最近项默认算出来的是 `user@host:port`——两个键指向
-            // 同一台机器，但数据库连接是按键分组的。键不一致的话，
-            // 从最近项打开的工作台里就看不到这条会话下的数据库
-            // 连接（"明明建过，怎么没有"）。
-            if e.custom {
-                o.session_name = Some(e.name.clone());
+        match entries.iter().find(|e| &e.name == name) {
+            Some(e) => {
+                // ⚠️ **凭证库兜底**（阶段 C12）：`entries` 是**建欢迎页那一刻**
+                //    的快照——那时凭证库多半还锁着（保存密码时 ini 明文已删、
+                //    进了库）⇒ 快照里 password 恒为 None，解锁了库再点最近
+                //    卡片还是要输密码（用户 2026-11-09 报）。**现查一次**：
+                //    键 = 连接名（`save_conn` 存的同一个键）；锁着返回 None
+                //    走原路。
+                o.password = e.password.clone().or_else(|| crate::vault::get(name));
+                // **把会话名带上**：自定义条目的会话键是 `s:<名字>`，
+                // 最近项默认算出来的是 `user@host:port`——两个键指向
+                // 同一台机器，但数据库连接是按键分组的。键不一致的话，
+                // 从最近项打开的工作台里就看不到这条会话下的数据库
+                // 连接（"明明建过，怎么没有"）。
+                if e.custom {
+                    o.session_name = Some(e.name.clone());
+                }
+            }
+            None => {
+                // 快照里没有这条（建连接晚于欢迎页构建）⇒ 直接查凭证库；
+                // ref 名只指向自建条目 ⇒ 会话键同样按 `s:<名字>`。
+                o.password = crate::vault::get(name);
+                o.session_name = Some(name.clone());
             }
         }
     }

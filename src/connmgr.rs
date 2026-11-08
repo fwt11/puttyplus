@@ -110,6 +110,17 @@ impl ConnEntry {
                 o.password = Some(p.clone());
             }
         }
+        // ⚠️ **凭证库兜底**（阶段 C12）：手里的 ConnEntry 是**快照**——侧栏
+        //    的列表是启动/上次刷新时读的，那时凭证库多半还锁着，而保存
+        //    密码时 ini 的明文键已删（进了库）⇒ 快照里 password 恒为 None，
+        //    用户解锁了库再连还是要输密码（用户 2026-11-09 报）。
+        //    组装连接参数的**这一刻**现查凭证库：解锁了就能拿到（键 =
+        //    连接名，`save_conn` 存的时候用的同一个键）；锁着 get 返回
+        //    None，走原路（弹密码框）。ini 明文优先于库（上面已赋值的
+        //    不覆盖）。
+        if o.password.is_none() && !self.name.is_empty() {
+            o.password = crate::vault::get(&self.name);
+        }
         if !self.name.is_empty() {
             o.title = Some(self.name.clone());
         }
@@ -2482,6 +2493,82 @@ mod tests {
         assert!(entries[0].custom);
         assert_eq!(entries[1].password, None);
         assert_eq!(entries[1].port, 22);
+    }
+
+    /// 阶段 C12：**凭证库兜底**——快照里 password=None 的条目，在
+    /// `to_opts` / `opts_for_recent` 组装连接参数这一刻能从库里拿到密码。
+    ///
+    /// 用户 2026-11-09 报：密码存在凭证库里、库也启用了，连接时还是让
+    /// 输密码。根因：侧栏 / 欢迎页的 ConnEntry 是**启动时的快照**，那时
+    /// 凭证库还锁着，而保存密码时 ini 的明文键已删 ⇒ 快照里恒为 None；
+    /// 之后解锁了库，快照也不会自己更新。
+    #[test]
+    fn to_opts_and_recent_凭证库兜底() {
+        // 隔离：PUTTYPLUS_VAULT 指到测试专用文件。
+        let dir = crate::util::testutil::temp_dir("pp_connmgr_test", "vault_fb");
+        let vf = dir.join("v.vault");
+        // SAFETY：只有本测试读写 PUTTYPLUS_VAULT（其余测试都不碰这个变量）。
+        unsafe { std::env::set_var("PUTTYPLUS_VAULT", &vf) };
+        struct Reset(std::path::PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                // SAFETY：同上。
+                unsafe { std::env::remove_var("PUTTYPLUS_VAULT") };
+                crate::vault::lock(); // 解锁态只属于本测试，别泄漏给别的测试
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Reset(vf.clone());
+
+        // ini 里**没有**明文密码（保存时已进库、明文键已删）
+        let path = tmp_ini("vault_fb");
+        std::fs::write(
+            &path,
+            "[c1]\nname=测试条目\nhost=h.example\nport=22\nuser=ops\n",
+        )
+        .unwrap();
+
+        // ① 快照时凭证库还没解锁（模拟启动时读列表）⇒ password None
+        let e = load_custom_from(&path)[0].clone();
+        assert_eq!(e.password, None, "库还没解锁 ⇒ 快照里不该有密码");
+        assert_eq!(
+            e.to_opts().password, None,
+            "库还不存在 ⇒ 兜底查不到，走弹框路径"
+        );
+
+        // ② 建库（无主密码：unlock("") 秒过，不用跑 Argon2）+ 存密码 + 解锁
+        crate::vault::create(
+            "",
+            &[("测试条目".into(), Zeroizing::new("pw123".into()))],
+        )
+        .expect("建库");
+        crate::vault::unlock("").expect("解锁");
+
+        // ③ **不重建列表**，直接用旧快照连：to_opts 这一刻现查库 ⇒ 拿到
+        let o = e.to_opts();
+        assert_eq!(o.password.as_ref().map(|p| p.as_str()), Some("pw123"));
+
+        // ④ 最近连接同一条路：快照里有条目但密码 None ⇒ 兜底拿到
+        let r = crate::recent::RecentConn {
+            label: "最近".into(),
+            host: "h.example".into(),
+            port: 22,
+            user: "ops".into(),
+            ref_name: Some("测试条目".into()),
+        };
+        let o = crate::sidebar::opts_for_recent(&r, &[e.clone()]);
+        assert_eq!(o.password.as_ref().map(|p| p.as_str()), Some("pw123"));
+        assert_eq!(o.session_name.as_deref(), Some("测试条目"));
+
+        // ⑤ 快照里**没有**这条（建连接晚于欢迎页构建）⇒ 直接查库
+        let o = crate::sidebar::opts_for_recent(&r, &[]);
+        assert_eq!(o.password.as_ref().map(|p| p.as_str()), Some("pw123"));
+        assert_eq!(o.session_name.as_deref(), Some("测试条目"));
+
+        // ⑥ 锁库 ⇒ 兜底拿不到 ⇒ 走原路（弹密码框）
+        crate::vault::lock();
+        assert_eq!(e.to_opts().password, None);
+        assert_eq!(crate::sidebar::opts_for_recent(&r, &[]).password, None);
     }
 
     #[test]
