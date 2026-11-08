@@ -177,12 +177,19 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 sysroot 上）：
 
 ```powershell
+# 一条命令搞定：检查 Rust(MSVC) → 备好 GTK4 与 Zig → 编译 → 跑 73 条契约
+powershell -ExecutionPolicy Bypass -File tools\win_build.ps1
+```
+
+脚本干的事（跟 CI 里那套一样，细节见 `tools/win_build.ps1` 的注释）：
+
+```powershell
 # 1) Rust（msvc 目标，windows-latest runner 自带 MSVC）
 rustup toolchain install stable-x86_64-pc-windows-msvc
 
 # 2) GTK 4 开发库（Windows 上没有系统包，用 gvsbuild 的预编译版）
-#    解压后把它自带的 bin/ 加进 PATH，并设置：
-$env:PKG_CONFIG_PATH = "<解压目录>\lib\pkgconfig"
+#    解压到 C:\gtk 后，它自己的 bin/ 要进 PATH，并设置：
+$env:PKG_CONFIG_PATH = "C:\gtk\lib\pkgconfig"
 
 # 3) Zig 0.17.x（编译 libghostty-vt 要用）
 pip install ziglang==0.17.1
@@ -192,12 +199,18 @@ cargo build --release
 .\target\release\puttyplus.exe
 ```
 
+⚠️ **exe 单独拿走跑不起来**：GTK / glib / pango 的 DLL 都在 `C:\gtk\bin` 里
+⇒ 要拷走就把那些 DLL 一起放在 exe 旁边。
+
 跑命令行契约检查（Windows 上用 Git Bash）：
 
 ```bash
 bash tools/cli_contract_check.sh --selftest   # 先验归一化逻辑本身
 bash tools/cli_contract_check.sh              # 73 条黄金基准
 ```
+
+⚠️ **GUI 那一半只能真机验**（CI 的 Windows runner 没有桌面会话，GTK 起不来）：
+清单见 [docs/跨平台-构建说明.md](docs/跨平台-构建说明.md) 的「Windows 真机验证清单」。
 
 细节（两个终端引擎、Zig 怎么装、pangocairo 的坑、ConPTY 的坑、路径语义）
 见 [docs/跨平台-构建说明.md](docs/跨平台-构建说明.md)。
