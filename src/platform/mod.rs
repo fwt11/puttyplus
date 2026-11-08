@@ -20,6 +20,7 @@ pub mod clipboard;
 pub mod exe;
 pub mod locale;
 pub mod localpath;
+pub mod localuri;
 pub mod notify;
 pub mod paths;
 pub mod perm;

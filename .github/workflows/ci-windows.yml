@@ -130,7 +130,26 @@ jobs:
       - name: 编译（release）
         # ⚠️ release profile 是 fat LTO + codegen-units=1 + panic=abort
         #    ⇒ Windows 上编译很慢（十几到几十分钟），别把 timeout 调小。
-        run: cargo build --release --locked
+        #
+        # ⚠️ **失败时必须把错误做成注解**：run 级日志要 admin 才能下载，
+        #    没注解的话网页上只有一句「Process completed with exit code 1」
+        #    ⇒ 等于什么都不知道（第一轮就栽在这：GTK/Zig/pkg-config 全装好了，
+        #    挂在编译上，却看不到错在哪）。
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          cargo build --release --locked 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) {
+            $err = (Select-String -Path build.log -Pattern "^error" -Context 0,12 |
+                    Select-Object -First 12 | Out-String)
+            $tail = (Get-Content build.log -Tail 40 | Out-String)
+            $msg = "$err`n--- 日志尾部 ---`n$tail"
+            if ($msg.Length -gt 8000) { $msg = $msg.Substring(0, 8000) }
+            # ⚠️ 注解是**一整行**：换行写成 %0A，% 本身要先转义成 %25
+            $msg = $msg -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
+            Write-Host "::error::Windows 编译失败。$msg"
+            exit 1
+          }
 
       - name: 单元测试
         # ⚠️ **只跑 --lib**：11 个 example 直接用 vte4（VTE 是 Linux 专属的
@@ -138,7 +157,19 @@ jobs:
         #    example 也编一遍 ⇒ 直接失败。
         # ⚠️ GTK 相关的那几个用例会**按设计跳过**（gtk::init() 在 libtest 的
         #    子线程上起不来）⇒ 与 Linux 上不给 DISPLAY 时的行为一致。
-        run: cargo test --lib --locked
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          cargo test --lib --locked 2>&1 | Tee-Object -FilePath test.log
+          if ($LASTEXITCODE -ne 0) {
+            $names = (Select-String -Path test.log -Pattern "^failures:" -Context 0,40 |
+                      Select-Object -First 1 | Out-String)
+            if (-not $names) { $names = (Get-Content test.log -Tail 40 | Out-String) }
+            if ($names.Length -gt 8000) { $names = $names.Substring(0, 8000) }
+            $names = $names -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
+            Write-Host "::error::Windows 单元测试失败。$names"
+            exit 1
+          }
 
       - name: 命令行契约回归（73 条黄金基准）
         # ⚠️ Windows 上用 **Git Bash** 跑同一个脚本 ⇒ 对照的还是同一批
@@ -147,8 +178,18 @@ jobs:
         #    还是「归一化逻辑坏了」。
         shell: bash
         run: |
-          bash tools/cli_contract_check.sh --selftest
-          bash tools/cli_contract_check.sh
+          # ⚠️ **不用管道**：GitHub 的 bash 默认带 `-e` ⇒ 管道里的失败会
+          #    直接把整个脚本干掉 ⇒ 注解就打不出来（等于又回到「只看得到
+          #    一句 exit code 1」）。⇒ 自己收退出码。
+          st1=0; bash tools/cli_contract_check.sh --selftest > selftest.log 2>&1 || st1=$?
+          st2=0; bash tools/cli_contract_check.sh > contract.log 2>&1 || st2=$?
+          cat selftest.log contract.log
+          if [ "$st1" != "0" ] || [ "$st2" != "0" ]; then
+            # ⚠️ 注解是单行：换行写 %0A，% 本身先转义成 %25
+            msg="$(tail -c 4000 selftest.log contract.log 2>/dev/null | sed 's/%/%25/g' | tr '\n' '%0A')"
+            printf '::error::Windows 上命令行契约没通过（selftest=%s 契约=%s）。%s\n' "$st1" "$st2" "$msg"
+            exit 1
+          fi
 
       - name: 打包可执行文件（含 GTK 的 DLL）
         # ⚠️ **exe 单独拿走是跑不起来的**：GTK / glib / pango 的 DLL 都在

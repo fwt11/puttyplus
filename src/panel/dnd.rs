@@ -128,7 +128,7 @@ pub fn parse_uri_list(text: &str) -> Vec<String> {
             continue;
         }
         let path = if line.starts_with("file://") {
-            match crate::platform::localpath::from_file_uri(line) {
+            match crate::platform::localuri::from_file_uri(line) {
                 Some(p) => p.to_string_lossy().into_owned(),
                 None => continue,
             }
@@ -354,7 +354,7 @@ pub fn files_provider(paths: &[String]) -> gdk::ContentProvider {
     let fl = gdk::FileList::from_array(&files);
     let body = paths
         .iter()
-        .map(|p| format!("{}\r\n", crate::platform::localpath::to_file_uri(p)))
+        .map(|p| format!("{}\r\n", crate::platform::localuri::to_file_uri(p)))
         .collect::<String>();
     source_provider(fl.to_value(), URI_LIST_MIME, &body)
 }

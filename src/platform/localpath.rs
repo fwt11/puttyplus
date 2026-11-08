@@ -27,12 +27,11 @@
 //! 拖放上传 / 剪贴板粘贴上传走的是 `text/uri-list`（`file:///…`）。
 //! 之前是手搓字符串 `format!("file://{p}")` ⇒ Windows 上得到
 //! `file://C:\dir\a.txt`（反斜杠 + 少一个斜杠）⇒ 源端与目标端都认不出。
-//! 现在统一走 [`to_file_uri`] / [`from_file_uri`]（GIO 负责百分号编码
-//! 与 Windows 盘符），本地路径的判定用 [`is_abs`]（不再一律要求 `/` 开头）。
+//! ⇒ URI 那部分拆到 [`super::localuri`]（要 GIO），**本模块只留纯 std
+//!    的部分**——这样 Windows 目标下可以单独拿它做交叉编译检查
+//!    （`cargo check --target x86_64-pc-windows-msvc`）。
 
-use std::path::{Path, PathBuf};
-
-use gtk::gio::prelude::*;
+use std::path::Path;
 
 /// 本地路径是不是「绝对路径」。
 ///
@@ -80,21 +79,6 @@ pub fn basename(path: &str) -> String {
         Some(s) => s.to_string_lossy().into_owned(),
         None => path.rsplit('/').next().unwrap_or(path).to_string(),
     }
-}
-
-/// 本地路径 → `file://` URI（百分号编码交给 GIO）。
-///
-/// - Linux：`/tmp/a b.txt` → `file:///tmp/a%20b.txt`
-/// - Windows：`C:\a b.txt` → `file:///C:/a%20b.txt`
-pub fn to_file_uri(path: &str) -> String {
-    gtk::gio::File::for_path(path).uri().to_string()
-}
-
-/// `file://` URI → 本地路径。
-///
-/// 解析不出来（不是 `file://`、带主机名等）返回 `None`。
-pub fn from_file_uri(uri: &str) -> Option<PathBuf> {
-    gtk::gio::File::for_uri(uri).path()
 }
 
 #[cfg(test)]
@@ -156,28 +140,6 @@ mod tests {
             // ⚠️ 这两条在 POSIX 版函数上会错（返回整串 / 找不到 `/`）
             assert_eq!(basename("C:\\dir\\a.txt"), "a.txt");
             assert_eq!(parent("C:\\dir"), "C:\\");
-        }
-    }
-
-    #[test]
-    fn file_uri_往返() {
-        // ⚠️ 用临时目录而不是写死 `/tmp` ⇒ Windows 上也能跑。
-        let p = std::env::temp_dir().join("pp_localpath_test.txt");
-        let uri = to_file_uri(p.to_str().unwrap());
-        assert!(uri.starts_with("file:///"), "{uri}");
-        assert_eq!(from_file_uri(&uri), Some(p));
-
-        // 带空格的路径要能编码/解码回来
-        let p2 = std::env::temp_dir().join("pp localpath 空格.txt");
-        let uri = to_file_uri(p2.to_str().unwrap());
-        assert!(!uri.contains(' '), "空格应当被编码：{uri}");
-        assert_eq!(from_file_uri(&uri), Some(p2));
-
-        #[cfg(windows)]
-        {
-            let uri = to_file_uri("C:\\dir\\a b.txt");
-            assert!(uri.starts_with("file:///C:/"), "{uri}");
-            assert!(!uri.contains('\\'), "URI 里不该有反斜杠：{uri}");
         }
     }
 }
