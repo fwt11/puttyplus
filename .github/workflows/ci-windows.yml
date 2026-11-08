@@ -296,9 +296,25 @@ jobs:
           st2=0; bash tools/cli_contract_check.sh > contract.log 2>&1 || st2=$?
           cat selftest.log contract.log
           if [ "$st1" != "0" ] || [ "$st2" != "0" ]; then
-            # ⚠️ 注解是单行：换行写 %0A，% 本身先转义成 %25
-            msg="$(tail -c 4000 selftest.log contract.log 2>/dev/null | sed 's/%/%25/g' | tr '\n' '%0A')"
-            printf '::error::Windows 上命令行契约没通过（selftest=%s 契约=%s）。%s\n' "$st1" "$st2" "$msg"
+            # ---- 注解 1：全部 DIFF 的用例名（挤成一行 ⇒ 不会被截断）----
+            difflist="$(grep -o '\[DIFF\] [^ ]*' contract.log 2>/dev/null | tr '\n' ' ')"
+            [ -z "$difflist" ] && difflist="(没抓到 DIFF 名单，去 artifact 里看 contract.log)"
+            difflist="$(printf '%s' "$difflist" | sed 's/%/%25/g' | tr -d '\r')"
+            printf '::error::Windows 命令行契约没通过（selftest=%s 契约=%s），DIFF 的用例：%s\n' "$st1" "$st2" "$difflist"
+
+            # ---- 注解 2：**第一个 DIFF 的完整 diff（含期望侧）**----
+            # ⚠️ 以前只 `tail -c 4000` ⇒ diff 的两侧被截断，**期望侧常常
+            #    整段没了** ⇒ 看不出差在哪一行（第 10 轮就吃了这个亏）。
+            #    ⇒ 改成取「第一个 [DIFF] 之后的 16 行」⇒ 两侧都在。
+            start="$(grep -n -m1 '\[DIFF\]' contract.log 2>/dev/null | cut -d: -f1)"
+            if [ -n "$start" ]; then
+              end=$((start + 16))
+              block="$(sed -n "${start},${end}p" contract.log)"
+            else
+              block="$(tail -c 3000 contract.log)"
+            fi
+            block="$(printf '%s' "$block" | sed 's/%/%25/g' | tr '\r' ' ' | tr '\n' '%0A')"
+            printf '::error::第一个 DIFF 的完整内容：%s\n' "$block"
             exit 1
           fi
 
@@ -345,4 +361,17 @@ jobs:
         with:
           name: diag-windows
           path: diag-windows.txt
+          if-no-files-found: warn
+
+      - name: 上传契约日志
+        # ⚠️ 契约失败时**要看全量对比**（哪几条 DIFF、每条差在哪一行）⇒
+        #    日志单独传一份，别混在 diag 里。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-log
+          path: |
+            contract.log
+            selftest.log
+            test.log
           if-no-files-found: warn

@@ -232,6 +232,13 @@ EOF
 #    能喂假形态验证归一化本身没坏。
 normalize_with() {  # 文本 | 形态列表(换行分隔) | 用户名
   local s="$1" forms="$2" me="$3"
+  # ⚠️ **先去掉 CR**：Windows 上程序输出的行尾可能是 `\r\n`
+  #    （Rust 的 println! 在 Windows 上是否转 CRLF 取决于 stdout 是
+  #    管道还是控制台）⇒ 基准（Linux 生成的）没有 `\r`
+  #    ⇒ 不去掉的话**每一行都算不同**（第 10 轮 Windows CI 就是
+  #    `1,12c1,12` 这种「整块全变」的形态 ⇒ 差在哪根本看不出来）。
+  #    ⚠️ Linux 上没有 `\r` ⇒ 这一步对 Linux 是空操作，不影响基准。
+  s=${s//$'\r'/}
   s=${s//\\//}
   local h
   while IFS= read -r h; do
@@ -272,6 +279,14 @@ selftest() {
   out=$(normalize_with "keyfile=C:\\Users\\alice\\.ssh\\id_rsa user=alice" "$win_forms" "alice")
   if [ "$out" != "keyfile=/home/<ME>/.ssh/id_rsa user=<ME>" ]; then
     echo "  [FAIL] Windows(原生) 形态归一化不对：$out"; fails=$((fails+1))
+  fi
+
+  # ⚠️ **行尾的 CR 也要去掉**：Windows 上程序的行尾可能是 `\r\n`
+  #    ⇒ 基准（Linux 生成的）没有 `\r` ⇒ 不去掉的话**每一行都算不同**
+  #    （第 10 轮 Windows CI 就是「整块全变」的 diff ⇒ 看不出差在哪）。
+  out=$(normalize_with "$(printf 'proto=ssh\r\nuser=alice\r\n')" "$linux_forms" "alice")
+  if [ "$out" != "$(printf 'proto=ssh\nuser=<ME>')" ]; then
+    echo "  [FAIL] CRLF 行尾没被归一化掉：$out"; fails=$((fails+1))
   fi
 
   # 与 home 无关的路径不许被动（`/keys/id_rsa`、`/dev/ttyUSB0`…）
