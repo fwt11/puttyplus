@@ -1,0 +1,196 @@
+name: CI · Windows
+
+# ⚠️ **独立成一个 workflow，不动 ci.yml**：
+#    计划里写的是「Linux job 一行不改」⇒ Windows 的活儿单独开一个文件，
+#    触发条件也自己管（ci.yml 只认 main 分支，这个还要跑 feature 分支）。
+#
+# ⚠️ **这个 workflow 只在 Windows 上做「编译 + 单测 + 命令行契约」**，
+#    不跑 GUI 冒烟：GitHub 的 windows-latest runner **没有桌面会话**
+#    ⇒ GTK 起不来（gtk::init() 直接失败）⇒ 任何 GUI example 都会挂。
+#    GUI 的验证在 Linux job（xvfb）与本地 Windows 机器上做。
+
+on:
+  push:
+    branches: [feature/cross-platform, main]
+  pull_request:
+    branches: [feature/cross-platform, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-win-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    name: 构建 · 单测 · 命令行契约（Windows · MSVC）
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠️ **MSVC 工具链要先激活**：Windows runner 默认 PATH 里**没有**
+      #    cl.exe / link.exe ⇒ Rust 的 msvc target 会找不到链接器。
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 装 Rust（stable · msvc）
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+          rustup default stable-x86_64-pc-windows-msvc
+          rustc --version
+          cargo --version
+
+      - name: 装 GTK4（gvsbuild 预编译）
+        # ⚠️ **Windows 上没有系统 GTK 包** ⇒ 用 gvsbuild 的预编译版。
+        #    它是 MSVC 编译的（跟 Rust 的 msvc target 对得上），里面带
+        #    GTK4 / cairo / pango / glib 与它们的 .pc 文件。
+        #    ⚠️ 版本要 **≥ 4.18**（gtk4-rs 0.11 的 v4_18 特性要求）⇒
+        #    取最新 release（2026.10.0 = GTK 4.24.1）。
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $rel = Invoke-RestMethod -Headers @{ "User-Agent" = "puttyplus-ci" } `
+                -Uri "https://api.github.com/repos/wingtk/gvsbuild/releases/latest"
+          $asset = $rel.assets |
+            Where-Object { $_.name -match "^GTK4_Gvsbuild_.*_x64\.zip$" } |
+            Select-Object -First 1
+          if (-not $asset) {
+            throw "没找到 GTK4 的 Windows 预编译包（release $($rel.tag_name)）"
+          }
+          Write-Host "下载 $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP\gtk4.zip"
+          if (Test-Path "C:\gtk") { Remove-Item -Recurse -Force "C:\gtk" }
+          Expand-Archive -Path "$env:RUNNER_TEMP\gtk4.zip" -DestinationPath "C:\gtk" -Force
+          Get-ChildItem "C:\gtk" | Select-Object -First 20 | ForEach-Object { Write-Host "gtk: $($_.Name)" }
+
+      - name: GTK4 的环境变量 + pkg-config
+        # ⚠️ Rust 侧（gtk4-sys / glib-sys）走 **pkg-config** 找 GTK，
+        #    不是靠 MSVC 的 LIB/INCLUDE ⇒ 关键是 PKG_CONFIG_PATH。
+        # ⚠️ `system-deps` 找的是叫 **pkg-config** 的可执行文件 ⇒
+        #    gvsbuild 里那个叫 `pkgconf.exe` ⇒ 复制一份成 `pkg-config.exe`。
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bin = "C:\gtk\bin"
+          $pkgconfig = "C:\gtk\lib\pkgconfig"
+          if (-not (Test-Path $pkgconfig)) {
+            throw "找不到 $pkgconfig（gvsbuild 的包结构变了？）"
+          }
+          if (-not (Test-Path "$bin\pkg-config.exe")) {
+            if (Test-Path "$bin\pkgconf.exe") {
+              Copy-Item "$bin\pkgconf.exe" "$bin\pkg-config.exe"
+            } else {
+              throw "gvsbuild 的包里既没有 pkgconf.exe 也没有 pkg-config.exe"
+            }
+          }
+          "C:\gtk\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "PKG_CONFIG_PATH=C:\gtk\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIB=C:\gtk\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INCLUDE=C:\gtk\include;C:\gtk\include\cairo;C:\gtk\include\glib-2.0;C:\gtk\include\gobject-introspection-1.0;C:\gtk\lib\glib-2.0\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 装 Zig 0.17（编译 libghostty-vt 要用）
+        # ⚠️ **libghostty-vt 是 Zig 编译的 C 代码** ⇒ Windows 上也要 Zig。
+        #    官方 zip 下载慢 ⇒ 用 PyPI 的 ziglang wheel（同一个 Zig 二进制）。
+        #    ⚠️ wheel 里可执行文件在包目录里 ⇒ 把那个目录加进 PATH，
+        #    并把 ZIG 指到它（ghostty-vt-sys 的 build.rs 找 ZIG 或 PATH 里的 zig）。
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip
+          python -m pip install "ziglang==0.17.1"
+          $zigdir = python -c "import ziglang, os; print(os.path.dirname(ziglang.__file__))"
+          Write-Host "zig 目录：$zigdir"
+          $zigdir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "ZIG=$zigdir\zig.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & "$zigdir\zig.exe" version
+
+      - name: 缓存 cargo 与 target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # ⚠️ 键里必须带 OS：Windows 与 Linux 的 target/ 产物不通用。
+          key: cargo-win-msvc-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: 打印工具链与依赖版本
+        run: |
+          rustc --version
+          cargo --version
+          pkg-config --modversion gtk4
+          pkg-config --modversion pango
+          "ZIG=$env:ZIG"
+          & $env:ZIG version
+
+      - name: 编译（release）
+        # ⚠️ release profile 是 fat LTO + codegen-units=1 + panic=abort
+        #    ⇒ Windows 上编译很慢（十几到几十分钟），别把 timeout 调小。
+        run: cargo build --release --locked
+
+      - name: 单元测试
+        # ⚠️ **只跑 --lib**：11 个 example 直接用 vte4（VTE 是 Linux 专属的
+        #    GTK 库）⇒ Windows 上编不过 ⇒ `cargo test`（不带 --lib）会把
+        #    example 也编一遍 ⇒ 直接失败。
+        # ⚠️ GTK 相关的那几个用例会**按设计跳过**（gtk::init() 在 libtest 的
+        #    子线程上起不来）⇒ 与 Linux 上不给 DISPLAY 时的行为一致。
+        run: cargo test --lib --locked
+
+      - name: 命令行契约回归（73 条黄金基准）
+        # ⚠️ Windows 上用 **Git Bash** 跑同一个脚本 ⇒ 对照的还是同一批
+        #    基准（真值不动），脚本把 home 的形态、反斜杠、默认用户名归一化掉。
+        # ⚠️ 先跑 --selftest：73 条全 DIFF 时，能立刻分清是「程序行为变了」
+        #    还是「归一化逻辑坏了」。
+        shell: bash
+        run: |
+          bash tools/cli_contract_check.sh --selftest
+          bash tools/cli_contract_check.sh
+
+      - name: 打包可执行文件（含 GTK 的 DLL）
+        # ⚠️ **exe 单独拿走是跑不起来的**：GTK / glib / pango 的 DLL 都在
+        #    gvsbuild 的 bin 里 ⇒ 一起打包（share/ 图标主题先不带，
+        #    缺了只是图标显示不出来，不影响功能）。
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force "release-windows" | Out-Null
+          Copy-Item "target\release\puttyplus.exe" "release-windows\"
+          Copy-Item "C:\gtk\bin\*.dll" "release-windows\"
+          Compress-Archive -Path "release-windows\*" `
+            -DestinationPath "puttyplus-windows-x86_64.zip" -Force
+          Get-ChildItem "release-windows" | Measure-Object |
+            ForEach-Object { Write-Host "打包文件数：$($_.Count)" }
+
+      - name: 上传可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: puttyplus-windows-x86_64
+          path: puttyplus-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: 收集诊断
+        # ⚠️ 这一步**永远成功**：诊断不该把 CI 拖红，但出问题时能直接看。
+        run: |
+          {
+            echo "=== rustc ==="
+            rustc --version
+            echo "=== gtk4 / pango ==="
+            pkg-config --modversion gtk4
+            pkg-config --modversion pango
+            echo "=== zig ==="
+            "& $env:ZIG version"
+            echo "=== 产出的 exe ==="
+            Get-Item "target\release\puttyplus.exe" | Format-List Name,Length,LastWriteTime
+          } > diag-windows.txt 2>&1
+          cat diag-windows.txt
+
+      - name: 上传诊断
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-windows
+          path: diag-windows.txt
+          if-no-files-found: warn

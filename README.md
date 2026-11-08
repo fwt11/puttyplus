@@ -154,6 +154,54 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 ./puttyplus
 ```
 
+## Windows 版（实验）
+
+跨平台改造已经落地到 `feature/cross-platform` 分支：**Windows 优先**，
+首版只承诺三件事与 Linux 版一致——
+
+| 能力 | Windows 状态 |
+|---|---|
+| **终端会话** | ✅ 可用。终端内核换成 **libghostty-vt**（Ghostty 的终端内核）+ **ConPTY** 伪终端，自绘渲染（cairo + pangocairo），中文输入法自己挂 |
+| **SFTP 文件面板** | ✅ 可用。列表、上下级、新建、重命名、删除、传输队列、拖拽上传、剪贴板粘贴上传 |
+| **命令行参数契约** | ✅ 与 Linux 版**逐条一致**：同样那 73 条黄金基准，PASS=73 FAIL=0 |
+
+**首版不做 / 未验证的**：
+
+- **数据库工作台**：代码保留编译，但**入口隐藏**（顶栏菜单里不显示，其余入口点了
+  会提示「Windows 版尚未验证」）。第二版再放开。
+- **桌面通知**：Windows 首版不做（状态栏有一句兜底）。
+- **录制/回放**：ghostty 内核的 `cursor_row()` 是视口内行号、与 VTE 的绝对行号
+  语义不同 ⇒ 录制在 ghostty 后端暂不准（Linux 的 VTE 后端不受影响）。
+
+构建（**只能在 Windows 上编**，Linux 交叉编译会卡在 `glib-sys` 需要的 Windows
+sysroot 上）：
+
+```powershell
+# 1) Rust（msvc 目标，windows-latest runner 自带 MSVC）
+rustup toolchain install stable-x86_64-pc-windows-msvc
+
+# 2) GTK 4 开发库（Windows 上没有系统包，用 gvsbuild 的预编译版）
+#    解压后把它自带的 bin/ 加进 PATH，并设置：
+$env:PKG_CONFIG_PATH = "<解压目录>\lib\pkgconfig"
+
+# 3) Zig 0.17.x（编译 libghostty-vt 要用）
+pip install ziglang==0.17.1
+$env:PATH = "<python -c "import ziglang,os;print(os.path.dirname(ziglang.__file__))">;$env:PATH"
+
+cargo build --release
+.\target\release\puttyplus.exe
+```
+
+跑命令行契约检查（Windows 上用 Git Bash）：
+
+```bash
+bash tools/cli_contract_check.sh --selftest   # 先验归一化逻辑本身
+bash tools/cli_contract_check.sh              # 73 条黄金基准
+```
+
+细节（两个终端引擎、Zig 怎么装、pangocairo 的坑、ConPTY 的坑、路径语义）
+见 [docs/跨平台-构建说明.md](docs/跨平台-构建说明.md)。
+
 ## 快速开始
 
 ### 依赖
