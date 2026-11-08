@@ -161,9 +161,22 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 
 | 能力 | Windows 状态 |
 |---|---|
-| **终端会话** | ✅ 可用。终端内核换成 **libghostty-vt**（Ghostty 的终端内核）+ **ConPTY** 伪终端，自绘渲染（cairo + pangocairo），中文输入法自己挂 |
+| **终端会话** | ✅ 可用。终端内核换成 **libghostty-vt**（Ghostty 的终端内核）+ 自绘渲染（cairo + pangocairo），中文输入法自己挂。**SSH 是进程内实现的**（russh 直接驱动终端内核）⇒ **不需要装 `ssh.exe`，也不需要 `plink`** |
 | **SFTP 文件面板** | ✅ 可用。列表、上下级、新建、重命名、删除、传输队列、拖拽上传、剪贴板粘贴上传 |
 | **命令行参数契约** | ✅ 与 Linux 版**逐条一致**：同样那 73 条黄金基准，PASS=73 FAIL=0 |
+
+⚠️ **Windows 上的 SSH 是「我们自己实现的」**（阶段 C7）：Windows 默认没装
+`ssh.exe`（OpenSSH 是可选功能），`plink` 又不想依赖 ⇒ 终端改成用 russh
+**在进程内**说 SSH：申请远程 pty、开 shell、键盘字节直接写进去、窗口尺寸
+用 SSH 的 window-change 告诉远程端。⇒ **跑起来不需要任何外部程序**
+（连 Git Bash 都不用，只有「跑 73 条契约」才需要）。
+
+⚠️ **与 Linux 版的已知差异**（Linux 主线**不变**，仍然是 spawn 用户自己的
+`ssh` ⇒ `~/.ssh/config`、agent、ProxyJump 的语义全都在）：
+
+- Windows 版终端**不读 `~/.ssh/config`**（别名展开由本程序自己做，
+  `HostName`/`Port`/`User`/`IdentityFile` 生效，但 **ProxyJump 等不支持**）；
+- 端口转发走本程序自己的进程内转发，不经 `ssh -L/-R/-D`。
 
 **首版不做 / 未验证的**：
 
