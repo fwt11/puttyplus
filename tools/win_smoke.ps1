@@ -33,7 +33,14 @@ $failed = $false
 
 # ---------------------------------------------------------------- 定位 exe
 if (-not $Exe) {
-    $Exe = Join-Path (Get-Location) "target\release\puttyplus.exe"
+    # ⚠️ **要认 CARGO_TARGET_DIR**：Windows 上有人会把 target 目录挪到
+    #    短路径（躲 MAX_PATH 260）⇒ exe 就不在 target\release\ 下了。
+    #    （契约脚本也是这么认的 ⇒ 两边指向同一个二进制）
+    if ($env:CARGO_TARGET_DIR) {
+        $Exe = Join-Path $env:CARGO_TARGET_DIR "release\puttyplus.exe"
+    } else {
+        $Exe = Join-Path (Get-Location) "target\release\puttyplus.exe"
+    }
 }
 if (-not (Test-Path $Exe)) {
     throw "找不到 $Exe ⇒ 先编译（tools\win_build.ps1）"

@@ -165,9 +165,13 @@ jobs:
         #    ⇒ 加上 ghostty 的 OUT_DIR/src 与 Zig 的输出目录，路径轻易
         #    超过 260 ⇒ 解压、编译、链接都可能失败（而且报错很怪）。
         #    ⇒ 挪到 D:\t（短）。
+        #
+        # ⚠️ **写成正斜杠 `D:/t`**：Windows 的路径两种写法都认，
+        #    但**契约脚本是 Git Bash 跑的** ⇒ `D:\t` 在那边不好拼
+        #    （`D:\t/release/puttyplus.exe` 这种混合分隔符不稳）。
         shell: pwsh
         run: |
-          "CARGO_TARGET_DIR=D:\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=D:/t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: 缓存 cargo 与 target
         uses: actions/cache@v4
@@ -175,7 +179,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            D:\t
+            D:/t
           # ⚠️ 键里必须带 OS：Windows 与 Linux 的 target/ 产物不通用。
           key: cargo-win-msvc-v2-${{ hashFiles('Cargo.lock') }}
 

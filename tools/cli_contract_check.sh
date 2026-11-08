@@ -24,9 +24,35 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
 esac
 
 # ---- 二进制（Windows 上是 .exe）----
-RBIN="target/release/puttyplus"
+#
+# ⚠️ **要认 CARGO_TARGET_DIR**：Windows 上为了躲 MAX_PATH(260)，
+#    CI 把 target 目录挪到了别处（`D:\t`）⇒ 二进制**不在** `target/release/` 下。
+#    （这个坑到第 8 轮才暴露：前几轮都在这一步之前就挂了，契约从没真跑过。）
+# ⚠️ 也允许用 `RBIN=` 环境变量直接指定（最省事）。
+RBIN="${RBIN:-}"
+if [ -z "$RBIN" ]; then
+  if [ "$IS_WINDOWS" = "1" ]; then
+    RBIN="target/release/puttyplus.exe"
+  else
+    RBIN="target/release/puttyplus"
+  fi
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    # ⚠️ CARGO_TARGET_DIR 可能是 Windows 形式（`D:\t`）⇒ 归一化成正斜杠
+    #    （Git Bash 里 `D:\t/release/x.exe` 这种混合写法不稳）
+    CTD="${CARGO_TARGET_DIR//\\//}"
+    if [ "$IS_WINDOWS" = "1" ]; then
+      RBIN="$CTD/release/puttyplus.exe"
+    else
+      RBIN="$CTD/release/puttyplus"
+    fi
+  fi
+fi
+# 退路：上面那个不在，但默认路径下有 ⇒ 用默认路径的
 if [ ! -x "$RBIN" ] && [ -x "target/release/puttyplus.exe" ]; then
   RBIN="target/release/puttyplus.exe"
+fi
+if [ ! -x "$RBIN" ] && [ -x "target/release/puttyplus" ]; then
+  RBIN="target/release/puttyplus"
 fi
 
 # ---- 归一化用的「真实身份」（在覆盖 HOME **之前**取）----
