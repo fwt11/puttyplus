@@ -180,21 +180,45 @@ pub(crate) mod testutil {
         DIRS.lock().unwrap().push(dir.to_path_buf());
     }
 
-    /// 建一个隔离的临时目录（`/tmp/<prefix>_<tag>_<pid>`），**进程退出时删**。
+    /// 建一个隔离的临时目录（`<tmp>/<prefix>_<tag>_<pid>_<序号>`），
+    /// **进程退出时删**。
     ///
     /// ⚠ 名字里带 PID ⇒ 同一台机器上并行跑两个测试进程不会互相踩。
+    ///
+    /// ⚠️ **名字里还带一个进程内递增的序号**（这是第 7 轮 Windows CI 抓到的）：
+    /// 以前名字只有 `<prefix>_<tag>_<pid>` ⇒ **同一个进程内多个测试用同一个
+    /// tag 就抢同一个目录**（`args::tests::parse` 就是 `temp_home("args")`，
+    /// 几十个测试共用）⇒ 每次进来都 `remove_dir_all` + 重建 ⇒ 并发时
+    /// 互相删对方的目录 ⇒ Windows 上直接报
+    /// `AlreadyExists`（183「Cannot create a file when that file already exists」）
+    /// ⇒ 用例挂。
+    /// ⇒ 现在每次调用都拿一个**全新**的名字 ⇒ 既没有同名互删，也不会有残留。
     pub fn temp_dir(prefix: &str, tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         temp_dir_in(
             std::env::temp_dir(),
-            &format!("{prefix}_{tag}_{:?}", std::process::id()),
+            &format!("{prefix}_{tag}_{}_{n}", std::process::id()),
         )
     }
 
     /// 同 `temp_dir`，但建在指定父目录下（子目录名自定）。
+    ///
+    /// ⚠️ **名字要由调用方保证唯一**（`temp_dir` 会自动加序号）。
+    ///
+    /// ⚠️ 失败时**别 unwrap**：Windows 上 `create_dir_all` 报的
+    /// `AlreadyExists`（183）光看 panic 信息根本猜不到是哪个目录
+    /// ⇒ 这里把路径和原始错误都打出来。
     pub fn temp_dir_in(base: PathBuf, name: &str) -> PathBuf {
         let d = base.join(name);
+        // 删掉同名残留（上一轮跑崩了、或同名目录还在）
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        if let Err(e) = std::fs::create_dir_all(&d) {
+            // 目录已经在了（别人建过）⇒ 能用就算了
+            if !d.is_dir() {
+                panic!("建临时目录失败：{}（{e}）", d.display());
+            }
+        }
         register(&d);
         d
     }
@@ -211,6 +235,26 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同 tag 的两次调用必须拿到**不同**的目录。
+    ///
+    /// ⚠️ 第 7 轮 Windows CI 抓到的：以前临时目录名只有
+    /// `<prefix>_<tag>_<pid>` ⇒ **同一个进程内多个测试用同一个 tag
+    /// 就抢同一个目录**（`args::tests::parse` 是 `temp_home("args")`，
+    /// 几十个测试共用）⇒ 每次进来都 `remove_dir_all` + 重建
+    /// ⇒ 并发时互相删对方的目录 ⇒ Windows 上直接报 `AlreadyExists`（183）。
+    ///
+    /// ⚠️ 这条在 **Linux 上就能验** ⇒ 不用等 Windows CI 才发现。
+    #[test]
+    fn 临时目录每次都独一无二() {
+        let a = crate::util::testutil::temp_home("dup");
+        let b = crate::util::testutil::temp_home("dup");
+        assert_ne!(
+            a, b,
+            "同 tag 的两次调用不能抢同一个目录（并行测试会互删对方的）"
+        );
+        assert!(a.is_dir() && b.is_dir(), "两个目录都该建好");
+    }
 
     #[test]
     fn atoi() {

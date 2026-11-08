@@ -210,6 +210,19 @@ mod lint_tests {
         false
     }
 
+    /// 这个文件是不是「语法高亮的测试语料」文件（lint 要跳过）。
+    ///
+    /// ⚠️ **不能拿字面量 `"panel/syntax.rs"` 直接 `ends_with`**：
+    ///    Windows 上路径是 `…\src\panel\syntax.rs`（**反斜杠**）⇒ 匹配不上
+    ///    ⇒ 文件没被跳过 ⇒ 扫到测试语料里的 `**粗体**`
+    ///    ⇒ Windows CI 的 lint 用例直接炸（第 7 轮抓到的）。
+    ///
+    /// ⇒ 先把反斜杠归一成正斜杠再比 —— **与运行平台无关**
+    ///    ⇒ Windows 形状的路径也能在 Linux 上测（见下面的用例）。
+    fn is_syntax_highlight_src(path: &str) -> bool {
+        path.replace('\\', "/").ends_with("panel/syntax.rs")
+    }
+
     /// 源码里所有**用户可见**的字符串字面量（跳过注释）。
     fn user_visible_strings() -> Vec<(String, String)> {
         let mut files = Vec::new();
@@ -218,7 +231,7 @@ mod lint_tests {
         for f in files {
             // ⚠️ 语法高亮的**测试语料**里故意有 markdown 的 **粗体**
             // （那是高亮器的输入，不是界面文案）⇒ 这个文件跳过。
-            if f.to_string_lossy().ends_with("panel/syntax.rs") {
+            if is_syntax_highlight_src(&f.to_string_lossy()) {
                 continue;
             }
             let Ok(src) = std::fs::read_to_string(&f) else {
@@ -245,6 +258,27 @@ mod lint_tests {
             "界面文案里出现了字面的双星号（GTK 不渲染 Markdown）：\n{}",
             bad.join("\n")
         );
+    }
+
+    /// 跳过语法高亮的测试语料时，**Windows 形状的路径也要认**。
+    ///
+    /// ⚠️ 第 7 轮 Windows CI 抓到的：跳过判断拿字面量
+    ///    `"panel/syntax.rs"` 去 `ends_with` ⇒ Windows 上路径是
+    ///    `…\src\panel\syntax.rs` ⇒ **匹配不上** ⇒ 那个文件没被跳过
+    ///    ⇒ 扫到测试语料里的 `**粗体**` ⇒ lint 用例炸。
+    ///
+    /// ⚠️ 这条断言在 **Linux 上就能验**（Windows 形状的路径写成字符串喂进去）
+    ///    ⇒ 不用等 Windows CI 才发现。
+    #[test]
+    fn 跳过语法高亮语料认得反斜杠路径() {
+        assert!(is_syntax_highlight_src("/a/puttyplus/src/panel/syntax.rs"));
+        // Windows 上 CI 的实际路径形状
+        assert!(is_syntax_highlight_src(
+            r"D:\a\puttyplus\puttyplus\src\panel\syntax.rs"
+        ));
+        // 别的文件不能被误跳过
+        assert!(!is_syntax_highlight_src("/a/puttyplus/src/panel/other.rs"));
+        assert!(!is_syntax_highlight_src("/a/puttyplus/src/syntax.rs"));
     }
 
     /// 审计 P2-8：统一用「远程」（与「本地」成对），不用「远端」。
