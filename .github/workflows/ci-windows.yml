@@ -108,15 +108,76 @@ jobs:
           "ZIG=$zigdir\zig.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           & "$zigdir\zig.exe" version
 
+      - name: 备好 Ghostty 源码（绕开 build.rs 自己的下载）
+        # ⚠️ **为什么不能交给 build.rs 自己下载**：
+        #    `ghostty-vt-sys` 的 build.rs 用 ureq 下载
+        #    `https://tip.files.ghostty.org/<commit>/libghostty-vt-source.tar.gz`
+        #    ⇒ 它在 **Windows 上用 NativeTLS**（build.rs 里按平台选后端），
+        #    那条路在 Windows runner 上失败了（Linux 上是 rustls ⇒ 没事），
+        #    整个编译就挂在「failed to run custom build command」。
+        #
+        # ⇒ 改成：**用 PowerShell 自己下载**（走 Windows 自带的 TLS）、
+        #    **自己校验 sha256**、解压后用 `GHOSTTY_SOURCE_DIR` 指过去
+        #    ⇒ build.rs 直接用现成的源码树，不联网。
+        #
+        # ⚠️ 解压到**短路径**（C:\g）：Windows 的 MAX_PATH 是 260，
+        #    ghostty 的源码树很深 ⇒ 长路径下 tar 解压/编译都可能撞限。
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $commit = "83fb95624b0439ee660c2679b43b38c8b63769cd"
+          $sha    = "ed57ae9b95581c88f2614e976c1d3f146c02d443a3c26139200eb9de6e645eb4"
+          $url    = "https://tip.files.ghostty.org/$commit/libghostty-vt-source.tar.gz"
+          $tarball = "C:\g\libghostty-vt-source.tar.gz"
+          New-Item -ItemType Directory -Force "C:\g" | Out-Null
+
+          try {
+            Write-Host "下载 $url"
+            Invoke-WebRequest -Uri $url -OutFile $tarball
+            $actual = (Get-FileHash $tarball -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $sha) {
+              throw "sha256 对不上：期望 $sha，实际 $actual"
+            }
+            Write-Host "sha256 对上了，解压…"
+            tar -xzf $tarball -C "C:\g"
+          } catch {
+            # ⚠️ **兜底**：tip.files.ghostty.org 走不通时，改从 GitHub 的
+            #    codeload 取同一个 commit 的整棵源码树（`GHOSTTY_SOURCE_DIR`
+            #    这条路**不校验内容**，只要有 build.zig 就行）。
+            Write-Host "::warning::官方 tarball 下载失败（$($_.Exception.Message)）⇒ 改用 GitHub codeload"
+            $gh = "C:\g\ghostty-$commit.tar.gz"
+            Invoke-WebRequest `
+              -Uri "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$commit" `
+              -OutFile $gh
+            tar -xzf $gh -C "C:\g"
+          }
+
+          # 顶层目录里有 build.zig 的那个 ⇒ 源码树
+          $root = Get-ChildItem "C:\g" -Directory |
+                  Where-Object { Test-Path (Join-Path $_.FullName "build.zig") } |
+                  Select-Object -First 1
+          if (-not $root) { throw "解压后没找到带 build.zig 的目录" }
+          Write-Host "源码目录：$($root.FullName)"
+          "GHOSTTY_SOURCE_DIR=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 短的 target 目录（Windows 的 MAX_PATH 是 260）
+        # ⚠️ 默认的 target 目录是 `D:\a\puttyplus\puttyplus\target\...`
+        #    ⇒ 加上 ghostty 的 OUT_DIR/src 与 Zig 的输出目录，路径轻易
+        #    超过 260 ⇒ 解压、编译、链接都可能失败（而且报错很怪）。
+        #    ⇒ 挪到 D:\t（短）。
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=D:\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: 缓存 cargo 与 target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            D:\t
           # ⚠️ 键里必须带 OS：Windows 与 Linux 的 target/ 产物不通用。
-          key: cargo-win-msvc-v1-${{ hashFiles('Cargo.lock') }}
+          key: cargo-win-msvc-v2-${{ hashFiles('Cargo.lock') }}
 
       - name: 打印工具链与依赖版本
         run: |
@@ -126,6 +187,12 @@ jobs:
           pkg-config --modversion pango
           "ZIG=$env:ZIG"
           & $env:ZIG version
+          "GHOSTTY_SOURCE_DIR=$env:GHOSTTY_SOURCE_DIR"
+          "CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR"
+          if (-not (Test-Path (Join-Path $env:GHOSTTY_SOURCE_DIR "build.zig"))) {
+            Write-Host "::error::GHOSTTY_SOURCE_DIR 里没有 build.zig"
+            exit 1
+          }
 
       - name: 编译（release）
         # ⚠️ release profile 是 fat LTO + codegen-units=1 + panic=abort
@@ -143,7 +210,11 @@ jobs:
             $err = (Select-String -Path build.log -Pattern "^error" -Context 0,12 |
                     Select-Object -First 12 | Out-String)
             $tail = (Get-Content build.log -Tail 40 | Out-String)
-            $msg = "$err`n--- 日志尾部 ---`n$tail"
+            # ⚠️ build script 的**真正**原因常在 `--- stderr` 段里
+            #    （cargo 把 build script 的输出单独放那儿）⇒ 一起带上
+            $stderr = (Select-String -Path build.log -Pattern "--- stderr" -Context 0,30 |
+                       Select-Object -First 1 | Out-String)
+            $msg = "$err`n--- stderr ---`n$stderr`n--- 日志尾部 ---`n$tail"
             if ($msg.Length -gt 8000) { $msg = $msg.Substring(0, 8000) }
             # ⚠️ 注解是**一整行**：换行写成 %0A，% 本身要先转义成 %25
             $msg = $msg -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
@@ -199,7 +270,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force "release-windows" | Out-Null
-          Copy-Item "target\release\puttyplus.exe" "release-windows\"
+          Copy-Item "$env:CARGO_TARGET_DIR\release\puttyplus.exe" "release-windows\"
           Copy-Item "C:\gtk\bin\*.dll" "release-windows\"
           Compress-Archive -Path "release-windows\*" `
             -DestinationPath "puttyplus-windows-x86_64.zip" -Force
@@ -225,7 +296,7 @@ jobs:
             echo "=== zig ==="
             "& $env:ZIG version"
             echo "=== 产出的 exe ==="
-            Get-Item "target\release\puttyplus.exe" | Format-List Name,Length,LastWriteTime
+            Get-Item "$env:CARGO_TARGET_DIR\release\puttyplus.exe" | Format-List Name,Length,LastWriteTime
           } > diag-windows.txt 2>&1
           cat diag-windows.txt
 
