@@ -152,6 +152,9 @@ pub(crate) mod testutil {
     /// 碰巧还能过）⇒ 删得太早反而会把并行测试搞挂。
     /// atexit 在**测试全跑完、进程正常退出**时统一清 ⇒ 既满足"跑完就没"，
     /// 又不在运行中把别人的 HOME 删了。
+    /// ⚠️ **Windows 上没有 atexit**（MSVC 的 CRT 是 `_onexit`，libc crate
+    /// 不绑它）⇒ 这个钩子只在 Unix 上挂得上。
+    #[cfg(unix)]
     extern "C" fn cleanup_at_exit() {
         let dirs = DIRS.lock().unwrap_or_else(|e| e.into_inner());
         for d in dirs.iter() {
@@ -162,10 +165,17 @@ pub(crate) mod testutil {
     /// 登记一个"进程退出时要删"的目录（第一次登记时挂上 atexit 钩子）。
     fn register(dir: &Path) {
         static HOOK: Once = Once::new();
-        HOOK.call_once(|| unsafe {
+        HOOK.call_once(|| {
             // ⚠ 回调必须是 `extern "C" fn()`（不带参数、不捕获环境）⇒
             // 要访问的东西只能放在**静态**里。
-            libc::atexit(cleanup_at_exit);
+            //
+            // ⚠️ **只在 Unix 上挂**：Windows 的 libc crate 没有 `atexit`
+            //    （MSVC CRT 用 `_onexit`）⇒ 那边不挂钩子，靠每个用例
+            //    自己删目录（钩子本来也只是兜底）。
+            #[cfg(unix)]
+            unsafe {
+                libc::atexit(cleanup_at_exit);
+            }
         });
         DIRS.lock().unwrap().push(dir.to_path_buf());
     }

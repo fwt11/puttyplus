@@ -34,7 +34,10 @@ use futures_util::{StreamExt, TryStreamExt};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, OptsBuilder, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
+/// ⚠️ **Unix 套接字只有 Unix 有**（PostgreSQL 的本地 socket 桥要用它）
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryStream};
 
 use super::{BackendError, BackendResult};
@@ -47,6 +50,7 @@ use crate::trf;
 /// 认证 / 建通道的兜底超时：服务器不回应时 UI 不能永远停在"连接中"。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Unix 套接字路径上限（Linux `sun_path` 108 字节，留余量）。
+#[cfg(unix)]
 const SOCKET_PATH_MAX: usize = 100;
 /// MySQL 首版一次取回的行数上限（分页在客户端切片）。
 const MYSQL_BUFFER_LIMIT: usize = 2000;
@@ -968,6 +972,7 @@ impl Drop for DbSession {
 
 /* ---------------- 连接 ---------------- */
 
+#[cfg(unix)]
 fn spawn_bridge<S>(listener: UnixListener, stream: S) -> tokio::task::JoinHandle<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -995,6 +1000,7 @@ where
     })
 }
 
+#[cfg(unix)]
 fn check_path(path: &std::path::Path) -> BackendResult<()> {
     if path.as_os_str().len() > SOCKET_PATH_MAX {
         return Err(BackendError(trf!("本地套接字路径过长（{v0} 字节）：{v1}", v0 = path.as_os_str().len(), v1 = path.display())));
@@ -1006,14 +1012,41 @@ async fn open_pg<S>(stream: S, cfg: &DbConfig, dir: &SocketDir) -> Result<Inner,
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let sock = dir.path.join(format!(".s.PGSQL.{}", cfg.port));
-    check_path(&sock).map_err(|e| DbOpenError::Other(e.0))?;
-    let listener = UnixListener::bind(&sock)
-        .map_err(|e| DbOpenError::Other(trf!("创建本地数据库套接字失败: {e}", e = e)))?;
-    let bridge = spawn_bridge(listener, stream);
+    // ① **本地监听端**：Unix 上是 Unix 套接字，Windows 上是回环 TCP。
+    //
+    // ⚠️ Windows 上 PostgreSQL **没有 Unix 套接字** ⇒ 改走回环 TCP 桥
+    //    （与 MySQL 同构：监听 127.0.0.1 的随机端口，驱动连它）。
+    //    ⚠️ 这条路**未验证**：走 Unix 套接字时远端 pg_hba.conf 多半是
+    //    peer/trust（不校验密码），走 TCP 就得放行密码认证 ⇒ 未必通。
+    //    且 Windows 首版**不承诺**数据库工作台（入口已隐藏）。
+    #[cfg(unix)]
+    let (bridge, mut pg) = {
+        let sock = dir.path.join(format!(".s.PGSQL.{}", cfg.port));
+        check_path(&sock).map_err(|e| DbOpenError::Other(e.0))?;
+        let listener = UnixListener::bind(&sock)
+            .map_err(|e| DbOpenError::Other(trf!("创建本地数据库套接字失败: {e}", e = e)))?;
+        let bridge = spawn_bridge(listener, stream);
+        let mut pg = tokio_postgres::Config::new();
+        pg.host_path(&dir.path).port(cfg.port).user(&cfg.user);
+        (bridge, pg)
+    };
+    #[cfg(not(unix))]
+    let (bridge, mut pg) = {
+        let _ = dir;
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|e| DbOpenError::Other(trf!("创建本地数据库桥接端口失败: {e}", e = e)))?;
+        let local_port = listener
+            .local_addr()
+            .map_err(|e| DbOpenError::Other(trf!("读取本地数据库桥接端口失败: {e}", e = e)))?
+            .port();
+        let bridge = spawn_bridge_tcp(listener, stream);
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("127.0.0.1").port(local_port).user(&cfg.user);
+        (bridge, pg)
+    };
 
-    let mut pg = tokio_postgres::Config::new();
-    pg.host_path(&dir.path).port(cfg.port).user(&cfg.user);
+    // ② 连上（两个平台共用）
     if !cfg.dbname.is_empty() {
         pg.dbname(&cfg.dbname);
     }

@@ -71,6 +71,9 @@ impl russh::client::Handler for HostKeyHandler {
 
     /// 服务器请求打开 agent 转发通道：连到本地 `$SSH_AUTH_SOCK` 双向搬运。
     /// 未处于直连传输窗口时一律拒绝。
+    ///
+    /// ⚠️ **Windows 上这条路整个不存在**：`$SSH_AUTH_SOCK` 是 **Unix 套接字**
+    /// （Windows 的 ssh-agent 用的是命名管道）⇒ 直接拒绝。
     async fn server_channel_open_agent_forward(
         &mut self,
         channel: russh::Channel<russh::client::Msg>,
@@ -83,22 +86,34 @@ impl russh::client::Handler for HostKeyHandler {
                 .await;
             return Ok(());
         }
-        let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") else {
+        #[cfg(not(unix))]
+        {
+            // ⚠️ Windows：没有 Unix 套接字 ⇒ agent 转发没法代理
+            let _ = channel;
             reply
                 .reject(russh::ChannelOpenFailure::ConnectFailed)
                 .await;
             return Ok(());
-        };
-        reply.accept().await;
-        tokio::spawn(async move {
-            let Ok(mut local) = tokio::net::UnixStream::connect(std::path::Path::new(&sock)).await
-            else {
-                return;
+        }
+        #[cfg(unix)]
+        {
+            let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") else {
+                reply
+                    .reject(russh::ChannelOpenFailure::ConnectFailed)
+                    .await;
+                return Ok(());
             };
-            let mut remote = channel.into_stream();
-            let _ = tokio::io::copy_bidirectional(&mut remote, &mut local).await;
-        });
-        Ok(())
+            reply.accept().await;
+            tokio::spawn(async move {
+                let Ok(mut local) = tokio::net::UnixStream::connect(std::path::Path::new(&sock)).await
+                else {
+                    return;
+                };
+                let mut remote = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut remote, &mut local).await;
+            });
+            Ok(())
+        }
     }
 
     /// 服务器请求打开「远程转发」的入站通道（-R）：

@@ -4,7 +4,6 @@
 //! OSC 7 目录跟随回调。
 
 use std::cell::{Cell, RefCell};
-#[cfg(unix)]
 use std::rc::Rc;
 
 use gtk::gdk;

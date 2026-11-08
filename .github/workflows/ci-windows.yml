@@ -207,20 +207,36 @@ jobs:
           $ErrorActionPreference = "Continue"
           cargo build --release --locked 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) {
-            $err = (Select-String -Path build.log -Pattern "^error" -Context 0,12 |
-                    Select-Object -First 12 | Out-String)
-            $tail = (Get-Content build.log -Tail 40 | Out-String)
+            # ⚠️ **先给一行摘要**（所有 error 标题）⇒ 一次能看到**全部**
+            #    错误，而不是被日志尾部挤掉前面几条（第三轮就栽在这：
+            #    注解里只看到 3 个错误，后面还有）。
+            $titles = (Select-String -Path build.log -Pattern "^error" |
+                       ForEach-Object { $_.Line }) -join " || "
+            if ($titles.Length -gt 3000) { $titles = $titles.Substring(0, 3000) }
+            # 再给前两个错误的上下文
+            $ctx = (Select-String -Path build.log -Pattern "^error" -Context 0,10 |
+                    Select-Object -First 2 | Out-String)
             # ⚠️ build script 的**真正**原因常在 `--- stderr` 段里
             #    （cargo 把 build script 的输出单独放那儿）⇒ 一起带上
-            $stderr = (Select-String -Path build.log -Pattern "--- stderr" -Context 0,30 |
+            $stderr = (Select-String -Path build.log -Pattern "--- stderr" -Context 0,25 |
                        Select-Object -First 1 | Out-String)
-            $msg = "$err`n--- stderr ---`n$stderr`n--- 日志尾部 ---`n$tail"
+            $msg = "$titles`n--- 上下文 ---`n$ctx`n--- stderr ---`n$stderr"
             if ($msg.Length -gt 8000) { $msg = $msg.Substring(0, 8000) }
             # ⚠️ 注解是**一整行**：换行写成 %0A，% 本身要先转义成 %25
             $msg = $msg -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
             Write-Host "::error::Windows 编译失败。$msg"
             exit 1
           }
+
+      - name: 上传编译日志（失败时也上传）
+        # ⚠️ **完整日志**：注解只有 8000 字符，多的看不到 ⇒ 整份留档，
+        #    人可以在网页上直接下载看。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-windows
+          path: build.log
+          if-no-files-found: warn
 
       - name: 单元测试
         # ⚠️ **只跑 --lib**：11 个 example 直接用 vte4（VTE 是 Linux 专属的
@@ -231,6 +247,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
+          # ⚠️ **HOME 与 USERPROFILE 都要指到临时目录**：Windows 上
+          #    GLib 的 `g_get_home_dir()` 读的是 **USERPROFILE**（不是 HOME），
+          #    而单测里改 `HOME` 改不动它 ⇒ 不设的话测试会往 runner 的真实
+          #    用户目录里写东西（~/.putty/sessions、~/.ssh/config…）。
+          $home = Join-Path $env:RUNNER_TEMP "pp-ci-home"
+          New-Item -ItemType Directory -Force $home | Out-Null
+          $env:HOME = $home
+          $env:USERPROFILE = $home
           cargo test --lib --locked 2>&1 | Tee-Object -FilePath test.log
           if ($LASTEXITCODE -ne 0) {
             $names = (Select-String -Path test.log -Pattern "^failures:" -Context 0,40 |
