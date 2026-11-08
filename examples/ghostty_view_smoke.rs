@@ -1,13 +1,16 @@
 //! ghostty 自绘终端控件冒烟（跨平台版 阶段 C3）。
 //!
-//! 验三件事（都是**真路径**，不是另写一份模拟）：
+//! 验四件事（都是**真路径**，不是另写一份模拟）：
 //!
 //! 1. **屏幕内容对**：喂一段 ANSI，网格里的字符就该是那样；
 //! 2. **按键发出的字节对**：回车 / Ctrl+C / 方向键；
-//! 3. **中文 commit 发的是 UTF-8 字节**（不是问号、不是半个字）。
+//! 3. **中文 commit 发的是 UTF-8 字节**（不是问号、不是半个字）；
+//! 4. **画出来的像素对**：文字行必须落在网格行里、光标和文字要对齐
+//!    （2026-11-08 用户报「光标跑到提示符上一行」——网格是对的，
+//!    文字被画低了一行 ⇒ 网格断言抓不住，渲到内存 surface 上数像素
+//!    才抓得住。字形长什么样由字体决定，那个才真的只能人眼比）。
 //!
-//! 另外截一张图（`/tmp/pp_ghostty_view.png`）供人工看画面——
-//! **画面本身没法用断言钉住**（字形由字体决定），只能人眼比。
+//! 另外截一张图（`/tmp/pp_ghostty_view.png`）供人工看画面。
 //!
 //! 运行：
 //! ```text
@@ -171,6 +174,160 @@ fn main() {
             "没有输出回调时，按键字节必须写给子进程（pty 的回显要上屏）：{rows:?}"
         );
         println!("[ok] 没有输出回调 ⇒ 按键字节写给了子进程（回显上屏：{rows:?}）");
+    }
+
+    /* ---------------- 5. 像素对齐：文字行必须落在网格行里 ---------------- */
+    //
+    // ⚠️ 这一条钉的是**2026-11-08 的真 bug**：`draw_text` 把 pangocairo
+    // 的当前点当基线用（实际是排版框左上角）⇒ 每行文字整体被压低约
+    // 0.8 个格子，视觉上「光标跑到提示符的上一行」。网格（screen_rows）
+    // 是对的 ⇒ 上面的文字断言全抓不住 ⇒ 必须把画面真渲出来数像素。
+    //
+    // 手法：喂三行细笔画字（`ill`——笔画只有 1~2px 宽，不会和光标的
+    // 实心块混淆；光标落在第 2 行），渲到内存 surface，按行扫「非背景」
+    // 像素 ⇒ 得到每行字的墨迹带与光标块位置 ⇒ 断言：
+    //   a. 第 0 行的墨迹顶在**第一个格子**里（画歪了会掉到 ≈1 行距以下）；
+    //   b. 第 1 行墨迹顶 ≈ 一个行距；
+    //   c. 光标块顶 ≈ 两个行距（第 2 行）；
+    //   d. 第 2 行墨迹与光标顶相差**不到半个行距**（同一个格子里）。
+    // 全部用「行距的倍数」表达 ⇒ 不依赖具体字体与 DPI。
+    {
+        let view2 = GhosttyView::new();
+        view2.feed(b"ill\r\nill\r\nill");
+        pump(100);
+
+        let (w, h) = (320i32, 140i32);
+        let mut surf = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h)
+            .expect("建内存 surface");
+        {
+            let cr = gtk::cairo::Context::new(&surf).expect("建 cairo 上下文");
+            view2.render_to(&cr, w as f64, h as f64);
+        }
+        // ⚠️ 读像素前：Context 要先 drop（data() 要求**独占**访问，
+        //    context 还活着就报 NonExclusive）；flush 要先做（还没冲刷
+        //    的绘制不落进 surface）；stride 要在 data() 前取（data() 是
+        //    对 surface 的可变借用，活着的时候 surf 不能再碰）。
+        surf.flush();
+        let stride = surf.stride() as usize;
+        let data = surf.data().expect("读 surface 像素");
+
+        // 留个图（PPM，零依赖），人工也能看（断言挂了先看这张图）
+        let ppm = std::env::temp_dir().join("pp_ghostty_pixel.ppm");
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::File::create(&ppm) {
+                let _ = write!(f, "P6\n{w} {h}\n255\n");
+                let mut buf = Vec::with_capacity((w * h * 3) as usize);
+                for y in 0..h as usize {
+                    for x in 0..w as usize {
+                        let o = y * stride + x * 4;
+                        buf.extend_from_slice(&[data[o + 2], data[o + 1], data[o]]);
+                    }
+                }
+                let _ = f.write_all(&buf);
+            }
+        }
+
+        // 像素读取（cairo ARgb32 在小端机器上的字节序是 b,g,r,a）。
+        // 背景色取右下角采样（那里必然没画东西）⇒ 不依赖主题色。
+        let px = |x: usize, y: usize| -> (i32, i32, i32) {
+            let o = y * stride + x * 4;
+            (data[o + 2] as i32, data[o + 1] as i32, data[o] as i32)
+        };
+        let (bgr, bgg, bgb) = px((w - 1) as usize, (h - 1) as usize);
+        let is_bg = |x: usize, y: usize| -> bool {
+            let (r, g, b) = px(x, y);
+            (r - bgr).abs() < 14 && (g - bgg).abs() < 14 && (b - bgb).abs() < 14
+        };
+
+        // 每行统计：非背景像素数 + 最长连续非背景横向 run
+        //（光标是实心一整格宽的块，run 比任何细笔画都粗）
+        let (mut row_ink, mut row_run) = (vec![0usize; h as usize], vec![0usize; h as usize]);
+        for y in 0..h as usize {
+            let mut run = 0usize;
+            for x in 0..w as usize {
+                if is_bg(x, y) {
+                    run = 0;
+                } else {
+                    run += 1;
+                    row_ink[y] += 1;
+                    row_run[y] = row_run[y].max(run);
+                }
+            }
+        }
+
+        // 光标块：run ≥ 6 且**连续 6 行都是**（块是整格高 ⇒ 竖向连续；
+        // 字形再粗也撑不满一格宽，更撑不满连续 6 行）
+        let is_cursor_row = |y: usize| -> bool {
+            y + 6 <= h as usize && (y..y + 6).all(|yy| row_run[yy] >= 6)
+        };
+        let cursor_top = (0..h as usize).find(|&y| is_cursor_row(y));
+
+        // 墨迹带（连续的「有字」行）
+        let mut bands: Vec<(usize, usize)> = Vec::new();
+        let mut start: Option<usize> = None;
+        for y in 0..h as usize {
+            match (row_ink[y] > 3, start) {
+                (true, None) => start = Some(y),
+                (false, Some(s)) => {
+                    bands.push((s, y - 1));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            bands.push((s, h as usize - 1));
+        }
+        let diag = format!(
+            "墨迹带 {bands:?}；光标顶 {:?}；每行墨迹 {:?}（图：{}）",
+            cursor_top,
+            row_ink.iter().enumerate().filter(|(_, c)| **c > 0).map(|(y, c)| format!("{y}:{c}")).collect::<Vec<_>>(),
+            ppm.display()
+        );
+        assert!(bands.len() >= 3, "至少要有三行字的墨迹带：{diag}");
+        // 行距从**前两条纯文字带**的顶部差推（第 2 行的带会和光标并成
+        // 一条，顶部是光标块的顶边，比文字墨迹高，不能用）
+        let pitch = bands[1].0 - bands[0].0;
+        assert!(
+            (8..60).contains(&pitch),
+            "行距 {pitch}px 不像正常的字号：{diag}"
+        );
+
+        // a. 第 0 行墨迹必须落在第一个格子里
+        assert!(
+            (bands[0].0 as f64) < 0.7 * pitch as f64,
+            "第 0 行文字墨迹顶在 {}px、行距 {pitch}px ⇒ 文字整体被画低了\
+             （应落在第一个格子里，即 < {:.0}px）：{diag}",
+            bands[0].0,
+            0.7 * pitch as f64
+        );
+
+        // b. 第 1 行墨迹顶 ≈ 一个行距
+        assert!(
+            ((bands[1].0 as f64) - pitch as f64).abs() < 0.4 * pitch as f64,
+            "第 1 行墨迹顶在 {}px、行距 {pitch}px ⇒ 没落在第 1 行的格子里：{diag}",
+            bands[1].0
+        );
+
+        // c. 光标块顶 ≈ 两个行距（在第 2 行）
+        let cursor_top = cursor_top.expect("扫不到光标块（连续 6 行的实心块）");
+        assert!(
+            ((cursor_top as f64) - 2.0 * pitch as f64).abs() < 0.45 * pitch as f64,
+            "光标顶在 {cursor_top}px、行距 {pitch}px ⇒ 光标没落在第 2 行的格子里：{diag}"
+        );
+
+        // d. 第 2 行墨迹与光标必须同格（相差不到半个行距）
+        assert!(
+            ((bands[2].0 as f64) - cursor_top as f64).abs() < 0.5 * pitch as f64,
+            "第 2 行墨迹顶 {}px 与光标顶 {cursor_top}px 相差超过半个行距（{pitch}px）\
+             ⇒ 文字和光标没对齐（老 bug：文字整体低一行）：{diag}",
+            bands[2].0
+        );
+        println!(
+            "[ok] 像素对齐：行距 {pitch}px，三行墨迹顶 {} / {} / {}，光标顶 {cursor_top}px",
+            bands[0].0, bands[1].0, bands[2].0
+        );
     }
 
     /* ---------------- 截图（人工看画面） ---------------- */

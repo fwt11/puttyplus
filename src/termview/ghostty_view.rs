@@ -142,6 +142,13 @@ struct State {
     font: RefCell<gtk::pango::FontDescription>,
     /// 单元格尺寸（像素）。
     cell: RefCell<(f64, f64)>,
+    /// 每行共用的**基线**（行顶往下主字体的 ascent 处，像素）。
+    ///
+    /// ⚠️ 终端的对齐规则是**一行一条基线**：行里不管混了什么回退字体
+    /// （中文的字形普遍比 ASCII 高），基线都不动——VTE / ghostty 都这样。
+    /// 量出来放在 state 里（`measure_cell`），`draw_text` 按每个 layout
+    /// 自己的 baseline 反推排版框顶部。
+    baseline: Cell<f64>,
     /// 输出回调：把字节交给子进程（PTY）。
     out: RefCell<Option<Rc<dyn Fn(&[u8])>>>,
     /// 输入法（GTK4 里要自己挂到控件上）。
@@ -355,6 +362,7 @@ impl GhosttyView {
             cells: RefCell::new(cells),
             font: RefCell::new(font),
             cell: RefCell::new((0.0, 0.0)),
+            baseline: Cell::new(0.0),
             out: RefCell::new(None),
             im: RefCell::new(None),
             preedit: RefCell::new(String::new()),
@@ -709,6 +717,15 @@ impl GhosttyView {
         self.area.queue_draw();
     }
 
+    /// 把当前画面画到**任意 cairo 目标**上（宽高自己给，像素照实算）。
+    ///
+    /// 给冒烟/截图用：渲到内存 surface 上做像素级断言（文字行必须落在
+    /// 网格行里）。⚠️ 宽高会当一次真实的视口尺寸用——比当前小也会
+    /// 触发内核重排（没有远程连接时无副作用）。
+    pub fn render_to(&self, cr: &gtk::cairo::Context, width: f64, height: f64) {
+        render_frame(&self.state, cr, width, height);
+    }
+
     /// 这个控件**是不是一个自绘终端**。
     pub fn is_terminal_widget(w: &gtk::Widget) -> bool {
         w.has_css_class(TERM_CSS_CLASS)
@@ -848,17 +865,28 @@ impl GhosttyView {
 
 /// 画一帧：背景 → 网格 → 光标 → 预编辑。
 fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Context) {
-    // 1. 算单元格尺寸（按当前字体量）
+    render_frame(state, cr, area.width() as f64, area.height() as f64);
+}
+
+/// 画一帧的本体：画到**任意** cairo 目标上（宽高自己给）。
+///
+/// 为什么要和 `draw_frame` 分开：GTK 的 draw_func 只能画到窗口表面，
+/// 冒烟要把画面渲到**内存 surface** 上做像素级断言（文字行必须落在
+/// 网格行里——2026-11-08「光标跑到提示符上一行」就是这里画歪的，
+/// 网格断言抓不住，只有像素抓得住）。
+fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height: f64) {
+    // 1. 算单元格尺寸（按当前字体量），顺带记下每行共用的基线
     let font = state.font.borrow().clone();
-    let (cell_w, cell_h) = measure_cell(area, &font);
+    let (cell_w, cell_h, baseline) = measure_cell(&font);
     *state.cell.borrow_mut() = (cell_w, cell_h);
+    state.baseline.set(baseline);
     if cell_w <= 0.0 || cell_h <= 0.0 {
         return;
     }
 
     // 2. 视口大小（按像素算行列）
-    let cols = ((area.width() as f64) / cell_w).floor().max(1.0) as u16;
-    let rows = ((area.height() as f64) / cell_h).floor().max(1.0) as u16;
+    let cols = (width / cell_w).floor().max(1.0) as u16;
+    let rows = (height / cell_h).floor().max(1.0) as u16;
 
     // 3. 尺寸变了就告诉内核（内核会重排屏幕）
     //
@@ -877,7 +905,7 @@ fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Conte
     // 4. 背景
     let (fg_default, bg_default) = default_colors();
     cr.set_source_rgb(bg_default.0, bg_default.1, bg_default.2);
-    cr.rectangle(0.0, 0.0, area.width() as f64, area.height() as f64);
+    cr.rectangle(0.0, 0.0, width, height);
     cr.fill();
 
     // 5. 网格
@@ -954,7 +982,7 @@ fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Conte
                     || run.underline != underline
                     || run.selected != selected)
             {
-                draw_run(area, state, cr, &run, col as f64 * cell_w - run.cols as f64 * cell_w, y, cell_w, cell_h, fg_default);
+                draw_run(state, cr, &run, col as f64 * cell_w - run.cols as f64 * cell_w, y, cell_w, cell_h, fg_default);
                 run = Run::default();
             }
             run.fg = fg;
@@ -967,7 +995,6 @@ fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Conte
         }
         if run.cols > 0 {
             draw_run(
-                area,
                 state,
                 cr,
                 &run,
@@ -998,13 +1025,12 @@ fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Conte
     let preedit = state.preedit.borrow().clone();
     if !preedit.is_empty() {
         let (x, y) = cursor_pos.unwrap_or((0.0, 0.0));
-        draw_text(area, state, cr, &preedit, x, y, cell_w, cell_h, fg_default, false, true);
+        draw_text(state, cr, &preedit, x, y, cell_w, cell_h, fg_default, false, true);
     }
 }
 
 /// 画一段（样式相同的一串单元格）。
 fn draw_run(
-    area: &gtk::DrawingArea,
     state: &Rc<State>,
     cr: &gtk::cairo::Context,
     run: &Run,
@@ -1040,7 +1066,6 @@ fn draw_run(
     for (text, cols) in &run.segs {
         if !text.is_empty() {
             draw_text(
-                area,
                 state,
                 cr,
                 text,
@@ -1060,14 +1085,13 @@ fn draw_run(
 /// 画一串文字（pango 排版 + pangocairo 落笔）。
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
-    area: &gtk::DrawingArea,
     state: &Rc<State>,
     cr: &gtk::cairo::Context,
     text: &str,
     x: f64,
     y: f64,
     _cell_w: f64,
-    cell_h: f64,
+    _cell_h: f64,
     color: (f64, f64, f64),
     bold: bool,
     underline: bool,
@@ -1089,8 +1113,18 @@ fn draw_text(
     }
     unsafe { pangocairo::update_layout(cr, &layout) };
     cr.set_source_rgb(color.0, color.1, color.2);
-    // 基线：字体的 ascent 差不多在格子上沿往下 80% 处
-    cr.move_to(x, y + cell_h * 0.8);
+    // ⚠️ pangocairo 的当前点是排版框的**左上角**，不是基线——基线在框内
+    // 顶部往下 `layout.baseline()` 处。所以排版框顶部要放在
+    // `行基线 - 本段 layout 的 baseline`：
+    //   · 纯 ASCII：本段 baseline == 主字体基线 ⇒ 框顶正好 = 行顶；
+    //   · 混进更高大的回退字体（中文）：框顶上移一点，**基线不动**——
+    //     一行一条基线，这正是终端该有的对齐（VTE / ghostty 同款）。
+    // 以前这里写死 `y + cell_h * 0.8`：把当前点当基线用 ⇒ 框顶被压到
+    // 行顶往下 0.8 格，基线掉到 ≈ 行顶 + 1.4 格 ⇒ 每行文字整体低一行，
+    // 视觉上像「光标跑到了上一行」（用户 2026-11-08 报的现象；网格与
+    // 光标都是对的，只有字画歪了）。
+    let line_baseline = layout.baseline() as f64 / f64::from(gtk::pango::SCALE);
+    cr.move_to(x, y + state.baseline.get() - line_baseline);
     unsafe { pangocairo::show_layout(cr, &layout) };
 }
 
@@ -1116,16 +1150,17 @@ fn draw_cursor(
     let _ = bg_default;
 }
 
-/// 量一个单元格有多大（像素）。
-fn measure_cell(area: &gtk::DrawingArea, font: &gtk::pango::FontDescription) -> (f64, f64) {
+/// 量一个单元格有多大（像素），顺带量出**主字体的基线**。
+fn measure_cell(font: &gtk::pango::FontDescription) -> (f64, f64, f64) {
     let ctx = pangocairo::context();
     let layout = gtk::pango::Layout::new(ctx);
     layout.set_font_description(Some(font));
     layout.set_text("M");
     let (w, _) = layout.pixel_size();
+    let baseline = layout.baseline() as f64 / f64::from(gtk::pango::SCALE);
     layout.set_text("M\nM");
     let (_, h2) = layout.pixel_size();
-    (w as f64, (h2 / 2).max(1) as f64)
+    (w as f64, (h2 / 2).max(1) as f64, baseline.max(1.0))
 }
 
 /// 默认的前景色/背景色（内核没给的时候用）。
