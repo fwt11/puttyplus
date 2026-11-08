@@ -190,3 +190,41 @@ SSH 传输（默认 `inproc` = 进程内 russh，不 spawn 任何外部程序）
 | Ghostty 源码下载失败 | `win_build.ps1` 会自动退回 GitHub codeload（那条路不校验内容） |
 | 契约脚本报 `$'\r': command not found` | 仓库的 `.gitattributes` 已钉 LF；若是旧 checkout ⇒ `git rm --cached -r . && git reset --hard` |
 | 契约脚本报权限/换行怪事 | Git Bash 的 MSYS 路径转换 ⇒ 脚本里已 `export MSYS_NO_PATHCONV=1`，确认 Git for Windows 是最新版 |
+
+## 7. Windows 上的 ssh-agent（**免密的关键**）
+
+Windows 上本程序会连 **`\\.\pipe\openssh-ssh-agent`** 这个命名管道
+（OpenSSH for Windows 与 Git for Windows 的 agent 都在这个管道上）⇒
+**密钥在 agent 里时，终端与 SFTP 都免密**（与 Linux 一致）。
+
+Windows 自带的 OpenSSH agent 默认**没启动**，开一下：
+
+```powershell
+# 看状态（Windows 11 自带 "OpenSSH Authentication Agent" 服务）
+Get-Service ssh-agent
+
+# 没运行就启动（**要管理员**）
+Set-Service -Name ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+
+# 把私钥加进去（Windows 自带 ssh-add）
+ssh-add $env:USERPROFILE\.ssh\id_ed25519
+# 或 Git Bash 里：eval $(ssh-agent -s); ssh-add ~/.ssh/id_ed25519
+```
+
+验证 agent 里有钥匙：
+
+```powershell
+ssh-add -l
+```
+
+⚠️ **密钥在 agent 里时本程序不会问密码**（这是设计如此，也和 Linux 一致）。
+⚠️ 如果你的密钥是**自定义文件名**（不是 `id_ed25519`/`id_rsa` 这类默认名），
+把它写进 `~/.ssh/config` 的 `IdentityFile`（两个平台都认）：
+
+```
+Host 堡垒机
+  HostName 10.0.0.9
+  User ops
+  IdentityFile ~/.ssh/my_bastion_key
+```
