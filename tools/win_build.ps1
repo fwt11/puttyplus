@@ -57,14 +57,42 @@ if ($installed -notcontains "x86_64-pc-windows-msvc") {
 # ---------------------------------------------------------------- 2) GTK4
 if (-not (Test-Path (Join-Path $GtkDir "bin"))) {
     Say "下载 GTK 4（gvsbuild 预编译版）"
-    $rel = Invoke-RestMethod -Headers @{ "User-Agent" = "puttyplus" } `
-            -Uri "https://api.github.com/repos/wingtk/gvsbuild/releases/latest"
-    $asset = $rel.assets |
-        Where-Object { $_.name -match "^GTK4_Gvsbuild_.*_x64\.zip$" } |
-        Select-Object -First 1
-    if (-not $asset) { throw "没找到 GTK4 的 Windows 预编译包（release $($rel.tag_name)）" }
+    # ⚠️ **固定版本 + 校验 sha256**（不再问 API 要「最新」）：
+    #    - 不依赖 GitHub API（限流/抖动就不会挂）；
+    #    - 每台机器拿到的 GTK 一模一样 ⇒ 结果可复现。
+    #    固定版真拿不到时，才退回「最新 release」。
+    # ⚠️ 版本要 ≥ 4.18（gtk4-rs 0.11 的 v4_18 特性要求）⇒ 2026.10.0 = GTK 4.24.1。
+    $tag = "2026.10.0"
+    $name = "GTK4_Gvsbuild_${tag}_x64.zip"
+    $url = "https://github.com/wingtk/gvsbuild/releases/download/$tag/$name"
+    $sha = "8005b860447e73b10c7f508b1f348e2b6390e01dd61fd5c617b8190a046022fe"
     $zip = Join-Path $env:TEMP "gtk4.zip"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+
+    $got = $false
+    for ($i = 1; $i -le 3 -and -not $got; $i++) {
+        try {
+            Say "下载固定版本 $name（第 $i 次）"
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $sha) { throw "sha256 对不上：期望 $sha，实际 $actual" }
+            $got = $true
+        } catch {
+            Write-Warning "第 $i 次失败：$($_.Exception.Message)"
+            if ($i -lt 3) { Start-Sleep -Seconds 10 }
+        }
+    }
+
+    if (-not $got) {
+        Say "固定版本拿不到 ⇒ 退回「最新 release」"
+        $rel = Invoke-RestMethod -Headers @{ "User-Agent" = "puttyplus" } `
+                -Uri "https://api.github.com/repos/wingtk/gvsbuild/releases/latest"
+        $asset = $rel.assets |
+            Where-Object { $_.name -match "^GTK4_Gvsbuild_.*_x64\.zip$" } |
+            Select-Object -First 1
+        if (-not $asset) { throw "没找到 GTK4 的 Windows 预编译包（release $($rel.tag_name)）" }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+    }
+
     if (Test-Path $GtkDir) { Remove-Item -Recurse -Force $GtkDir }
     Expand-Archive -Path $zip -DestinationPath $GtkDir -Force
 }
