@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::MethodKind;
-// ⚠️ **`AgentClient::connect_env` 只在 Unix 上有**（它连的是
-//    `$SSH_AUTH_SOCK` 那个 Unix 套接字）⇒ Windows 上这个类型整个没有。
-#[cfg(unix)]
+// ⚠️ **`AgentClient` 的连接方式按平台不同**（阶段 C10）：
+//    - Unix：`connect_env()` ⇒ 连 `$SSH_AUTH_SOCK` 那个 Unix 套接字；
+//    - Windows：`connect_named_pipe()` ⇒ 连 `\\.\pipe\openssh-ssh-agent`
+//      命名管道（**Windows 上也有 agent**，以前这条路是断的 ⇒ 密钥在
+//      agent 里时 Linux 免密、Windows 却要密码）。
+//    ⇒ **认证的逻辑两边是同一段**（`try_agent_with`）。
 use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key::Algorithm;
 use russh::keys::PrivateKeyWithHashAlg;
@@ -615,11 +618,20 @@ async fn key_with_hash(
 /// 与 C 版 ssh_userauth_publickey_auto 对应：先 ssh-agent，再 ~/.ssh 默认密钥。
 /// 只用 ssh-agent 里的密钥（阶段 70 的「只用 ssh-agent 里的密钥」）。
 ///
-/// ⚠️ **Windows 上这条路没有**：ssh-agent 在 Windows 上用的是命名管道，
-///    `russh` 的 `AgentClient::connect_env`（连 `$SSH_AUTH_SOCK` 那个 Unix
-///    套接字）**只在 Unix 上存在** ⇒ Windows 上直接返回 false
-///    （⇒ 后面走 ~/.ssh 下的默认密钥）。
-#[cfg(not(unix))]
+/// ⚠️ **Windows 上也有 agent**（阶段 C10）——OpenSSH for Windows 与
+///    Git for Windows 的 `ssh-agent` 都监听在**命名管道**
+///    `\\.\pipe\openssh-ssh-agent` 上。
+///
+///    ⚠️ **以前这里在 Windows 上直接返回 false** ⇒ **agent 这条路是断的**
+///    ⇒ 密钥在 agent 里（登录后 `ssh-add` 过，最常见的情形）时，
+///    **Linux 能免密、Windows 却要输密码** ⇒ 这才是「两个平台像两个软件」
+///    的**真正原因**（不是密码框的问题）。
+///
+/// ⇒ 现在两边**同一段逻辑**（[`try_agent_with`]），只是**连接方式**不同：
+/// - Unix：连 `$SSH_AUTH_SOCK` 那个 Unix 套接字；
+/// - Windows：连 `\\.\pipe\openssh-ssh-agent` 命名管道
+///   （`russh` 的 `connect_named_pipe` 就是干这个的）。
+#[cfg(not(any(unix, windows)))]
 async fn try_agent(
     _session: &mut Handle<HostKeyHandler>,
     _user: &str,
@@ -632,9 +644,48 @@ async fn try_agent(
     session: &mut Handle<HostKeyHandler>,
     user: &str,
 ) -> BackendResult<bool> {
-    let Ok(mut agent) = AgentClient::connect_env().await else {
+    let Ok(agent) = AgentClient::connect_env().await else {
         return Ok(false);
     };
+    try_agent_with(session, user, agent).await
+}
+
+/// **Windows 的 ssh-agent**：命名管道。
+///
+/// ⚠️ 管道名是 OpenSSH for Windows 与 Git for Windows 的约定
+///    （`\\.\pipe\openssh-ssh-agent`）⇒ 两者通用。
+///    `SSH_AUTH_SOCK` 在 Git Bash 里指向的是 MSYS 的 Unix 套接字
+///    （Windows 程序用不了）⇒ 但**若**它被设成命名管道路径，就按它来。
+#[cfg(windows)]
+async fn try_agent(
+    session: &mut Handle<HostKeyHandler>,
+    user: &str,
+) -> BackendResult<bool> {
+    /// OpenSSH for Windows / Git for Windows 的 agent 管道名。
+    const AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+    let path = std::env::var("SSH_AUTH_SOCK")
+        .ok()
+        .filter(|s| s.starts_with(r"\\.\pipe\"))
+        .unwrap_or_else(|| AGENT_PIPE.to_string());
+    let Ok(agent) = AgentClient::connect_named_pipe(path).await else {
+        return Ok(false);
+    };
+    try_agent_with(session, user, agent).await
+}
+
+/// **用 agent 里的密钥认证**（两个平台共用的同一段逻辑）。
+///
+/// 把 agent 里每一把公钥都试一遍 ⇒ 哪一把被服务器接受就算过。
+/// ⚠️ **签名是 agent 做的**（私钥不出 agent）⇒ `authenticate_publickey_with`
+///    把签名请求转给 agent。
+async fn try_agent_with<S>(
+    session: &mut Handle<HostKeyHandler>,
+    user: &str,
+    mut agent: AgentClient<S>,
+) -> BackendResult<bool>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let Ok(identities) = agent.request_identities().await else {
         return Ok(false);
     };
@@ -985,6 +1036,127 @@ impl SftpBackend {
 mod tests {
     use super::*;
     use crate::args::{AuthMethod, AuthOrder};
+
+    /// **ssh-agent 免密认证**（阶段 C10）——「两个平台像两个软件」的
+    /// **真正原因**就在这里。
+    ///
+    /// ⚠️ 以前 Windows 上 `try_agent` 直接返回 false ⇒ **agent 这条路
+    ///    是断的** ⇒ 密钥在 agent 里（登录后 `ssh-add` 过，最常见的情形）
+    ///    时，**Linux 能免密、Windows 却要输密码**。
+    ///
+    /// 验三件事：
+    /// 1. 密钥在 agent 里 ⇒ **不给密码、不给私钥文件**也能连上（免密）；
+    /// 2. 把 agent 藏起来 ⇒ **连不上** ⇒ 证明确实是 agent 在起作用
+    ///    （不是别的路蒙对的）——**反向验证**；
+    /// 3. 认证方式选「只用 ssh-agent 里的密钥」时，认证计划里**只有**
+    ///    agent 这一段。
+    ///
+    /// ⚠️ 需要本机有**测试 sshd**（`~/.cache/puttyplus-test-sshd`，端口
+    ///    2233）与 `ssh-agent` ⇒ 没有就**跳过**（CI 上没有这套环境）。
+    /// ⚠️ `127.0.0.1` 是回环 ⇒ 主机密钥校验直接放行 ⇒ **不会碰用户的
+    ///    known_hosts** ✔。
+    #[test]
+    fn agent_免密认证() {
+        const HOST: &str = "127.0.0.1";
+        const PORT: i32 = 2233;
+
+        // 测试 sshd 在吗？
+        if std::net::TcpStream::connect((HOST, PORT as u16)).is_err() {
+            eprintln!("跳过：本机没有测试 sshd（{HOST}:{PORT}）");
+            return;
+        }
+        // 起一个 agent
+        let Ok(out) = std::process::Command::new("ssh-agent")
+            .arg("-s")
+            .output()
+        else {
+            eprintln!("跳过：本机没有 ssh-agent");
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        // ⚠️ `ssh-agent -s` 的输出形如
+        //    `SSH_AUTH_SOCK=/tmp/ssh-XXX/agent.123; export SSH_AUTH_SOCK;`
+        //    ⇒ **值只到第一个分号为止**（后面那截 export 语句要丢掉）。
+        let Some(sock) = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("SSH_AUTH_SOCK="))
+            .and_then(|v| v.split(';').next())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            eprintln!("跳过：ssh-agent 没给出 SSH_AUTH_SOCK");
+            return;
+        };
+        // 把默认私钥加进 agent（测试 sshd 的 authorized_keys 就是它）
+        let key = glib::home_dir().join(".ssh").join("id_rsa");
+        if !key.exists() {
+            eprintln!("跳过：没有 ~/.ssh/id_rsa");
+            return;
+        }
+        let add = std::process::Command::new("ssh-add")
+            .arg(&key)
+            .env("SSH_AUTH_SOCK", &sock)
+            .output();
+        if add.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("跳过：ssh-add 失败");
+            return;
+        }
+
+        let user = glib::user_name().to_string_lossy().into_owned();
+        let rt = tokio::runtime::Runtime::new().expect("建 tokio 运行时");
+
+        // ① agent 在 ⇒ 免密连上
+        // SAFETY：本测试独占这个环境变量（下面有全局锁）。
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", &sock);
+        }
+        let ok = rt.block_on(connect_session(
+            HOST,
+            PORT,
+            &user,
+            None,
+            None,
+            None,
+            0,
+            AuthMethod::Agent,
+            AuthOrder::PasswordFirst,
+        ));
+        assert!(
+            ok.is_ok(),
+            "密钥在 ssh-agent 里时应当免密连上（Windows 上这条路以前是断的）：{:?}",
+            ok.err()
+        );
+
+        // ② 反向验证：藏起 agent ⇒ 必须连不上
+        //    （否则说明"连上"不是因为 agent ⇒ 断言就白写了）
+        unsafe {
+            std::env::remove_var("SSH_AUTH_SOCK");
+        }
+        let bad = rt.block_on(connect_session(
+            HOST,
+            PORT,
+            &user,
+            None,
+            None,
+            None,
+            0,
+            AuthMethod::Agent,
+            AuthOrder::PasswordFirst,
+        ));
+        assert!(
+            bad.is_err(),
+            "没有 agent 却连上了 ⇒ 说明上面那次不是 agent 在起作用"
+        );
+
+        // 收尾：放回环境变量 + 杀掉 agent
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", &sock);
+        }
+        let _ = std::process::Command::new("ssh-agent")
+            .arg("-k")
+            .env("SSH_AUTH_SOCK", &sock)
+            .status();
+    }
 
     /// 认证优先级只决定几段凭据的先后；顺序必须正确。
     /// 真正的「成功后不再试下一段」由 `authenticate` 的循环保证。
