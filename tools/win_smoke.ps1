@@ -53,6 +53,9 @@ if (Test-Path $gtkBin) {
 Write-Host "`n[1] exe 能起来不崩"
 $proc = Start-Process -FilePath $Exe -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 5
+# ⚠️ **要 Refresh**：.NET 的 Process 对象会缓存状态 ⇒ 不刷新的话
+#    HasExited 可能是旧值（进程明明退了却说还在）。
+$proc.Refresh()
 if ($proc.HasExited) {
     Bad "进程已经退了（退出码 $($proc.ExitCode)）⇒ 多半是缺 DLL 或初始化失败"
 } else {
