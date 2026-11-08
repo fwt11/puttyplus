@@ -1,4 +1,4 @@
-# 阶段 C9-二：Windows 开发环境一键安装（把 Windows 变成开发 + 验证工作台）
+﻿# 阶段 C9-二：Windows 开发环境一键安装（把 Windows 变成开发 + 验证工作台）
 #
 # 干什么用：在这台 Windows 机器上装齐「编译 PuTTYPlus 所需的一切」，
 # 装完就能直接 `cargo build` / `cargo test --lib` / `cargo run --example`

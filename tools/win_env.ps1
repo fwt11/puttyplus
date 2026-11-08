@@ -1,4 +1,4 @@
-# 阶段 C8：Windows 本地开发环境（把 CI 那套搬到开发机上）
+﻿# 阶段 C8：Windows 本地开发环境（把 CI 那套搬到开发机上）
 #
 # 干什么用：**在 Windows 机器上直接开发**（本地 cargo build / test /
 # run --example），不必每轮都等 CI 编一个 exe 下来手测。

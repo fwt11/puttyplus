@@ -1,4 +1,4 @@
-# 阶段 C8：在当前 PowerShell 会话里激活 MSVC（cl.exe / link.exe 进 PATH）
+﻿# 阶段 C8：在当前 PowerShell 会话里激活 MSVC（cl.exe / link.exe 进 PATH）
 #
 # 干什么用：Rust 的 `x86_64-pc-windows-msvc` target 要链接器（link.exe），
 # 而它住在 Visual Studio 的 VC 目录里，**只有激活过「开发者命令提示符」
