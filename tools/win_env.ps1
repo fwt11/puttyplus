@@ -214,9 +214,12 @@ foreach ($pair in @(@("INCLUDE", $gtkInclude), @("LIB", $gtkLib))) {
     $name = $pair[0]; $add = $pair[1]
     $cur = [Environment]::GetEnvironmentVariable($name, "User")
     if (-not $cur) { $cur = "" }
-    $parts = $cur.Split(";") | Where-Object { $_ }
-    foreach ($p in $add.Split(";")) {
-        if ($p -and ($parts -notcontains $p)) { $parts += $p }
+    # ⚠️ 必须 @() 包一层：$cur 为空时管道过滤后 $parts 是 $null，
+    #    $null += "x" 会把数组退化成字符串 ⇒ 后面的 += 全变成**字符串
+    #    拼接**，写出来的 INCLUDE 连分号都没有（真机踩过）。
+    $parts = @($cur.Split(";") | Where-Object { $_ })
+    foreach ($p in @($add.Split(";") | Where-Object { $_ })) {
+        if ($parts -notcontains $p) { $parts += $p }
     }
     Set-UserEnv $name ($parts -join ";")
 }
