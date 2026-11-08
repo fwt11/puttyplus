@@ -48,6 +48,11 @@ pub fn build_body(
     // 开关项的当前状态（勾 = 开）：菜单项只建一次 ⇒ 每次弹出前问一次。
     let mut toggles: Vec<(gtk::ToggleButton, fn() -> bool)> = Vec::new();
     for e in entries.iter().copied() {
+        // ⚠️ **平台可见性**（阶段 C5）：Windows 上数据库工作台的入口先藏
+        //    起来（首版范围是终端 + SFTP + 命令行契约；DB 只保证能编译）。
+        if !crate::topmenus::entry_visible(&e) {
+            continue;
+        }
         match e {
             MenuEntry::Sep => {
                 vb.append(&menu::sep());

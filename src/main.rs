@@ -570,6 +570,19 @@ fn app_menubar(
         }
     });
     act!("db", || {
+        // ⚠️ **Windows 上这个入口是关着的**（阶段 C5）：首版范围是
+        //    「终端 + SFTP + 命令行契约」，DB 工作台在 Windows 上只保证
+        //    能编译、没实测 ⇒ 菜单里不显示（见 `topmenus::entry_visible`），
+        //    快捷键这条路也在这里拦住，免得「菜单里没有、快捷键却能进」。
+        #[cfg(windows)]
+        {
+            panel::dialogs::info(
+                None,
+                "数据库工作台",
+                "数据库工作台的 Windows 版尚未验证，首版暂不开放。",
+            );
+        }
+        #[cfg(not(windows))]
         if let Some(st) = tabs::current_panel_state() {
             panel::on_open_db(&st);
         }

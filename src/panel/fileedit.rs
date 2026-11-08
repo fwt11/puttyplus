@@ -831,13 +831,25 @@ fn close_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
     }
 }
 
+/// 文件名（本地/远端路径语义不同）。
+///
+/// ⚠️ 远端路径恒为 POSIX（`/srv/a.txt`）；本地路径在 Windows 上是
+/// `C:\dir\a.txt` ⇒ 用 POSIX 的 basename 会把整串当成文件名。
+fn base_name(path: &str, remote: bool) -> String {
+    if remote {
+        path_basename(path).to_string()
+    } else {
+        crate::platform::localpath::basename(path)
+    }
+}
+
 /// 子标签上的标题。
 ///
 /// **不要「编辑」二字**（用户要求）：编辑/查看由**图标**表示（见
 /// `tab_icon`），标题只留文件名 + 脏标记。省下来的宽度让长文件名
 /// 更不容易被压成省略号。
 fn tab_title(e: &FileEdit) -> String {
-    let base = path_basename(&e.path);
+    let base = base_name(&e.path, e.remote);
     let star = if e.dirty.get() { "● " } else { "" };
     format!("{star}{base}")
 }
@@ -1645,7 +1657,7 @@ fn wire(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
 
 fn update_ui(e: &FileEdit) {
     let mode = if e.base_readonly { tr("查看") } else { tr("编辑") };
-    let base = path_basename(&e.path);
+    let base = base_name(&e.path, e.remote);
     let star = if e.dirty.get() { "● " } else { "" };
     let title = format!("{star}{mode} — {base}");
     e.title_lbl.set_text(&title);
@@ -2833,7 +2845,7 @@ fn confirm_close(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
             (tr("保存并关闭"), gtk::ResponseType::Ok),
         ],
     );
-    let lbl = gtk::Label::new(Some(&trf!("「{v0}」有未保存的修改。\n\n保存到{v1}后再关闭吗？", v0 = path_basename(&e.path), v1 = if e.remote { tr("远程") } else { tr("本地") })));
+    let lbl = gtk::Label::new(Some(&trf!("「{v0}」有未保存的修改。\n\n保存到{v1}后再关闭吗？", v0 = base_name(&e.path, e.remote), v1 = if e.remote { tr("远程") } else { tr("本地") })));
     lbl.set_wrap(true);
     lbl.set_xalign(0.0);
     lbl.set_max_width_chars(48);

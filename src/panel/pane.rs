@@ -194,7 +194,13 @@ impl Pane {
                     continue; // 上级导航条目不参与文件操作
                 }
                 let isdir: bool = self.model.get(&it, COL_ISDIR);
-                out.push((path_join(cwd, &name), isdir));
+                // ⚠️ **远端路径恒为 POSIX**，本地路径在 Windows 上是 `C:\dir`
+                //    ⇒ 两种语义要分开（阶段 C5）。
+                out.push((if self.remote {
+                    path_join(cwd, &name)
+                } else {
+                    crate::platform::localpath::join(cwd, &name)
+                }, isdir));
             }
         }
         out

@@ -17,6 +17,7 @@ use crate::backend::conn::{self, SftpBackend};
 use crate::backend::db::DbSession;
 use crate::backend::sftp::ProgressSink;
 use crate::backend::SftpEntry;
+use crate::platform::localpath;
 use crate::util::{path_basename, path_join};
 use crate::i18n::tr;
 use crate::trf;
@@ -1419,7 +1420,13 @@ fn job_key(job: &TransferJob) -> Option<String> {
     match job {
         TransferJob::File(it) if it.kind == XferKind::Transfer => Some(format!("{}|{}",
             if it.upload { "up" } else { "down" },
-            path_join(&it.dst_dir, path_basename(&it.src))
+            // ⚠️ 目标路径按方向拼：上传 = 远端目录 + 本地文件名；
+            //    下载 = 本地目录 + 远端文件名。
+            if it.upload {
+                path_join(&it.dst_dir, &localpath::basename(&it.src))
+            } else {
+                localpath::join(&it.dst_dir, &path_basename(&it.src))
+            }
         )),
         _ => None,
     }
@@ -1539,7 +1546,7 @@ fn spawn_job(
     Box::pin(async move {
         match job {
             TransferJob::File(it) => {
-                let name = crate::util::path_basename(&it.src).to_string();
+                let name = localpath::basename(&it.src);
                 let shared = it.shared.clone();
                 run_transfer(Some(conn.as_ref()), it, &ui_tx).await;
                 let state = shared.lock().unwrap().state;
@@ -1548,7 +1555,7 @@ fn spawn_job(
             TransferJob::Serial(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
-                    let name = crate::util::path_basename(&it.src).to_string();
+                    let name = localpath::basename(&it.src);
                     let shared = it.shared.clone();
                     run_transfer(Some(conn.as_ref()), it, &ui_tx).await;
                     out.push((name, shared.lock().unwrap().state));
@@ -1604,7 +1611,7 @@ fn fail_jobs(jobs: Vec<TransferJob>, why: &str, ui_tx: &async_channel::Sender<Pa
     for job in jobs {
         match job {
             TransferJob::File(it) => {
-                let name = crate::util::path_basename(&it.src).to_string();
+                let name = localpath::basename(&it.src);
                 if let Ok(mut g) = it.shared.lock() {
                     g.state = XferState::Err;
                     g.msg = Some(why.to_string());
@@ -1613,7 +1620,7 @@ fn fail_jobs(jobs: Vec<TransferJob>, why: &str, ui_tx: &async_channel::Sender<Pa
             }
             TransferJob::Serial(items) => {
                 for it in items {
-                    let name = crate::util::path_basename(&it.src).to_string();
+                    let name = localpath::basename(&it.src);
                     if let Ok(mut g) = it.shared.lock() {
                         g.state = XferState::Err;
                         g.msg = Some(why.to_string());

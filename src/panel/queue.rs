@@ -389,7 +389,17 @@ pub fn flush(st: &Rc<PanelState>) {
         if it.kind == XferKind::Transfer {
             let remote_src = !it.upload;
             let cwd = st.pane_cwd(remote_src);
-            if path_parent(&it.src) == cwd {
+            // ⚠️ **源路径有两种**：上传 = 本地路径（Windows 上 `C:\dir\a.txt`），
+            //    下载 = 远端 POSIX 路径 ⇒ 取父目录/取名要分语义。
+            let (src_parent, src_name) = if remote_src {
+                (path_parent(&it.src), path_basename(&it.src).to_string())
+            } else {
+                (
+                    crate::platform::localpath::parent(&it.src),
+                    crate::platform::localpath::basename(&it.src),
+                )
+            };
+            if src_parent == cwd {
                 let (ppct, ptext) = match g.state {
                     XferState::Wait => (0, tr("等待").to_string()),
                     XferState::Run => (pct, format!("{pct}%")),
@@ -398,12 +408,7 @@ pub fn flush(st: &Rc<PanelState>) {
                     XferState::Err => (0, tr("失败").to_string()),
                     XferState::Cancel => (0, tr("取消").to_string()),
                 };
-                super::pane::set_progress(
-                    &st.pane(remote_src),
-                    path_basename(&it.src),
-                    ppct,
-                    &ptext,
-                );
+                super::pane::set_progress(&st.pane(remote_src), &src_name, ppct, &ptext);
             }
         }
     }

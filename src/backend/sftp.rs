@@ -13,6 +13,7 @@ use super::conn::SftpBackend;
 use super::resume::{self, Mark};
 use super::{checksum, BackendError, BackendResult, SftpEntry};
 use crate::panel::worker::XferConflict;
+use crate::platform::localpath;
 use crate::util::{human_size, path_basename, path_join, path_parent};
 use crate::i18n::tr;
 use crate::trf;
@@ -297,7 +298,9 @@ impl SftpBackend {
         conflict: XferConflict,
         note: &XferNote,
     ) -> BackendResult<bool> {
-        let dst = path_join(dst_dir, path_basename(src));
+        // ⚠️ **src 是本地路径**（Windows 上是 `C:\dir\a.txt`）⇒ 取名要用
+        // 本地语义；dst_dir 是**远端** ⇒ 仍是 POSIX 拼接。
+        let dst = path_join(dst_dir, &localpath::basename(src));
         self.upload_rec_inner(src, &dst, progress, conflict, note, 0).await
     }
 
@@ -326,7 +329,7 @@ impl SftpBackend {
                     .map_err(|e| BackendError(trf!("打开本地目录 {lsrc} 失败: {e}", lsrc = lsrc, e = e)))?;
                 while let Some(Ok(ent)) = rd.next() {
                     let name = ent.file_name().to_string_lossy().into_owned();
-                    let lsub = path_join(lsrc, &name);
+                    let lsub = localpath::join(lsrc, &name);
                     let rsub = path_join(rdst, &name);
                     self.upload_rec_inner(&lsub, &rsub, progress, conflict, note, depth + 1)
                         .await?;
@@ -354,7 +357,9 @@ impl SftpBackend {
         conflict: XferConflict,
         note: &XferNote,
     ) -> BackendResult<bool> {
-        let dst = path_join(dst_dir, path_basename(src)).replace('/', std::path::MAIN_SEPARATOR_STR);
+        // ⚠️ **dst_dir 是本地目录**（Windows 上是 `C:\dir`）⇒ 用本地语义拼；
+        // src 是**远端**路径 ⇒ 取名仍是 POSIX 语义。
+        let dst = localpath::join(dst_dir, &path_basename(src));
         self.download_rec_inner(src, Path::new(&dst), progress, conflict, note, 0)
             .await
     }

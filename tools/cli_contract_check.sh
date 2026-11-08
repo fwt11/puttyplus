@@ -16,12 +16,76 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 
 GOLDEN_DIR="tools/cli_contract/golden"
-FIX_HOME="/tmp/pp_cli_contract_home"   # 固定 fixture HOME ⇒ 基准可复现
+
+# ---- 平台判定（Windows 上是 Git Bash / MSYS2）----
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) IS_WINDOWS=1 ;;
+  *) IS_WINDOWS=0 ;;
+esac
+
+# ---- 二进制（Windows 上是 .exe）----
 RBIN="target/release/puttyplus"
+if [ ! -x "$RBIN" ] && [ -x "target/release/puttyplus.exe" ]; then
+  RBIN="target/release/puttyplus.exe"
+fi
+
+# ---- 归一化用的「真实身份」（在覆盖 HOME **之前**取）----
+#
+# ⚠️ **这里取的是真 home，不是 fixture home**：
+#    脚本里的 `~` 是在**脚本的 shell** 里展开的（eval 展开）⇒ 展开成的是
+#    「跑脚本那个用户」的真实 home，而不是 fixture ⇒ 输出的路径形状
+#    随平台而变 ⇒ 必须归一化成同一个形状（`/home/<ME>`）才能与基准对上。
+#
+#    - Linux：真实 home 是 `/home/<user>`，MSYS 的 `~` 也展开成这个；
+#    - Windows（Git Bash）：`~` 展开成 **MSYS 风格** `/c/Users/<user>`
+#      （不是 `C:\Users\<user>`！）⇒ 两种形态都要登记。
+ME=""
+for cand in "$(id -un 2>/dev/null)" "${USERNAME:-}" "${USER:-}"; do
+  if [ -n "$cand" ]; then ME="$cand"; break; fi
+done
+if [ -z "$ME" ] && [ -n "${USERPROFILE:-}" ]; then
+  ME="${USERPROFILE##*/}"
+fi
+[ -n "$ME" ] || ME="unknown"
+
+# 真实 home 的各种形态（归一化时逐个替换成 `/home/<ME>`）。
+# ⚠️ 顺序无所谓（长度不同也不会互相误伤，因为都替换成同一个目标）。
+HOME_FORMS=()
+add_home_form() {  # 一个形态
+  local h="$1"
+  [ -n "$h" ] || return 0
+  h="${h//\\//}"          # 反斜杠先转正斜杠
+  HOME_FORMS+=("$h")
+}
+add_home_form "${HOME:-}"                # Linux: /home/<user>；Git Bash: /c/Users/<user>
+add_home_form "${USERPROFILE:-}"         # Windows 原生: C:\Users\<user>
+if [ "$IS_WINDOWS" = "1" ] && [ -n "${USERPROFILE:-}" ] && command -v cygpath >/dev/null 2>&1; then
+  add_home_form "$(cygpath -u "$USERPROFILE" 2>/dev/null)"   # /c/Users/<user>
+fi
+
+# ---- fixture HOME（会话文件 + ssh config）----
+#
+# ⚠️ **Unix 走 HOME，Windows 走 USERPROFILE**：
+#    GLib 的 `g_get_home_dir()` 在 Windows 上读的是 `USERPROFILE`；
+#    而且 MSYS 的 `HOME` 是 `/c/Users/…` 这种 **MSYS 风格**路径，
+#    原生 Windows 程序拿它是错的（会当成当前盘根目录下的 \c\Users\…）。
+#    ⇒ 两个变量都给成 fixture 目录，程序读哪个都对。
+if [ "$IS_WINDOWS" = "1" ]; then
+  FIX_HOME_NATIVE="${TEMP:-C:/Windows/Temp}\\pp_cli_contract_home"
+  if command -v cygpath >/dev/null 2>&1; then
+    FIX_HOME_MSYS="$(cygpath -u "$FIX_HOME_NATIVE" 2>/dev/null || printf '%s' "$FIX_HOME_NATIVE")"
+  else
+    FIX_HOME_MSYS="$FIX_HOME_NATIVE"
+  fi
+else
+  FIX_HOME_NATIVE="/tmp/pp_cli_contract_home"
+  FIX_HOME_MSYS="/tmp/pp_cli_contract_home"
+fi
+FIX_HOME="$FIX_HOME_MSYS"   # 脚本自己读写用
 
 # ---- 找参考实现二进制（只有 --gen 重新生成基准时才用）----
 C_BIN=""
-for c in ./reference/puttyplus ./puttyplus; do
+for c in ./reference/puttyplus ./reference/puttyplus.exe ./puttyplus; do
   [ -x "$c" ] || continue
   if cmp -s "$c" "$RBIN" 2>/dev/null; then continue; fi   # 别拿本程序的产物当参考实现
   C_BIN="$c"; break
@@ -127,23 +191,88 @@ Host demo
 EOF
 }
 
+# ---- 归一化：把「平台差异」抹平成基准里的形状 ----
+#
+# 做三件事（顺序不能换）：
+#   1. 反斜杠 → 正斜杠（Windows 路径）；
+#   2. 真实 home 的各种形态 → `/home/<ME>`（Windows 上是 `C:/Users/<user>`
+#      或 MSYS 的 `/c/Users/<user>`，Linux 上是 `/home/<user>`）；
+#   3. 用户名 → `<ME>`（默认用户那一格）。
+#
+# ⚠️ 第 2 步必须在第 3 步**之前**：home 路径里含用户名，先替换 home 才
+#    不会把 home 拆成 `/home/<ME>` 之外的形状。
+#
+# ⚠️ 形态列表与用户名**作为参数传进来**（不直接用全局）⇒ `--selftest`
+#    能喂假形态验证归一化本身没坏。
+normalize_with() {  # 文本 | 形态列表(换行分隔) | 用户名
+  local s="$1" forms="$2" me="$3"
+  s=${s//\\//}
+  local h
+  while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    s=${s//"$h"/\/home\/<ME>}
+  done <<<"$forms"
+  [ -n "$me" ] && s=${s//"$me"/<ME>}
+  printf '%s' "$s"
+}
+
+normalize() {
+  local forms
+  forms=$(printf '%s\n' ${HOME_FORMS[@]+"${HOME_FORMS[@]}"})
+  normalize_with "$1" "$forms" "$ME"
+}
+
+# ---- 归一化自测（喂假形态，验证逻辑本身没坏）----
+#
+# ⚠️ **为什么要单独测**：Windows 上跑契约时，73 条全 DIFF 有两种可能
+#    ——「程序行为变了」或「归一化坏了」。先跑这个自测，能立刻分清。
+selftest() {
+  local fails=0
+  local linux_forms="/home/alice"
+  local win_forms="C:/Users/alice
+/c/Users/alice"
+
+  local out
+  out=$(normalize_with "keyfile=/home/alice/.ssh/id_rsa user=alice" "$linux_forms" "alice")
+  if [ "$out" != "keyfile=/home/<ME>/.ssh/id_rsa user=<ME>" ]; then
+    echo "  [FAIL] Linux 形态归一化不对：$out"; fails=$((fails+1))
+  fi
+
+  out=$(normalize_with "keyfile=/c/Users/alice/.ssh/id_rsa user=alice" "$win_forms" "alice")
+  if [ "$out" != "keyfile=/home/<ME>/.ssh/id_rsa user=<ME>" ]; then
+    echo "  [FAIL] Windows(MSYS) 形态归一化不对：$out"; fails=$((fails+1))
+  fi
+
+  out=$(normalize_with "keyfile=C:\\Users\\alice\\.ssh\\id_rsa user=alice" "$win_forms" "alice")
+  if [ "$out" != "keyfile=/home/<ME>/.ssh/id_rsa user=<ME>" ]; then
+    echo "  [FAIL] Windows(原生) 形态归一化不对：$out"; fails=$((fails+1))
+  fi
+
+  # 与 home 无关的路径不许被动（`/keys/id_rsa`、`/dev/ttyUSB0`…）
+  out=$(normalize_with "keyfile=/keys/id_rsa remote_cmd=/dev/ttyUSB0" "$linux_forms" "alice")
+  if [ "$out" != "keyfile=/keys/id_rsa remote_cmd=/dev/ttyUSB0" ]; then
+    echo "  [FAIL] 无关路径被误改：$out"; fails=$((fails+1))
+  fi
+
+  echo "== 归一化自测: FAIL=$fails =="
+  [ "$fails" -eq 0 ]
+}
+
 # ---- 跑一个用例，输出规范化后的结果块 ----
 run_case() {  # argv
   local argv="$1"
   local out err ec
-  out=$(eval "HOME='$FIX_HOME' \"\$BIN\" --print-config $argv" 2>/tmp/pp_cli_err.txt)
+  out=$(eval "HOME='$FIX_HOME_NATIVE' USERPROFILE='$FIX_HOME_NATIVE' \"\$BIN\" --print-config $argv" 2>"$FIX_HOME/../pp_cli_err.txt")
   ec=$?
-  err=$(cat /tmp/pp_cli_err.txt)
-  # 当前登录用户名会出现在「用户没给时取默认用户」的位置 ⇒ 归一化成 <ME>
-  local me; me=$(id -un)
-  out=${out//$me/<ME>}
-  err=${err//$me/<ME>}
+  err=$(cat "$FIX_HOME/../pp_cli_err.txt" 2>/dev/null)
+  out=$(normalize "$out")
+  err=$(normalize "$err")
   printf -- '--- argv ---\n%s\n--- stdout ---\n%s\n--- stderr ---\n%s\n--- exit ---\n%s\n' \
     "$argv" "$out" "$err" "$ec"
 }
 
 # ⚠️ 用 printf 而不是 echo：echo 会多一个换行，tr -c 会把换行也换成 '_'
-#    ⇒ 文件名后面多一个下划线（难认，还容易对不上）
+#    ⇒ 文件名后面多一个下划号（难认，还容易对不上）
 slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
 # ---- 生成基准（需要参考实现二进制）----
@@ -186,5 +315,6 @@ check() {
 
 case "${1:-}" in
   --gen) gen_golden ;;
+  --selftest) selftest ;;
   *) check ;;
 esac

@@ -370,6 +370,27 @@ pub fn top_menu_titles() -> Vec<&'static str> {
     TOP_MENUS.iter().map(|(t, _)| *t).collect()
 }
 
+/// 某个菜单项在**当前平台**上要不要显示。
+///
+/// ⚠️ **Windows 上数据库工作台的入口先藏起来**（跨平台版 阶段 C5）：
+///
+/// - 首版承诺的范围是「**终端 + SFTP + 命令行契约**」，DB 工作台在
+///   Windows 上只保证**能编译**（说明它可移植），**没在 Windows 上实测**；
+/// - 菜单里摆一个点进去会出问题的入口，比不摆更糟 ⇒ Windows 上不显示；
+/// - 代码原样保留（`panel::dbui` 那套还在编）⇒ 第二版放开入口即可。
+///
+/// ⚠️ 只管**显示**；快捷键那条路在 action 分发处另外拦（见 `main.rs`）。
+pub fn entry_visible(entry: &MenuEntry) -> bool {
+    #[cfg(windows)]
+    {
+        if let MenuEntry::Item { action: "db", .. } = entry {
+            return false;
+        }
+    }
+    let _ = entry;
+    true
+}
+
 /// 表里引用到的 action（去重、保序）。
 pub fn referenced_actions() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();

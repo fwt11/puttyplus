@@ -115,8 +115,11 @@ pub fn parse_paths(text: &str) -> Vec<String> {
 ///
 /// 一行一个 URI（`file:///…`）；`#` 开头是注释行（RFC 2483）。
 ///
-/// ⚠️ 百分号编码交给 `gio::File::for_uri` 解（`a%20b.txt` → `a b.txt`）；
+/// ⚠️ 百分号编码交给 GIO 解（`a%20b.txt` → `a b.txt`）；
 /// 带主机名的 `file://host/path` 拿不到本地路径，跳过。
+///
+/// ⚠️ **Windows 上本地路径是 `C:\dir\a.txt`** ⇒ 「是不是本地绝对路径」
+/// 不能一律要求 `/` 开头（那样会把 Windows 的路径全丢掉，拖放上传直接失效）。
 pub fn parse_uri_list(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -125,14 +128,14 @@ pub fn parse_uri_list(text: &str) -> Vec<String> {
             continue;
         }
         let path = if line.starts_with("file://") {
-            match gtk::gio::File::for_uri(line).path() {
+            match crate::platform::localpath::from_file_uri(line) {
                 Some(p) => p.to_string_lossy().into_owned(),
                 None => continue,
             }
         } else {
             line.to_string()
         };
-        if !path.starts_with('/') {
+        if !crate::platform::localpath::is_abs(&path) {
             continue;
         }
         if !out.contains(&path) {
@@ -340,13 +343,18 @@ pub fn source_provider(typed: glib::Value, mime: &str, body: &str) -> gdk::Conte
 }
 
 /// 本地文件列表 → 拖拽源（上传方向）。
+///
+/// ⚠️ **URI 必须是标准形式**：Linux `file:///tmp/a b.txt`（空格编码成
+/// `%20`）、Windows `file:///C:/a%20b.txt` ⇒ 手工拼 `file://{path}`
+/// 在 Windows 上会得到 `file://C:\a.txt`（反斜杠 + 少一个斜杠），
+/// 源端与目标端都认不出。
 pub fn files_provider(paths: &[String]) -> gdk::ContentProvider {
     use glib::prelude::ToValue;
     let files: Vec<gtk::gio::File> = paths.iter().map(|p| gtk::gio::File::for_path(p)).collect();
     let fl = gdk::FileList::from_array(&files);
     let body = paths
         .iter()
-        .map(|p| format!("file://{p}\r\n"))
+        .map(|p| format!("{}\r\n", crate::platform::localpath::to_file_uri(p)))
         .collect::<String>();
     source_provider(fl.to_value(), URI_LIST_MIME, &body)
 }

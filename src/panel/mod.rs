@@ -50,6 +50,7 @@ use gtk::prelude::*;
 use zeroize::Zeroizing;
 
 use crate::args::ConnOptions;
+use crate::platform::localpath;
 use crate::theme::State;
 use crate::util::{find_program_in_path, path_basename, path_join, path_parent};
 
@@ -1136,7 +1137,9 @@ fn cancel_aborted_xfers(st: &Rc<PanelState>) {
             g.state = XferState::Cancel;
             g.msg = Some(tr("连接已断开或已重建").into());
             cancelled.push((
-                crate::util::path_basename(&it.src).to_string(),
+                // ⚠️ src 可能是本地路径（上传）也可能是远端路径（下载）
+                // ⇒ 取名用「两边都成立」的那个（POSIX 远端路径也能用）。
+                localpath::basename(&it.src),
                 XferState::Cancel,
             ));
         }
@@ -1424,7 +1427,10 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 .iter()
                 .zip(exists.iter())
                 .filter(|(_, ex)| **ex)
-                .map(|((src, dst_dir, _), _)| path_join(dst_dir, path_basename(src)))
+                .map(|((src, dst_dir, _), _)| {
+                // 上传：dst_dir 是**远端**目录，src 是**本地**路径
+                path_join(dst_dir, &localpath::basename(src))
+            })
                 .collect();
             ask_then_submit(st, pending, conflicts);
         }
@@ -1679,7 +1685,11 @@ pub fn on_open_file(st: &Rc<PanelState>, remote: bool, readonly: bool) {
         [(path, true)] => dialogs::show_error(
             st.topwin().as_ref(),
             tr("无法打开文件"),
-            &trf!("「{v0}」是目录，内置查看/编辑器只处理文本文件。", v0 = path_basename(path)),
+            &trf!("「{v0}」是目录，内置查看/编辑器只处理文本文件。", v0 = if remote {
+                path_basename(path).to_string()
+            } else {
+                localpath::basename(path)
+            }),
         ),
         _ => dialogs::show_error(
             st.topwin().as_ref(),
@@ -1691,8 +1701,9 @@ pub fn on_open_file(st: &Rc<PanelState>, remote: bool, readonly: bool) {
 
 pub fn on_up(st: &Rc<PanelState>, remote: bool) {
     let cwd = st.pane_cwd(remote);
-    let parent = path_parent(&cwd);
     if remote {
+        // ⚠️ **远端路径恒为 POSIX**（`/srv/x`）⇒ 用 POSIX 的 parent。
+        let parent = path_parent(&cwd);
         if !cwd.starts_with('/') {
             return; // ~ 相对路径保护
         }
@@ -1702,6 +1713,9 @@ pub fn on_up(st: &Rc<PanelState>, remote: bool) {
         }
         submit_list(st, &parent);
     } else {
+        // ⚠️ **本地路径在 Windows 上是 `C:\dir`** ⇒ 必须用本地语义的
+        // parent（POSIX 那个在 Windows 上会直接跳到文件系统根）。
+        let parent = localpath::parent(&cwd);
         set_local_cwd(st, &parent);
         fill_local_pane(st);
     }
@@ -1757,7 +1771,12 @@ pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bo
         return;
     }
     let cwd = st.pane_cwd(remote);
-    let full = path_join(&cwd, name);
+    // ⚠️ 远端用 POSIX 拼接，本地用本地语义（Windows 上是 `C:\dir`）。
+    let full = if remote {
+        path_join(&cwd, name)
+    } else {
+        localpath::join(&cwd, name)
+    };
     if isdir {
         if remote {
             submit_list(st, &full);
@@ -1785,7 +1804,12 @@ pub fn on_mkdir(st: &Rc<PanelState>, remote: bool) {
         let st = st.clone();
         let Some(name) = name else { return };
         let cwd = st.pane_cwd(remote);
-        let full = path_join(&cwd, &name);
+        // ⚠️ 远端 POSIX 拼接 / 本地本地语义（Windows 上是 `C:\dir`）。
+        let full = if remote {
+            path_join(&cwd, &name)
+        } else {
+            localpath::join(&cwd, &name)
+        };
         if remote {
             submit_simple(&st, SimpleOp::Mkdir, &full, None);
         } else {
@@ -1807,7 +1831,13 @@ pub fn on_rename(st: &Rc<PanelState>, remote: bool) {
         return;
     }
     let (old, _) = sel[0].clone();
-    let oldname = path_basename(&old).to_string();
+    // ⚠️ 本地路径在 Windows 上是 `C:\dir\a.txt` ⇒ POSIX 的 basename 会把
+    // 整串当成文件名（重命名对话框里预填成完整路径）。
+    let oldname = if remote {
+        path_basename(&old).to_string()
+    } else {
+        localpath::basename(&old)
+    };
     let top = st.topwin();
     let title = if remote { tr("重命名（远程）") } else { tr("重命名（本地）") };
     let st = Rc::clone(st);
@@ -1823,7 +1853,10 @@ pub fn on_rename(st: &Rc<PanelState>, remote: bool) {
             let full_new = path_join(&cwd, &newname);
             submit_simple(&st, SimpleOp::Rename, &old, Some(&full_new));
         } else {
-            if let Err(e) = std::fs::rename(&old, newname) {
+            // ⚠️ **目标要带目录**：只给新名字的话，重命名会落到「进程当前
+            // 工作目录」而不是面板当前目录（老 bug，Linux 上也一样）。
+            let full_new = localpath::join(&cwd, &newname);
+            if let Err(e) = std::fs::rename(&old, &full_new) {
                 dialogs::show_error(st.topwin().as_ref(), tr("重命名失败"), &e.to_string());
             }
             fill_local_pane(&st);
@@ -1925,11 +1958,36 @@ pub fn on_open_forwards(st: &Rc<PanelState>) {
 /// 连上数据库之后才允许显示数据库管理页面」）⇒ 这里只是**发起连接**，
 /// 页面由 `dbui::mount` 在连上之后挂出来。连不上时弹对话框说清楚。
 pub fn on_open_db(st: &Rc<PanelState>) {
-    if !check_db_channel(st) {
+    // ⚠️ **Windows 上先拦下来**（跨平台版 阶段 C5）：首版承诺的范围是
+    //    「终端 + SFTP + 命令行契约」，DB 工作台在 Windows 上只保证能编译、
+    //    没实测 ⇒ 这里弹一句提示就返回。
+    #[cfg(windows)]
+    {
+        let _ = st;
+        db_unavailable();
         return;
     }
-    dbui::ensure(st);
-    dbui::connect_current(st);
+    #[cfg(not(windows))]
+    {
+        if !check_db_channel(st) {
+            return;
+        }
+        dbui::ensure(st);
+        dbui::connect_current(st);
+    }
+}
+
+/// Windows 上数据库工作台未验证 ⇒ 统一的一句话提示。
+///
+/// ⚠️ 入口有好几个（顶栏菜单、侧栏、「新建」菜单、标签页「+」），
+///    逐个藏容易漏 ⇒ 都在这里收口。
+#[cfg(windows)]
+fn db_unavailable() {
+    dialogs::info(
+        None,
+        "数据库工作台",
+        "数据库工作台的 Windows 版尚未验证，首版暂不开放。",
+    );
 }
 
 /// 只**准备**数据库工作台，**不连**。
@@ -1940,10 +1998,20 @@ pub fn on_open_db(st: &Rc<PanelState>) {
 /// 双击某条具体的数据库连接时走这条：那条连接由 `dbui::use_profile`
 /// 选中并连上——要是这里先连了"上次用的那条"，就得连错一次再断开重连。
 pub fn on_open_db_page(st: &Rc<PanelState>) {
-    if !check_db_channel(st) {
+    // ⚠️ 同 `on_open_db`：Windows 上这个入口也关着（见那里）。
+    #[cfg(windows)]
+    {
+        let _ = st;
+        db_unavailable();
         return;
     }
-    dbui::ensure(st);
+    #[cfg(not(windows))]
+    {
+        if !check_db_channel(st) {
+            return;
+        }
+        dbui::ensure(st);
+    }
 }
 
 /// 数据库通道只支持 SSH 会话：通道要挂在一条已认证的 SSH 连接上。
@@ -1983,7 +2051,8 @@ fn submit_transfers(st: &Rc<PanelState>, specs: Vec<(String, String, bool)>) {
         let dst_dir = &specs[0].1;
         let conflicts: Vec<String> = specs
             .iter()
-            .map(|(src, dir, _)| path_join(dir, path_basename(src)))
+            // 下载：dir 是**本地**目录，src 是**远端**路径
+            .map(|(src, dir, _)| localpath::join(dir, &path_basename(src)))
             .filter(|p| std::path::Path::new(p).is_file())
             .collect();
         ask_then_submit(st, specs, conflicts);
@@ -1991,7 +2060,8 @@ fn submit_transfers(st: &Rc<PanelState>, specs: Vec<(String, String, bool)>) {
         // 远端目标：两阶段——先发预检命令，结果回来后询问
         let paths: Vec<String> = specs
             .iter()
-            .map(|(src, dir, _)| path_join(dir, path_basename(src)))
+            // 上传：dir 是**远端**目录，src 是**本地**路径
+            .map(|(src, dir, _)| path_join(dir, &localpath::basename(src)))
             .collect();
         let check = st.next_check.get();
         st.next_check.set(check + 1);
@@ -2099,7 +2169,13 @@ fn do_submit(
             upload: *upload,
             kind: worker::XferKind::Transfer,
             // ⚠️ 逐个确认时**每个文件**按自己的决定来（阶段 79）
-            conflict: policy.decide(&path_join(dst_dir, path_basename(src))),
+            // ⚠️ 目标路径按方向拼：上传 = 远端目录 + 本地文件名；
+            //    下载 = 本地目录 + 远端文件名。
+            conflict: policy.decide(&if *upload {
+                path_join(dst_dir, &localpath::basename(src))
+            } else {
+                localpath::join(dst_dir, &path_basename(src))
+            }),
             shared,
         });
     }
@@ -2263,8 +2339,8 @@ pub fn copy_uris_into_local(st: &Rc<PanelState>, paths: &[String], dstdir: &str)
         if lp == dstdir {
             continue;
         }
-        let bn = path_basename(lp);
-        let dst = path_join(dstdir, bn);
+        let bn = localpath::basename(lp);
+        let dst = localpath::join(dstdir, &bn);
         let src = gtk::gio::File::for_path(lp);
         let df = gtk::gio::File::for_path(&dst);
         if let Err(e) = df.copy(
