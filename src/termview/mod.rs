@@ -216,6 +216,9 @@ impl TermView {
             TermView::Ghostty(v) => {
                 // ⚠️ ghostty 后端：字号自己算（响铃暂不支持——内核的
                 // BEL 事件已经在事件流里，应用层要的话自己去取）。
+                // ⚠️ `bell` 在这条分支用不上 ⇒ 显式丢掉（否则 Windows 上
+                // 编译会报「unused variable」）。
+                let _ = bell;
                 let font_env = std::env::var("PUTTYPLUS_FONT").unwrap_or_default();
                 let size = font_size
                     .or_else(crate::settings::term_font_size)
@@ -479,7 +482,7 @@ impl TermView {
     /* ---------------- 子进程与标题 ---------------- */
 
     /// 接管子进程（ssh 起来之后调用，让终端知道 pid）。
-    pub fn watch_child(&self, pid: glib::Pid) {
+    pub fn watch_child(&self, pid: crate::platform::pty::ChildPid) {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.watch_child(pid),

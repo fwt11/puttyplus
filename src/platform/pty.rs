@@ -25,6 +25,22 @@
 
 use std::io;
 
+/// 子进程标识（**平台原生**）。
+///
+/// ⚠️ **为什么不能直接用 `glib::Pid`**：GLib 的 `GPid` 在 **Unix 上是
+/// `c_int`**，在 **Windows 上是 `*mut c_void`**（GLib 在 Windows 上把 pid
+/// 当指针存）⇒ 同一个 `glib::Pid` 在两个平台上**内部类型不一样**
+/// ⇒ 任何 `glib::Pid(整数)` 的写法在 Windows 上都编不过（E0308）。
+///
+/// ⇒ Linux 上就是 `glib::Pid`（VTE 的 `spawn_async` 直接给这个）；
+///    别的平台自己用 `u32` 表示（ghostty 后端不看它 ⇒ 值无所谓）。
+#[cfg(target_os = "linux")]
+pub type ChildPid = glib::Pid;
+
+/// 子进程标识（**平台原生**）—— 非 Linux 平台见上面的说明。
+#[cfg(not(target_os = "linux"))]
+pub type ChildPid = u32;
+
 /// 一个 PTY 会话（持有 master 端）。
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -67,7 +83,7 @@ impl PtySession {
         cwd: &str,
         argv: &[&str],
         env: &[&str],
-        cb: impl FnOnce(Result<glib::Pid, String>) + 'static,
+        cb: impl FnOnce(Result<ChildPid, String>) + 'static,
     ) {
         self.pty.spawn_async(
             Some(cwd),
@@ -233,18 +249,16 @@ impl PtySession {
         cwd: &str,
         argv: &[&str],
         env: &[&str],
-        cb: impl FnOnce(Result<glib::Pid, String>) + 'static,
+        cb: impl FnOnce(Result<ChildPid, String>) + 'static,
     ) {
-        // ⚠️ **`glib::Pid::from_raw` 在 glib 0.22 里根本不存在**（那是我
-        //    写 Windows 分支时臆想的 API ⇒ 这段代码从没在 Linux 上编过，
-        //    是 Windows CI 第一次编到才发现）。
-        //    `glib::Pid` 是**公有元组** `Pid(pub GPid)` ⇒ 直接构造。
-        //    Windows 上这个 Pid 没人用（ghostty 后端不 watch_child）⇒
-        //    值是什么无所谓，但得能编。
+        // ⚠️ **别用 `glib::Pid`**：GLib 的 `GPid` 在 Windows 上是
+        //    `*mut c_void`（**不是整数**）⇒ `glib::Pid(pid as i32)` 报
+        //    E0308（Windows CI 抓到的）⇒ 用自己的 `ChildPid`（= u32）。
+        //    Windows 上这个 pid 没人用（ghostty 后端不 watch_child）。
         let res = self
             .con
             .spawn(cwd, argv, env)
-            .map(|pid| glib::Pid(pid as i32));
+            .map(|pid| pid as ChildPid);
         cb(res.map_err(|e| e.to_string()));
     }
 
@@ -301,7 +315,7 @@ impl PtySession {
         _cwd: &str,
         _argv: &[&str],
         _env: &[&str],
-        cb: impl FnOnce(Result<glib::Pid, String>) + 'static,
+        cb: impl FnOnce(Result<ChildPid, String>) + 'static,
     ) {
         cb(Err("本平台还没有 PTY 实现（Windows 走 ConPTY，macOS 待做）".into()));
     }
