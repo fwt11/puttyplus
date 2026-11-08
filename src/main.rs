@@ -41,6 +41,10 @@ fn main() {
     // （非 Unix 平台不走这条路，见 platform::locale 的说明）
     crate::platform::locale::init();
 
+    // ⚠️ 阶段 C8：清掉**陈旧**的会话级密码文件（上次崩了留下的）
+    // —— 里面是明文密码，不能一直躺在盘上。
+    puttyplus::pwcache::cleanup_stale_session_files();
+
     /* 参数解析必须在 GUI 初始化之前：堡垒机生成的临时会话/密码文件
      * 会在客户端启动后立即被删除，GTK 初始化有显示服务器往返耗时。
      * 分支顺序与 C 版 main 一致：parse → --print-config → --sftp-selftest */

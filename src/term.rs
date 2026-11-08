@@ -38,16 +38,30 @@ fn self_exe_path() -> Option<std::path::PathBuf> {
 pub fn run_askpass(args_after_prog: &[String]) -> bool {
     let pw = std::env::var("PUTTYPLUS_PW").ok();
     let ap = std::env::var("SSH_ASKPASS").ok();
+    // ⚠️ 阶段 C8：**会话级密码文件**。
+    //
+    // 本进程还不知道密码时（Linux 上：终端的 ssh 先要密码，而 SFTP 面板
+    // 的对话框还没答），ssh 会问 **askpass 助手**（＝本程序的另一个
+    // 进程）⇒ 助手拿不到本进程的内存缓存 ⇒ 靠这个文件跟父进程通气：
+    // 父进程（SFTP 面板）把密码写进去，助手等它出现。
+    let pw_file = std::env::var("PUTTYPLUS_PW_FILE")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let mut is_askpass = args_after_prog.len() == 1 && args_after_prog[0] == "--askpass";
     if !is_askpass {
-        if let (Some(pw), Some(ap)) = (&pw, &ap) {
-            if !pw.is_empty() && !ap.is_empty() {
-                // ⚠️ 判定「SSH_ASKPASS 指的就是我自己」：两边都解析符号链接再比
-                // （`platform::exe::same_file`）——软链接调用也算数。
-                if let Some(selfp) = self_exe_path() {
-                    if crate::platform::exe::same_file(&selfp, std::path::Path::new(&ap)) {
-                        is_askpass = true;
+        // ⚠️ **有文件也算数**：密码还不知道时环境变量里没有 PUTTYPLUS_PW
+        //    ⇒ 以前这里判不出来 ⇒ 助手会当成普通程序启动（然后什么都不做）
+        let have_cred = pw.as_ref().map_or(false, |p| !p.is_empty()) || pw_file.is_some();
+        if have_cred {
+            if let Some(ap) = &ap {
+                if !ap.is_empty() {
+                    // ⚠️ 判定「SSH_ASKPASS 指的就是我自己」：两边都解析符号链接再比
+                    // （`platform::exe::same_file`）——软链接调用也算数。
+                    if let Some(selfp) = self_exe_path() {
+                        if crate::platform::exe::same_file(&selfp, std::path::Path::new(&ap)) {
+                            is_askpass = true;
+                        }
                     }
                 }
             }
@@ -56,12 +70,45 @@ pub fn run_askpass(args_after_prog: &[String]) -> bool {
     if !is_askpass {
         return false;
     }
+    // 答案：优先环境变量里的密码；没有就**等会话文件**（父进程写）。
+    let answer = askpass_answer(
+        pw.clone(),
+        pw_file
+            .as_ref()
+            .map(|p| std::path::Path::new(p.as_str())),
+        std::time::Duration::from_secs(60),
+    );
     use std::io::Write;
     let mut out = std::io::stdout();
-    let _ = write!(out, "{}\n", pw.as_deref().unwrap_or(""));
+    let _ = write!(out, "{}\n", answer);
     let _ = out.flush();
     // 与 C 版 _exit 一致：不做任何清理
     std::process::exit(0);
+}
+
+/// **askpass 助手的核心**：算出要交给 `ssh` 的答案。
+///
+/// - `pw_env` = `PUTTYPLUS_PW`（父进程**已经知道**密码时直接给）。
+/// - `file` = `PUTTYPLUS_PW_FILE`（**会话级密码文件**：父进程还不知道
+///   密码时，助手在这儿等它被写出来）。
+///
+/// ⚠️ 返回**空串** = 交白卷（`ssh` 认证失败）⇒ 助手**不能干等**。
+///   父进程在用户**取消**时会写一个空文件进来 ⇒ 助手立刻拿到空串 ⇒
+///   `ssh` 立刻失败，而不是卡住等 60 秒。
+pub fn askpass_answer(
+    pw_env: Option<String>,
+    file: Option<&std::path::Path>,
+    wait: std::time::Duration,
+) -> String {
+    if let Some(pw) = pw_env.filter(|p| !p.is_empty()) {
+        return pw;
+    }
+    if let Some(path) = file {
+        if let Some(pw) = crate::pwcache::read_session_file_wait(path, wait) {
+            return pw;
+        }
+    }
+    String::new()
 }
 
 /* ---------------- 子进程 argv / env 构建 ---------------- */
@@ -209,6 +256,14 @@ fn build_bridge_argv(o: &ConnOptions) -> Option<Vec<String>> {
 }
 
 pub fn build_env(o: &ConnOptions) -> Vec<String> {
+    build_env_with_pw(o, None)
+}
+
+/// 同 [`build_env`]，但**可以补一个密码**（阶段 C8：本次运行内问过的）。
+///
+/// `pw` = 本次运行内已经问过的密码（`crate::pwcache`）。
+/// 优先级：**命令行/连接条目里的密码 > 缓存里的**。
+pub fn build_env_with_pw(o: &ConnOptions, pw: Option<&str>) -> Vec<String> {
     let mut env: Vec<String> = std::env::vars_os()
         .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
         .collect();
@@ -222,15 +277,36 @@ pub fn build_env(o: &ConnOptions) -> Vec<String> {
     );
     set("COLORTERM", "truecolor".into());
 
+    let pw = pw.filter(|p| !p.is_empty()).or_else(|| o.password_str());
     // 有密码、无密钥时启用 askpass 自动应答（OpenSSH >= 8.4）
-    if o.password_str().map_or(false, |p| !p.is_empty())
-        && o.keyfile.as_deref().map_or(true, |k| k.is_empty())
-        && o.is_ssh()
-    {
+    //
+    // ⚠️ 阶段 C8：**连"还不知道密码"的情况也接上 askpass**。
+    //
+    // 以前只在"已经有密码"时才设 ⇒ 密码未知时 ssh 就在 **tty 上**问 ⇒
+    // 用户在终端里敲一次、SFTP 面板那个对话框再敲一次 ⇒ **两个地方、
+    // 两套体验**（而且 Linux 与 Windows 不一样）。
+    //
+    // ⇒ 现在**一律**把 ssh 的提问交给 askpass 助手（＝本程序）：
+    // - 已知密码 ⇒ 助手直接答（`PUTTYPLUS_PW`）；
+    // - 未知密码 ⇒ 助手去等**会话级密码文件**（SFTP 面板那个对话框会把
+    //   密码写进去）⇒ **两个平台都是「我们的对话框问一次」**。
+    if o.is_ssh() && o.keyfile.as_deref().map_or(true, |k| k.is_empty()) {
         if let Some(selfp) = self_exe_path() {
             set("SSH_ASKPASS", selfp.to_string_lossy().into_owned());
             set("SSH_ASKPASS_REQUIRE", "force".into());
-            set("PUTTYPLUS_PW", o.password_str().unwrap().to_string());
+            match pw {
+                Some(p) => set("PUTTYPLUS_PW", p.to_string()),
+                None => {
+                    // ⚠️ **密码还不知道** ⇒ 助手去等会话级密码文件
+                    let k = crate::pwcache::key(&o.host, o.port, &o.user);
+                    set(
+                        "PUTTYPLUS_PW_FILE",
+                        crate::pwcache::session_file_path(&k)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
             if std::env::var("DISPLAY").is_err() {
                 set("DISPLAY", ":0".into());
             }
@@ -2440,15 +2516,22 @@ fn spawn_term_inproc_ex(
                     //    分屏是三条连接，认证各自独立 ⇒ 会同时要密码）。
                     let key = crate::pwcache::key(&host, port, &user);
                     crate::pwcache::ask_once(
-                        key,
+                        key.clone(),
                         move |pw| match pw {
                             Some(pw) => {
+                                // ⚠️ 阶段 C8：写进会话级密码文件 ⇒ 同会话的
+                                //    其它连接（spawn 出去的 ssh 那边）也能用
+                                //    这一份 ⇒ **两个平台都是「问一次」**。
+                                let _ = crate::pwcache::write_session_file(&key, &pw);
                                 // ⚠️ **不再用缓存**（`allow_cache=false`）：
                                 //    这次问来的是最新的，缓存里那份可能已经
                                 //    过期了（用户改过密码）。
                                 spawn_term_inproc_ex(&inner_retry, Some(pw), false);
                             }
                             None => {
+                                // 取消 ⇒ 也写一次（空）⇒ 正在等文件的助手
+                                // 立刻收到答复，不用干等。
+                                let _ = crate::pwcache::write_session_file(&key, "");
                                 let parent = toplevel(&inner_retry.term);
                                 alert::<gtk::Window>(parent.as_ref(), &tr("未连接"));
                             }
@@ -2585,7 +2668,14 @@ fn spawn_term(inner: &Rc<TermInner>) {
         return;
     }
 
-    let env = build_env(o);
+    let env = build_env_with_pw(
+        o,
+        // ⚠️ 阶段 C8：**本次运行内问过的密码**（同一会话的 SFTP 面板
+        //    问过了 ⇒ 这条终端不用再问一遍 ⇒ 两个平台一致）。
+        crate::pwcache::get(&crate::pwcache::key(&o.host, o.port, &o.user))
+            .map(|z| z.to_string())
+            .as_deref(),
+    );
     autofeed_start(inner);
     inner.spawn_wall.set(
         std::time::SystemTime::now()
@@ -2825,6 +2915,89 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **askpass 助手**（阶段 C8）：ssh 在 tty 上问密码时，我们让它问**我们**
+    /// ——于是**两个平台都是「我们的对话框问一次」**。
+    ///
+    /// 助手是**另一个进程** ⇒ 拿不到父进程的内存缓存 ⇒ 靠**会话级密码
+    /// 文件**通气（父进程写、助手等）。
+    #[test]
+    fn askpass_助手能等会话文件() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("pp_askpass_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("pw.tmp");
+
+        // 环境变量里有密码 ⇒ 直接用，不等
+        assert_eq!(
+            super::askpass_answer(Some("env-pw".into()), Some(&path), Duration::from_millis(50)),
+            "env-pw"
+        );
+
+        // 环境变量里没有 ⇒ 等文件
+        let p2 = path.clone();
+        let th = std::thread::spawn(move || {
+            super::askpass_answer(None, Some(&p2), Duration::from_secs(5))
+        });
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(crate::pwcache::write_session_file_at(&path, "file-pw"));
+        assert_eq!(th.join().unwrap(), "file-pw");
+
+        // 等不到 ⇒ 交白卷（不能干等）
+        let t0 = std::time::Instant::now();
+        assert_eq!(
+            super::askpass_answer(None, Some(&dir.join("never.tmp")), Duration::from_millis(200)),
+            ""
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **spawn 出去的 ssh** 也得接上共享的密码通道（阶段 C8）。
+    ///
+    /// ⚠️ 以前只在"已经有密码"时才设 askpass ⇒ 密码未知时 ssh 在 tty 上
+    /// 自己问 ⇒ 用户在终端里敲一次、SFTP 对话框再敲一次 ⇒ **两个地方、
+    /// 两套体验**（Linux 与 Windows 还不一样）。
+    #[test]
+    fn spawn_路径的环境变量接上共享密码通道() {
+        let mut o = crate::args::ConnOptions::default();
+        o.proto = "ssh".into();
+        o.host = "10.0.0.9".into();
+        o.port = 22;
+        o.user = "ops".into();
+
+        // ① 已知密码 ⇒ 助手直接答
+        let env = super::build_env_with_pw(&o, Some("known-pw"));
+        let get = |k: &str| {
+            env.iter()
+                .find(|e| e.starts_with(&format!("{k}=")))
+                .map(|e| e.splitn(2, '=').nth(1).unwrap_or("").to_string())
+        };
+        assert_eq!(get("SSH_ASKPASS_REQUIRE").as_deref(), Some("force"));
+        assert_eq!(get("PUTTYPLUS_PW").as_deref(), Some("known-pw"));
+        assert!(get("PUTTYPLUS_PW_FILE").is_none(), "有密码就不用等文件");
+
+        // ② 密码未知 ⇒ 助手去等**会话级密码文件**
+        let env = super::build_env_with_pw(&o, None);
+        let get = |k: &str| {
+            env.iter()
+                .find(|e| e.starts_with(&format!("{k}=")))
+                .map(|e| e.splitn(2, '=').nth(1).unwrap_or("").to_string())
+        };
+        assert_eq!(get("SSH_ASKPASS_REQUIRE").as_deref(), Some("force"));
+        assert!(get("PUTTYPLUS_PW").is_none());
+        let f = get("PUTTYPLUS_PW_FILE").expect("必须给出会话文件路径");
+        assert!(f.contains("pp-pw-"), "会话文件路径不对：{f}");
+
+        // ③ 有私钥 ⇒ 不该问密码（别把 askpass 塞进去）
+        o.keyfile = Some("/home/x/.ssh/id_ed25519".into());
+        let env = super::build_env_with_pw(&o, None);
+        assert!(
+            !env.iter().any(|e| e.starts_with("SSH_ASKPASS=")),
+            "有私钥时不该启用 askpass"
+        );
+    }
+
     /// 右键菜单里的说明文案必须与**真实行为**一致（阶段 94）。
     ///
     /// ⚠️ 用户 2026-11-01 报「录屏的 tooltip 与现在的真实情况显然已经是

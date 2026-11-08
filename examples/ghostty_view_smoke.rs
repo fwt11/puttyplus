@@ -145,17 +145,7 @@ fn main() {
     // ⇒ 这里**刻意不设**输出回调 ⇒ 字节必须走 pty ⇒ 回显出来。
     #[cfg(target_os = "linux")]
     {
-        use std::sync::{Arc, Mutex};
-
         let pty = puttyplus::platform::pty::PtySession::new().expect("开 pty");
-        let echoed: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        {
-            let echoed = echoed.clone();
-            pty.spawn_reader(Box::new(move |b| {
-                echoed.lock().unwrap().extend_from_slice(b);
-            }))
-            .expect("起 pty 读线程");
-        }
         // 起一个会回显的子进程（cat）
         let env: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
         let env_refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
@@ -165,21 +155,22 @@ fn main() {
         });
         pump(600);
 
-        // 0. 先做一次**直写**的健全性检查（pty 回显这条路本身通不通）
-        pty.write(b"z").expect("直写 pty");
-        pump(500);
-
         let view2 = GhosttyView::new();
+        // ⚠️ **pty 的读线程归 view2**（`attach_pty` 自己起一个）⇒
+        //    回显会喂给 ghostty 内核 ⇒ **上屏**。
+        //    ⚠️ **不能再另起一个读线程**：两个读者抢同一个 master fd
+        //    ⇒ 字节被谁读到是**随机的** ⇒ 断言会时红时绿（实测踩过）。
         view2.attach_pty(&pty);
+        pump(400);
         // ⚠️ **没有** set_output_handler ⇒ 只能走 pty
         view2.press_key(gdk::Key::a, gdk::ModifierType::empty());
-        pump(800);
-        let seen = echoed.lock().unwrap().clone();
+        pump(1000);
+        let rows = view2.screen_rows();
         assert!(
-            seen.contains(&b'a'),
-            "没有输出回调时，按键字节必须写给子进程（pty 回显里应有 'a'）：实际 {seen:?}"
+            rows.iter().any(|r| r.contains('a')),
+            "没有输出回调时，按键字节必须写给子进程（pty 的回显要上屏）：{rows:?}"
         );
-        println!("[ok] 没有输出回调 ⇒ 按键字节写给了子进程（pty 回显 {seen:?}）");
+        println!("[ok] 没有输出回调 ⇒ 按键字节写给了子进程（回显上屏：{rows:?}）");
     }
 
     /* ---------------- 截图（人工看画面） ---------------- */

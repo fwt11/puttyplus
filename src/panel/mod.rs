@@ -1254,17 +1254,27 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 let st = Rc::clone(st);
                 // ⚠️ **同一条会话只弹一个框**（SFTP / 终端 / 分屏三条
                 //    连接会同时要密码 ⇒ 只弹一个，答案共享）。
+                let key = session_key.clone();
                 crate::pwcache::ask_once(
                     session_key,
                     move |pw| {
                         let st = st.clone();
                         match pw {
                             Some(pw) => {
-                                *st.pw.borrow_mut() = Some(Zeroizing::new(pw));
+                                *st.pw.borrow_mut() = Some(Zeroizing::new(pw.clone()));
+                                // ⚠️ 阶段 C8：**写进会话级密码文件** ⇒
+                                //    Linux 上终端的 ssh（它的 askpass 助手正
+                                //    在等这个文件）能拿到**同一份**密码 ⇒
+                                //    **两个平台都是「问一次」**。
+                                let _ = crate::pwcache::write_session_file(&key, &pw);
                                 set_remote_status(&st, State::Warn, tr("正在连接…"));
                                 submit_connect(&st);
                             }
                             None => {
+                                // ⚠️ **取消也要写一次**（空密码）⇒ 正在等的
+                                //    askpass 助手立刻收到答复（不用干等
+                                //    60 秒）⇒ ssh 认证失败而不是卡住。
+                                let _ = crate::pwcache::write_session_file(&key, "");
                                 // 状态栏只显示状态词；完整错误在弹窗与 tooltip 里
                                 set_remote_status(&st, State::Err, tr("未连接"));
                             }

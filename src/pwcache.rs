@@ -30,6 +30,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
@@ -49,6 +51,135 @@ pub fn key(host: &str, port: i32, user: &str) -> Key {
         host: host.to_string(),
         port,
         user: user.to_string(),
+    }
+}
+
+/* ---------------- 会话级密码文件（给 spawn 出去的 ssh 用） ---------------- */
+
+/// 会话级密码文件的路径。
+///
+/// ⚠️ **为什么需要文件**（阶段 C8）：
+///
+/// Linux 主线的终端跑的是**用户自己的 `ssh`**（零回归红线：他的
+/// `~/.ssh/config`、agent、ProxyJump 语义全都在）⇒ **认证是 ssh 进程
+/// 自己做的**，它在 **tty 上**问密码 ⇒ 我们**看不到**那个密码，也
+/// **没法**把它喂回去（往 pty 里写有回显风险：ssh 还没关掉回显时，
+/// 密码会明文出现在屏幕上）。
+///
+/// ⇒ 改让 ssh 问**我们**：`SSH_ASKPASS=<本程序>` +
+/// `SSH_ASKPASS_REQUIRE=force`（OpenSSH ≥ 8.4）⇒ ssh 把问题交给
+/// **askpass 助手**（＝本程序的另一个进程）⇒ 助手把答案打印给 ssh。
+///
+/// ⚠️ **助手是另一个进程** ⇒ 拿不到本进程的内存缓存 ⇒ 用一个
+/// **会话级临时文件**当通道：
+/// - 谁先拿到密码（一般是 SFTP 面板那个对话框）⇒ **写进文件**；
+/// - 助手 ⇒ **等文件出现** ⇒ 读出来 ⇒ 打印给 ssh ⇒ 删掉文件。
+///
+/// ⇒ **这样两个平台的密码体验就一致了**：都是**我们的对话框**问一次，
+/// 终端与 SFTP 共用（Linux 上终端的 ssh 也用这一份）。
+///
+/// ⚠️ 文件放在**用户自己的配置目录**（不是共享的临时目录）⇒ 别的用户
+/// 读不到；文件名带 pid ⇒ 多开互不串。
+pub fn session_file_path(k: &Key) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    k.hash(&mut h);
+    crate::platform::paths::config_dir().join(format!(
+        "pp-pw-{}-{:x}.tmp",
+        std::process::id(),
+        h.finish()
+    ))
+}
+
+/// 把密码写进会话文件（**父进程**：谁拿到密码谁写）。
+pub fn write_session_file(k: &Key, pw: &str) -> bool {
+    write_session_file_at(&session_file_path(k), pw)
+}
+
+/// 把密码写进**指定路径**的会话文件（测试用：不许写用户真实配置目录）。
+pub fn write_session_file_at(path: &Path, pw: &str) -> bool {
+    write_private(path, pw.as_bytes())
+}
+
+/// 助手进程：等文件出现再读（**等的是父进程写密码**）。
+///
+/// `timeout` 到了还没出现 ⇒ 返回 `None`（助手只能交白卷 ⇒ ssh 认证失败）。
+///
+/// ⚠️ **读完把文件清空**（不是删掉）：
+///
+/// - 清空 ⇒ **密码不留在盘上** ✔；
+/// - ⚠️ **ssh 会重试 3 次**（密码错时）⇒ 每次都调一次助手 ⇒ 要是把
+///   文件**删掉**，第 2、3 次就会**干等到超时**（终端像卡住了 60 秒）
+///   ⇒ 清空之后，第 2、3 次读到的是**空串** ⇒ 立刻失败、不卡 ✔。
+pub fn read_session_file_wait(path: &Path, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            // ⚠️ **立刻清空**：密码不留盘（且重试时读到的是空串）
+            let _ = std::fs::write(path, b"");
+            return Some(s);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 清掉**陈旧**的会话文件（上次崩了/被杀留下的）。
+///
+/// ⚠️ 只删**一小时前**的 ⇒ 正在用的会话（文件很新）不受影响。
+pub fn cleanup_stale_session_files() {
+    let dir = crate::platform::paths::config_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("pp-pw-") || !name.ends_with(".tmp") {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        // 用修改时间判断年龄（SystemTime 与 Instant 不是一回事 ⇒
+        // 直接比 `SystemTime::now().duration_since(modified)`）
+        let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+            continue;
+        };
+        if age > Duration::from_secs(3600) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// 写文件，**只有自己能读**（Unix 上是 0600）。
+fn write_private(p: &Path, data: &[u8]) -> bool {
+    if let Some(dir) = p.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(p)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        f.write_all(data).is_ok() && f.flush().is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(p, data).is_ok()
     }
 }
 
@@ -241,5 +372,58 @@ mod tests {
         );
         assert_eq!(answered.load(Ordering::SeqCst), 1, "取消也必须通知");
         assert!(get(&k).is_none(), "取消不该留下密码");
+    }
+
+    /// **会话级密码文件**：父进程写、助手等 ⇒ 助手能拿到同一份密码。
+    ///
+    /// ⚠️ 这是「两个平台只问一次密码」的关键：Linux 上终端的 ssh 是
+    /// **另一个进程**（它自己问密码）⇒ 只能靠文件把答案送过去。
+    #[test]
+    fn 会话文件能通气() {
+        use std::time::Duration;
+        // ⚠️ **不许写用户真实配置目录** ⇒ 用临时目录
+        let dir = std::env::temp_dir().join(format!("pp_pwfile_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("pw.tmp");
+
+        // 助手在等
+        let p2 = path.clone();
+        let th = std::thread::spawn(move || read_session_file_wait(&p2, Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(80));
+        // 父进程写
+        assert!(write_session_file_at(&path, "s3cret"));
+
+        let got = th.join().unwrap();
+        assert_eq!(got.as_deref(), Some("s3cret"), "助手必须拿到父进程写的密码");
+        // ⚠️ 读完**清空**（不是删掉）：密码不留在盘上，
+        // 而 ssh 重试时读到的是空串（不会干等超时）
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "",
+            "读完必须清空（密码不留盘 + 重试不卡）"
+        );
+        // 第二次读 ⇒ 空串（不卡）
+        let t0 = std::time::Instant::now();
+        assert_eq!(
+            read_session_file_wait(&path, Duration::from_millis(200)).as_deref(),
+            Some("")
+        );
+        assert!(t0.elapsed() < Duration::from_secs(2), "重试不该干等");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **助手等不到** ⇒ 返回 None（交白卷），不能干等。
+    #[test]
+    fn 会话文件等不到就放弃() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("pp_pwfile2_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("never.tmp");
+        let t0 = std::time::Instant::now();
+        let got = read_session_file_wait(&path, Duration::from_millis(300));
+        assert!(got.is_none(), "等不到就必须放弃");
+        assert!(t0.elapsed() < Duration::from_secs(5), "不该干等");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
