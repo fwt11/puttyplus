@@ -23,6 +23,25 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
   *) IS_WINDOWS=0 ;;
 esac
 
+# ---- 关掉 MSYS/Git Bash 的「参数路径自动转换」----
+#
+# ⚠️ **Windows 上必须关**：Git Bash（MSYS 系）在把参数交给**原生 Windows
+#    程序**时会自动做「Unix 路径 → Windows 路径」的转换：
+#        /dev/ttyUSB0  ⇒  C:/Program Files/Git/dev/ttyUSB0
+#        /keys/id_rsa  ⇒  C:/Program Files/Git/keys/id_rsa
+#    ⇒ 契约用例（`proto_serial`、`val_i`…）收到的参数**跟 C 版基准不一样**
+#    ⇒ 第 12 轮 Windows CI 上就是这几条 DIFF。
+#    ⇒ 契约要的是「PuTTY 那边会看到什么」⇒ **原样传参** ⇒ 关掉转换。
+#
+#    `MSYS_NO_PATHCONV=1`  关掉全部转换；
+#    `MSYS2_ARG_CONV_EXCL='*'`  排除全部参数（双保险，语义更明确）。
+#    ⇒ 两者都由**这个 shell**继承 ⇒ 只影响它启动的子进程（本程序），
+#    不影响脚本自己读写文件。
+if [ "$IS_WINDOWS" = "1" ]; then
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL='*'
+fi
+
 # ---- 二进制（Windows 上是 .exe）----
 #
 # ⚠️ **要认 CARGO_TARGET_DIR**：Windows 上为了躲 MAX_PATH(260)，
@@ -98,16 +117,38 @@ fi
 #    ⇒ 两个变量都给成 fixture 目录，程序读哪个都对。
 if [ "$IS_WINDOWS" = "1" ]; then
   FIX_HOME_NATIVE="${TEMP:-C:/Windows/Temp}\\pp_cli_contract_home"
+  FIX_ALIAS_NATIVE="${TEMP:-C:/Windows/Temp}\\pp_cli_contract_alias_home"
   if command -v cygpath >/dev/null 2>&1; then
     FIX_HOME_MSYS="$(cygpath -u "$FIX_HOME_NATIVE" 2>/dev/null || printf '%s' "$FIX_HOME_NATIVE")"
+    FIX_ALIAS_MSYS="$(cygpath -u "$FIX_ALIAS_NATIVE" 2>/dev/null || printf '%s' "$FIX_ALIAS_NATIVE")"
   else
     FIX_HOME_MSYS="$FIX_HOME_NATIVE"
+    FIX_ALIAS_MSYS="$FIX_ALIAS_NATIVE"
   fi
 else
   FIX_HOME_NATIVE="/tmp/pp_cli_contract_home"
   FIX_HOME_MSYS="/tmp/pp_cli_contract_home"
+  FIX_ALIAS_NATIVE="/tmp/pp_cli_contract_alias_home"
+  FIX_ALIAS_MSYS="/tmp/pp_cli_contract_alias_home"
 fi
 FIX_HOME="$FIX_HOME_MSYS"   # 脚本自己读写用
+
+# ⚠️ **为什么 ssh 别名用例要单独的 home**：
+#
+#    会话 fixture 叫 `Demo`，ssh config 别名叫 `demo` ⇒ **只差大小写**。
+#    Linux 的文件系统大小写敏感 ⇒ `puttyplus demo` 找不到会话文件
+#    ⇒ 走 `~/.ssh/config` 别名展开（C 版与 Rust 版都是这个顺序：
+#    **会话优先**，见 c/src/args.c:338 与 src/args.rs 的位置参数分支）。
+#    ⚠️ **Windows 的文件系统大小写不敏感** ⇒ `demo` **命中了** `Demo`
+#    ⇒ 程序加载了 PuTTY 会话 ⇒ **别名展开根本没跑**
+#    ⇒ `sshconfig_alias` / `sshconfig_alias_port` 两条 DIFF
+#    （第 12 轮 Windows CI 实测）。
+#
+#    ⚠️ **这不是程序的行为差异**：C 版在 Windows 上也是同样结果
+#    （C 版同样先查 `~/.putty/sessions/<name>`，Windows 上同样大小写不敏感）
+#    ⇒ 差的是**测试环境**，不是程序。
+#    ⇒ 修法在测试侧：给别名用例一个**只放 `.ssh/config`、没有 `.putty`** 的
+#    home ⇒ 两种文件系统上行为一致 ⇒ **基准文件内容一个字都不用改**。
 
 # ---- 找参考实现二进制（只有 --gen 重新生成基准时才用）----
 C_BIN=""
@@ -117,9 +158,19 @@ for c in ./reference/puttyplus ./reference/puttyplus.exe ./puttyplus; do
   C_BIN="$c"; break
 done
 
-# ---- 用例表（名字 | argv，argv 用 shell 引号写法）----
+# ---- 用例表（名字 | argv[ | home种类 ]，argv 用 shell 引号写法）----
 # 覆盖：协议开关 / 无值开关 / 接受但忽略 / 带值参数 / 位置参数 / -- /
 #       未知参数 / 缺值 / atoi 语义 / PuTTY 会话 / ~/.ssh/config 别名
+#
+# ⚠️ **第三段（home 种类）**：
+#    `alias` = 用**只放 `.ssh/config`、没有 `.putty`** 的 fixture home
+#    （见上面「为什么 ssh 别名用例要单独的 home」）。
+#    不写 = 默认 home（会话 + ssh config 都在）。
+#
+# ⚠️ **名字不能只差大小写**：Windows 的文件系统大小写不敏感
+#    ⇒ `sw_t.txt` 与 `sw_T.txt` 会**互相覆盖**（checkout 时后写的赢）
+#    ⇒ 读到的是**别的用例**的基准 ⇒ 凭空多出 DIFF。
+#    ⇒ 三对撞名的用例都加了 `_lower` / `_upper` 后缀。
 CASES=(
 "proto_ssh|-ssh h"
 "proto_telnet|-telnet h"
@@ -129,15 +180,15 @@ CASES=(
 "proto_serial_with_port|-serial -P 115200 /dev/ttyUSB0"
 "proto_serial_user|-serial ops@/dev/ttyUSB0"
 "sw_N|-N h"
-"sw_t|-t h"
-"sw_T|-T h"
+"sw_t_lower|-t h"
+"sw_T_upper|-T h"
 "sw_4|-4 h"
 "sw_6|-6 h"
 "sw_C|-C h"
 "sw_v|-v h"
 "sw_batch|-batch h"
-"ignored_A|-A h"
-"ignored_a|-a h"
+"ignored_A_upper|-A h"
+"ignored_a_lower|-a h"
 "ignored_1|-1 h"
 "ignored_2|-2 h"
 "ignored_noantispoof|-no-antispoof h"
@@ -153,13 +204,13 @@ CASES=(
 "val_P_atoi_overflow|-P 99999999999 h"
 "val_P_atoi_nan|-P abc h"
 "val_P_atoi_neg|-P -1 h"
-"val_l|-l ops h"
+"val_l_lower|-l ops h"
 "val_l_empty|-l '' h"
 "val_pw|-pw secret h"
 "val_pw_empty|-pw '' h"
 "val_i|-i /keys/id_rsa h"
 "val_i_tilde|-i ~/.ssh/id_rsa h"
-"val_L|-L 9000:127.0.0.1:9000 h"
+"val_L_upper|-L 9000:127.0.0.1:9000 h"
 "val_R|-R 2222:host:22 h"
 "val_D|-D 1080 h"
 "val_proxycmd|-proxycmd 'nc -X connect -x p:8080 %h %p' h"
@@ -191,8 +242,8 @@ CASES=(
 "session_positional_override|Demo 10.9.9.9"
 "session_load|-load Demo"
 "session_load_override|-load Demo 10.9.9.9"
-"sshconfig_alias|demo"
-"sshconfig_alias_port|-P 2200 demo"
+"sshconfig_alias|demo|alias"
+"sshconfig_alias_port|-P 2200 demo|alias"
 "mix_all|-ssh -l ops -P 2222 -pw pw -i ~/.ssh/id_rsa -C -v -4 -N -L 9000:127.0.0.1:9000 -R 2222:h:22 -D 1080 -title T -proxycmd 'ssh -W %h:%p gw' -- host.example.com remote cmd"
 )
 
@@ -210,6 +261,17 @@ PublicKeyFile=~/.ssh/id_rsa
 ProxyType=none
 EOF
   cat > "$FIX_HOME/.ssh/config" <<'EOF'
+Host demo
+  HostName 10.1.1.1
+  Port 2200
+  User dbops
+EOF
+  # ⚠️ **别名用例专用的 home**：只有 `.ssh/config`，**没有 `.putty`**。
+  #    ⇒ 「demo」这个位置参数**不可能**命中 PuTTY 会话
+  #    ⇒ 两个平台（大小写敏感 / 不敏感）行为一致。
+  #    ⇒ 基准文件内容一个字都不用改。
+  mkdir -p "$FIX_ALIAS_MSYS/.ssh"
+  cat > "$FIX_ALIAS_MSYS/.ssh/config" <<'EOF'
 Host demo
   HostName 10.1.1.1
   Port 2200
@@ -265,6 +327,32 @@ selftest() {
   local win_forms="C:/Users/alice
 /c/Users/alice"
 
+  # ⚠️ **Windows 上必须关掉 MSYS 的参数路径自动转换**
+  #    （否则 `/dev/ttyUSB0` 会被转成 `C:/Program Files/Git/dev/ttyUSB0`
+  #    ⇒ `proto_serial` / `val_i` 等用例拿到的参数与 C 版基准不同）。
+  #    ⇒ 少了这两个变量，**自测就要报错**（别等到 73 条里挂几条才发现）。
+  if [ "$IS_WINDOWS" = "1" ]; then
+    if [ "${MSYS_NO_PATHCONV:-}" != "1" ]; then
+      echo "  [FAIL] MSYS_NO_PATHCONV 没关（Git Bash 会把 /xxx 参数转成 Windows 路径）"
+      fails=$((fails+1))
+    fi
+    if [ "${MSYS2_ARG_CONV_EXCL:-}" != "*" ]; then
+      echo "  [FAIL] MSYS2_ARG_CONV_EXCL 不是 '*'（同上）"
+      fails=$((fails+1))
+    fi
+  fi
+
+  # ⚠️ **基准文件名不能只差大小写**：Windows 的文件系统大小写不敏感
+  #    ⇒ `sw_t.txt` 与 `sw_T.txt` checkout 时会互相覆盖 ⇒ 读到别的用例的基准。
+  #    ⇒ 这里直接查一遍磁盘上的基准名（Linux 上查不出来也照样跑，
+  #    真正的检查发生在 Windows CI 上）。
+  local dup
+  dup=$(ls "$GOLDEN_DIR" 2>/dev/null | awk '{print tolower($0)}' | sort | uniq -d)
+  if [ -n "$dup" ]; then
+    echo "  [FAIL] 基准文件名大小写冲突（Windows 上会互相覆盖）：$(echo "$dup" | tr '\n' ' ')"
+    fails=$((fails+1))
+  fi
+
   local out
   out=$(normalize_with "keyfile=/home/alice/.ssh/id_rsa user=alice" "$linux_forms" "alice")
   if [ "$out" != "keyfile=/home/<ME>/.ssh/id_rsa user=<ME>" ]; then
@@ -300,12 +388,18 @@ selftest() {
 }
 
 # ---- 跑一个用例，输出规范化后的结果块 ----
-run_case() {  # argv
+run_case() {  # argv [home种类：alias=只用别名那个 home]
   local argv="$1"
+  local kind="${2:-default}"
+  local home_native="$FIX_HOME_NATIVE" home_msys="$FIX_HOME_MSYS"
+  if [ "$kind" = "alias" ]; then
+    home_native="$FIX_ALIAS_NATIVE"
+    home_msys="$FIX_ALIAS_MSYS"
+  fi
   local out err ec
-  out=$(eval "HOME='$FIX_HOME_NATIVE' USERPROFILE='$FIX_HOME_NATIVE' \"\$BIN\" --print-config $argv" 2>"$FIX_HOME/../pp_cli_err.txt")
+  out=$(eval "HOME='$home_native' USERPROFILE='$home_native' \"\$BIN\" --print-config $argv" 2>"$home_msys/pp_cli_err.txt")
   ec=$?
-  err=$(cat "$FIX_HOME/../pp_cli_err.txt" 2>/dev/null)
+  err=$(cat "$home_msys/pp_cli_err.txt" 2>/dev/null)
   out=$(normalize "$out")
   err=$(normalize "$err")
   printf -- '--- argv ---\n%s\n--- stdout ---\n%s\n--- stderr ---\n%s\n--- exit ---\n%s\n' \
@@ -316,6 +410,18 @@ run_case() {  # argv
 #    ⇒ 文件名后面多一个下划号（难认，还容易对不上）
 slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
+# ---- 拆一条用例：名字 | argv[ | home种类 ] ----
+split_case() {  # 用例字符串
+  local c="$1"
+  CASE_NAME="${c%%|*}"
+  local rest="${c#*|}"
+  CASE_ARGV="${rest%%|*}"
+  CASE_HOME="default"
+  case "$rest" in
+    *"|"*) CASE_HOME="${rest##*|}" ;;
+  esac
+}
+
 # ---- 生成基准（需要参考实现二进制）----
 gen_golden() {
   [ -n "$C_BIN" ] || { echo "找不到参考实现二进制（./reference/puttyplus）⇒ 无法生成基准"; exit 2; }
@@ -323,8 +429,8 @@ gen_golden() {
   setup_fixture
   local n=0
   for c in "${CASES[@]}"; do
-    local name="${c%%|*}"; local argv="${c#*|}"
-    BIN="$C_BIN" run_case "$argv" > "$GOLDEN_DIR/$(slug "$name").txt"
+    split_case "$c"
+    BIN="$C_BIN" run_case "$CASE_ARGV" "$CASE_HOME" > "$GOLDEN_DIR/$(slug "$CASE_NAME").txt"
     n=$((n+1))
   done
   echo "已用 $C_BIN 生成 $n 条基准 → $GOLDEN_DIR"
@@ -336,12 +442,12 @@ check() {
   setup_fixture
   local pass=0 fail=0
   for c in "${CASES[@]}"; do
-    local name="${c%%|*}"; local argv="${c#*|}"
-    local f="$GOLDEN_DIR/$(slug "$name").txt"
+    split_case "$c"
+    local f="$GOLDEN_DIR/$(slug "$CASE_NAME").txt"
     if [ ! -f "$f" ]; then
-      echo "  [缺基准] $name"; fail=$((fail+1)); continue
+      echo "  [缺基准] $CASE_NAME"; fail=$((fail+1)); continue
     fi
-    local actual; actual=$(BIN="$RBIN" run_case "$argv")
+    local actual; actual=$(BIN="$RBIN" run_case "$CASE_ARGV" "$CASE_HOME")
     # ⚠️ **基准也要过一遍归一化**（主要是去 CR）：
     #    Windows runner 的 git 会把 checkout 的**文本文件转成 CRLF**
     #    （`core.autocrlf`）⇒ 基准文件里的每一行都多了 `\r`
@@ -354,7 +460,7 @@ check() {
       pass=$((pass+1))
     else
       fail=$((fail+1))
-      echo "  [DIFF] $name  ($argv)"
+      echo "  [DIFF] $CASE_NAME  ($CASE_ARGV)"
       # ⚠️ **要看两侧**：原来 `head -12` 只剩「实际侧」
       #    （diff 是 `<` 实际 / `>` 期望）⇒ 期望侧整段被砍掉
       #    ⇒ 看到注解也看不出差在哪一行（第 10 轮就吃了这个亏）。

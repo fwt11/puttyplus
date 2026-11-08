@@ -92,9 +92,21 @@ $env:INCLUDE = @(
 # ---------------------------------------------------------------- 3) Zig
 if (-not $env:ZIG) {
     Say "装 Zig 0.17（PyPI 的 ziglang wheel）"
-    python -m pip install --upgrade pip | Out-Null
-    python -m pip install "ziglang==0.17.1" | Out-Null
-    $zigdir = python -c "import ziglang, os; print(os.path.dirname(ziglang.__file__))"
+    # ⚠️ **python 的命令名在 Windows 上不统一**：`python` 常常没有
+    #    （Microsoft Store 的别名 / 只有 `py` / WSL 里的 `python3`）
+    #    ⇒ 三种都试一遍，别卡在这儿。
+    $py = $null
+    foreach ($cand in @("python", "py", "python3")) {
+        $cmd = Get-Command $cand -ErrorAction SilentlyContinue
+        if ($cmd) { $py = $cand; break }
+    }
+    if (-not $py) {
+        throw "没找到 python（试过 python / py / python3）⇒ 装 Python，或自己装 Zig 0.17.x 并设 ZIG 环境变量"
+    }
+    Say "用 $py 装 ziglang"
+    & $py -m pip install --upgrade pip | Out-Null
+    & $py -m pip install "ziglang==0.17.1" | Out-Null
+    $zigdir = & $py -c "import ziglang, os; print(os.path.dirname(ziglang.__file__))"
     $env:ZIG = Join-Path $zigdir "zig.exe"
     $env:Path = "$zigdir;$env:Path"
 }
