@@ -2266,6 +2266,20 @@ fn use_inproc_ssh() -> bool {
     }
 }
 
+/// 终端所在的最上层窗口（给弹窗当父窗口）。
+///
+/// ⚠️ **为什么要有**：GTK 的弹窗没有父窗口时会警告
+///    `GtkDialog mapped without a transient parent`（Linux 上也有，
+///    Windows 上更显眼）⇒ 顺手把它消掉。
+///
+/// ⚠️ 终端控件可能还没挂到窗口上（`root()` 返回 None）⇒ 那就当没有
+///    父窗口（退回原样，不报错）。
+fn toplevel(term: &TermView) -> Option<gtk::Window> {
+    term.widget()
+        .root()
+        .and_then(|r| r.downcast::<gtk::Window>().ok())
+}
+
 /// **进程内 SSH** 的终端会话（阶段 C7：Windows 上不再 spawn `ssh.exe`）。
 ///
 /// 干什么用：Windows 默认没装 `ssh.exe`、`plink` 又不想依赖 ⇒ 终端改成
@@ -2378,8 +2392,9 @@ fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
                         msg = msg
                     );
                     let inner_retry = Rc::clone(&inner_cb);
+                    let parent = toplevel(&inner_retry.term);
                     crate::panel::dialogs::ask_password(
-                        None,
+                        parent.as_ref(),
                         tr("SSH 密码"),
                         &detail,
                         move |pw| {
@@ -2390,7 +2405,11 @@ fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
                     );
                     return;
                 }
-                alert::<gtk::Window>(None, &trf!("SSH 连接失败：{msg}", msg = msg));
+                let parent = toplevel(&inner_cb.term);
+                alert::<gtk::Window>(
+                    parent.as_ref(),
+                    &trf!("SSH 连接失败：{msg}", msg = msg),
+                );
             }
             Err(_) => {}
         }
