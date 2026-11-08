@@ -301,7 +301,7 @@ impl TermView {
 
     /* ---------------- 输出 / 输入 ---------------- */
 
-    /// 把**远端来的字节**喂给终端。
+    /// 把**远程来的字节**喂给终端。
     pub fn feed(&self, bytes: &[u8]) {
         match self {
             #[cfg(target_os = "linux")]
@@ -565,6 +565,27 @@ impl TermView {
             }
             #[cfg(any(feature = "ghostty", target_os = "windows"))]
             TermView::Ghostty(v) => v.attach_pty(pty),
+        }
+    }
+
+    /// 接上**进程内 SSH 通道**（阶段 C7：Windows 上不再 spawn `ssh.exe`）。
+    ///
+    /// ⚠️ **只有 ghostty 后端支持**：VTE 的输入必须经过一个 pty
+    /// （`vte::Pty`）⇒ 没有 pty 就没法把键盘送出去 ⇒ 返回 `false`，
+    /// 由调用方决定怎么办（Linux 主线本来就 spawn `ssh`，用不到这条）。
+    pub fn attach_shell(
+        &self,
+        chan: crate::backend::shell::ShellChannel,
+        rx: async_channel::Receiver<crate::backend::shell::ShellEvent>,
+    ) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            TermView::Vte(_) => false,
+            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            TermView::Ghostty(v) => {
+                v.attach_shell(chan, rx);
+                true
+            }
         }
     }
 }

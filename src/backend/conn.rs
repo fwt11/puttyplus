@@ -222,7 +222,7 @@ pub struct SftpBackend {
     /// 连接标识（host:port）。断点续传的 mark 用它做键的一部分，
     /// 免得两台同名主机的半截文件互相续上
     pub id: String,
-    /// 远端可用的 SHA-1 工具（checksum.rs）：None = 还没试过，
+    /// 远程可用的 SHA-1 工具（checksum.rs）：None = 还没试过，
     /// Some("") = 试过了都没有。Mutex 是因为 exec 要 &self 又要缓存结果
     pub(crate) sha1_tool: Mutex<Option<&'static str>>,
 }
@@ -238,10 +238,16 @@ pub struct FwdInfo {
     pub err: Option<String>,
 }
 
-/// 与 C 版相同的认证顺序：
-/// none（探测可用方法）→ 有密码时 password → kbdint → 指定私钥 → agent/默认密钥。
+/// **只建连 + 认证**，不开 SFTP 子系统（阶段 C7）。
+///
+/// 干什么用：Windows 上的终端**不再 spawn `ssh.exe`**（Windows 默认没装，
+/// `plink` 又不想依赖）⇒ 改成**进程内实现 SSH 客户端**
+/// （见 [`crate::backend::shell`]）⇒ 终端要的就是这条「已认证的会话」。
+///
+/// ⇒ 认证顺序与 SFTP 面板**完全一致**（同一段代码）⇒ 密码 / 私钥 /
+/// agent 的行为不会两边不一致。
 #[allow(clippy::too_many_arguments)]
-pub async fn connect(
+pub(crate) async fn connect_session(
     host: &str,
     port: i32,
     user: &str,
@@ -251,7 +257,7 @@ pub async fn connect(
     keepalive_sec: u32,
     auth_method: crate::args::AuthMethod,
     auth_order: crate::args::AuthOrder,
-) -> BackendResult<SftpBackend> {
+) -> BackendResult<(Handle<HostKeyHandler>, RfwdTable)> {
     // russh 端口是 u16；越界值（堡垒机不会出现）按 0 处理，连接自然失败，
     // 报错信息仍带原始端口值，与 C 版 libssh 行为等价
     let port_u16 = u16::try_from(port).unwrap_or(0);
@@ -302,6 +308,39 @@ pub async fn connect(
     };
 
     authenticate(&mut session, user, password, keyfile, auth_method, auth_order).await?;
+
+    // ⚠️ **连同 rfwd 一起交出去**：远程转发（-R）的入站登记表是
+    //    handler 与连接体**共享**的同一个实例 ⇒ 建连时造好、
+    //    两边都拿着同一份。
+    Ok((session, rfwd))
+}
+
+/// 与 C 版相同的认证顺序：
+/// none（探测可用方法）→ 有密码时 password → kbdint → 指定私钥 → agent/默认密钥。
+#[allow(clippy::too_many_arguments)]
+pub async fn connect(
+    host: &str,
+    port: i32,
+    user: &str,
+    password: Option<&str>,
+    keyfile: Option<&str>,
+    proxycmd: Option<&str>,
+    keepalive_sec: u32,
+    auth_method: crate::args::AuthMethod,
+    auth_order: crate::args::AuthOrder,
+) -> BackendResult<SftpBackend> {
+    let (mut session, rfwd) = connect_session(
+        host,
+        port,
+        user,
+        password,
+        keyfile,
+        proxycmd,
+        keepalive_sec,
+        auth_method,
+        auth_order,
+    )
+    .await?;
 
     // SFTP 子系统。三步都加超时：认证已通过但网关不回应 channel open /
     // subsystem 时，不能把 UI 永久卡在「正在连接」。

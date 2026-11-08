@@ -20,6 +20,7 @@ pub mod proxy;
 pub mod resume;
 pub mod selftest;
 pub mod sftp;
+pub mod shell;
 
 /// 后端错误：消息直接面向用户（与 C 版文案保持一致）。
 #[derive(Debug, thiserror::Error)]

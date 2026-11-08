@@ -152,6 +152,11 @@ struct State {
     cursor_on: Cell<bool>,
     /// 挂着的 PTY（写给子进程用）。
     pty: RefCell<Option<crate::platform::pty::PtySession>>,
+    /// 挂着的**进程内 SSH 通道**（阶段 C7：Windows 上不再 spawn ssh）。
+    ///
+    /// ⚠️ 与 `pty` **互斥**：有通道就没有 pty（进程内那条路没有本地
+    /// pty）⇒ 写输入 / 改尺寸时先看通道、没有才看 pty。
+    shell: RefCell<Option<crate::backend::shell::ShellChannel>>,
     /// 远程标题变化的回调（OSC 0/2）。
     title_cb: RefCell<Vec<Box<dyn Fn(&str)>>>,
     /// OSC 7 目录变化的回调。
@@ -186,10 +191,16 @@ impl State {
 
     /// 设置视口大小（**内核与 pty 一起**）。
     ///
-    /// ⚠️ 两者必须同步：内核决定画几列，pty 决定**远端**以为屏幕多大。
-    /// 不同步 ⇒ 远端一直按旧尺寸排版（画面看着正常其实错位）。
+    /// ⚠️ 两者必须同步：内核决定画几列，pty 决定**远程**以为屏幕多大。
+    /// 不同步 ⇒ 远程一直按旧尺寸排版（画面看着正常其实错位）。
     fn set_term_size(&self, cols: u16, rows: u16) {
         let _ = self.term.borrow_mut().set_size(cols, rows);
+        // ⚠️ **先看进程内 SSH 通道**（阶段 C7）：有通道就没有 pty ⇒
+        //    尺寸要通过 SSH 的 window-change 告诉远程。
+        if let Some(sh) = self.shell.borrow().clone() {
+            sh.resize(cols, rows);
+            return;
+        }
         let pty = self.pty.borrow().clone();
         if let Some(p) = pty {
             let _ = p.set_size(cols, rows);
@@ -198,6 +209,12 @@ impl State {
 
     /// 写给子进程（pty 在的话）。
     fn write_to_child(&self, bytes: &[u8]) {
+        // ⚠️ **进程内 SSH 通道优先**（阶段 C7）：Windows 上没有 pty，
+        //    键盘字节直接写进 SSH 通道。
+        if let Some(sh) = self.shell.borrow().clone() {
+            sh.send(bytes);
+            return;
+        }
         let pty = self.pty.borrow().clone();
         if let Some(p) = pty {
             let _ = p.write(bytes);
@@ -331,6 +348,7 @@ impl GhosttyView {
             preedit: RefCell::new(String::new()),
             cursor_on: Cell::new(true),
             pty: RefCell::new(None),
+            shell: RefCell::new(None),
             title_cb: RefCell::new(Vec::new()),
             cwd_cb: RefCell::new(Vec::new()),
             exit_cb: RefCell::new(None),
@@ -372,7 +390,7 @@ impl GhosttyView {
         self.area.queue_draw();
     }
 
-    /// 把远端来的字节喂给内核（并重画）。
+    /// 把远程来的字节喂给内核（并重画）。
     ///
     /// ⚠️ **喂完要把事件取出来**（标题变了、目录变了、响铃……）——
     /// 不取的话事件队列会一直涨，标题回调也永远不触发。
@@ -433,8 +451,8 @@ impl GhosttyView {
 
     /// 设置视口大小（**并同步给 pty**）。
     ///
-    /// ⚠️ 远端 ssh 靠 pty 的窗口大小知道屏幕多大 ⇒ 不同步的话，
-    /// 远端会一直按 80×24 排版（画面能看，但不对齐）。
+    /// ⚠️ 远程 ssh 靠 pty 的窗口大小知道屏幕多大 ⇒ 不同步的话，
+    /// 远程会一直按 80×24 排版（画面能看，但不对齐）。
     pub fn set_size(&self, cols: i64, rows: i64) {
         self.state
             .set_term_size(cols.max(1) as u16, rows.max(1) as u16);
@@ -555,8 +573,8 @@ impl GhosttyView {
     pub fn attach_pty(&self, pty: &crate::platform::pty::PtySession) {
         *self.state.pty.borrow_mut() = Some(pty.clone());
 
-        // ⚠️ **pty 的窗口大小要跟终端对齐**：远端 ssh 靠它知道屏幕多大
-        // （不同步 ⇒ 远端一直按 80×24 排版，画面和实际宽度对不上）。
+        // ⚠️ **pty 的窗口大小要跟终端对齐**：远程 ssh 靠它知道屏幕多大
+        // （不同步 ⇒ 远程一直按 80×24 排版，画面和实际宽度对不上）。
         {
             let t = self.state.term.borrow();
             let _ = pty.set_size(t.column_count().max(1) as u16, t.row_count().max(1) as u16);
@@ -603,6 +621,69 @@ impl GhosttyView {
     /// 把**用户敲的字节**写给子进程。
     pub fn feed_child(&self, bytes: &[u8]) {
         self.state.write_to_child(bytes);
+    }
+
+    /// 接上**进程内 SSH 通道**（阶段 C7：Windows 上不再 spawn `ssh.exe`）。
+    ///
+    /// ⚠️ **与 [`Self::attach_pty`] 互斥**：有通道就没有本地 pty。
+    ///
+    /// 干什么用：Windows 上默认没有 `ssh.exe`、`plink` 又不想依赖 ⇒
+    /// 终端改成**进程内实现 SSH 客户端**（`backend::shell`）⇒
+    /// 远程字节直接喂给内核，键盘字节直接写进通道。
+    ///
+    /// ⚠️ **读循环跑在 tokio 线程上**（建通道时那个运行时），
+    /// 数据经 async_channel 送回**主线程**再喂内核（GTK 的状态只能在
+    /// 主线程动）——与 `attach_pty` 的做法一致。
+    /// ⚠️ **读循环不在这里**（阶段 C7）：读循环跑在**后台线程的 tokio
+    ///    运行时**上（那边才是网络 I/O 该待的地方），数据经
+    ///    `rx` 送回主线程 ⇒ 这里只负责「喂内核」+「退出回调」。
+    pub fn attach_shell(
+        &self,
+        chan: crate::backend::shell::ShellChannel,
+        rx: async_channel::Receiver<crate::backend::shell::ShellEvent>,
+    ) {
+        *self.state.shell.borrow_mut() = Some(chan.clone());
+
+        // ⚠️ **尺寸要先同步一次**：远程 pty 是按申请时的尺寸建的，
+        //    不发 window-change 的话远程会一直按那个尺寸排版。
+        {
+            let t = self.state.term.borrow();
+            chan.resize(
+                t.column_count().max(1) as u16,
+                t.row_count().max(1) as u16,
+            );
+        }
+
+        let area = self.area.clone();
+        let state = self.state.clone();
+        glib::MainContext::default().spawn_local(async move {
+            while let Ok(ev) = rx.recv().await {
+                use crate::backend::shell::ShellEvent;
+                match ev {
+                    ShellEvent::Data(bytes) => {
+                        {
+                            let mut term = state.term.borrow_mut();
+                            term.feed(&bytes);
+                            let events = term.drain_events();
+                            drop(term);
+                            for ev in events {
+                                use ghostty_vt::terminal::Event;
+                                match ev {
+                                    Event::TitleChanged(t) if !t.is_empty() => state.fire_title(&t),
+                                    Event::PwdChanged(u) if !u.is_empty() => state.fire_cwd(&u),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        area.queue_draw();
+                    }
+                    ShellEvent::Exit(code) => {
+                        state.fire_exit(code);
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// 复位（重连时用）。
@@ -769,8 +850,8 @@ fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Conte
 
     // 3. 尺寸变了就告诉内核（内核会重排屏幕）
     //
-    // ⚠️ **必须连 pty 一起改**（`set_term_size`）——远端 ssh 靠 pty 的
-    // 窗口大小知道屏幕多大 ⇒ 只改内核的话，远端会一直按旧尺寸排版。
+    // ⚠️ **必须连 pty 一起改**（`set_term_size`）——远程 ssh 靠 pty 的
+    // 窗口大小知道屏幕多大 ⇒ 只改内核的话，远程会一直按旧尺寸排版。
     {
         let changed = {
             let term = state.term.borrow();

@@ -294,14 +294,14 @@ pub(crate) struct TermInner {
     banner_re: gtk::Button,
     /// 右键菜单的扩展区提供方（分屏/广播/日志由 tabs 注册）
     menu_extra: RefCell<Option<MenuExtra>>,
-    /// **会话就绪钩子**：**远端准备好了**之后调一次。
+    /// **会话就绪钩子**：**远程准备好了**之后调一次。
     ///
     /// 「在此处打开终端」要用：新终端连上后往 pty 里写 `cd <目录>`，
     /// 让它进到用户右键的那个目录。
     ///
     /// ⚠️ **时机不是「ssh 子进程起来了」**（见 `feed_when_remote_ready`）：
     /// 那时候 ssh 还没连上、pty 还没切 raw 模式，写进去的字节会被本地
-    /// 回显 + 缓冲，然后被远端的**登录流程**吃掉 ⇒ `cd` 根本不执行。
+    /// 回显 + 缓冲，然后被远程的**登录流程**吃掉 ⇒ `cd` 根本不执行。
     ///
     /// ⚠️ 钩子拿到的是**终端**，不是 TermPane：闭包一旦捕获 TermPane，
     /// 就是「TermPane → ready_hook → TermPane」的**引用环**，面板永远
@@ -763,12 +763,12 @@ impl TermPane {
         *self.inner.menu_extra.borrow_mut() = Some(f);
     }
 
-    /// **会话就绪钩子**：**远端说完了话**之后调一次（只调一次）。
+    /// **会话就绪钩子**：**远程说完了话**之后调一次（只调一次）。
     ///
     /// 给「在此处打开终端」用——新终端连上后要 `cd` 到用户右键的目录。
     ///
     /// ⚠️ **不是「ssh 子进程起来了」就调**：见 `feed_when_remote_ready`
-    /// （写早了会被本地回显、并被远端的登录流程吃掉）。
+    /// （写早了会被本地回显、并被远程的登录流程吃掉）。
     ///
     /// ⚠️ 闭包里**别捕获 TermPane 自己**（那是自引用，终端永远释放不掉）。
     /// 钩子收到的是终端本身，往里写字节就行。
@@ -1162,18 +1162,18 @@ impl TermInner {
  *   · 用户敲的命令**照样出现在录制的输出里**，而且是**逐次重写**录下来的
  *     （阶段 88）：光标行每变一次就重写一次（`\r` + 清行 + 行文本），
  *     所以回放里看得到命令是**一个个敲出来的**，不靠输入事件；
- *   · 而输入事件里会有**明文密码**：密码输入时远端把 echo 关掉，
+ *   · 而输入事件里会有**明文密码**：密码输入时远程把 echo 关掉，
  *     那串字节不会回传（我们这边却抓得到）⇒ 落盘就是事故。
  *     asciicast v2 规范也是这么说的（官方 asciinema 默认不录输入，
  *     "实现不应默认录输入，除非用户明确要求"）。
- *   代价：远端关掉回显的场景（vim / less / `su` / 嵌套 ssh）里，
+ *   代价：远程关掉回显的场景（vim / less / `su` / 嵌套 ssh）里，
  *   敲的按键不会出现在任何地方——这是可以接受的取舍。
  *
  * 边界（UI 与文档都写明）：
  *   · **正在敲的那一行**（光标行）现在会**逐次重写**（`\r` + 清行 + 行文本），
  *     所以回放里能看到命令是**一个个敲出来的**——和 asciinema 的观感一致；
  *     但**已经输出完的行**被反复改写，仍只留**最后一次**（那不是敲的过程，
- *     是远端在重画，例如进度条）；
+ *     是远程在重画，例如进度条）；
  *   · 敲命令的**粒度是采样间隔**（250ms），不是按键级——按键级得录输入事件，
  *     而输入事件里会有明文密码（见上）；
  *   · 终端被清屏（`clear`）会漏；
@@ -1525,9 +1525,9 @@ fn install_broadcast_capture(inner: &Rc<TermInner>) {
         };
         if let Some(bytes) = encode_key(keyval, mods) {
             // ⚠ 6.1 录制**不录输入**（asciicast v2 规范："实现不应默认录输入"）。
-            //   · 用户敲的命令**本来就会出现在录制的输出里**——远端 tty 的回显
+            //   · 用户敲的命令**本来就会出现在录制的输出里**——远程 tty 的回显
             //     本身就是输出字节，回放里照样看得到敲了什么；
-            //   · 而输入事件里会有**明文密码**：密码输入时远端把 echo 关掉，
+            //   · 而输入事件里会有**明文密码**：密码输入时远程把 echo 关掉，
             //     那串字节根本不会回传（我们这边却抓得到）⇒ 录下来就是事故。
             // 钩子内部只写别的面板的 PTY，不再碰 key_sink，借用期间不会重入
             if let Some(h) = inner.key_sink.borrow().as_ref() {
@@ -1610,7 +1610,7 @@ fn connect_signals(inner: &Rc<TermInner>) {
  *
  * 已知边界（UI 与文档都写明了）：
  *   - 光标键按 CSI 形式发（ESC [ A），不跟随目标终端的 DECCKM。
- *     远端 vi/less 这类开了应用光标键的程序要按应用光标键才认；
+ *     远程 vi/less 这类开了应用光标键的程序要按应用光标键才认；
  *     老式/新式两种 CSI 形式都收，所以怎么发都能被识别。
  *   - 死键/输入法组合由 VTE 自己合成，我们只看最终字符——
  *     取不到字符（to_unicode 为 None）就不广播，不猜。
@@ -2078,15 +2078,15 @@ pub fn attach_split_menu(pane: &TermPane, page: &gtk::Widget) {
 
 /* ---------------- spawn ---------------- */
 
-/* ---------------- 「在此处打开终端」：等远端就绪 ---------------- */
+/* ---------------- 「在此处打开终端」：等远程就绪 ---------------- */
 
 /// 采样周期（毫秒）。
 const READY_TICK_MS: i64 = 200;
 /// 还没看见 shell 提示符 ⇒ 多久后发一个**空行**探路（毫秒）。
 const READY_PROBE_MS: i64 = 2500;
-/// 探过路之后，屏幕安静多久算「远端说完了」（毫秒）。
+/// 探过路之后，屏幕安静多久算「远程说完了」（毫秒）。
 const READY_QUIET_MS: i64 = 900;
-/// 最多等这么久（远端一声不吭时的兜底）（毫秒）。
+/// 最多等这么久（远程一声不吭时的兜底）（毫秒）。
 const READY_MAX_WAIT_MS: i64 = 8000;
 
 /// 屏幕最后一行像不像 shell 提示符。
@@ -2109,7 +2109,7 @@ pub fn screen_has_prompt(text: &str) -> bool {
     matches!(c, '$' | '#' | '❯' | '➜' | 'λ')
 }
 
-/// **等远端真的就绪了，再把初始命令送进去**（「在此处打开终端」用）。
+/// **等远程真的就绪了，再把初始命令送进去**（「在此处打开终端」用）。
 ///
 /// ⚠️ **为什么不能「ssh 子进程起来了就写」**：
 ///
@@ -2118,8 +2118,8 @@ pub fn screen_has_prompt(text: &str) -> bool {
 ///
 /// 1. **被本地回显** —— 屏幕上凭空多出一行命令（用户看到的就是
 ///    `cd '/home/fwt/litellm'` 孤零零地出现在 banner 上面）；
-/// 2. **缓冲在本地行规程里** —— 等 ssh 连上后被**转发给远端**。
-///    而那会儿远端可能还停在**登录流程**（堡垒机那种
+/// 2. **缓冲在本地行规程里** —— 等 ssh 连上后被**转发给远程**。
+///    而那会儿远程可能还停在**登录流程**（堡垒机那种
 ///    "Access granted. Press Return to begin session."），
 ///    它**读掉一整行**才往下走 ⇒ 这行 `cd` 被它吃掉，**根本没执行**。
 ///
@@ -2130,13 +2130,13 @@ pub fn screen_has_prompt(text: &str) -> bool {
 ///    脚本要读一行才往下走，提示符才会出现。所以先发一个**空行探路**
 ///    （`ReadyCmd::Probe`），喂它那次回车；脚本走完，提示符就出来了。
 ///
-/// ⚠️ 远端一声不吭（没有 MOTD、也没有提示符）时靠 `READY_MAX_WAIT_MS`
+/// ⚠️ 远程一声不吭（没有 MOTD、也没有提示符）时靠 `READY_MAX_WAIT_MS`
 ///    兜底。
 fn feed_when_remote_ready(
     term: &TermView,
     hook: Box<dyn Fn(&TermView, ReadyCmd) + 'static>,
     inner: std::rc::Weak<TermInner>,
-    pty: PtySession,
+    pty: Option<PtySession>,
 ) {
     let term = term.clone();
     let hook = Rc::new(hook);
@@ -2170,8 +2170,10 @@ fn feed_when_remote_ready(
             // ⚠ **本地 pty 必须已经切到 raw 模式**（ssh 认证通过之后
             // 才切）。没切就写 ⇒ 字节被**本地回显**（屏幕上凭空多一行
             // 命令）并**缓冲**在本地行规程里，等 ssh 切 raw 后才转发给
-            // 远端 —— 那时远端可能还停在登录流程里，命令被吃掉。
-            let raw = pty.is_raw();
+            // 远程 —— 那时远程可能还停在登录流程里，命令被吃掉。
+            // ⚠️ **进程内 SSH 没有本地 pty**（阶段 C7）⇒ 没有本地
+            //    行规程 ⇒ 不存在「本地回显 + 缓冲」⇒ 恒为 raw。
+            let raw = pty.as_ref().map_or(true, |p| p.is_raw());
 
             // ① **看见 shell 提示符** ⇒ shell 起来了，命令直接发
             //    （落进的是真 shell，不会被任何登录脚本吃掉）。
@@ -2188,12 +2190,12 @@ fn feed_when_remote_ready(
                 if (raw && elapsed >= READY_PROBE_MS) || elapsed >= READY_MAX_WAIT_MS {
                     hook(&term, ReadyCmd::Probe);
                     probe_sent.set(true);
-                    // 探完之后重新起算「安静」——等远端把话说完。
+                    // 探完之后重新起算「安静」——等远程把话说完。
                     last_change.set(now);
                     return glib::ControlFlow::Continue;
                 }
             } else {
-                // ③ 探过路了 ⇒ 等远端安静下来（欢迎消息发完了）再发命令。
+                // ③ 探过路了 ⇒ 等远程安静下来（欢迎消息发完了）再发命令。
                 //    登录脚本可能读了不止一行，把命令吃掉了 —— 这时命令
                 //    还没到 shell，得自己再发一遍。
                 let quiet = now - last_change.get() >= READY_QUIET_MS;
@@ -2233,9 +2235,271 @@ fn new_term_backend() -> TermView {
     TermView::new()
 }
 
+/// 终端会话走哪条路（阶段 C7）。
+///
+/// - `spawn`：起 `ssh` 子进程 + 本地 pty（**Linux 主线**，行为零变化）。
+/// - `inproc`：**进程内实现 SSH 客户端**（russh 直接驱动终端内核）。
+///
+/// ⚠️ **Windows 默认 `inproc`**：Windows 默认没有 `ssh.exe`（OpenSSH 是
+/// 「可选功能」，很多机器根本没装），`plink` 我们又不想依赖 ⇒ 走
+/// spawn 必然失败（用户 2026-11-08 报的「找不到可用的客户端程序」）。
+///
+/// ⚠️ **Linux 主线仍然是 spawn**（AGENTS.md 的零回归红线）：终端里跑的
+/// 是用户自己的 ssh ⇒ `~/.ssh/config`、agent、ProxyJump、known_hosts
+/// 的语义**全都在**（进程内那条路做不到这个 ⇒ 那是 Windows 版的已知
+/// 差异，文档里写明）。
+///
+/// ⚠️ `inproc` **只有 ghostty 后端能用**（VTE 的输入必须过一个 pty）
+/// ⇒ Linux 上要自测这条通路，得配 `PP_TERM_BACKEND=ghostty`。
+///
+/// 环境变量 `PP_TERM_SSH=inproc|spawn` 可强制切换（自测用）。
+fn use_inproc_ssh() -> bool {
+    match std::env::var("PP_TERM_SSH")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "inproc" | "1" | "on" => true,
+        "spawn" | "0" | "off" => false,
+        _ => cfg!(target_os = "windows"),
+    }
+}
+
+/// **进程内 SSH** 的终端会话（阶段 C7：Windows 上不再 spawn `ssh.exe`）。
+///
+/// 干什么用：Windows 默认没装 `ssh.exe`、`plink` 又不想依赖 ⇒ 终端改成
+/// **进程内实现 SSH 客户端**（`backend::shell`）⇒ 不 spawn 任何外部程序，
+/// 也就没有「双回显」「本地行规程」「等 ssh 切 raw」那一套。
+///
+/// ## 线程模型
+///
+/// - **后台线程**（`pp-ssh-shell`）：一个 tokio 运行时 ⇒ 连上 ⇒ 开通道
+///   ⇒ **读循环**（远程字节 → 事件通道 → 主线程）。
+/// - **主线程**（GTK）：把事件喂给终端内核 + 收键盘输入（写进通道）。
+///
+/// ⚠️ **tokio 运行时必须活到会话结束**：`ShellChannel::send`（键盘）与
+/// `resize`（窗口尺寸）都要 `rt.spawn` ⇒ 运行时一掉，键盘就没反应了
+/// ⇒ 后台线程 `block_on` 到「会话结束」信号才退出。
+///
+/// ⚠️ **认证失败要问密码**：没有凭据且像是认证失败 ⇒ 弹框问一次再重试
+/// （与 SFTP 面板同一套逻辑，见 `panel/mod.rs` 的 `Connected(Err)`）。
+fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
+    let o = inner.opts.clone();
+    // ⚠️ **主线程与后台线程都要用这些值** ⇒ 各自拿一份拷贝
+    //    （ConnOptions 整体 clone 一次给后台线程；下面几个标量给主线程）。
+    let o_bg = o.clone();
+    let pw_bg = password.clone();
+    let user = o.user.clone();
+    let host = o.host.clone();
+    let port = o.port;
+    // 「有没有凭据」在主线程判断（要不要弹密码框）
+    let have_pw = password.is_some() || o.password.as_ref().map_or(false, |p| !p.is_empty());
+    let have_key = o.keyfile.as_deref().map_or(false, |k| !k.is_empty());
+    let cols = inner.term.column_count().max(1) as u16;
+    let rows = inner.term.row_count().max(1) as u16;
+    // 远程命令（-m / 位置参数）⇒ 走 exec，否则走交互 shell
+    let remote_cmd = o.remote_cmd.clone();
+    // `-N`（不要 shell）：连上但不请求 shell（终端空白，这是它的语义）
+    let no_shell = o.no_shell;
+    // `-T`（不要 pty）：远程不分配终端
+    let want_pty = !o.no_pty;
+
+    // 事件通道：后台线程 → 主线程（远程字节 + 退出）
+    let (ev_tx, ev_rx) =
+        async_channel::unbounded::<crate::backend::shell::ShellEvent>();
+    // 连接结果：后台线程 → 主线程
+    let (res_tx, res_rx) = async_channel::bounded::<
+        Result<crate::backend::shell::ShellChannel, String>,
+    >(1);
+
+    // ---- 主线程：等连接结果 ----
+    let inner_cb = Rc::clone(inner);
+    glib::MainContext::default().spawn_local(async move {
+        match res_rx.recv().await {
+            Ok(Ok(chan)) => {
+                if !inner_cb.term.attach_shell(chan, ev_rx) {
+                    alert::<gtk::Window>(
+                        None,
+                        tr("当前终端后端不支持进程内 SSH（VTE 需要本地 pty）。\n请用 PP_TERM_BACKEND=ghostty。"),
+                    );
+                    return;
+                }
+                // 会话活着（与 spawn 那条路同一套标志）
+                inner_cb.child_alive.set(true);
+                if !inner_cb.alive_reported.get() {
+                    inner_cb.alive_reported.set(true);
+                    if let Some(h) = inner_cb.alive_hook.borrow().as_ref() {
+                        h(true);
+                    }
+                }
+                inner_cb.banner_re.set_visible(false);
+                inner_cb.sync_banner_visibility();
+                // 会话就绪钩子（「在此处打开终端」靠它发 `cd`）
+                // ⚠️ **没有 pty** ⇒ 没有本地行规程 ⇒ 不必等 raw。
+                inner_cb.reconnecting.set(false);
+                let pending = std::mem::take(&mut *inner_cb.pending_input.borrow_mut());
+                let user_hook = inner_cb.ready_hook.borrow_mut().take();
+                if !pending.is_empty() || user_hook.is_some() {
+                    let pending = RefCell::new(Some(pending));
+                    let hook: Box<dyn Fn(&TermView, ReadyCmd) + 'static> =
+                        Box::new(move |term, what| {
+                            if let Some(h) = &user_hook {
+                                h(term, what);
+                            }
+                            if what == ReadyCmd::Cmd {
+                                if let Some(bytes) = pending.borrow_mut().take() {
+                                    if !bytes.is_empty() {
+                                        term.feed_child(&bytes);
+                                    }
+                                }
+                            }
+                        });
+                    feed_when_remote_ready(
+                        &inner_cb.term,
+                        hook,
+                        Rc::downgrade(&inner_cb),
+                        None,
+                    );
+                }
+            }
+            Ok(Err(msg)) => {
+                inner_cb.reconnecting.set(false);
+                inner_cb.banner_re.set_visible(true);
+                inner_cb.sync_banner_visibility();
+                // ⚠️ **没有凭据且像是认证失败 ⇒ 问一次密码再重试**
+                //    （与 SFTP 面板同一套逻辑）。
+                if !have_pw && !have_key && crate::i18n::looks_like_auth_failure(&msg) {
+                    let detail = trf!(
+                        "SSH 连接 {v0}@{v1}:{v2} 需要密码：\n{msg}",
+                        v0 = user,
+                        v1 = host,
+                        v2 = port,
+                        msg = msg
+                    );
+                    let inner_retry = Rc::clone(&inner_cb);
+                    crate::panel::dialogs::ask_password(
+                        None,
+                        tr("SSH 密码"),
+                        &detail,
+                        move |pw| {
+                            if let Some(pw) = pw {
+                                spawn_term_inproc(&inner_retry, Some(pw));
+                            }
+                        },
+                    );
+                    return;
+                }
+                alert::<gtk::Window>(None, &trf!("SSH 连接失败：{msg}", msg = msg));
+            }
+            Err(_) => {}
+        }
+    });
+
+    // ---- 后台线程：连接 + 读循环 ----
+    std::thread::Builder::new()
+        .name("pp-ssh-shell".into())
+        .spawn(move || {
+            let o = o_bg;
+            let password = pw_bg;
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = res_tx.send_blocking(Err(format!("创建运行时失败: {e}")));
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let pw = password
+                    .as_deref()
+                    .filter(|p| !p.is_empty())
+                    .or_else(|| o.password.as_ref().map(|p| p.as_str()));
+                let (session, _rfwd) = match crate::backend::conn::connect_session(
+                    &o.host,
+                    o.port,
+                    &o.user,
+                    pw,
+                    o.keyfile.as_deref().filter(|k| !k.is_empty()),
+                    o.proxycmd.as_deref().filter(|c| !c.is_empty()),
+                    o.keepalive_sec,
+                    o.auth_method,
+                    o.auth_order,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = res_tx.send_blocking(Err(e.0));
+                        return;
+                    }
+                };
+                let opened = if no_shell {
+                    crate::backend::shell::ShellChannel::open_bare(&session).await
+                } else {
+                    match remote_cmd.as_deref().filter(|c| !c.is_empty()) {
+                        Some(cmd) => {
+                            crate::backend::shell::ShellChannel::open_exec(
+                                &session, cmd, cols, rows, want_pty,
+                            )
+                            .await
+                        }
+                        None => {
+                            crate::backend::shell::ShellChannel::open_shell(
+                                &session, cols, rows, want_pty,
+                            )
+                            .await
+                        }
+                    }
+                };
+                let chan = match opened {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = res_tx.send_blocking(Err(e.0));
+                        return;
+                    }
+                };
+                let _ = res_tx.send_blocking(Ok(chan.clone()));
+
+                // 读循环：远程字节 → 主线程
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+                let tx = ev_tx.clone();
+                // ⚠️ 用 `Handle::current()` 而不是 `rt.spawn`：async 块
+                //    是 `move` 的，捕获 `rt` 会和 `rt.block_on(..)` 的
+                //    借用冲突 ⇒ 这里在运行时上下文里拿句柄。
+                tokio::runtime::Handle::current().spawn(async move {
+                    while let Some(ev) = chan.next_event().await {
+                        if tx.send(ev).await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = done_tx.send(());
+                });
+                // ⚠️ **运行时活到会话结束**（键盘输入/尺寸变化都要 rt.spawn）
+                let _ = done_rx.await;
+            });
+        })
+        .ok();
+}
+
 fn spawn_term(inner: &Rc<TermInner>) {
     let o = &inner.opts;
     inner.child_alive.set(false);
+
+    // ⚠️ **Windows 上不能走 spawn 那条路**（阶段 C7）：Windows 默认没装
+    //    `ssh.exe`（OpenSSH 是可选功能），`plink` 我们又不想依赖 ⇒
+    //    走 spawn 必然失败（用户 2026-11-08 报的「找不到可用的客户端
+    //    程序」）⇒ 改成**进程内实现 SSH 客户端**。
+    //    ⚠️ **Linux 主线仍然是 spawn**（零回归红线：终端里跑的是用户
+    //    自己的 ssh ⇒ ~/.ssh/config / agent / ProxyJump 语义全都在）。
+    if o.is_ssh() && use_inproc_ssh() {
+        spawn_term_inproc(inner, None);
+        return;
+    }
+
     let argv: Vec<String> = inner.ssh_argv();
 
     if argv.is_empty() {
@@ -2300,7 +2564,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 // ⚠️ **不是「子进程起来了」就发**：那时 ssh 还没连上，
                 //    pty 还没切 raw 模式 ⇒ 写进去的字节被本地回显（屏幕上
                 //    凭空多一行命令）并缓冲在本地行规程里，等 ssh 连上后
-                //    转发给远端 —— 那会儿远端可能还停在**登录流程**
+                //    转发给远程 —— 那会儿远程可能还停在**登录流程**
                 //    （堡垒机常见），这行就被它吃掉，`cd` 根本没执行。
                 //
                 // ⚠️ **阶段 99**：一起把「断线时用户敲的输入」带上 ——
@@ -2316,7 +2580,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
                                 h(term, what);
                             }
                             // ⚠️ 只在**看见提示符**时补发（`Probe` 是探路，
-                            // 那会儿远端还没进 shell，发过去会被登录脚本吃掉）
+                            // 那会儿远程还没进 shell，发过去会被登录脚本吃掉）
                             if what == ReadyCmd::Cmd {
                                 if let Some(bytes) = pending.borrow_mut().take() {
                                     if !bytes.is_empty() {
@@ -2329,7 +2593,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
                         &inner_cb.term,
                         hook,
                         Rc::downgrade(&inner_cb),
-                        pty_cb,
+                        Some(pty_cb),
                     );
                 }
             }
@@ -2431,7 +2695,7 @@ fn autofeed_cb(inner: &Rc<TermInner>) -> glib::ControlFlow {
 
         let pw = inner.opts.password_str().unwrap_or("");
         // i18n:keep
-        // ⚠️ 下面认的是**远端终端**的提示文字 —— 那是**别人机器上**的
+        // ⚠️ 下面认的是**远程终端**的提示文字 —— 那是**别人机器上**的
         // 字符串（可能是中文，也可能是英文），**不是本程序的界面文案**
         // ⇒ 绝对不能翻译（翻了中文那句就再也认不出来了）。
         let want_pw = !pw.is_empty()
