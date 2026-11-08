@@ -5,6 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::MethodKind;
+// ⚠️ **`AgentClient::connect_env` 只在 Unix 上有**（它连的是
+//    `$SSH_AUTH_SOCK` 那个 Unix 套接字）⇒ Windows 上这个类型整个没有。
+#[cfg(unix)]
 use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key::Algorithm;
 use russh::keys::PrivateKeyWithHashAlg;
@@ -572,6 +575,20 @@ async fn key_with_hash(
 
 /// 与 C 版 ssh_userauth_publickey_auto 对应：先 ssh-agent，再 ~/.ssh 默认密钥。
 /// 只用 ssh-agent 里的密钥（阶段 70 的「只用 ssh-agent 里的密钥」）。
+///
+/// ⚠️ **Windows 上这条路没有**：ssh-agent 在 Windows 上用的是命名管道，
+///    `russh` 的 `AgentClient::connect_env`（连 `$SSH_AUTH_SOCK` 那个 Unix
+///    套接字）**只在 Unix 上存在** ⇒ Windows 上直接返回 false
+///    （⇒ 后面走 ~/.ssh 下的默认密钥）。
+#[cfg(not(unix))]
+async fn try_agent(
+    _session: &mut Handle<HostKeyHandler>,
+    _user: &str,
+) -> BackendResult<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
 async fn try_agent(
     session: &mut Handle<HostKeyHandler>,
     user: &str,

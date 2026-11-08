@@ -235,10 +235,16 @@ impl PtySession {
         env: &[&str],
         cb: impl FnOnce(Result<glib::Pid, String>) + 'static,
     ) {
+        // ⚠️ **`glib::Pid::from_raw` 在 glib 0.22 里根本不存在**（那是我
+        //    写 Windows 分支时臆想的 API ⇒ 这段代码从没在 Linux 上编过，
+        //    是 Windows CI 第一次编到才发现）。
+        //    `glib::Pid` 是**公有元组** `Pid(pub GPid)` ⇒ 直接构造。
+        //    Windows 上这个 Pid 没人用（ghostty 后端不 watch_child）⇒
+        //    值是什么无所谓，但得能编。
         let res = self
             .con
             .spawn(cwd, argv, env)
-            .map(|pid| glib::Pid::from_raw(pid as i32));
+            .map(|pid| glib::Pid(pid as i32));
         cb(res.map_err(|e| e.to_string()));
     }
 
