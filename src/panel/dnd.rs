@@ -390,32 +390,57 @@ mod tests {
 
     #[test]
     fn 解析_uri列表() {
+        // ⚠️ **URI 必须用 GIO 生成，不能手搓 `file://…`**：
+        //    Windows 上手搓出来的是**非法 URI**（`file://C:\dir\a.txt`）
+        //    ⇒ 解析必然失败 ⇒ 这条用例**只有 Windows 上会挂**。
+        //    而路径要用**平台原生**的临时目录 ⇒ 两个平台上形状都对。
+        let dir = crate::util::testutil::temp_dir("pp_dnd_test", "uri");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let uri_a = crate::platform::localuri::to_file_uri(&a.to_string_lossy());
+        let uri_b = crate::platform::localuri::to_file_uri(&b.to_string_lossy());
+
         assert_eq!(
-            parse_uri_list("file:///tmp/a.txt\r\nfile:///tmp/b.txt\r\n"),
-            vec!["/tmp/a.txt".to_string(), "/tmp/b.txt".to_string()]
+            parse_uri_list(&format!("{uri_a}\r\n{uri_b}\r\n")),
+            vec![
+                a.to_string_lossy().into_owned(),
+                b.to_string_lossy().into_owned()
+            ]
         );
         // 注释行、空行要跳过；重复的只留一个
         assert_eq!(
-            parse_uri_list("# 这是注释\n\nfile:///tmp/a.txt\nfile:///tmp/a.txt\n"),
-            vec!["/tmp/a.txt".to_string()]
+            parse_uri_list(&format!("# 这是注释\n\n{uri_a}\n{uri_a}\n")),
+            vec![a.to_string_lossy().into_owned()]
         );
         // 百分号编码也要能解开
+        let spaced = dir.join("a b.txt");
+        let uri_sp = crate::platform::localuri::to_file_uri(&spaced.to_string_lossy());
         assert_eq!(
-            parse_uri_list("file:///tmp/a%20b.txt\n"),
-            vec!["/tmp/a b.txt".to_string()]
+            parse_uri_list(&format!("{uri_sp}\n")),
+            vec![spaced.to_string_lossy().into_owned()]
         );
     }
 
     #[test]
     fn 文件列表取本地路径() {
+        // ⚠️ 用**平台原生**的临时目录：Windows 上 `/tmp/a.txt` 并不是一个
+        //    有意义的本地绝对路径 ⇒ GIO 会把它当成「当前盘根下的
+        //    tmp\a.txt」⇒ 取回来的形状跟期望对不上（`\tmp\a.txt`
+        //    vs `/tmp/a.txt`）⇒ 这条用例只有 Windows 上会挂。
+        let dir = crate::util::testutil::temp_dir("pp_dnd_test", "filelist");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
         let files = vec![
-            gtk::gio::File::for_path("/tmp/a.txt"),
-            gtk::gio::File::for_path("/tmp/b.txt"),
+            gtk::gio::File::for_path(&a),
+            gtk::gio::File::for_path(&b),
         ];
         let fl = gdk::FileList::from_array(&files);
         assert_eq!(
             filelist_paths(&fl),
-            vec!["/tmp/a.txt".to_string(), "/tmp/b.txt".to_string()]
+            vec![
+                a.to_string_lossy().into_owned(),
+                b.to_string_lossy().into_owned()
+            ]
         );
     }
 

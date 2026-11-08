@@ -261,12 +261,24 @@ jobs:
           $env:USERPROFILE = $home
           cargo test --lib --locked 2>&1 | Tee-Object -FilePath test.log
           if ($LASTEXITCODE -ne 0) {
-            $names = (Select-String -Path test.log -Pattern "^failures:" -Context 0,40 |
-                      Select-Object -First 1 | Out-String)
-            if (-not $names) { $names = (Get-Content test.log -Tail 40 | Out-String) }
-            if ($names.Length -gt 8000) { $names = $names.Substring(0, 8000) }
+            # ⚠️ **失败清单要单独一条注解**：以前是把 test.log 的尾巴
+            #    （含 backtrace）塞进一条注解 ⇒ 8000 字符上限一截，
+            #    **只看得到前一两条失败**（第 7、9 轮都因此漏看了别的失败）。
+            #    ⇒ 第一条注解只放**全部失败用例名**（挤成一行 ⇒ 不会被截断），
+            #      第二条注解放关键信息（panic 位置 + 左右值）。
+            $failed = @(Select-String -Path test.log -Pattern '^---- (.+) stdout ----$' |
+                       ForEach-Object { $_.Matches[0].Groups[1].Value })
+            if (-not $failed) { $failed = @("(没抓到用例名，去 artifact 里看 test.log)") }
+            $names = ($failed -join ' | ')
             $names = $names -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
-            Write-Host "::error::Windows 单元测试失败。$names"
+            Write-Host "::error::Windows 单元测试失败，共 $($failed.Count) 条：$names"
+
+            $details = @(Select-String -Path test.log -Pattern 'panicked at|assertion|left:|right:|Err value' |
+                         Select-Object -First 60 | ForEach-Object { $_.Line.Trim() })
+            $d = ($details -join ' | ')
+            if ($d.Length -gt 6000) { $d = $d.Substring(0, 6000) }
+            $d = $d -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
+            Write-Host "::error::失败细节：$d"
             exit 1
           }
 

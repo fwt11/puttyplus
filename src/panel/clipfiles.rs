@@ -114,7 +114,13 @@ mod tests {
     fn 剪贴板_uri列表能解出路径() {
         let real = crate::util::testutil::temp_dir("pp_clip_test", "uri").join("clip_test2.txt");
         std::fs::write(&real, b"x").unwrap();
-        let text = format!("file://{}\n", real.to_string_lossy());
+        // ⚠️ **URI 用 GIO 生成，别手搓 `file://{路径}`**：
+        //    Windows 上手搓出来的是**非法 URI**（`file://C:\dir\a.txt`）
+        //    ⇒ 解析必然失败 ⇒ 这条用例**只有 Windows 上会挂**。
+        let text = format!(
+            "{}\n",
+            crate::platform::localuri::to_file_uri(&real.to_string_lossy())
+        );
         let paths = local_paths_from_text(&text);
         assert_eq!(paths, vec![real.to_string_lossy().into_owned()]);
         let _ = std::fs::remove_file(&real);
