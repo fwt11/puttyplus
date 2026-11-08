@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     在 Windows 上构建 PuTTYPlus（跨平台版）并跑命令行契约检查。
 
@@ -109,13 +109,24 @@ if (-not (Test-Path (Join-Path $bin "pkg-config.exe"))) {
 $env:Path = "$bin;$env:Path"
 $env:PKG_CONFIG_PATH = $pkgconfig
 $env:LIB = "$(Join-Path $GtkDir 'lib');$env:LIB"
-$env:INCLUDE = @(
+# ⚠️ GTK 的头文件目录必须**追加**到 INCLUDE 前面，不能整个替换：
+#    替换会把 MSVC/Windows SDK 的头文件路径弄丢 ⇒ ring 这类带 C 代码的
+#    crate 编不过（`fatal error C1083: Cannot open include file:
+#    'stddef.h'`）。CI 上没炸是因为 runner 上 INCLUDE 没设过、cc-rs
+#    自己探测 MSVC；真机先跑过 win_msvc_env.ps1 就会踩。**别覆盖别人
+#    设好的东西**——GTK 的排前面（同名头以 GTK 为准），原有的留在后面。
+$gtk_include = @(
     (Join-Path $GtkDir "include"),
     (Join-Path $GtkDir "include\cairo"),
     (Join-Path $GtkDir "include\glib-2.0"),
     (Join-Path $GtkDir "include\gobject-introspection-1.0"),
     (Join-Path $GtkDir "lib\glib-2.0\include")
-) -join ";"
+)
+$rest = @()
+if ($env:INCLUDE) {
+    $rest = @($env:INCLUDE -split ";" | Where-Object { $_ })
+}
+$env:INCLUDE = ($gtk_include + $rest) -join ";"
 
 # ---------------------------------------------------------------- 3) Zig
 if (-not $env:ZIG) {
