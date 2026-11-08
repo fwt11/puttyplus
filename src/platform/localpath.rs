@@ -53,6 +53,26 @@ pub fn is_abs(s: &str) -> bool {
     }
 }
 
+/// 看起来是不是「本地绝对路径」（**不分运行平台**）。
+///
+/// 与 [`is_abs`] 的区别：这里**连盘符/UNC 也认**。
+///
+/// 用途：有些判定是「这个字符串像不像一个绝对路径」（比如从
+/// `~/.ssh/config` 里读出来的 `IdentityFile`）⇒ 这种判定必须
+/// **在 Linux 上也能把 Windows 的形态测到**，不能跟着运行平台变。
+///
+/// ⚠️ 与 [`is_abs`] 的已知差异：以 `/` 开头在 Windows 上也算绝对
+///    （MSYS 风格路径在原生程序里其实是「当前盘根目录下的相对路径」，
+///    但把它当成绝对路径更安全 —— 宁可原样保留，别给它乱补目录）。
+pub fn is_abs_shape(s: &str) -> bool {
+    let b = s.as_bytes();
+    // 盘符绝对路径：C:\… 或 C:/…（C:x 这种「盘符相对」不算）
+    let drive = b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    // UNC：\\server\share；MSYS 风格：//server/share
+    let unc = s.starts_with("\\\\") || s.starts_with("//");
+    drive || unc || s.starts_with('/')
+}
+
 /// 上一级目录（本地语义）。
 ///
 /// 根目录（`/`、`C:\`）与没有上级的路径**原样返回**。
@@ -103,6 +123,20 @@ mod tests {
             // MSYS 风格的 `/tmp/x` 在 Windows 上不算绝对路径
             assert!(!is_abs("/tmp/x"));
         }
+    }
+
+    /// 形状判定**不看运行平台** ⇒ 两种平台上断言一样。
+    #[test]
+    fn 绝对路径的形状判定不分平台() {
+        assert!(is_abs_shape("/tmp/x"));
+        assert!(is_abs_shape("C:\\dir\\x"));
+        assert!(is_abs_shape("C:/dir/x"));
+        assert!(is_abs_shape("\\\\server\\share\\x"));
+        assert!(is_abs_shape("//server/share/x"));
+        // 盘符相对（C:x）不算绝对
+        assert!(!is_abs_shape("C:x.txt"));
+        assert!(!is_abs_shape("dir\\x"));
+        assert!(!is_abs_shape("x.txt"));
     }
 
     #[test]

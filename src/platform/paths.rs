@@ -55,8 +55,13 @@ mod tests {
     fn 波浪号展开规则与契约一致() {
         let home = Path::new("/tmp/测试home");
         // 开头的 ~ 与 ~/ 都展开
-        assert_eq!(expand_tilde("~/.ssh/id_rsa", home), "/tmp/测试home/.ssh/id_rsa");
-        assert_eq!(expand_tilde("~", home), "/tmp/测试home");
+        // ⚠️ 期望值用 `Path::join` 写：**分隔符是平台的**
+        //    （Windows 上是 `\`）⇒ 断言在两个平台上都对。
+        assert_eq!(
+            expand_tilde("~/.ssh/id_rsa", home),
+            home.join(".ssh/id_rsa").to_str().unwrap()
+        );
+        assert_eq!(expand_tilde("~", home), home.to_str().unwrap());
         // ~user/x 不展开
         assert_eq!(expand_tilde("~someone/x", home), "~someone/x");
         // 中间的 ~ 不展开

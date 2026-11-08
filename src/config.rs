@@ -10,23 +10,61 @@ use crate::util::atoi_like;
 use crate::trf;
 
 /// 把开头的 `~` / `~/` 展开为用户主目录。
+///
+/// ⚠️ **只展开开头**：`~user/x` 原样保留（PuTTY/C 版契约）。
+/// ⚠️ `home` 传进来是为了**可测**（测试里用临时目录，不碰用户真实 home）。
+///
+/// ⚠️ **分隔符用平台的**（Windows 是 `\`、Unix 是 `/`）：home 与其余部分
+///    之间用平台分隔符，其余部分**原样保留**
+///    （用户写 `~/.ssh/id_rsa`，里面的 `/` 就还是 `/`）。
+///
+///    ⚠️ 之前这里是纯 POSIX 拼接（`home + "/" + rest`）⇒ Windows 上得到
+///    `C:\Users\bob/.ssh/id_rsa`（两种分隔符混用），跟同一份代码里
+///    `Path::join` 的结果对不上 ⇒ Windows CI 的单测直接炸了。
 pub fn expand_tilde(p: &str, home: &Path) -> String {
+    expand_tilde_for(p, home, cfg!(windows))
+}
+
+/// 同 [`expand_tilde`]，但**显式指定是不是 Windows**。
+///
+/// ⚠️ 为什么要能指定：Windows 上的行为（分隔符是 `\`）必须**在 Linux 上
+///    也能测到**，否则改错了要等一轮 Windows CI 才知道。
+///    ⇒ 平台相关的部分用参数带进来，平台判断只留 [`expand_tilde`] 一处。
+fn expand_tilde_for(p: &str, home: &Path, windows: bool) -> String {
+    let sep = if windows { '\\' } else { '/' };
     if let Some(rest) = p.strip_prefix('~') {
         if rest.is_empty() || rest.starts_with('/') {
-            return join_posix(&home.to_string_lossy(), rest);
+            let rest = rest.trim_start_matches('/');
+            if rest.is_empty() {
+                return home.to_string_lossy().into_owned();
+            }
+            let dir = home.to_string_lossy();
+            let dir = dir.trim_end_matches(['/', '\\']);
+            if dir.is_empty() {
+                return rest.to_string();
+            }
+            return format!("{dir}{sep}{rest}");
         }
     }
     p.to_string()
 }
 
-fn join_posix(dir: &str, rest: &str) -> String {
-    let rest = rest.trim_start_matches('/');
-    if rest.is_empty() {
-        dir.trim_end_matches('/').to_string()
-    } else if dir.ends_with('/') {
-        format!("{dir}{rest}")
+/// `~/.ssh/config` 里的 `IdentityFile` 怎么变成一个路径。
+///
+/// - **绝对路径**（`/keys/id_rsa`、`C:\keys\id_rsa`）⇒ 原样用；
+/// - **相对路径**（`rel_key`）⇒ 按 OpenSSH 语义补到 `~/.ssh/` 下。
+///
+/// ⚠️ **绝对路径的判定必须分平台**：Windows 上 home 展开出来的是
+///    `C:\Users\bob\.ssh/id_rsa`（**盘符**开头，不是 `/` 开头）⇒
+///    只判 `starts_with('/')` 会把它当成相对路径再补一层 `~/.ssh/`。
+fn identity_path(kf: &str, home: &Path) -> String {
+    let absolute = crate::platform::localpath::is_abs_shape(kf);
+    if absolute {
+        kf.to_string()
     } else {
-        format!("{dir}/{rest}")
+        home.join(&format!(".ssh/{kf}"))
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -132,15 +170,8 @@ pub fn resolve_ssh_config_alias_with_home(o: &mut ConnOptions, home: &Path) {
             } else if kw == "user" && o.user.is_empty() {
                 o.user = val.to_string();
             } else if kw == "identityfile" && o.keyfile.is_none() {
-                let mut kf = expand_tilde(val, home);
-                if !kf.starts_with('/') {
-                    kf = [home.to_string_lossy().as_ref(), ".ssh", &kf]
-                        .iter()
-                        .collect::<PathBuf>()
-                        .to_string_lossy()
-                        .into_owned();
-                }
-                o.keyfile = Some(kf);
+                let kf = expand_tilde(val, home);
+                o.keyfile = Some(identity_path(&kf, home));
             }
         }
     }
@@ -466,6 +497,85 @@ mod tests {
         assert_eq!(session_filename_encode("a/b"), "a%2Fb");
         assert_eq!(session_filename_encode("100%"), "100%25");
         assert_eq!(session_filename_encode("a:b@h"), "a%3Ab%40h");
+    }
+
+    /// `~` 展开：**home 与其余部分之间用平台的分隔符**。
+    ///
+    /// ⚠️ 为什么要单独测：Windows 上 home 是 `C:\Users\bob`，展开 `~/.ssh/id_rsa`
+    ///    必须得到 `C:\Users\bob\.ssh/id_rsa`（边界是 `\`）⇒ 跟同一份代码里
+    ///    `Path::join` 的结果一致。之前这里是纯 POSIX 拼接
+    ///    （`home + "/" + rest`）⇒ Windows 上得到 `C:\Users\bob/.ssh/id_rsa`
+    ///    ⇒ Windows CI 的 `args::tests::tilde_expand_keyfile` 直接炸。
+    ///
+    /// ⚠️ 这里**把「是不是 Windows」当参数传进来**⇒ Linux 上也能把
+    ///    Windows 的行为测到，不用等 Windows CI 才发现自己写错了。
+    #[test]
+    fn 波浪号展开的分隔符随平台() {
+        let win_home = Path::new("C:\\Users\\bob");
+        // Windows：边界是反斜杠，其余部分原样保留
+        assert_eq!(
+            expand_tilde_for("~/.ssh/id_rsa", win_home, true),
+            "C:\\Users\\bob\\.ssh/id_rsa"
+        );
+        // 只有 ~ 没有后续 ⇒ 就是 home 本身
+        assert_eq!(expand_tilde_for("~", win_home, true), "C:\\Users\\bob");
+        // ~user/x 不展开（契约）
+        assert_eq!(expand_tilde_for("~someone/x", win_home, true), "~someone/x");
+        // 中间的 ~ 不展开
+        assert_eq!(expand_tilde_for("/a/~/b", win_home, true), "/a/~/b");
+        // Unix：边界是正斜杠
+        let nix_home = Path::new("/home/bob");
+        assert_eq!(
+            expand_tilde_for("~/.ssh/id_rsa", nix_home, false),
+            "/home/bob/.ssh/id_rsa"
+        );
+        // home 末尾自带分隔符 ⇒ 不重复加
+        assert_eq!(
+            expand_tilde_for("~/.ssh/id_rsa", Path::new("C:\\Users\\bob\\"), true),
+            "C:\\Users\\bob\\.ssh/id_rsa"
+        );
+        // 与 `Path::join` 的结果一致（Windows 上 `Path::join` 用的也是 `\`）
+        // ⚠️ 只能在 Windows 上断言：Linux 的 `Path::join` 用的是 `/`，
+        //    拿 Windows 形状的路径去比没有意义。
+        #[cfg(windows)]
+        assert_eq!(
+            expand_tilde_for("~/.ssh/id_rsa", win_home, true),
+            win_home.join(".ssh/id_rsa").to_str().unwrap()
+        );
+        // 真正的入口用的就是这个平台判断 ⇒ 别让它跟 `expand_tilde_for` 脱节
+        assert_eq!(
+            expand_tilde("~/.ssh/id_rsa", win_home),
+            expand_tilde_for("~/.ssh/id_rsa", win_home, cfg!(windows))
+        );
+    }
+
+    /// `IdentityFile` 的绝对/相对判定。
+    ///
+    /// ⚠️ Windows 上 home 展开出来是**盘符**开头（`C:\Users\bob\...`），
+    ///    只判 `starts_with('/')` 会把绝对路径误当成相对路径、再补一层
+    ///    `~/.ssh/` ⇒ 密钥路径整个错掉。
+    /// ⚠️ 这里用的是**不分平台**的形状判定 ⇒ Linux 上也能把 Windows 的
+    ///    盘符形态测到（不用等 Windows CI）。
+    #[test]
+    fn identity_路径的绝对与相对() {
+        let home = Path::new("/home/bob");
+        // 绝对路径原样用
+        assert_eq!(identity_path("/keys/id_rsa", home), "/keys/id_rsa");
+        // Windows 的盘符形态也是绝对路径 ⇒ 不能被补一层 ~/.ssh/
+        assert_eq!(
+            identity_path("C:\\Users\\bob\\.ssh/id_rsa", home),
+            "C:\\Users\\bob\\.ssh/id_rsa"
+        );
+        // UNC 也是
+        assert_eq!(
+            identity_path("\\\\server\\share\\id_rsa", home),
+            "\\\\server\\share\\id_rsa"
+        );
+        // 相对路径补到 ~/.ssh/ 下
+        assert_eq!(
+            identity_path("rel_key", home),
+            home.join(".ssh/rel_key").to_str().unwrap()
+        );
     }
 
     /// 文件名编码/解码互逆：PuTTY 用 %XX 编码会话名，中文名尤其容易坏
