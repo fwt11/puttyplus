@@ -2299,16 +2299,52 @@ fn toplevel(term: &TermView) -> Option<gtk::Window> {
 /// ⚠️ **认证失败要问密码**：没有凭据且像是认证失败 ⇒ 弹框问一次再重试
 /// （与 SFTP 面板同一套逻辑，见 `panel/mod.rs` 的 `Connected(Err)`）。
 fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
+    spawn_term_inproc_ex(inner, password, true)
+}
+
+/// 进程内 SSH 的终端会话（阶段 C8：带 `allow_cache` 的版本）。
+///
+/// `allow_cache` = 这次连接能不能用「本次运行内已经问过的密码」
+/// （`crate::pwcache`）。
+///
+/// ⚠️ **必须能把它关掉**：密码**可能已经变了**（用户改完密码，缓存里
+///   还是旧的）⇒ 拿旧密码一直重试就是死循环 ⇒ 用缓存重试过的那一次
+///   必须**不再用缓存**（要么弹框问新的，要么直接报错）。
+fn spawn_term_inproc_ex(
+    inner: &Rc<TermInner>,
+    password: Option<String>,
+    allow_cache: bool,
+) {
     let o = inner.opts.clone();
     // ⚠️ **主线程与后台线程都要用这些值** ⇒ 各自拿一份拷贝
     //    （ConnOptions 整体 clone 一次给后台线程；下面几个标量给主线程）。
     let o_bg = o.clone();
-    let pw_bg = password.clone();
     let user = o.user.clone();
     let host = o.host.clone();
     let port = o.port;
+    // ⚠️ **阶段 C8：同一条会话的密码只问一次**。
+    //    一个会话里 SFTP 面板 / 终端 / 分屏是**三条独立连接** ⇒ 谁先连上
+    //    谁问密码，后面的直接用缓存（用户 2026-11-08 报的就是"要分别输
+    //    密码，分屏还要再输一次"）。
+    //    优先级：**显式给的密码**（用户刚在框里输了 / 命令行给的）
+    //    > **缓存里的**（本次运行内问过的）。
+    let explicit_pw = password
+        .clone()
+        .or_else(|| o.password.as_ref().map(|p| p.to_string()))
+        .filter(|p| !p.is_empty());
+    let session_key = crate::pwcache::key(&host, port, &user);
+    let cached_pw = if explicit_pw.is_none() && allow_cache {
+        crate::pwcache::get(&session_key).map(|z| z.to_string())
+    } else {
+        None
+    };
+    // 用的到底是"显式密码"还是"缓存里的旧密码"？缓存里的可能已经过期
+    // ⇒ 认证失败时**要重新问**，不能拿旧的死磕。
+    let pw_from_cache = explicit_pw.is_none() && cached_pw.is_some();
+    let effective_pw = explicit_pw.clone().or(cached_pw);
+    let pw_bg = effective_pw.clone();
     // 「有没有凭据」在主线程判断（要不要弹密码框）
-    let have_pw = password.is_some() || o.password.as_ref().map_or(false, |p| !p.is_empty());
+    let have_pw = effective_pw.is_some();
     let have_key = o.keyfile.as_deref().map_or(false, |k| !k.is_empty());
     let cols = inner.term.column_count().max(1) as u16;
     let rows = inner.term.row_count().max(1) as u16;
@@ -2383,7 +2419,14 @@ fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
                 inner_cb.sync_banner_visibility();
                 // ⚠️ **没有凭据且像是认证失败 ⇒ 问一次密码再重试**
                 //    （与 SFTP 面板同一套逻辑）。
-                if !have_pw && !have_key && crate::i18n::looks_like_auth_failure(&msg) {
+                //
+                // ⚠️ **阶段 C8：缓存里的密码可能是旧的**（用户改过密码）
+                //    ⇒ 用它重试**只试一次**（`pw_from_cache`）⇒ 不行就
+                //    重新问人，别拿旧密码死磕。
+                let need_ask = !have_key
+                    && crate::i18n::looks_like_auth_failure(&msg)
+                    && (!have_pw || pw_from_cache);
+                if need_ask {
                     let detail = trf!(
                         "SSH 连接 {v0}@{v1}:{v2} 需要密码：\n{msg}",
                         v0 = user,
@@ -2393,14 +2436,30 @@ fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
                     );
                     let inner_retry = Rc::clone(&inner_cb);
                     let parent = toplevel(&inner_retry.term);
-                    crate::panel::dialogs::ask_password(
-                        parent.as_ref(),
-                        tr("SSH 密码"),
-                        &detail,
-                        move |pw| {
-                            if let Some(pw) = pw {
-                                spawn_term_inproc(&inner_retry, Some(pw));
+                    // ⚠️ **同一条会话只弹一个框**（SFTP 面板 / 终端 /
+                    //    分屏是三条连接，认证各自独立 ⇒ 会同时要密码）。
+                    let key = crate::pwcache::key(&host, port, &user);
+                    crate::pwcache::ask_once(
+                        key,
+                        move |pw| match pw {
+                            Some(pw) => {
+                                // ⚠️ **不再用缓存**（`allow_cache=false`）：
+                                //    这次问来的是最新的，缓存里那份可能已经
+                                //    过期了（用户改过密码）。
+                                spawn_term_inproc_ex(&inner_retry, Some(pw), false);
                             }
+                            None => {
+                                let parent = toplevel(&inner_retry.term);
+                                alert::<gtk::Window>(parent.as_ref(), &tr("未连接"));
+                            }
+                        },
+                        move |done| {
+                            crate::panel::dialogs::ask_password(
+                                parent.as_ref(),
+                                tr("SSH 密码"),
+                                &detail,
+                                move |pw| done(pw),
+                            );
                         },
                     );
                     return;
@@ -2420,7 +2479,6 @@ fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
         .name("pp-ssh-shell".into())
         .spawn(move || {
             let o = o_bg;
-            let password = pw_bg;
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -2433,10 +2491,8 @@ fn spawn_term_inproc(inner: &Rc<TermInner>, password: Option<String>) {
                 }
             };
             rt.block_on(async move {
-                let pw = password
-                    .as_deref()
-                    .filter(|p| !p.is_empty())
-                    .or_else(|| o.password.as_ref().map(|p| p.as_str()));
+                // ⚠️ **阶段 C8**：用**算好的那个**密码（显式 > 缓存）。
+                let pw = pw_bg.as_deref().filter(|p| !p.is_empty());
                 let (session, _rfwd) = match crate::backend::conn::connect_session(
                     &o.host,
                     o.port,

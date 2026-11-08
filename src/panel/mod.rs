@@ -1062,7 +1062,15 @@ fn submit_connect(st: &Rc<PanelState>) {
         .pw
         .borrow()
         .as_ref()
-        .map(|p| p.to_string());
+        .map(|p| p.to_string())
+        // ⚠️ **阶段 C8：本次运行内问过的密码直接拿来用**——
+        //    同一个会话里 SFTP / 终端 / 分屏是**三条独立连接**，
+        //    认证各自独立 ⇒ 终端那边问过了，这边就不用再问一遍
+        //    （用户 2026-11-08 报的就是"要分别输入密码"）。
+        .or_else(|| {
+            let key = crate::pwcache::key(&st.opts.host, st.opts.port, &st.opts.user);
+            crate::pwcache::get(&key).map(|z| z.to_string())
+        });
     let ka = st.keepalive_sec.get();
     let ao = st.auth_order.get();
     let _ = st.tx.borrow().as_ref().unwrap().send(WorkerCmd::Connect {
@@ -1228,22 +1236,49 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 .keyfile
                 .as_deref()
                 .map_or(false, |k| !k.is_empty());
-            if !have_pw && !have_key && crate::i18n::looks_like_auth_failure(&err) {
+            // ⚠️ **阶段 C8：本次运行内问过的密码**。
+            //    「这次连接用的密码是从缓存里拿的」⇒ 缓存里那份**可能已经
+            //    过期**（用户改过密码）⇒ 失败时要**重新问**，不能拿旧的
+            //    死磕（死磕 = 无限重连）。
+            let session_key =
+                crate::pwcache::key(&st.opts.host, st.opts.port, &st.opts.user);
+            let pw_from_cache =
+                !have_pw && crate::pwcache::get(&session_key).is_some();
+            let need_ask = !have_key
+                && crate::i18n::looks_like_auth_failure(&err)
+                && (!have_pw || pw_from_cache);
+            if need_ask {
                 // 无凭据且认证失败：询问密码后重试
                 let msg = trf!("SFTP 连接 {v0}@{v1}:{v2} 需要密码：\n{err}", err = err, v0 = st.opts.user, v1 = st.opts.host, v2 = st.opts.port);
                 let top = st.topwin();
                 let st = Rc::clone(st);
-                dialogs::ask_password(top.as_ref(), tr("SFTP 密码"), &msg, move |pw| {
-                    let st = st.clone();
-                    if let Some(pw) = pw {
-                        *st.pw.borrow_mut() = Some(Zeroizing::new(pw));
-                        set_remote_status(&st, State::Warn, tr("正在连接…"));
-                        submit_connect(&st);
-                    } else {
-                        // 状态栏只显示状态词；完整错误在弹窗与 tooltip 里
-                        set_remote_status(&st, State::Err, tr("未连接"));
-                    }
-                });
+                // ⚠️ **同一条会话只弹一个框**（SFTP / 终端 / 分屏三条
+                //    连接会同时要密码 ⇒ 只弹一个，答案共享）。
+                crate::pwcache::ask_once(
+                    session_key,
+                    move |pw| {
+                        let st = st.clone();
+                        match pw {
+                            Some(pw) => {
+                                *st.pw.borrow_mut() = Some(Zeroizing::new(pw));
+                                set_remote_status(&st, State::Warn, tr("正在连接…"));
+                                submit_connect(&st);
+                            }
+                            None => {
+                                // 状态栏只显示状态词；完整错误在弹窗与 tooltip 里
+                                set_remote_status(&st, State::Err, tr("未连接"));
+                            }
+                        }
+                    },
+                    move |done| {
+                        dialogs::ask_password(
+                            top.as_ref(),
+                            tr("SFTP 密码"),
+                            &msg,
+                            move |pw| done(pw),
+                        );
+                    },
+                );
                 return;
             }
             set_remote_status(&st, State::Err, tr("未连接"));

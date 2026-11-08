@@ -167,6 +167,16 @@ struct State {
 
 impl State {
     /// 把字节交给输出回调。
+    ///
+    /// ⚠️ **没有输出回调就写给子进程**（阶段 C8）。
+    ///
+    /// 以前这里只调 `self.out`（`set_output_handler` 设的回调）⇒ 而**生产
+    /// 代码路径从来没调过 `set_output_handler`**（只有冒烟 `ghostty_view_smoke`
+    /// 用它收集字节）⇒ 键盘敲出来的字节被**直接丢掉**：程序喂进去的字节
+    /// 能出字（那条路走 `feed_child` → `write_to_child`），真人敲键盘却没
+    /// 反应——Windows 上表现为「终端打不出字」。
+    ///
+    /// ⇒ 没有回调时**直接写给子进程**（进程内 SSH 通道 / 本地 pty）。
     fn emit(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -174,7 +184,9 @@ impl State {
         let cb = self.out.borrow().clone();
         if let Some(cb) = cb {
             cb(bytes);
+            return;
         }
+        self.write_to_child(bytes);
     }
 
     /// 重画（GTK 控件那边）。
@@ -1143,10 +1155,25 @@ fn handle_key(state: &Rc<State>, keyval: gdk::Key, mods: gdk::ModifierType) {
     // 文本：可打印字符才带（控制键不带）。
     // ⚠️ **别滤掉空格**：空格键也要打出 " "（VTE 就是这么做的）——
     // 滤掉的话编码器只能靠逻辑键推，有些布局下会推不出来。
+    //
+    // ⚠️ **Shift 单独按时把字母转成大写**（阶段 C8）：ghostty 的编码器
+    // **「传了 text 就以 text 为准」**（SHIFT 不会自己把 a 改成 A）⇒
+    // 后端给的 keyval 若没带 shift（大写化由后端决定，有的后端/输入法
+    // 给的是小写），大写就打不出来。
+    // ⚠️ **带 Ctrl/Alt 时不转**：Ctrl+Shift+C 是**控制键**，不是字母 C。
+    let shift_only = mods.contains(gdk::ModifierType::SHIFT_MASK)
+        && !mods.contains(gdk::ModifierType::CONTROL_MASK)
+        && !mods.contains(gdk::ModifierType::ALT_MASK);
     let text = keyval
         .to_unicode()
         .filter(|c| !c.is_control())
-        .map(|c| c.to_string());
+        .map(|c| {
+            if shift_only {
+                c.to_uppercase().to_string()
+            } else {
+                c.to_string()
+            }
+        });
     let bytes = state
         .term
         .borrow_mut()

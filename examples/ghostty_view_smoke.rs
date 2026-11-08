@@ -134,6 +134,54 @@ fn main() {
     );
     println!("[ok] 中文 commit ⇒ UTF-8 字节（{} 字节）", got.len());
 
+    /* ---------------- 4. 没有输出回调 ⇒ 字节必须写给子进程 ---------------- */
+    //
+    // ⚠️ 这一条钉的是**阶段 C8 的真 bug**：以前按键字节只走
+    // `set_output_handler` 设的回调，而**生产代码路径从来没设过它**
+    // （只有这个冒烟设了，用来收集字节）⇒ 真人敲键盘的字节被**直接
+    // 丢掉**：程序喂进去的字节能出字（那条路走 `feed_child`），真键盘
+    // 没反应——Windows 上表现为「终端打不出字」。
+    //
+    // ⇒ 这里**刻意不设**输出回调 ⇒ 字节必须走 pty ⇒ 回显出来。
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::{Arc, Mutex};
+
+        let pty = puttyplus::platform::pty::PtySession::new().expect("开 pty");
+        let echoed: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let echoed = echoed.clone();
+            pty.spawn_reader(Box::new(move |b| {
+                echoed.lock().unwrap().extend_from_slice(b);
+            }))
+            .expect("起 pty 读线程");
+        }
+        // 起一个会回显的子进程（cat）
+        let env: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+        let env_refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+        pty.spawn_async("/tmp", &["cat"], &env_refs, |r| match r {
+            Ok(_) => println!("[ok] cat 起来了"),
+            Err(e) => println!("[warn] cat 起不来：{e}"),
+        });
+        pump(600);
+
+        // 0. 先做一次**直写**的健全性检查（pty 回显这条路本身通不通）
+        pty.write(b"z").expect("直写 pty");
+        pump(500);
+
+        let view2 = GhosttyView::new();
+        view2.attach_pty(&pty);
+        // ⚠️ **没有** set_output_handler ⇒ 只能走 pty
+        view2.press_key(gdk::Key::a, gdk::ModifierType::empty());
+        pump(800);
+        let seen = echoed.lock().unwrap().clone();
+        assert!(
+            seen.contains(&b'a'),
+            "没有输出回调时，按键字节必须写给子进程（pty 回显里应有 'a'）：实际 {seen:?}"
+        );
+        println!("[ok] 没有输出回调 ⇒ 按键字节写给了子进程（pty 回显 {seen:?}）");
+    }
+
     /* ---------------- 截图（人工看画面） ---------------- */
     let _ = std::process::Command::new("/usr/bin/scrot")
         .arg("-o")

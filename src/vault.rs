@@ -122,6 +122,14 @@ static UNLOCKED: Mutex<Option<Zeroizing<[u8; KEY_LEN]>>> = Mutex::new(None);
 /// 固有代价——主密码在本进程内必然以某种形式驻留内存。
 static MASTER: Mutex<Option<Zeroizing<String>>> = Mutex::new(None);
 
+/// 解锁时**文件里那把 salt**（阶段 C8）。
+///
+/// 派生密钥是「主密码 + salt」的产物 ⇒ 密钥必须与 salt 配套。
+/// 写凭据时要用**文件里现有的 salt** 加密（换 salt = 密钥作废，
+/// 刚存的密码就再也读不回来了）⇒ 记住解锁时的 salt，才能判断
+/// 「缓存的密钥还能不能用」，不必每次重跑一遍 Argon2。
+static UNLOCKED_SALT: Mutex<Option<[u8; SALT_LEN]>> = Mutex::new(None);
+
 pub fn is_unlocked() -> bool {
     UNLOCKED.lock().map(|k| k.is_some()).unwrap_or(false)
 }
@@ -133,6 +141,9 @@ pub fn lock() {
     if let Ok(mut m) = MASTER.lock() {
         m.take();
     }
+    if let Ok(mut s) = UNLOCKED_SALT.lock() {
+        s.take();
+    }
 }
 
 /// 已解锁时借出派生密钥（调用方负责尽快结束借用）。
@@ -140,6 +151,16 @@ fn with_key<T>(f: impl FnOnce(&[u8]) -> T) -> Option<T> {
     let guard = UNLOCKED.lock().ok()?;
     let key = guard.as_ref()?;
     Some(f(key.as_slice()))
+}
+
+/// 借出当前解锁密钥的一份**拷贝**（抹零的那把用完就消失 ⇒ 要留着用
+/// 就得拷一份；拷贝品同样 Zeroizing）。
+fn current_key() -> Option<Zeroizing<[u8; KEY_LEN]>> {
+    with_key(|k| {
+        let mut arr = [0u8; KEY_LEN];
+        arr.copy_from_slice(k);
+        Zeroizing::new(arr)
+    })
 }
 
 fn master_pw() -> Option<Zeroizing<String>> {
@@ -288,6 +309,10 @@ fn unlock_at(p: &std::path::Path, master: &str) -> Result<(), String> {
         if let Ok(mut k) = UNLOCKED.lock() {
             *k = Some(Zeroizing::new([0u8; KEY_LEN]));
         }
+        // 明文库没有 salt ⇒ 缓存里也不留（阶段 C8）。
+        if let Ok(mut s) = UNLOCKED_SALT.lock() {
+            *s = None;
+        }
         return Ok(());
     }
     // 先真解一次：主密码错 / 文件被篡改要在写入内存状态**之前**发现
@@ -295,6 +320,15 @@ fn unlock_at(p: &std::path::Path, master: &str) -> Result<(), String> {
     let key = reload_key_at(p, master)?;
     if let Ok(mut k) = UNLOCKED.lock() {
         *k = Some(key);
+    }
+    // ⚠️ **记住这次用的 salt**（阶段 C8）：写凭据时要用**文件里现有的
+    // salt** 加密；缓存的密钥与它配套，就不用重跑 Argon2。
+    if let Ok(kf) = read_kf_at(p) {
+        if let Ok(salt) = decode_salt(&kf) {
+            if let Ok(mut s) = UNLOCKED_SALT.lock() {
+                *s = Some(salt);
+            }
+        }
     }
     Ok(())
 }
@@ -390,7 +424,12 @@ pub fn names() -> Vec<String> {
 
 /// 取一条凭据（未解锁 → None）。
 pub fn get(name: &str) -> Option<Zeroizing<String>> {
-    let all = read_all()?;
+    get_at(&path(), name)
+}
+
+/// 指定路径取一条凭据（**测试用**）。
+fn get_at(p: &std::path::Path, name: &str) -> Option<Zeroizing<String>> {
+    let all = read_all_at(p)?;
     all.into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, p)| p)
@@ -398,7 +437,12 @@ pub fn get(name: &str) -> Option<Zeroizing<String>> {
 
 /// 写一条凭据（未解锁 → false）。
 pub fn put(name: &str, password: &str) -> bool {
-    let mut all = match read_all() {
+    put_at(&path(), name, password)
+}
+
+/// 指定路径写一条凭据（**测试用**）。
+fn put_at(p: &std::path::Path, name: &str, password: &str) -> bool {
+    let mut all = match read_all_at(p) {
         Some(v) => v,
         None => return false,
     };
@@ -406,7 +450,7 @@ pub fn put(name: &str, password: &str) -> bool {
         Some(slot) => slot.1 = Zeroizing::new(password.to_string()),
         None => all.push((name.to_string(), Zeroizing::new(password.to_string()))),
     }
-    save_all(&all)
+    save_all_at(p, &all)
 }
 
 /// 删一条凭据。
@@ -474,7 +518,12 @@ fn decrypt_with_at(
 
 /// 已解锁状态下读全部凭据。
 fn read_all() -> Option<Vec<(String, Zeroizing<String>)>> {
-    let kf = read_kf().ok()?;
+    read_all_at(&path())
+}
+
+/// 指定路径读全部凭据（**测试用**）。
+fn read_all_at(p: &std::path::Path) -> Option<Vec<(String, Zeroizing<String>)>> {
+    let kf = read_kf_at(p).ok()?;
     // 明文模式：不需要密钥（但仍然要求"已解锁"——UI 上得先过一道）。
     if !kf_protected(&kf) {
         if !is_unlocked() {
@@ -495,13 +544,87 @@ fn read_all() -> Option<Vec<(String, Zeroizing<String>)>> {
     })?
 }
 
+/// 写全部凭据。
 fn save_all(creds: &[(String, Zeroizing<String>)]) -> bool {
-    // ⚠️ 主密码是**空串**（明文模式）也是一种"有"：`master_pw()` 返回
-    // `Some("")`，不是 `None`。`None` 只表示"没解锁"。
+    save_all_at(&path(), creds)
+}
+
+/// 写全部凭据（指定路径，**测试用**）。
+///
+/// ⚠️ **必须沿用文件里现有的 salt，不能整个库重建**（阶段 C8）。
+///
+/// 以前这里是 `create(master, creds)` ⇒ `create` 每次都**换一把新 salt**
+/// 并按新 salt 重新派生密钥加密 ⇒ 而进程里缓存的解锁密钥
+/// （`UNLOCKED`）是按**旧 salt** 派生的 ⇒ 写完这一下，缓存密钥与文件
+/// 里的 salt 就**对不上了** ⇒ 下次 `read_all()` 解不开（认证标签校验失败）
+/// ⇒ `get()` 返回 `None` ⇒ **刚存进去的密码读不回来**（界面上看着就是
+/// "凭据库明明启用了，密码却没保存"——用户 2026-11-08 在 Windows 上
+/// 报的就是这个）。
+///
+/// ⇒ 这里只做一件事：拿**现有的 salt** 重新加密负载，salt 不动 ⇒
+/// 存完立刻能读回来，下次解锁也能读回来。
+fn save_all_at(p: &std::path::Path, creds: &[(String, Zeroizing<String>)]) -> bool {
+    // ⚠️ 没解锁 ⇒ 不许写（主密码没记 ⇒ 说明压根没开过库）。
+    //
+    // 明文库（空主密码）算"有主密码"——`master_pw()` 返回 `Some("")`，
+    // 不是 `None`（见 `unlock_at` 的注释）。
     let Some(master) = master_pw() else {
         return false;
     };
-    create(&master, creds).is_ok()
+    let Ok(kf) = read_kf_at(p) else {
+        return false;
+    };
+    let payload = encode_creds(creds);
+    // 明文库：没有密钥，直接把负载写进去。
+    if !kf_protected(&kf) {
+        kf.set_string("vault", "data", &B64.encode(payload.as_bytes()));
+        return write_kf_at(p, &kf).is_ok();
+    }
+    let Ok(salt) = decode_salt(&kf) else {
+        return false;
+    };
+    // 密钥：优先用**解锁时缓存的那把**（快）——但它必须与**文件里现在
+    // 的 salt** 配套。缓存的 salt 记在 `UNLOCKED_SALT` 里 ⇒ 不用重新
+    // 跑一遍 Argon2（m=64MiB 那套参数不便宜）就能判断配不配套。
+    let cached_ok = {
+        let s = UNLOCKED_SALT.lock().ok();
+        s.map(|s| s.map(|v| v == salt).unwrap_or(false)).unwrap_or(false)
+    };
+    let key: Zeroizing<[u8; KEY_LEN]> = if cached_ok {
+        let Some(k) = current_key() else {
+            return false;
+        };
+        k
+    } else {
+        // 文件被别的进程换过（重置/重建）⇒ 缓存密钥作废 ⇒ 按**文件里的
+        // salt** 现算一把。写完把缓存换成这一把 ⇒ 后面读写都配套。
+        let Ok(k) = derive_key(&master, &salt) else {
+            return false;
+        };
+        k
+    };
+    let Ok(nonce_bytes) = random_bytes::<NONCE_LEN>() else {
+        return false;
+    };
+    let cipher = new_cipher(key.as_slice());
+    let Ok(ct) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), payload.as_bytes()) else {
+        return false;
+    };
+    let mut blob = Vec::with_capacity(NONCE_LEN + ct.len());
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&ct);
+    kf.set_string("vault", "data", &B64.encode(&blob));
+    if !write_kf_at(p, &kf).is_ok() {
+        return false;
+    }
+    // 缓存的解锁密钥/salt 换成刚用的这一套（保证下次读得回来）。
+    if let Ok(mut k) = UNLOCKED.lock() {
+        *k = Some(Zeroizing::new(*key));
+    }
+    if let Ok(mut s) = UNLOCKED_SALT.lock() {
+        *s = Some(salt);
+    }
+    true
 }
 
 /// 长度不对会 panic —— 调用方只有两个来源：派生出的 32 字节密钥，
@@ -736,7 +859,70 @@ mod tests {
         GLOBAL.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 重置 = 旧主密码失效 + 新主密码可用 + 旧凭据清空。
+    /// **写进去的凭据必须读得回来**（阶段 C8）。
+    ///
+    /// ⚠️ 这是用户 2026-11-08 在 Windows 上报的真 bug：勾了「记住密码」、
+    /// 凭据库也启用了，**密码却读不回来**（界面上看着就是"没保存"）。
+    ///
+    /// 根因：以前写凭据是 `create(master, creds)` —— `create` 每次都
+    /// **换一把新 salt**，而进程里缓存的解锁密钥是按**旧 salt** 派生的
+    /// ⇒ 写完这一下，密钥与文件对不上 ⇒ `read_all()` 解不开 ⇒
+    /// `get()` 返回 `None`。
+    ///
+    /// ⚠️ 只在**设了主密码**的库上犯（明文库没有密钥，不受影响）——
+    /// 所以"新建一个空库"那条路看起来是好的，一存就坏。
+    #[test]
+    fn 写进去的凭据读得回来() {
+        let _g = global_guard();
+        let (dir, p) = tmp_vault("put");
+        create_at(&p, "主密码", &[]).unwrap();
+        assert!(unlock_at(&p, "主密码").is_ok());
+
+        // 写第一条
+        assert!(put_at(&p, "堡垒机", "s3cret"), "写凭据必须成功");
+        // ⚠️ 关键：写完必须**立刻读得回来**
+        assert_eq!(
+            get_at(&p, "堡垒机").map(|s| s.to_string()).as_deref(),
+            Some("s3cret"),
+            "刚写进去的密码必须读得回来（曾经：写凭据会换 salt ⇒ 读不回来）"
+        );
+
+        // 再写一条：第一条不能丢
+        assert!(put_at(&p, "第二条", "pw2"), "第二条也要写得进去");
+        assert_eq!(get_at(&p, "堡垒机").map(|s| s.to_string()).as_deref(), Some("s3cret"));
+        assert_eq!(get_at(&p, "第二条").map(|s| s.to_string()).as_deref(), Some("pw2"));
+
+        // 模拟下次启动：重新解锁也读得回来
+        lock();
+        assert!(unlock_at(&p, "主密码").is_ok());
+        assert_eq!(
+            get_at(&p, "堡垒机").map(|s| s.to_string()).as_deref(),
+            Some("s3cret"),
+            "重新解锁后必须读得回来"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **明文库（不设主密码）**也得能存能取——它是堡垒机场景的默认选择。
+    #[test]
+    fn 明文库写进去的凭据也读得回来() {
+        let _g = global_guard();
+        let (dir, p) = tmp_vault("put_plain");
+        create_at(&p, "", &[]).unwrap();
+        assert!(unlock_at(&p, "").is_ok());
+
+        assert!(put_at(&p, "堡垒机", "s3cret"));
+        assert_eq!(get_at(&p, "堡垒机").map(|s| s.to_string()).as_deref(), Some("s3cret"));
+
+        lock();
+        assert!(unlock_at(&p, "").is_ok());
+        assert_eq!(get_at(&p, "堡垒机").map(|s| s.to_string()).as_deref(), Some("s3cret"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **重置凭据库** = 旧主密码失效 + 新主密码可用 + 旧凭据清空。
     ///
     /// 这是"忘了主密码"时唯一的出路，必须钉死三件事：
     /// 1. 旧主密码**真的**解不开了（否则等于没重置）；
