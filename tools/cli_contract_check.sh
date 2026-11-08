@@ -342,12 +342,23 @@ check() {
       echo "  [缺基准] $name"; fail=$((fail+1)); continue
     fi
     local actual; actual=$(BIN="$RBIN" run_case "$argv")
-    if [ "$actual" = "$(cat "$f")" ]; then
+    # ⚠️ **基准也要过一遍归一化**（主要是去 CR）：
+    #    Windows runner 的 git 会把 checkout 的**文本文件转成 CRLF**
+    #    （`core.autocrlf`）⇒ 基准文件里的每一行都多了 `\r`
+    #    ⇒ 而程序输出是 LF ⇒ **每一行都算不同** ⇒ 73 条全 DIFF
+    #    （第 10、11 轮 Windows CI 就是这个：diff 形态是「整块全变」
+    #    `1,12c1,12`，而两边内容其实一模一样，只差行尾）。
+    #    ⇒ 两边都归一化 ⇒ 行尾差异被抹平。
+    local golden; golden=$(normalize "$(cat "$f")")
+    if [ "$actual" = "$golden" ]; then
       pass=$((pass+1))
     else
       fail=$((fail+1))
       echo "  [DIFF] $name  ($argv)"
-      diff <(echo "$actual") "$f" | head -12
+      # ⚠️ **要看两侧**：原来 `head -12` 只剩「实际侧」
+      #    （diff 是 `<` 实际 / `>` 期望）⇒ 期望侧整段被砍掉
+      #    ⇒ 看到注解也看不出差在哪一行（第 10 轮就吃了这个亏）。
+      diff <(echo "$actual") <(echo "$golden") | head -30
     fi
   done
   echo "== 命令行契约: PASS=$pass FAIL=$fail =="

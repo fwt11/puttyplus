@@ -31,6 +31,20 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      # ⚠️ **关掉 Git 的换行转换**（要在 checkout **之前**）：
+      #    Windows runner 的 Git for Windows 默认 `core.autocrlf=true`
+      #    ⇒ checkout 时把文本文件转成 CRLF ⇒ **契约黄金基准**变成 CRLF
+      #    ⇒ 与程序输出的 LF **每行都不同** ⇒ 73 条全 DIFF
+      #    （第 10、11 轮 Windows CI 就是这个现象：diff 形态「整块全变」，
+      #      而两边内容其实一模一样，只差行尾）。
+      #    ⇒ 仓库里也有 `.gitattributes` 钉死 LF ⇒ 这是第二道保险。
+      - name: 关掉 Git 的换行转换
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          git config --global --list | Select-String -Pattern "autocrlf|core.eol"
+
       - uses: actions/checkout@v4
 
       # ⚠️ **MSVC 工具链要先激活**：Windows runner 默认 PATH 里**没有**

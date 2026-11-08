@@ -1,0 +1,27 @@
+# 换行符：这几类文件**必须**保持 LF（LF-only）
+#
+# ⚠️ **为什么**：Windows 上 git 默认 `core.autocrlf=true` ⇒ checkout 时
+#    会把文本文件转成 **CRLF**。⇒ 契约脚本（.sh）在 Git Bash 里会因
+#    行尾多一个 `\r` 而报错；**黄金基准（.txt）转成 CRLF 之后**，
+#    与程序输出的 LF **每一行都不同** ⇒ 73 条契约全 DIFF
+#    （第 10、11 轮 Windows CI 就是这个现象：diff 形态是「整块全变」）。
+# ⇒ 这里显式钉死 LF ⇒ 两个平台 checkout 出来的字节完全一致。
+#
+# ⚠️ **注意**：.gitattributes 只影响**checkout**，不影响已经 checkout
+#    出来的文件 ⇒ 已经在 Windows 上 checkout 过的人要重新拉一次
+#    （或 `git rm --cached -r . && git reset --hard`）。
+
+# shell 脚本：Git Bash 里必须是 LF（CRLF 会让 bash 报 `$'\r': command not found`）
+*.sh text eol=lf
+*.bash text eol=lf
+*.ps1 text eol=crlf
+
+# 命令行契约的黄金基准：必须与程序输出逐字节可比（LF）
+tools/cli_contract/golden/*.txt text eol=lf
+
+# 文本资源：统一 LF
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.rs text eol=lf
