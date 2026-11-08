@@ -172,6 +172,42 @@ fn main() {
     pump(300);
 
     let st = tabs.current_panel_state().expect("应有当前面板");
+
+    // ---- 名字列横向滚动条的 adjustment 必须是「真的建出来了」 ----
+    //
+    // ⚠️ **为什么单测兜不住**：GTK 的 `gtk_adjustment_new` 在参数不合法时
+    //    **返回 NULL**（不是只警告！）⇒ 之后所有操作都是对着 NULL 做 ⇒
+    //    满屏 GLib 警告 + 横向滚动条整个失效（用户 2026-11-08 在 Windows
+    //    上看到的就是这个：`gtk_adjustment_new: assertion 'lower +
+    //    page_size <= upper' failed`）。
+    //    而这条断言**只有新 GTK 才有**（Linux 上的旧 GTK 会「建出一个
+    //    参数不对的对象」）⇒ **断言得自己写**（下面这条）。
+    {
+        // ① **刚建出来的那个**：区间必须合法，**而且必须就是我们给的那一套**
+        //    ⇒ 一条断言同时抓两种坏：
+        //    - GTK 直接拒了（参数不合法 ⇒ 返回 NULL ⇒ 读什么都得 0）
+        //    - GTK 建了但参数不对（老 GTK 没有那条断言）
+        let fresh = puttyplus::panel::pane::name_adjustment();
+        assert!(
+            fresh.lower() + fresh.page_size() <= fresh.upper() + 0.001
+                && (fresh.upper() - 10.0).abs() < 0.001
+                && (fresh.page_size() - 10.0).abs() < 0.001,
+            "名字列的 adjustment 不是我们给的那一套（lower={} page_size={} upper={}）\n             ⇒ GTK 是不是把参数判成非法、直接返回了 NULL？",
+            fresh.lower(),
+            fresh.page_size(),
+            fresh.upper()
+        );
+        // ② **面板里那个**：已被 update_name_scroll 改成实际范围 ⇒ 区间仍要合法
+        let adj = st.pane(true).name_adj.clone();
+        assert!(
+            adj.lower() + adj.page_size() <= adj.upper() + 0.001,
+            "名字列的 adjustment 区间不合法：lower={} page_size={} upper={}",
+            adj.lower(),
+            adj.page_size(),
+            adj.upper()
+        );
+    }
+
     tabs.open_term_at(&st, target);
 
     // 新终端在 `term_pages` 里（子标签栏「+」新建的那些）

@@ -317,6 +317,24 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
     pane.view.queue_draw();
 }
 
+/// 名字列横向滚动条用的 adjustment。
+///
+/// ⚠️ **区间必须合法**：`lower + page_size <= upper`。
+///    GTK 的 `gtk_adjustment_new` 违反这条就**返回 NULL**（不是只警告！）⇒
+///    之后每一次 `set_page_size` / `set_upper` / `get_upper` 都是**对着
+///    NULL 做** ⇒ 满屏 GLib 警告，而且**横向滚动条根本不工作**。
+///
+///    ⚠️ **这是 GTK 版本相关的坑**：新 GTK（Windows 上的 4.24）才有这条
+///    断言 ⇒ 旧 GTK（Linux 上）会「建出来一个参数不对的对象」⇒ 症状
+///    轻得多（只是范围不对），**但一样是错的** ⇒ 所以断言要自己写
+///    （见 `examples/fileops_smoke.rs`），不能指望 GTK 帮我们拦。
+///
+///    ⇒ 这里给一个**合法但看起来是空的**区间（`upper == page_size`）；
+///    真正的范围由 [`update_name_scroll`] 按最长文件名算。
+pub fn name_adjustment() -> gtk::Adjustment {
+    gtk::Adjustment::new(0.0, 0.0, 10.0, 1.0, 10.0, 10.0)
+}
+
 /// 按当前名称列的可视宽度与最长文件名，算出名称列横向滚动范围。
 fn update_name_scroll(
     model: &gtk::ListStore,
@@ -335,10 +353,13 @@ fn update_name_scroll(
         }
         it = if model.iter_next(&mut i) { Some(i) } else { None };
     }
-    adj.set_page_size(avail as f64);
+    // ⚠️ **顺序有讲究**：GTK 要求任何时刻 `lower + page_size <= upper` ⇒
+    //    **先抬 upper、再设 page_size**（反过来会出现「page_size 比整个
+    //    区间还大」的瞬间，GTK 会断言）。
     // 没有溢出时 upper == page → 滚动条自动隐藏（多给 4px 会永远露出一截）
     let upper = if max_w > avail { max_w as f64 + 4.0 } else { avail as f64 };
     adj.set_upper(upper);
+    adj.set_page_size(avail as f64);
     adj.set_value(0.0);
 }
 
@@ -713,7 +734,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
 
     // 名称列专用横向滚动条：只滚文件名文字，其他列不动。
     // 放在列表下方（6px 薄条，不压住最后一行），没有超长文件名时隐藏。
-    let name_adj = gtk::Adjustment::new(0.0, 0.0, 0.0, 1.0, 10.0, 10.0);
+    let name_adj = name_adjustment();
     let name_bar = gtk::Scrollbar::new(gtk::Orientation::Horizontal, Some(&name_adj));
     name_bar.add_css_class("pp-name-scroll");
     name_bar.set_tooltip_text(Some(tr("拖动查看完整文件名")));
