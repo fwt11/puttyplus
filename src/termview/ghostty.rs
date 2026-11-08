@@ -91,6 +91,16 @@ impl GhosttyTerm {
         self.term.resize(cols.max(1), rows.max(1), 0, 0)
     }
 
+    /// 设置「DECSCUSR 0 重置后」的默认光标**是否闪烁**。
+    ///
+    /// 内核内置默认是**不闪** ⇒ 普通 shell 的光标是死的；我们的观感要跟
+    /// VTE / PuTTY 对齐（默认闪）⇒ 建视图时设 `Some(true)`。远端程序
+    /// 仍可用 DECSCUSR 随时改（2/4/6 稳态、1/3/5 闪），内核会把结果报在
+    /// `Cursor.blinking` 里，渲染层照办。
+    pub fn set_default_cursor_blink(&mut self, v: Option<bool>) {
+        let _ = self.term.set_default_cursor_blink(v);
+    }
+
     /* ---------------- 光标 ---------------- */
 
     /// 光标在**视口内**的行号（0 起）。

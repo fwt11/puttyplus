@@ -38,7 +38,7 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use super::ghostty::{GhosttyTerm, KeyAction, KeyCode, KeyMods};
-use ghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use ghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
 use ghostty_vt::style::RgbColor;
 
 /* ---------------- pangocairo（gtk4-rs 没绑） ---------------- */
@@ -157,6 +157,15 @@ struct State {
     preedit: RefCell<String>,
     /// 光标闪烁相位（true = 画实心光标）。
     cursor_on: Cell<bool>,
+    /// 内核说这个光标**该不该闪**（DECSCUSR / DECSET 12 的结果）。
+    ///
+    /// 画一帧时从快照里记下来，闪烁定时器读它——**定时器不去借内核**
+    /// （term/render 的 RefCell 在 draw 里被占着，别跟定时器抢）。
+    kernel_blink: Cell<bool>,
+    /// 闪烁定时器。输入到来（敲键 / 粘贴 / 拿回焦点）时**摘掉重排**：
+    /// 先实心一个相位，再从头开始闪。闭包只抓弱引用 ⇒ 控件销毁后
+    /// 定时器自己 Break 收摊，不成环。
+    blink_src: RefCell<Option<glib::SourceId>>,
     /// 挂着的 PTY（写给子进程用）。
     pty: RefCell<Option<crate::platform::pty::PtySession>>,
     /// 挂着的**进程内 SSH 通道**（阶段 C7：Windows 上不再 spawn ssh）。
@@ -206,6 +215,64 @@ impl State {
         if let Some(area) = self.area.upgrade() {
             area.queue_draw();
         }
+    }
+
+    /// 读系统的光标闪烁设置：`(是否闪, 半周期毫秒)`。
+    ///
+    /// 尊重 GTK 全局设置（`gtk-cursor-blink` / `gtk-cursor-blink-time`）
+    /// ——跟文本框一个脾气。半周期取 150ms 起步、600ms 兜底（设置读不到
+    /// 或被改得离谱时别让光标抽搐）。
+    fn blink_settings() -> (bool, u64) {
+        let Some(s) = gtk::Settings::default() else {
+            return (true, 600);
+        };
+        let on = s.property::<bool>("gtk-cursor-blink");
+        let phase = (s.property::<i32>("gtk-cursor-blink-time").max(60) as u64 / 2).max(150);
+        (on, phase)
+    }
+
+    /// 重启闪烁周期：**先实心一个相位**，再开始切换。
+    ///
+    /// 输入到来（敲键 / 粘贴）、拿回焦点时调——敲字时光标要**马上实心**
+    /// （半路灭着的样子像卡了），相位从头计。
+    ///
+    /// ⚠️ 定时器闭包只抓 `Weak<State>`：强引用会成「State → blink_src →
+    /// 闭包 → State」的环，面板永远回收不掉（AGENTS.md 红线）。控件销毁
+    /// 后 upgrade 失败 ⇒ 定时器自己 Break 收摊。
+    fn reset_blink(self: &Rc<Self>) {
+        self.cursor_on.set(true);
+        if let Some(src) = self.blink_src.borrow_mut().take() {
+            src.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let (enabled, phase_ms) = Self::blink_settings();
+        let src = glib::timeout_add_local(
+            std::time::Duration::from_millis(phase_ms),
+            move || {
+                let Some(st) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(area) = st.area.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                // 该闪的场合：系统开了闪烁 + 内核允许（DECSCUSR 没关）
+                // + 控件有焦点 + 可见。不满足 ⇒ 保持**实心**（稳态光标，
+                // VTE 对无焦点/被远端要求稳态时的做法）。
+                let should_blink = enabled
+                    && st.kernel_blink.get()
+                    && area.has_focus()
+                    && area.is_visible();
+                if should_blink {
+                    st.cursor_on.set(!st.cursor_on.get());
+                    st.queue_draw(&area);
+                } else if !st.cursor_on.get() {
+                    st.cursor_on.set(true);
+                    st.queue_draw(&area);
+                }
+                glib::ControlFlow::Continue
+            },
+        );
+        *self.blink_src.borrow_mut() = Some(src);
     }
 
     /// 设置视口大小（**内核与 pty 一起**）。
@@ -339,7 +406,11 @@ pub struct GhosttyView {
 impl GhosttyView {
     /// 新建一个 80×24 的自绘终端。
     pub fn new() -> Self {
-        let term = GhosttyTerm::new(80, 24).expect("建 ghostty 终端");
+        let mut term = GhosttyTerm::new(80, 24).expect("建 ghostty 终端");
+        // 光标默认**闪烁**（内核内置默认不闪 ⇒ 普通 shell 的光标是死的）。
+        // 观感对齐 VTE / PuTTY；远端仍可用 DECSCUSR 随时改（内核会报在
+        // Cursor.blinking 里，渲染层照办）。
+        term.set_default_cursor_blink(Some(true));
         let render = RenderState::new().expect("建渲染状态");
         let rows = RowIterator::new().expect("建行迭代器");
         let cells = CellIterator::new().expect("建单元格迭代器");
@@ -367,6 +438,8 @@ impl GhosttyView {
             im: RefCell::new(None),
             preedit: RefCell::new(String::new()),
             cursor_on: Cell::new(true),
+            kernel_blink: Cell::new(true),
+            blink_src: RefCell::new(None),
             pty: RefCell::new(None),
             shell: RefCell::new(None),
             title_cb: RefCell::new(Vec::new()),
@@ -382,6 +455,10 @@ impl GhosttyView {
             area.set_data(STATE_DATA_KEY, state.clone());
         }
 
+        // 闪烁定时器从建视图起就在跑：没焦点/内核说稳态时它把光标按在
+        // 实心上（不重画），有焦点才切换相位（见 `reset_blink`）。
+        // ⚠️ 要在 state 移进 view **之前**调（这里只抓它的弱引用）。
+        state.reset_blink();
         let view = GhosttyView { area, state };
         view.install_draw();
         view.install_keys();
@@ -552,6 +629,8 @@ impl GhosttyView {
     /// ⚠️ GTK4 的剪贴板**只能异步读** ⇒ 读完再写给子进程。
     pub fn paste_clipboard(&self) {
         let state = self.state.clone();
+        // 粘贴也是输入 ⇒ 光标实心、相位从头计（和敲键一致）。
+        state.reset_blink();
         crate::platform::clipboard::read_text(move |text| {
             if let Some(t) = text {
                 state.write_to_child(t.as_bytes());
@@ -849,9 +928,12 @@ impl GhosttyView {
         });
 
         let im2 = im.clone();
+        let state3 = self.state.clone();
         self.area.connect_has_focus_notify(move |area| {
             if area.has_focus() {
                 im2.focus_in();
+                // 拿回焦点 ⇒ 光标实心、相位从头计（灭着的样子像没反应）。
+                state3.reset_blink();
             } else {
                 im2.focus_out();
             }
@@ -1010,12 +1092,25 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
     // 6. 光标
     if let Ok(cursor) = snapshot.cursor() {
         if cursor.visible {
+            // 内核说该不该闪（DECSCUSR / DECSET 12 的结果）⇒ 记下来给
+            // 闪烁定时器用（定时器不借内核，见 `reset_blink`）。
+            state.kernel_blink.set(cursor.blinking);
             if let Some(vp) = cursor.viewport {
                 let x = vp.x as f64 * cell_w;
                 let y = vp.y as f64 * cell_h;
                 cursor_pos = Some((x, y));
                 if state.cursor_on.get() {
-                    draw_cursor(cr, x, y, cell_w, cell_h, &defaults.cursor, fg_default, bg_default);
+                    draw_cursor(
+                        cr,
+                        x,
+                        y,
+                        cell_w,
+                        cell_h,
+                        cursor.visual_style,
+                        &defaults.cursor,
+                        fg_default,
+                        bg_default,
+                    );
                 }
             }
         }
@@ -1128,13 +1223,17 @@ fn draw_text(
     unsafe { pangocairo::show_layout(cr, &layout) };
 }
 
-/// 画光标（块状）。
+/// 画光标（按内核给的形状：块 / 竖条 / 下划线——DECSCUSR 1~6）。
+///
+/// ⚠️ 闪烁的开关在 `cursor_on` 相位（`render_frame` 判过才走到这里）；
+/// 这里只管**形状**。
 fn draw_cursor(
     cr: &gtk::cairo::Context,
     x: f64,
     y: f64,
     cell_w: f64,
     cell_h: f64,
+    style: CursorVisualStyle,
     cursor_color: &Option<RgbColor>,
     fg_default: (f64, f64, f64),
     bg_default: (f64, f64, f64),
@@ -1145,8 +1244,37 @@ fn draw_cursor(
         b: (fg_default.2 * 255.0) as u8,
     });
     cr.set_source_rgb(color.r as f64 / 255.0, color.g as f64 / 255.0, color.b as f64 / 255.0);
-    cr.rectangle(x, y, cell_w, cell_h);
-    cr.fill();
+    // 条形/下划线的厚度：格子的 1/5，最少 2px（再细就看不清了）
+    let thickness = (cell_h / 5.0).max(2.0);
+    match style {
+        // 竖条：贴格子左缘（宽字符的格也只在起点画一条）
+        CursorVisualStyle::Bar => {
+            let w = (cell_w / 5.0).max(2.0);
+            cr.rectangle(x, y, w, cell_h);
+            cr.fill();
+        }
+        // 下划线：贴格子下缘
+        CursorVisualStyle::Underline => {
+            cr.rectangle(x, y + cell_h - thickness, cell_w, thickness);
+            cr.fill();
+        }
+        // 块状：实心一格
+        CursorVisualStyle::Block => {
+            cr.rectangle(x, y, cell_w, cell_h);
+            cr.fill();
+        }
+        // 空心块：描边不填充（内核在要求"稳态但空心"等场合给出）
+        CursorVisualStyle::BlockHollow => {
+            cr.set_line_width(1.0);
+            cr.rectangle(x + 0.5, y + 0.5, cell_w - 1.0, cell_h - 1.0);
+            cr.stroke();
+        }
+        // 内核以后加形状 ⇒ 按块画兜底（枚举标了 non_exhaustive）
+        _ => {
+            cr.rectangle(x, y, cell_w, cell_h);
+            cr.fill();
+        }
+    }
     let _ = bg_default;
 }
 
@@ -1172,6 +1300,8 @@ fn default_colors() -> ((f64, f64, f64), (f64, f64, f64)) {
 
 /// 输入法的 commit ⇒ 按 UTF-8 字节发出去。
 fn commit_text(state: &Rc<State>, text: &str) {
+    // 敲键了 ⇒ 光标马上实心、相位从头计（见 `reset_blink`）。
+    state.reset_blink();
     let bytes = state.term.borrow_mut().encode_key(
         KeyAction::Press,
         KeyCode::Unidentified,
@@ -1183,6 +1313,8 @@ fn commit_text(state: &Rc<State>, text: &str) {
 
 /// 一个按键 ⇒ 该发给终端什么。
 fn handle_key(state: &Rc<State>, keyval: gdk::Key, mods: gdk::ModifierType) {
+    // 敲键了 ⇒ 光标马上实心、相位从头计（见 `reset_blink`）。
+    state.reset_blink();
     let Some(code) = keycode_from_gdk(keyval) else {
         return;
     };

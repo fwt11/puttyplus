@@ -1,6 +1,6 @@
 //! ghostty 自绘终端控件冒烟（跨平台版 阶段 C3）。
 //!
-//! 验四件事（都是**真路径**，不是另写一份模拟）：
+//! 验五件事（都是**真路径**，不是另写一份模拟）：
 //!
 //! 1. **屏幕内容对**：喂一段 ANSI，网格里的字符就该是那样；
 //! 2. **按键发出的字节对**：回车 / Ctrl+C / 方向键；
@@ -8,7 +8,9 @@
 //! 4. **画出来的像素对**：文字行必须落在网格行里、光标和文字要对齐
 //!    （2026-11-08 用户报「光标跑到提示符上一行」——网格是对的，
 //!    文字被画低了一行 ⇒ 网格断言抓不住，渲到内存 surface 上数像素
-//!    才抓得住。字形长什么样由字体决定，那个才真的只能人眼比）。
+//!    才抓得住。字形长什么样由字体决定，那个才真的只能人眼比）；
+//! 5. **光标会闪**（2026-11-09 用户报「光标是静止的，希望能闪烁」）：
+//!    聚焦后实心/灭两个相位轮流出现，敲键立刻回到实心。
 //!
 //! 另外截一张图（`/tmp/pp_ghostty_view.png`）供人工看画面。
 //!
@@ -17,9 +19,12 @@
 //! cargo run --example ghostty_view_smoke --features ghostty
 //! ```
 //! ⚠️ 需要 **Zig 0.17**（编译 libghostty-vt 用）。
+//! ⚠️ 第 5 节要**真桌面**（焦点）：Windows 桌面直接跑；Linux 无头环境
+//!    得有窗口管理器（裸 xvfb 不行，xvfb + 轻量 WM 才行）。
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk::gdk;
 use gtk::glib;
@@ -330,6 +335,55 @@ fn main() {
         );
     }
 
+    /* ---------------- 6. 光标会闪（默认开启） ---------------- */
+    //
+    // ⚠️ 这一条钉的是**2026-11-09 的真反馈**：光标常亮不闪。内核内置
+    // 默认是「不闪」（`libghostty` 的观感）⇒ 建**内核**时
+    // `set_default_cursor_blink(Some(true))`；渲染层加**相位定时器**：
+    // 半周期切换一次，敲键/拿回焦点时重置为实心。
+    //
+    // 闪烁只在**有焦点**时发生 ⇒ 视图塞进窗口、present、抢焦点。
+    // 判定用真渲染：实心相位上「连续 6 行 run≥6」的实心块在，
+    // 灭相位上它没了。窗口宽裕（±1 个相位都不敏感），时序靠
+    // **轮询到状态出现为止**，不做脆弱的「睡固定毫秒」。
+    {
+        let view2 = GhosttyView::new();
+        view2.feed(b"ill\r\nill\r\nill");
+        let win = gtk::Window::new();
+        win.set_default_size(320, 140);
+        win.set_child(Some(view2.widget()));
+        win.present();
+        pump(300);
+        view2.area().grab_focus();
+        pump(200);
+
+        // ① 刚抢到焦点 ⇒ 实心（相位从头计）
+        assert!(
+            cursor_block_present(&view2, 320, 140),
+            "聚焦后光标应该先实心"
+        );
+
+        // ② 泵着等它灭（两个相位内必灭；「不闪」的话永远等不到 ⇒ 失败）
+        assert!(
+            wait_cursor_state(&view2, 320, 140, false, 2200),
+            "光标该在两个相位内灭一次（不闪 = 一直实心）"
+        );
+
+        // ③ 再等它亮回来
+        assert!(
+            wait_cursor_state(&view2, 320, 140, true, 2200),
+            "光标该在下一个相位亮回来"
+        );
+
+        // ④ 敲键 ⇒ 相位重置，立刻回实心
+        view2.press_key(gdk::Key::a, gdk::ModifierType::empty());
+        assert!(
+            cursor_block_present(&view2, 320, 140),
+            "敲键后光标必须立刻实心（相位重置）"
+        );
+        println!("[ok] 光标闪烁：实心/灭两个相位轮流出现，敲键重置为实心");
+    }
+
     /* ---------------- 截图（人工看画面） ---------------- */
     let _ = std::process::Command::new("/usr/bin/scrot")
         .arg("-o")
@@ -338,4 +392,68 @@ fn main() {
     println!("截图：/tmp/pp_ghostty_view.png");
 
     println!("\nghostty_view_smoke: 全部通过");
+}
+
+/* ---------------- 闪烁判定（第 6 节用） ---------------- */
+
+/// 渲一帧，判断画面上有没有**实心光标块**（连续 6 行、每行最长
+/// 非背景横向 run ≥ 6 —— 文字笔画撑不满一格宽，实心块撑得满）。
+fn cursor_block_present(view: &GhosttyView, w: i32, h: i32) -> bool {
+    let mut surf = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h)
+        .expect("建内存 surface");
+    {
+        let cr = gtk::cairo::Context::new(&surf).expect("建 cairo 上下文");
+        view.render_to(&cr, w as f64, h as f64);
+    }
+    surf.flush();
+    let stride = surf.stride() as usize;
+    let data = surf.data().expect("读 surface 像素");
+
+    // 背景色取右下角采样（那里必然没画东西）⇒ 不依赖主题色
+    let px = |x: usize, y: usize| -> (i32, i32, i32) {
+        let o = y * stride + x * 4;
+        (data[o + 2] as i32, data[o + 1] as i32, data[o] as i32)
+    };
+    let (bgr, bgg, bgb) = px((w - 1) as usize, (h - 1) as usize);
+
+    let mut consecutive = 0usize;
+    for y in 0..h as usize {
+        let mut run = 0usize;
+        let mut best = 0usize;
+        for x in 0..w as usize {
+            let (r, g, b) = px(x, y);
+            let bg = (r - bgr).abs() < 14 && (g - bgg).abs() < 14 && (b - bgb).abs() < 14;
+            if bg {
+                run = 0;
+            } else {
+                run += 1;
+                best = best.max(run);
+            }
+        }
+        if best >= 6 {
+            consecutive += 1;
+        } else {
+            consecutive = 0;
+        }
+        if consecutive >= 6 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 泵主循环直到画面上光标达到想要的状态（实心 `true` / 灭 `false`）
+/// 或超时——闪烁是**相位轮换**，判定用轮询而不是「睡固定毫秒」，
+/// 相位边界飘一点也不影响。
+fn wait_cursor_state(view: &GhosttyView, w: i32, h: i32, want: bool, timeout_ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if cursor_block_present(view, w, h) == want {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        pump(40);
+    }
 }
