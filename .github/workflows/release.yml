@@ -167,16 +167,31 @@ jobs:
             dist/${{ matrix.tarname }}
           if-no-files-found: error
 
-  # ---- 两个架构都编完，再统一建 Release ----
+  # ---- Windows 版也编一份，资产一起挂进 Release ----
+  #
+  # ⚠️ **为什么以前 Release 里没有 Windows 版**：`release.yml` 原来**只有
+  #    Linux 的两个架构**（amd64 / arm64）；Windows 版的构建在
+  #    `ci-windows.yml` 里，但它只 `upload-artifact` ⇒ 只是 **CI 的构建
+  #    产物**（下载页会过期），**不是 Release 资产** ⇒ 用户在 Release 页面
+  #    下不到 Windows 版。
+  #
+  # ⇒ 这里**复用** `ci-windows.yml`（它已经会跑单测 + 73 条契约，顺带当
+  #    一道发布前的闸门）⇒ 它的产物 artifact 叫 `pkg-windows` ⇒ 下面
+  #    `pattern: pkg-*` 正好收拢得到。
+  build_windows:
+    name: 构建 Windows 版
+    uses: ./.github/workflows/ci-windows.yml
+
+  # ---- 三个架构都编完，再统一建 Release ----
   publish:
     name: 建 Release 并上传资产
-    needs: build
+    needs: [build, build_windows]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: 收拢两个架构的产物
+      - name: 收拢各架构的产物
         uses: actions/download-artifact@v4
         with:
           pattern: pkg-*
@@ -217,6 +232,12 @@ jobs:
           for t in dist/puttyplus-linux-x86_64.tar.gz dist/puttyplus-linux-aarch64.tar.gz; do
             [ -f "$t" ] || { echo "::error::缺少 $t"; exit 1; }
           done
+          # ⚠️ **Windows 的 zip 也要在**：它跟两个 deb 一样是「用户直接
+          #    下载就能用」的东西 ⇒ 少它 ⇒ Release 里就没有 Windows 版
+          #    （这正是 0.5.0 发布时用户问「为什么没有 windows 版的」）。
+          for t in dist/puttyplus-windows-x86_64.zip; do
+            [ -f "$t" ] || { echo "::error::缺少 $t"; exit 1; }
+          done
 
       - name: 生成发布说明（版本号从 tag 注入）
         # ⚠️ 正文**不再硬编码**在 workflow 里：按版本放在仓库的
@@ -235,11 +256,11 @@ jobs:
           sed "s/{{VERSION}}/${version}/g" "$notes" > "$GITHUB_WORKSPACE/dist/notes.md"
           cat "$GITHUB_WORKSPACE/dist/notes.md"
 
-      - name: 算校验和（覆盖两个架构的全部资产）
+      - name: 算校验和（覆盖各架构的全部资产）
         run: |
           set -eux
           cd dist
-          sha256sum puttyplus_*.deb puttyplus-linux-*.tar.gz > SHA256SUMS
+          sha256sum puttyplus_*.deb puttyplus-linux-*.tar.gz puttyplus-windows-*.zip > SHA256SUMS
           cat SHA256SUMS
 
       - name: 建 Release 并上传资产
@@ -300,6 +321,21 @@ jobs:
           if [ "$code" = "200" ]; then
             rid=$(jq -r '.id' /tmp/api.out)
             echo "Release 已存在，id=$rid"
+            # ⚠️ **顺手把正文同步一遍**：发布说明改了（比如补上「Windows 版
+            #    的 zip」这一行）⇒ 重跑这个 workflow 时，Release 页面上的
+            #    正文也跟着更新，不用手工改。
+            #    （之前只在**新建** Release 时写正文 ⇒ 已存在的 Release 永远
+            #    是第一次发布时的样子。）
+            body=$(jq -n --arg tag "$TAG" --arg name "PuTTYPlus $TAG" \
+                   --rawfile body notes.md \
+                   '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:false}')
+            code=$(api PATCH "https://api.github.com/repos/$REPO/releases/$rid" "$body")
+            echo "同步 Release 正文：$code"
+            if [ "$code" != "200" ]; then
+              dump
+              echo "::error::同步 Release 正文失败（$code）"
+              exit 1
+            fi
           else
             body=$(jq -n --arg tag "$TAG" --arg name "PuTTYPlus $TAG" \
                    --rawfile body notes.md \
@@ -321,7 +357,7 @@ jobs:
             upload_url="https://uploads.github.com/repos/$REPO/releases/$rid/assets"
           }
           upload_url=$(echo "$upload_url" | sed 's/{[^}]*}//')
-          for f in puttyplus_*.deb puttyplus-linux-*.tar.gz SHA256SUMS; do
+          for f in puttyplus_*.deb puttyplus-linux-*.tar.gz puttyplus-windows-*.zip SHA256SUMS; do
             [ -f "$f" ] || continue
             old_id=$(api GET "https://api.github.com/repos/$REPO/releases/$rid/assets" \
                      >/dev/null 2>&1; jq -r --arg n "$f" '.[] | select(.name==$n) | .id' /tmp/api.out 2>/dev/null | head -1)

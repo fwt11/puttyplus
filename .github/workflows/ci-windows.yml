@@ -15,9 +15,19 @@ on:
   pull_request:
     branches: [feature/cross-platform, main]
   workflow_dispatch:
+  # ⚠️ **可被复用**（阶段 0.5.0 收尾）：`release.yml` 用它来出 Windows 版
+  #    的发布资产（`puttyplus-windows-x86_64.zip`）——否则 Release 里只有
+  #    Linux 的 deb/tar.gz，Windows 版**下不到**（只有 CI 的 artifact，
+  #    过期就没了）。
+  workflow_call:
 
 concurrency:
-  group: ci-win-${{ github.ref }}
+  # ⚠️ **组名里要带 `github.workflow`**：这个 workflow 现在**也会被
+  #    `release.yml` 调用**（workflow_call）⇒ 复用时 `github.ref` 是**调用方**
+  #    的 ref ⇒ 「CI 触发的」与「Release 触发的」会撞进同一个组 ⇒
+  #    **一边把另一边取消掉**（发版跑到一半被 CI 的 push 取消）。
+  #    ⇒ 组名加上 workflow 名：CI 是「CI · Windows」，发版是「Release」。
+  group: ci-win-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -397,9 +407,14 @@ jobs:
             ForEach-Object { Write-Host "打包文件数：$($_.Count)" }
 
       - name: 上传可执行文件
+        # ⚠️ **artifact 名用 `pkg-windows`**：`release.yml` 的 publish job
+        #    用 `pattern: pkg-*` 收拢产物（Linux 那边叫 `pkg-amd64` /
+        #    `pkg-arm64`）⇒ 这里也得叫 `pkg-*` ⇒ Windows 的 zip 才会进
+        #    Release 的资产列表。
+        #    （zip **文件**名仍是 `puttyplus-windows-x86_64.zip`。）
         uses: actions/upload-artifact@v4
         with:
-          name: puttyplus-windows-x86_64
+          name: pkg-windows
           path: puttyplus-windows-x86_64.zip
           if-no-files-found: error
 
