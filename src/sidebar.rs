@@ -317,7 +317,12 @@ impl Sidebar {
                 let parent = btn
                     .ancestor(gtk::Window::static_type())
                     .and_downcast::<gtk::Window>();
-                crate::vaultui::open_manager_vault(parent.as_ref(), crate::connmgr::load_all());
+                // ⚠️ **只解锁，不开凭据库管理器**（用户 2026-11-09）：
+                // 「点了这个按钮，输入密码，如果正确了还会跳出一个对话框，
+                // 显示所有凭据库里面有什么东西，这个没有必要。菜单里有个
+                // 『凭据库』，那里显示就好了。」⇒ 徽标解锁完就变成
+                // 「已解锁」的图标；管理器在菜单「凭据库…」里。
+                crate::vaultui::badge_clicked(parent.as_ref(), crate::connmgr::load_all());
             });
         }
         head.append(&b_vault);

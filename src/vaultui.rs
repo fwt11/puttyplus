@@ -360,13 +360,15 @@ fn reset_flow(parent: Option<&gtk::Window>) {
     );
 }
 
-/// 连接管理器里的凭据库入口。
+/// 连接管理器里的凭据库入口（菜单里的「凭据库…」走这条）。
+///
+/// ⚠️ 这里**会**开凭据库管理器窗口（列库里有哪些凭据 + 改主密码/重置/锁定）。
 pub fn open_manager_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
     // 父窗口要活过回调（对话框是异步的），所以闭包得自己持有一份 clone，
     // 不能借用函数参数里的引用。
     let parent = parent.cloned();
     if !vault::exists() {
-        setup_vault(parent.as_ref(), entries);
+        setup_vault(parent.as_ref(), entries, true);
         return;
     }
     // ⚠️ **明文（不加密）库没有主密码要输**：直接进管理器。
@@ -379,14 +381,93 @@ pub fn open_manager_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>)
         return;
     }
     if !vault::is_unlocked() {
-        unlock_vault(parent.as_ref());
+        unlock_vault(parent.as_ref(), true);
         return;
     }
     open_vault_window(parent.as_ref());
 }
 
+/// 侧栏那个**凭据库徽标**被点时的行为。
+///
+/// ⚠️ **只解锁，不开凭据库管理器**（用户 2026-11-09）：
+/// 「点了这个按钮，输入密码，如果正确了还会跳出一个对话框，显示所有凭据库
+/// 里面有什么东西，这个没有必要。菜单里有个『凭据库』，那里显示就好了。
+/// 这里的这个按钮点了，输密码，然后就显示成已经解锁的样子就行了。」
+///
+/// ⇒ 解锁成功后**只剩图标变成「已解锁」**（状态钩子自动刷），
+/// **不弹任何窗口**。要管理器 ⇒ 走菜单「凭据库…」。
+pub fn badge_clicked(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
+    let parent = parent.cloned();
+    match badge_action() {
+        BadgeAction::Setup => {
+            // ⚠️ 第一次建库：还是要问主密码（这一步没法省）⇒
+            // 建完**只更新图标**，不开管理器。
+            setup_vault(parent.as_ref(), entries, false);
+        }
+        BadgeAction::Unlock => {
+            if vault::is_protected() {
+                // 有主密码 ⇒ 问一次。
+                unlock_vault(parent.as_ref(), false);
+            } else {
+                // ⚠️ **明文（不加密）库没有主密码要输**：直接当已解锁。
+                // 否则这里会弹一个"请输入主密码"的框——而这个库**压根没有
+                // 主密码**，用户输什么都不对（只剩「重置」那条路，等于白丢
+                // 凭据）。
+                let _ = vault::unlock("");
+                notify_state_changed();
+            }
+        }
+        BadgeAction::Nothing => {}
+    }
+}
+
+/// 侧栏徽标被点 ⇒ 该走哪条路（**纯判定**，好测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeAction {
+    /// 还没建库 ⇒ 走「设置主密码」。
+    Setup,
+    /// 库在但没解锁 ⇒ 解锁（明文库直接算解锁）。
+    Unlock,
+    /// 已经解锁 ⇒ 什么都不做。
+    Nothing,
+}
+
+/// 徽标点击的判定表（**纯逻辑**，单测直接跑，不碰 GTK）。
+pub fn badge_action() -> BadgeAction {
+    badge_action_of(vault::exists(), vault::is_protected(), vault::is_unlocked())
+}
+
+/// 判定表本体（**纯函数**：`存在 / 有主密码 / 已解锁` ⇒ 干什么）。
+///
+/// ⚠️ 拆成纯函数是为了能测：真去动凭据库文件会跟进程级的解锁状态搅
+/// 在一起（`UNLOCKED` 是全局的），单测里互相干扰。
+///
+/// ⚠️ **顺序要紧**：先看「已解锁」，再看「有没有主密码」。
+/// `vault::is_unlocked()` 指的是**本进程里有没有派生密钥**——明文库
+/// （没有主密码）在进程刚起来时**也是未解锁**（`state()` 单独把它报成
+/// `Plain`）⇒ 那时点徽标得**先解锁**（不用问密码）才拿得到里面存的密码。
+pub fn badge_action_of(exists: bool, protected: bool, unlocked: bool) -> BadgeAction {
+    if !exists {
+        return BadgeAction::Setup;
+    }
+    if unlocked {
+        // 已经能用了 ⇒ 什么都不做（别再弹一遍密码框）。
+        return BadgeAction::Nothing;
+    }
+    if !protected {
+        // 明文库没有主密码 ⇒ 直接解锁（内部不问密码）。
+        return BadgeAction::Unlock;
+    }
+    // 有主密码且锁着 ⇒ 问一次主密码。
+    BadgeAction::Unlock
+}
+
 /// 第一次建库：设主密码（**可以不设**）+ 把 ini 里的明文密码收进来。
-fn setup_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
+///
+/// ⚠️ `open_manager`：建完要不要**开凭据库管理器**。
+/// 菜单那条路要（用户就是去看库里有什么的）；侧栏徽标那条**不要**
+/// （用户 2026-11-09：徽标只管解锁，管理器在菜单里）。
+fn setup_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>, open_manager: bool) {
     let pwin = parent.cloned();
     ask_master(
         parent,
@@ -426,13 +507,19 @@ fn setup_vault(parent: Option<&gtk::Window>, entries: Vec<ConnEntry>) {
                 mode,
                 &trf!("{v0} 条密码已从 connections.ini 迁入存储，ini 中的明文已删除。\n\n{v1}", v0 = creds.len(), v1 = status(&entries)),
             );
-            open_vault_window(pwin.as_ref());
+            // ⚠️ **只在该开管理器的时候开**（菜单那条路要；侧栏徽标不要）。
+            if open_manager {
+                open_vault_window(pwin.as_ref());
+            }
         },
     );
 }
 
 /// 解锁（失败不关门，框里有「忘记主密码？」的出路）。
-fn unlock_vault(parent: Option<&gtk::Window>) {
+///
+/// ⚠️ `open_manager`：解锁后要不要**开凭据库管理器**。
+/// 菜单那条路要；侧栏徽标**不要**（用户 2026-11-09：徽标只管解锁）。
+fn unlock_vault(parent: Option<&gtk::Window>, open_manager: bool) {
     let pwin = parent.cloned();
     ask_master(
         parent,
@@ -447,7 +534,11 @@ fn unlock_vault(parent: Option<&gtk::Window>) {
             let Some(pw) = pw else { return };
             let pwin = pwin.clone();
             let _ = pw;
-            open_vault_window(pwin.as_ref());
+            // ⚠️ 解锁本身是 `ask_master` 干的（它当场验密码，失败不关门）；
+            // 这里只决定**要不要开管理器**。
+            if open_manager {
+                open_vault_window(pwin.as_ref());
+            }
         },
     );
 }
@@ -796,7 +887,9 @@ pub fn unlock_button(parent: Option<&gtk::Window>) -> gtk::Button {
         tr("输入主密码解锁本机凭据库；解锁后就能勾上「存进凭据库」，密码会加密保存。"),
     ));
     let p = parent.cloned();
-    b.connect_clicked(move |_| unlock_vault(p.as_ref()));
+    // ⚠️ 解锁完**不开凭据库管理器**（用户 2026-11-09：这里只管解锁，
+    // 管理器在菜单「凭据库…」里）⇒ 用户点完就能回去勾「存进凭据库」。
+    b.connect_clicked(move |_| unlock_vault(p.as_ref(), false));
     b
 }
 
@@ -880,24 +973,10 @@ pub fn badge_button() -> gtk::Button {
     // 标志变成"一串白字"，状态一眼看不出来（那跟没标志一样）。
 
     let img = gtk::Image::new();
-    let lbl = gtk::Label::new(None);
-    // ⚠️ 阶段 93：徽标在侧栏**标题栏**里，标题栏窄的时候（用户存的是
-    // 203px）它太长 ⇒ 整条侧栏溢出、左边被裁掉。文字可省略 ⇒ 徽标
-    // 不再撑住最小宽度（窄的时候先省略「凭据库 未加密」这类长文案）。
-    lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    // ⚠️ 再给一个**最小宽度**（`width_chars`，不是 `max_width_chars`）：
-    // 光有 ellipsize 的话，窄的时候会被压成「…」——连状态都看不出来是
-    // 哪个状态。`width_chars(4)` = 最小留 4 列（两个汉字「凭据」），
-    // 宽的时候照样显示完整文案（`max_width_chars` 才是**永久**截短，
-    // 侧栏够宽也只剩「凭据库 已…」⇒ 不能用）。
-    lbl.set_width_chars(4);
-    let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    box_.append(&img);
-    box_.append(&lbl);
-    b.set_child(Some(&box_));
+    b.set_child(Some(&img));
 
-    // 按状态刷图标 / 文字 / 配色 / 提示
-    fn apply(b: &gtk::Button, img: &gtk::Image, lbl: &gtk::Label, st: vault::State) {
+    // 按状态刷图标 / 配色 / 提示 / 无障碍标签
+    fn apply(b: &gtk::Button, img: &gtk::Image, st: vault::State) {
         let (icon, text, tip, css) = match st {
             vault::State::Off => (
                 "dialog-password-symbolic",
@@ -909,25 +988,32 @@ pub fn badge_button() -> gtk::Button {
             vault::State::Unlocked => (
                 "channel-secure-symbolic",
                 tr("已启用"),
-                tr("凭据库已启用并已解锁：连接密码加密存在本机。\n点这里查看/管理库里的凭据。"),
+                tr("凭据库已启用并已解锁：连接密码加密存在本机。\n\
+                 要看/管理库里的凭据，去菜单「凭据库…」。"),
                 Some("pp-chip-ok"),
             ),
             vault::State::Locked => (
                 "dialog-password-symbolic",
                 tr("已锁定"),
-                tr("凭据库已启用（有主密码），当前处于锁定状态：要用里面的密码得先解锁。\n点这里解锁。"),
+                tr("凭据库已启用（有主密码），当前处于锁定状态：要用里面的密码得先解锁。\n\
+                 点这里解锁。"),
                 Some("pp-chip-warn"),
             ),
             vault::State::Plain => (
                 "dialog-warning-symbolic",
                 tr("未加密"),
-                tr("⚠ 凭据库已启用，但没有主密码：密码以明文存在本机文件里。\n点这里设一个主密码就能加密。"),
+                tr("⚠ 凭据库已启用，但没有主密码：密码以明文存在本机文件里。\n\
+                 点这里设一个主密码就能加密。"),
                 Some("pp-chip-err"),
             ),
         };
         img.set_icon_name(Some(icon));
-        lbl.set_text(&trf!("凭据库 {text}", text = text));
         b.set_tooltip_text(Some(tip));
+        // ⚠️ **无障碍标签**：按钮里**没有文字了** ⇒ 读屏软件只会念出
+        // 「按钮」⇒ 把状态文字挂成 a11y label（跟图标同一套文案，
+        // 不另编一套 ⇒ 不会跟 tooltip 说法打架）。
+        let a11y = trf!("凭据库 {text}", text = text);
+        b.update_property(&[gtk::accessible::Property::Label(&a11y)]);
         // ⚠️ **基础类 `pp-chip` 始终保留**（它带底色、圆角、内边距），
         //    只换"状态类"。把基础类也摘掉的话，标志就变成一串没底色的
         //    白字——那跟没有标志一样。
@@ -945,18 +1031,16 @@ pub fn badge_button() -> gtk::Button {
         // 就等于把控件钉死（每开一次窗口漏一份）。
         let wb = b.downgrade();
         let wimg = img.downgrade();
-        let wlbl = lbl.downgrade();
         let alive = add_state_hook(move |st| {
-            let (Some(b), Some(img), Some(lbl)) = (wb.upgrade(), wimg.upgrade(), wlbl.upgrade())
-            else {
+            let (Some(b), Some(img)) = (wb.upgrade(), wimg.upgrade()) else {
                 return;
             };
-            apply(&b, &img, &lbl, st);
+            apply(&b, &img, st);
         });
         // 控件销毁时注销这条回调（不然死回调会一直留在列表里）
         b.connect_destroy(move |_| alive.set(false));
     }
-    apply(&b, &img, &lbl, vault::state());
+    apply(&b, &img, vault::state());
     b
 }
 
@@ -994,6 +1078,22 @@ fn alert(parent: Option<&gtk::Window>, title: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 侧栏徽标的点击判定表（用户 2026-11-09：徽标**只管解锁**，
+    /// 管理器在菜单里）。
+    #[test]
+    fn 徽标点击的判定表() {
+        // 还没建库 ⇒ 设置主密码
+        assert_eq!(badge_action_of(false, false, false), BadgeAction::Setup);
+        // 建了库、有主密码、锁着 ⇒ 解锁（问主密码）
+        assert_eq!(badge_action_of(true, true, false), BadgeAction::Unlock);
+        // 明文库（没有主密码）**在进程刚起来时也是未解锁** ⇒ 也要解锁
+        //（只是不问密码，内部直接解）
+        assert_eq!(badge_action_of(true, false, false), BadgeAction::Unlock);
+        // 已经解锁 ⇒ 什么都不做（别再弹一遍密码框）
+        assert_eq!(badge_action_of(true, true, true), BadgeAction::Nothing);
+        assert_eq!(badge_action_of(true, false, true), BadgeAction::Nothing);
+    }
 
     #[test]
     fn 凭据库没启用或锁着时记住密码不可勾() {
