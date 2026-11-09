@@ -1,3 +1,16 @@
+puttyplus (0.5.1-1) unstable; urgency=medium
+
+  * **Release 里现在也有 Windows 版了**：0.5.0 发布时 Windows 的 zip 只
+    上传到了 CI 的构建产物（会过期），Release 页面下不到 —— 根因是
+    发版那条 workflow 只编 Linux 的两个架构。现在发版流程会一起构建
+    Windows 版，并把 puttyplus-windows-x86_64.zip 挂进 Release 的资产
+    （校验和也一起算进 SHA256SUMS）。
+  * 顺手修一个老毛病：重跑发版流程时，如果 Release 已经存在，之前只
+    补资产、不更新正文；现在会同步刷新正文。
+  * 功能与 0.5.0 完全一致（本次只改发布流程，不含功能变更）。
+
+ -- fwt11 <wutong.feng@qq.com>  Tue, 10 Nov 2026 07:06:00 +0800
+
 puttyplus (0.5.0-1) unstable; urgency=medium
 
   * **有 Windows 版了**（实验）：终端会话、SFTP 文件面板、命令行参数契约
