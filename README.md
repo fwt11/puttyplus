@@ -142,6 +142,7 @@ ssh 子进程长什么样 —— 每一处都要和 PuTTY 对得上。
 | `puttyplus_<版本>-1_arm64.deb` | arm64（aarch64）同上，树莓派 / ARM 服务器 / ARM 笔记本用这个 |
 | `puttyplus-linux-x86_64.tar.gz` | 免安装的单文件版（x86-64）：解开直接跑 `puttyplus` |
 | `puttyplus-linux-aarch64.tar.gz` | 免安装的单文件版（arm64） |
+| `puttyplus-windows-x86_64.zip` | **Windows 版**（实验）：解压后双击 `puttyplus.exe` 即可（GTK 的 DLL 都在包里；图标主题没带，可能显示不出图标，不影响功能） |
 | `SHA256SUMS` | 校验和（`sha256sum -c SHA256SUMS`） |
 
 ```bash
