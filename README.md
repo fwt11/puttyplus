@@ -156,8 +156,8 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 
 ## Windows 版（实验）
 
-跨平台改造已经落地到 `feature/cross-platform` 分支：**Windows 优先**，
-首版只承诺三件事与 Linux 版一致——
+跨平台改造已经合进 `main`（开发过程在 `feature/cross-platform` 分支）：
+**Windows 优先**，首版只承诺三件事与 Linux 版一致——
 
 | 能力 | Windows 状态 |
 |---|---|
