@@ -1,3 +1,26 @@
+puttyplus (0.5.0-1) unstable; urgency=medium
+
+  * **有 Windows 版了**（实验）：终端会话、SFTP 文件面板、命令行参数契约
+    三样跟 Linux 版一致。终端内核换成 Ghostty 的（libghostty-vt）并自己
+    画字（cairo + pangocairo），中文输入法自己挂；**SSH 是我们自己实现
+    的**（russh 直接驱动终端内核）⇒ Windows 上**不用装 ssh.exe，也不用
+    装 plink**，跑起来不需要任何外部程序。
+  * **命令行参数跟 PuTTY 逐条一致**：Windows 版对着同一批 73 条黄金基准
+    跑，PASS=73 FAIL=0 ⇒ 堡垒机那边照旧用 PuTTY 的调用方式拉起本程序，
+    不用改。
+  * **两个平台的密码现在是同一套**：以前 SFTP 面板、终端、分屏是三条
+    各自独立的连接，要分别输密码；现在同一个会话只问一次，终端 / SFTP /
+    分屏共用这一份。
+  * **Windows 上也能用 ssh-agent 了**：密钥加进 agent 之后，Linux 上
+    本来就是免密的，Windows 上以前却还要输密码——那是"看起来像两个
+    软件"的真正原因，现在两边都能走 agent（Windows 走命名管道）。
+  * **终端敲键盘有反应了**：以前在 Windows 上敲键盘像没反应（按键被
+    丢掉了），现在字能出来了；点完文件面板再点回终端也能立刻接着打字。
+  * 修了一个 Linux 上的老毛病：**每开一个终端都往 stderr 喷一条
+    GLib-CRITICAL**（终端引擎 VTE 那边要读程序名，我们一直没设）。
+
+ -- fwt11 <wutong.feng@qq.com>  Mon, 09 Nov 2026 22:20:00 +0800
+
 puttyplus (0.4.4-1) unstable; urgency=medium
 
   * 拖拽上传修好了：从别的程序（比如桌面文件管理器）把文件拖进文件列表 /

@@ -1,6 +1,6 @@
 [package]
 name = "puttyplus"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2024"
 description = "PuTTY 兼容的 SSH 终端 + SFTP 图形客户端（Rust 重构版）"
 
