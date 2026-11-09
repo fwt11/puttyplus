@@ -199,6 +199,14 @@ fn main() {
     {
         let view2 = GhosttyView::new();
         view2.feed(b"ill\r\nill\r\nill");
+        // ⚠️ 阶段 C14 起光标形状跟着焦点走（无焦点 = 空心）⇒ 对齐断言要的
+        //    是**实心**块，先把视图放进窗口并聚焦。
+        let win5 = gtk::Window::new();
+        win5.set_default_size(320, 140);
+        win5.set_child(Some(view2.widget()));
+        win5.present();
+        pump(200);
+        view2.area().grab_focus();
         pump(100);
 
         let (w, h) = (320i32, 140i32);
@@ -382,6 +390,57 @@ fn main() {
             "敲键后光标必须立刻实心（相位重置）"
         );
         println!("[ok] 光标闪烁：实心/灭两个相位轮流出现，敲键重置为实心");
+    }
+
+    /* ---------------- 7. 焦点状态看得见：无焦点 = 空心光标 ---------------- */
+    //
+    // ⚠️ 这一条钉的是**2026-11-09 的第二个反馈**：终端与文件面板同处一个
+    // 标签，点了文件树焦点就过去——键盘不再进终端（这是终端的正确行为），
+    // 但以前无焦点还画**实心**块 ⇒ 看上去像「终端死了」。现在：无焦点画
+    // **空心**（VTE 同款观感），点一下终端聚焦（显式 GestureClick，不赌
+    // GTK 默认）⇒ 实心 + 闪烁恢复。
+    //
+    // 判定：空心块只有 1px 边框 ⇒ 「连续 6 行、每行 run≥6」的实心检测
+    // 探不到 ⇒ 失焦时探不到实心块、聚焦后探得到。用**程序化 grab_focus**
+    // 模拟点击的聚焦效果（真点击在无头环境没法合成）。
+    {
+        let view2 = GhosttyView::new();
+        view2.feed(b"ill\r\nill\r\nill");
+        let win = gtk::Window::new();
+        win.set_default_size(320, 140);
+        let btn = gtk::Button::new();
+        let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        box_.append(view2.widget());
+        box_.append(&btn);
+        win.set_child(Some(&box_));
+        win.present();
+        pump(300);
+        view2.area().grab_focus();
+        pump(200);
+
+        // ① 终端有焦点 ⇒ 实心块在
+        assert!(
+            cursor_block_present(&view2, 320, 140),
+            "聚焦时光标应是实心块"
+        );
+
+        // ② 焦点给按钮（模拟点了文件树）⇒ 光标变空心 ⇒ 实心检测探不到
+        btn.grab_focus();
+        pump(200);
+        assert!(
+            !cursor_block_present(&view2, 320, 140),
+            "无焦点时光标应是空心块（实心检测探不到）"
+        );
+
+        // ③ 焦点回到终端（模拟点回终端——真路径走 GestureClick 的
+        //    grab_focus，这里用同一个 API 断言同一效果）
+        view2.area().grab_focus();
+        pump(200);
+        assert!(
+            cursor_block_present(&view2, 320, 140),
+            "焦点回终端后光标应恢复实心"
+        );
+        println!("[ok] 焦点可见：聚焦=实心、失焦=空心、点回终端即恢复");
     }
 
     /* ---------------- 截图（人工看画面） ---------------- */

@@ -461,6 +461,7 @@ impl GhosttyView {
         state.reset_blink();
         let view = GhosttyView { area, state };
         view.install_draw();
+        view.install_click_focus();
         view.install_keys();
         view.install_ime();
         view
@@ -885,6 +886,33 @@ impl GhosttyView {
         });
     }
 
+    /// **点一下就聚焦**（阶段 C14）。
+    ///
+    /// ⚠️ 为什么显式做：终端与文件面板同处一个标签（阶段 97），点了文件树
+    /// 之后焦点在树上——键盘就不再进终端（这是终端的正确行为），**但用户
+    /// 点回终端必须能把焦点拿回来**。GTK 的默认「点击聚焦」依赖各后端的
+    /// 事件路径（Windows 上 DrawingArea 未必走默认处理），不赌它——自己
+    /// 挂一个 GestureClick：按下就 grab_focus，**不吞事件**（Proceed），
+    /// 以后的选区/右键等照常走。
+    ///
+    /// 顺带把闪烁相位重置为实心：焦点回来了，光标马上以实心出现
+    /// （灭着的相位开头像「点了没反应」）。
+    fn install_click_focus(&self) {
+        let area = self.area.clone();
+        let state = self.state.clone();
+        let g = gtk::GestureClick::new();
+        // 0 = 任意键（左/中/右都算「点终端」）；右键菜单不受影响——
+        // 菜单由别的控制器处理，这里只负责聚焦。
+        g.set_button(0);
+        g.connect_pressed(move |_g, _n, _x, _y| {
+            if !area.has_focus() {
+                area.grab_focus();
+                state.reset_blink();
+            }
+        });
+        self.area.add_controller(g);
+    }
+
     /* ---------------- 按键 ---------------- */
 
     fn install_keys(&self) {
@@ -1100,13 +1128,24 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
                 let y = vp.y as f64 * cell_h;
                 cursor_pos = Some((x, y));
                 if state.cursor_on.get() {
+                    // ⚠️ **没有焦点 ⇒ 画空心块**（VTE 同款）：终端与文件面板
+                    //    同处一个标签，点了面板焦点就过去——键盘不再进终端。
+                    //    这时如果还画**实心**块，看上去就像「终端死了」
+                    //    （用户 2026-11-09 报的正是这个观感）；空心 = 一眼
+                    //    看出「键盘不在这，点一下终端再敲」。
+                    let focused = state.area.upgrade().map(|a| a.has_focus()).unwrap_or(true);
+                    let style = if focused {
+                        cursor.visual_style
+                    } else {
+                        ghostty_vt::render::CursorVisualStyle::BlockHollow
+                    };
                     draw_cursor(
                         cr,
                         x,
                         y,
                         cell_w,
                         cell_h,
-                        cursor.visual_style,
+                        style,
                         &defaults.cursor,
                         fg_default,
                         bg_default,
