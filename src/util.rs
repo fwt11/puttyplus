@@ -2,6 +2,42 @@
 
 use chrono::{Datelike, TimeZone};
 
+/// 设 GLib 的**程序名**（`g_set_prgname`）。
+///
+/// ## 为什么必须有这个函数
+///
+/// 否则**每开一个终端都往 stderr 喷一条 GLib-CRITICAL**：
+///
+/// ```text
+/// GLib-CRITICAL: g_utf8_make_valid: assertion 'str != NULL' failed
+/// ```
+///
+/// 根因在 **VTE 0.80** 里面，不在 PuTTYPlus：VTE 的 `SpawnContext` 里
+/// `m_systemd_scope` **默认是 true** ⇒ 每 spawn 一个子进程（ssh / telnet /
+/// `cat`…）都会走「把子进程挪进 systemd user scope」那条路，那儿要拼
+/// unit 描述 ⇒ 调 `g_get_prgname()` ⇒ **从没设过 prgname 时它返回 NULL**
+/// ⇒ `g_utf8_make_valid(NULL)` ⇒ GLib 断言失败。
+///
+/// ⇒ 按惯例取 `argv[0]` 的**文件名部分**设上（GTK 对话框、VTE 的 scope
+/// 描述都用它）。⚠️ 必须在**任何 GTK/VTE 用法之前**调。
+///
+/// ⚠️ **可重复调用**：已设过就不改（GTK 自己在 `gtk_init` 之后也可能设过）。
+pub fn init_prgname() {
+    if gtk::glib::prgname().is_some() {
+        return;
+    }
+    let Some(name) = std::env::args_os().next().and_then(|a| {
+        std::path::Path::new(&a)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    }) else {
+        return;
+    };
+    gtk::glib::set_prgname(Some(name));
+}
+
 /// 在 PATH 里查找可执行文件（对应 g_find_program_in_path）。
 pub fn find_program_in_path(name: &str) -> Option<std::path::PathBuf> {
     if name.contains('/') {
@@ -235,6 +271,30 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 程序名必须设得上：VTE 0.80 的 systemd-scope 那条路要
+    /// `g_get_prgname()`，**没设过就是 NULL** ⇒
+    /// `g_utf8_make_valid(NULL)` ⇒ 每 spawn 一个子进程喷一条
+    /// GLib-CRITICAL（`g_utf8_make_valid: assertion 'str != NULL' failed`）。
+    ///
+    /// ⚠️ 这条断言钉的是「设上了」；**没设**时 `glib::prgname()` 是
+    /// `None` ⇒ 测试会红。
+    #[test]
+    fn 设了程序名_prgname_不为空() {
+        init_prgname();
+        let name = gtk::glib::prgname().expect("prgname 应当已被设上");
+        assert!(!name.is_empty(), "prgname 不该是空串");
+    }
+
+    /// 重复调用不许出事（幂等）。
+    #[test]
+    fn 程序名_可以重复设置() {
+        init_prgname();
+        let first = gtk::glib::prgname().expect("第一次应设上");
+        init_prgname();
+        let second = gtk::glib::prgname().expect("第二次仍应设上");
+        assert_eq!(first, second, "重复调用不该改动程序名");
+    }
 
     /// 同 tag 的两次调用必须拿到**不同**的目录。
     ///

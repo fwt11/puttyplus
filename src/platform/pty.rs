@@ -66,6 +66,16 @@ pub struct PtySession {
 impl PtySession {
     /// 开一个新的 PTY。
     pub fn new() -> io::Result<Self> {
+        // ⚠️ **程序名要在开 pty 之前设上**：VTE 0.80 的 `SpawnContext` 里
+        // `m_systemd_scope` **默认 true** ⇒ 每 spawn 一个子进程都会走
+        // 「挪进 systemd user scope」那条路 ⇒ 那儿要 `g_get_prgname()`
+        // ⇒ 没设过就是 NULL ⇒ `g_utf8_make_valid(NULL)` ⇒
+        // **每开一个终端都喷一条 GLib-CRITICAL**。
+        //
+        // ⇒ 放在这里而不是只放在 `main` 里：**所有**开 pty 的路径
+        // （主程序 + 各个冒烟示例）都从这里过 ⇒ 一处设，处处生效。
+        // 详见 `crate::util::init_prgname`。
+        crate::util::init_prgname();
         let pty = vte4::Pty::new_sync(vte4::PtyFlags::empty(), None::<&gtk::gio::Cancellable>)
             .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Self { pty })

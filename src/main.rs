@@ -22,6 +22,11 @@ const APP_TITLE: &str = "PuTTYPlus";
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
 
+    // ⚠️ 程序名必须设（`g_set_prgname`）—— 不设的话**每开一个终端都会往
+    // stderr 喷一条 GLib-CRITICAL**（VTE 0.80 的 systemd-scope 那条路要
+    // `g_get_prgname()`，没设过就是 NULL）。详见 util::init_prgname。
+    puttyplus::util::init_prgname();
+
     // askpass 模式：被 ssh 调用输出密码，不做任何 GUI 初始化
     if term::run_askpass(&argv[1..]) {
         return; // run_askpass 内部已 exit(0)；此处仅为可读性
