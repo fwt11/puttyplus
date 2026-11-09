@@ -1985,6 +1985,17 @@ impl Tabs {
             p.apply_palette();
         }
     }
+
+    /// 换终端字体（字体名 / 字号）：所有已开的面板**立即生效**。
+    ///
+    /// ⚠️ 与配色同理：用户在首选项改字号时**正在看的终端**就该变，
+    /// 不该要求「重开终端才生效」（用户 2026-11-09：「字体设置和字号修改后
+    /// 应该实时生效，这样用户可以马上在终端上看出改变的效果」）。
+    pub fn sync_term_fonts(&self) {
+        for p in self.panes() {
+            p.apply_font();
+        }
+    }
 }
 
 /// 欢迎页（空状态）：图标 + 定位 + 主操作 + 快捷键速查。
@@ -2245,6 +2256,13 @@ pub fn refresh_theme_colors() {
 pub fn sync_term_palettes() {
     if let Some(t) = TABS.with(|w| w.borrow().clone()) {
         t.sync_term_palettes();
+    }
+}
+
+/// 换终端字体（字体名 / 字号）：所有已开面板**立即重刷**。
+pub fn sync_term_fonts() {
+    if let Some(t) = TABS.with(|w| w.borrow().clone()) {
+        t.sync_term_fonts();
     }
 }
 

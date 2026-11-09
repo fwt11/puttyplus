@@ -78,6 +78,36 @@ pub enum TermView {
     Ghostty(GhosttyView),
 }
 
+/// 终端字体（**字体名 + 字号**）⇒ Pango 字体描述。
+///
+/// ## 为什么放在这一层
+///
+/// 两个后端（VTE / ghostty）都要用同一套字体规则，**各写一份就会漂**
+/// （以前就漂过：两边的 `format!("Monospace {size}")` 是抄的）。
+///
+/// ## 优先级
+///
+/// - **字号**：会话/连接里设的 > 首选项中心的全局字号 > 内置 10.5；
+/// - **字体名**：目前只有全局一档（首选项中心 →「终端」页），默认
+///   `Monospace`（系统等宽字体）。
+///
+/// ⚠️ `PUTTYPLUS_FONT` 环境变量仍然可以**整个覆盖**（调试用）。
+pub fn font_description(font_size: Option<f64>) -> gtk::pango::FontDescription {
+    let font_env = std::env::var("PUTTYPLUS_FONT").unwrap_or_default();
+    if !font_env.is_empty() {
+        return gtk::pango::FontDescription::from_string(&font_env);
+    }
+    let size = font_size
+        .or_else(crate::settings::term_font_size)
+        .unwrap_or(10.5);
+    let family = crate::settings::term_font_family()
+        .filter(|f| !f.trim().is_empty())
+        .unwrap_or_else(|| "Monospace".to_string());
+    // ⚠️ 字体名里**可能有空格**（"Noto Sans Mono CJK SC"）⇒ 拼的时候
+    // 字体名在前、字号在后（pango 按「最后一个是数字的词」认字号）。
+    gtk::pango::FontDescription::from_string(&format!("{family} {size}"))
+}
+
 impl TermView {
     /// 新建一个终端控件（还没接 PTY、没设外观）。
     pub fn new() -> Self {
@@ -219,16 +249,8 @@ impl TermView {
                 // ⚠️ `bell` 在这条分支用不上 ⇒ 显式丢掉（否则 Windows 上
                 // 编译会报「unused variable」）。
                 let _ = bell;
-                let font_env = std::env::var("PUTTYPLUS_FONT").unwrap_or_default();
-                let size = font_size
-                    .or_else(crate::settings::term_font_size)
-                    .unwrap_or(10.5);
-                let font = if font_env.is_empty() {
-                    format!("Monospace {size}")
-                } else {
-                    font_env
-                };
-                v.set_font(gtk::pango::FontDescription::from_string(&font));
+                // ⚠️ 字体规则与 VTE 后端**共用一份**（见 `font_description`）。
+                v.set_font(crate::termview::font_description(font_size));
             }
         }
     }

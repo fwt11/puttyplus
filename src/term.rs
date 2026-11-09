@@ -829,6 +829,20 @@ impl TermPane {
         self.inner.term.apply_palette(crate::theme::palette());
     }
 
+    /// 按当前字体设置重刷本面板。
+    ///
+    /// ⚠️ **字号优先级不变**：会话/连接里设过的字号仍然压过全局默认
+    /// （`opts.font_size`）—— 用户在首选项改的是**全局默认**，不该把
+    /// 某条连接**特意设过**的字号也改了。
+    ///
+    /// ⚠️ 改字号会让 VTE **重排**已有内容（行宽变了）⇒ 这就是「实时生效」
+    /// 的正解：不是「重开终端才生效」。
+    pub fn apply_font(&self) {
+        self.inner
+            .term
+            .set_appearance(self.inner.opts.font_size, self.inner.opts.bell);
+    }
+
     /// 装/卸按键广播钩子。钩子捕获不到 self，按键只以字节形式出去。
     pub(crate) fn set_broadcast_hook(&self, h: Option<BroadcastHook>) {
         *self.inner.key_sink.borrow_mut() = h;

@@ -684,6 +684,28 @@ pub fn set_term_font_size(v: Option<f64>) {
     }
 }
 
+/// 全局终端**字体名**（`None` = 用系统的 `Monospace`）。
+///
+/// ⚠️ 跟字号一样是**全局默认**：连接/会话里没有单独的字体名设置（只有
+/// 字号），所以这一档就是最终值。
+pub fn term_font_family() -> Option<String> {
+    let s = get_str("ui", "term_font_family");
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// 设全局终端字体名（`None` = 恢复默认 `Monospace`）。
+pub fn set_term_font_family(v: Option<&str>) {
+    match v {
+        Some(f) if !f.trim().is_empty() => set_str("ui", "term_font_family", f.trim()),
+        _ => remove_str("ui", "term_font_family"),
+    }
+}
+
 /* ---------------- 数据库连接记忆（阶段 13） ---------------- */
 
 const DB_LAST_GROUP: &str = "db_last";

@@ -77,6 +77,45 @@ pub fn set_lang(l: Lang) {
     LANG.store(l as u8, Ordering::Relaxed);
 }
 
+/// 语言变化时的回调（界面靠它重建）。
+struct LangHook {
+    /// 回调还活着吗？死了就摘掉（别让列表越积越长）。
+    alive: std::cell::Cell<bool>,
+    f: std::rc::Rc<dyn Fn()>,
+}
+
+thread_local! {
+    /// 语言变了要重建界面的回调。
+    static LANG_HOOKS: std::cell::RefCell<Vec<LangHook>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 注册"语言变了"的回调（返回的 `alive` 置否即注销）。
+pub fn add_lang_hook(f: impl Fn() + 'static) -> std::cell::Cell<bool> {
+    let alive = std::cell::Cell::new(true);
+    LANG_HOOKS.with(|h| {
+        h.borrow_mut().push(LangHook {
+            alive: alive.clone(),
+            f: std::rc::Rc::new(f),
+        })
+    });
+    alive
+}
+
+/// 通知界面：**语言变了**。
+///
+/// ⚠️ 先把回调**取出来**再调（不在借用里调）：回调里会重建控件。
+pub fn notify_lang_changed() {
+    let hooks: Vec<std::rc::Rc<dyn Fn()>> = LANG_HOOKS.with(|h| {
+        let mut v = h.borrow_mut();
+        v.retain(|x| x.alive.get());
+        v.iter().map(|x| x.f.clone()).collect()
+    });
+    for h in hooks {
+        h();
+    }
+}
+
 /// 当前语言。
 pub fn lang() -> Lang {
     match LANG.load(Ordering::Relaxed) {

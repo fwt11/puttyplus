@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1667] = [
+pub static EN: [(&str, &str); 1674] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -609,6 +609,8 @@ pub static EN: [(&str, &str); 1667] = [
     ("失败：{err}", "Failed: {err}"),
     ("奇 (o)", "Odd (o)"),
     ("子标签栏", "Tab bar"),
+    ("字体", "Font"),
+    ("字号", "Font size"),
     ("字段", "Field"),
     ("字段改动预览", "Preview of the field changes"),
     ("字符集", "Character set"),
@@ -921,6 +923,8 @@ pub static EN: [(&str, &str); 1667] = [
     ("改名", "Rename"),
     ("改名…", "Rename…"),
     ("改完点工具栏的保存图标才会动库", "Nothing reaches the database until you click the save icon in the toolbar"),
+    ("改完立刻生效", "Takes effect immediately"),
+    ("改完立刻生效（不用重启）。", "Takes effect immediately (no restart needed)."),
     ("改表结构", "Change the table structure"),
     ("改表结构失败：{v0}", "Changing the table structure failed: {v0}"),
     ("改选中那条的类型与机制（双击表格里的行也行）。", "Change the type and mechanism of the selected one (you can also double-click the row in the table)."),
@@ -1334,13 +1338,16 @@ pub static EN: [(&str, &str); 1667] = [
     ("终端", "Terminal"),
     ("终端 · 已停用", "Terminal · disabled"),
     ("终端响铃", "Terminal bell"),
+    ("终端字体", "Terminal font"),
     ("终端字号", "Terminal font size"),
     ("终端字号。留空则用首选项中心的全局字号（默认 10.5）。", "Terminal font size. Leave it empty to use the global font size of the preferences (10.5 by default)."),
+    ("终端字号（点）", "Terminal font size (points)"),
     ("终端字号，立即生效", "Terminal font size, takes effect immediately"),
     ("终端屏幕文字逐行落盘。同一行被反复改写会记多行；两次采样之间滚过一屏以上或被清屏会漏记——抓的是屏幕，不是原始字节流。", "The text of the terminal screen is written to disk line by line. A line that is rewritten over and over is recorded several times; scrolling more than one screen between two samples or clearing the screen loses lines — it captures the screen, not the raw byte stream."),
     ("终端已结束", "The terminal has ended"),
     ("终端查找", "Terminal find"),
     ("终端查找…", "Find in terminal…"),
+    ("终端用哪种字体（只列本机的等宽字体）", "Which font the terminal uses (only the monospace fonts installed on this machine are listed)"),
     ("终端的「终端类型（TERM）/ 响铃 / 保活」是每条会话自己的设置，在连接编辑器的「会话」页里改；这里管的是所有终端共用的默认。", "The \"terminal type (TERM) / bell / keepalive\" of the terminal are settings of each session on their own, change them on the \"Session\" page of the connection editor; what is managed here is the default shared by all terminals."),
     ("终端类型（TERM）", "Terminal type (TERM)"),
     ("终端转发", "Terminal forwarding"),

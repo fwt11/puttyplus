@@ -143,7 +143,7 @@ pub const SETTINGS: &[SettingItem] = &[
     },
     SettingItem {
         id: "term_font",
-        label: "终端字号",
+        label: "终端字体",
         page: Page::Terminal,
         from: "会话选项",
     },
@@ -238,6 +238,46 @@ pub fn open(page: Page) {
         nb.set_current_page(Some(page.index()));
     }
     win.present();
+    register_retranslate_hook();
+}
+
+/// 注册「语言变了 ⇒ 把首选项窗口的页签重建一遍」的回调（**只注册一次**）。
+///
+/// ⚠️ **窗口不关**，只把六个页签的内容换掉 ⇒ 用户在「外观」页改语言，
+/// 窗口当场变成新语言，还停在原来那一页。
+///
+/// ⚠️ 用 `once` 保证只注册一次：`open()` 每次开窗口都会调 ⇒ 不去重会
+/// 攒下一堆重复回调（每改一次语言就重建 N 遍）。
+fn register_retranslate_hook() {
+    use std::cell::Cell;
+    thread_local! {
+        static REGISTERED: Cell<bool> = const { Cell::new(false) };
+    }
+    if REGISTERED.with(|r| r.replace(true)) {
+        return;
+    }
+    crate::i18n::add_lang_hook(|| {
+        let Some(win) = crate::windows::tool_window(ToolKind::Settings) else {
+            return;
+        };
+        let Some(nb) = find_pages(&win) else { return };
+        let cur = nb.current_page();
+        // ⚠️ **先把旧页全摘掉，再按顺序挂新的**：边摘边挂的话，`remove_page`
+        // 会让后面的页**往前挪**，挂上去的顺序全乱了（页签名会跟页面
+        // 对不上——实测「外观」页签变成「终端」）。
+        while nb.n_pages() > 0 {
+            nb.remove_page(Some(0));
+        }
+        for p in Page::all() {
+            let body = build_page(p);
+            let lbl = gtk::Label::new(Some(p.title()));
+            lbl.set_width_chars(crate::panel::subtabs::display_width(p.title()) as i32 + 1);
+            nb.append_page(&body, Some(&lbl));
+        }
+        if let Some(c) = cur {
+            nb.set_current_page(Some(c));
+        }
+    });
 }
 
 /// 当前开着的首选项窗口的**页签容器**（测试钩子）。
@@ -350,13 +390,26 @@ fn appearance_page(root: &gtk::Box) {
         combo.connect_changed(move |c| {
             let Some(id) = c.active_id() else { return };
             let l = Lang::from_code(&id);
+            if l == crate::i18n::lang() {
+                return; // 没变 ⇒ 什么都不用做
+            }
             crate::settings::set_language(l);
             crate::i18n::set_lang(l);
+            // ⚠️ **实时生效**（用户 2026-11-09：「切换语言也应该实时生效」）
+            // ⇒ 通知界面把要重建的部分重建一遍（顶栏/菜单/侧栏 + 本窗口
+            // 的页签）。
+            //
+            // ⚠️ **必须延到 idle**：现在正在这个下拉框的 `changed` 回调里，
+            // 而重建会**销毁这个下拉框本身**（它就在要重建的页签里）⇒
+            // 在回调里销毁 ⇒ use-after-free ⇒ 必须等这一趟回调走完。
+            gtk::glib::idle_add_local_once(|| {
+                crate::i18n::notify_lang_changed();
+            });
         });
         row.append(&lbl);
         row.append(&combo);
         sec.append(&row);
-        sec.append(&hint_label(tr("切换语言后需要重启应用才能生效。")));
+        sec.append(&hint_label(tr("改完立刻生效（不用重启）。")));
         root.append(&sec);
     }
 
@@ -517,27 +570,81 @@ fn terminal_page(root: &gtk::Box) {
         });
     }
 
-    /* ---- 终端字号 ---- */
+    /* ---- 终端字体 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        sec.append(&section(tr("终端字号")));
+        sec.append(&section(tr("终端字体")));
 
+        // ---- 字体名：本机装了的**等宽字体**（终端用等宽，比例字体没法对齐）----
+        let families = monospace_families();
+        let mut names: Vec<String> = vec!["Monospace".to_string()];
+        for f in &families {
+            if f != "Monospace" && !names.contains(f) {
+                names.push(f.clone());
+            }
+        }
+        let cur_family = crate::settings::term_font_family().unwrap_or_else(|| "Monospace".into());
+        let cur_idx = names
+            .iter()
+            .position(|n| n == &cur_family)
+            .unwrap_or(0) as u32;
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_margin_top(7);
+        row.set_margin_bottom(7);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        let lbl = gtk::Label::new(Some(tr("字体")));
+        lbl.set_xalign(0.0);
+        row.append(&lbl);
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let dd = gtk::DropDown::from_strings(&refs);
+        dd.set_selected(cur_idx);
+        dd.set_hexpand(true);
+        dd.set_tooltip_text(Some(tr("终端用哪种字体（只列本机的等宽字体）")));
+        row.append(&dd);
+        sec.append(&row);
+
+        // ---- 字号 ----
+        let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row2.set_margin_top(7);
+        row2.set_margin_bottom(7);
+        row2.set_margin_start(12);
+        row2.set_margin_end(12);
+        let lbl2 = gtk::Label::new(Some(tr("字号")));
+        lbl2.set_xalign(0.0);
         let spin = gtk::SpinButton::with_range(9.0, 40.0, 0.5);
         spin.set_value(crate::settings::term_font_size().unwrap_or(10.5));
-        spin.set_tooltip_text(Some(tr("新开的终端用这个字号；已经开着的终端不动")));
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row.append(&spin);
-        let tip = gtk::Label::new(Some(tr("全局默认")));
+        spin.set_tooltip_text(Some(tr("终端字号（点）")));
+        let tip = gtk::Label::new(Some(tr("改完立刻生效")));
         tip.add_css_class("dim-label");
         tip.add_css_class("pp-hint");
         tip.set_xalign(0.0);
-        row.append(&tip);
-        sec.append(&row);
+        row2.append(&lbl2);
+        row2.append(&spin);
+        row2.append(&tip);
+        sec.append(&row2);
         root.append(&sec);
 
+        // ⚠️ **实时生效**（用户 2026-11-09：「字体设置和字号修改后应该实时
+        // 生效，这样用户可以马上在终端上看出改变的效果」）⇒ 改完立刻刷
+        // 所有已开的终端，不用重开。
+        //
+        // ⚠️ **先设当前值、再接回调**（跟上面语言那个下拉一个道理）：否则
+        // 一开窗口就把自己"改"了一遍。
+        let names2 = names.clone();
+        dd.connect_selected_notify(move |d| {
+            let i = d.selected();
+            let Some(name) = names2.get(i as usize) else {
+                return;
+            };
+            crate::settings::set_term_font_family(Some(name));
+            crate::tabs::sync_term_fonts();
+        });
         spin.connect_value_changed(move |s| {
             let v = s.value();
             crate::settings::set_term_font_size(Some(v));
+            crate::tabs::sync_term_fonts();
         });
     }
 
@@ -545,6 +652,27 @@ fn terminal_page(root: &gtk::Box) {
         tr("终端的「终端类型（TERM）/ 响铃 / 保活」是每条会话自己的设置，\
          在连接编辑器的「会话」页里改；这里管的是所有终端共用的默认。"),
     ));
+}
+
+/// 本机装了的**等宽字体**（终端只能用等宽字体）。
+///
+/// ⚠️ 拿不到（没有显示服务 / pango 还没初始化）⇒ 空列表 ⇒ 设置页里
+/// 只留默认的 `Monospace`。
+fn monospace_families() -> Vec<String> {
+    if !gtk::is_initialized_main_thread() {
+        return Vec::new();
+    }
+    let probe = gtk::Label::new(None);
+    let ctx = probe.create_pango_context();
+    let mut out: Vec<String> = ctx
+        .list_families()
+        .iter()
+        .filter(|f| f.is_monospace())
+        .map(|f| f.name().to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// 传输页：断点续传 / 校验 / 并发数（原来在队列窗口顶部）。

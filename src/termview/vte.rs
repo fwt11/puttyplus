@@ -68,16 +68,9 @@ pub fn visible_text(term: &vte::Terminal) -> Option<String> {
 /// 生效，那条路径也得用全局默认值，否则"没设过字号"的会话在改一次响铃后
 /// 字号会跳回 10.5。
 pub fn set_appearance(term: &vte::Terminal, font_size: Option<f64>, bell: Option<bool>) {
-    let font_env = std::env::var("PUTTYPLUS_FONT").unwrap_or_default();
-    let font = if font_env.is_empty() {
-        let size = font_size
-            .or_else(crate::settings::term_font_size)
-            .unwrap_or(10.5);
-        format!("Monospace {size}")
-    } else {
-        font_env
-    };
-    term.set_font(Some(&gtk::pango::FontDescription::from_string(&font)));
+    // ⚠️ 字体规则（字体名 + 字号 + 优先级）**两个后端共用一份**
+    // （`termview::font_description`）—— 各写一份迟早漂。
+    term.set_font(Some(&crate::termview::font_description(font_size)));
     term.set_audible_bell(bell.unwrap_or(true));
 }
 
