@@ -271,8 +271,10 @@ impl Decoded {
 ///
 /// 现在先开一个占位页（转圈 + 「正在读取 xxx…」），内容到了自动换成正文。
 struct Placeholder {
-    /// 占位盒（Overlay 的 overlay 子控件）
+    /// 占位盒（铺满正文那块区域）
     box_: gtk::Box,
+    /// **内容盒**（转圈 + 文字这一组）—— 居中量的就是它
+    content: gtk::Box,
     /// 转圈（读失败时要停下来）
     spinner: gtk::Spinner,
     /// 提示文字
@@ -281,22 +283,35 @@ struct Placeholder {
 
 /// 建载入占位层：转圈 + 一句提示。
 fn build_placeholder(msg: &str) -> Placeholder {
-    // ⚠️ **盒子要铺满**（hexpand/vexpand）：Overlay 的 overlay 子控件默认
-    // 按内容取大小，不铺满的话底下那块空 TextView 会在旁边露出来，
-    // 看着像"编辑器已经打开了但是空的"。
+    // ⚠️ **盒子要铺满**（hexpand/vexpand）：它顶替的是正文的位置，
+    // 不铺满的话底下那块空 TextView 会在旁边露出来，看着像"编辑器已经
+    // 打开了但是空的"。
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
     box_.set_hexpand(true);
     box_.set_vexpand(true);
     box_.add_css_class("pp-placeholder");
 
-    // 内容居中：单独一层 —— 盒子自己得铺满，不能靠它居中
-    let inner = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    inner.set_halign(gtk::Align::Center);
-    inner.set_valign(gtk::Align::Center);
+    // ⚠️ **内容要真正居中**（用户 2026-11-10：「loading 的动画和提示文字
+    // 放在屏幕中部吧，不要放在顶部」）。
+    //
+    // **为什么不能是「竖直 Box 里放一个不扩张的子盒」**：GtkBox 竖着排时，
+    // **不带 vexpand 的子控件只分到自然高度、还排在顶上** ⇒ align 属性在
+    // 那点高度里根本没意义 ⇒ 转圈就贴在页面顶部（用户看到的正是这个）。
+    //
+    // ⇒ 改用 **Overlay**：它的 overlay 子控件**按 align 摆在整块区域的
+    // 中间**（不扩张的 Grid 也不行：Grid 的行默认不扩张 ⇒ 内容还是贴顶）。
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_halign(gtk::Align::Center);
+    content.set_valign(gtk::Align::Center);
 
+    // ⚠️ **大小**：32px 的转圈在空页面上又黑又重（用户：「你看看大小合适吗」
+    // ⇒ 24px 刚好——看得见在转，又不抢眼）。
     let spinner = gtk::Spinner::new();
     spinner.set_spinning(true);
-    spinner.set_size_request(32, 32);
+    spinner.set_size_request(24, 24);
+    // ⚠️ **别让它被横向拉宽**：竖直 Box 里默认是 FILL ⇒ 转圈会被拉到跟
+    // 文字一样宽（看着像个椭圆）。⇒ 固定成自己的宽度、居中。
+    spinner.set_halign(gtk::Align::Center);
 
     let label = gtk::Label::new(Some(msg));
     label.add_css_class("pp-hint");
@@ -304,10 +319,101 @@ fn build_placeholder(msg: &str) -> Placeholder {
     label.set_justify(gtk::Justification::Center);
     label.set_max_width_chars(48);
 
-    inner.append(&spinner);
-    inner.append(&label);
-    box_.append(&inner);
-    Placeholder { box_, spinner, label }
+    content.append(&spinner);
+    content.append(&label);
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+    // Overlay 需要一个「主控件」占满整块区域（这里只是个空盒：底色由
+    // 外层的 .pp-placeholder 提供）。
+    let filler = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    overlay.set_child(Some(&filler));
+    overlay.add_overlay(&content);
+    box_.append(&overlay);
+    Placeholder {
+        box_,
+        content,
+        spinner,
+        label,
+    }
+}
+
+/// 冒烟用：占位层里转圈与提示文字现在摆在哪儿（相对占位盒）。
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceholderLayout {
+    /// 占位盒的宽高（= 它铺开的那块区域）
+    pub area_w: i32,
+    pub area_h: i32,
+    /// **内容盒**（转圈 + 文字这一组）相对占位盒左上角的位置与大小
+    /// —— 居中与否看的是它（不是单看转圈：转圈自己的 allocation 跟它
+    /// 画出来的位置有出入，量它会误判）。
+    pub content_x: i32,
+    pub content_y: i32,
+    pub content_w: i32,
+    pub content_h: i32,
+    /// 转圈相对占位盒左上角的位置与大小
+    pub spinner_x: i32,
+    pub spinner_y: i32,
+    pub spinner_w: i32,
+    pub spinner_h: i32,
+    /// 提示文字相对占位盒左上角的位置
+    pub label_x: i32,
+    pub label_y: i32,
+    /// 提示文字的大小
+    pub label_w: i32,
+    pub label_h: i32,
+}
+
+/// 冒烟用：建一个**永远停在载入中**的编辑器页（**不发读请求**）。
+///
+/// ⚠️ **为什么需要**：占位层在真实流程里只存在几十毫秒（读回来就没了）
+/// ⇒ 没法稳定地量它的位置。⇒ 这里走**真实的构建路径**（`build` +
+/// `attach_tab`），只是**不发读请求** ⇒ 占位层一直在 ⇒ 可以量几何
+/// （用户 2026-11-10：「loading 的动画和提示文字放在屏幕中部吧」）。
+pub fn open_placeholder_for_smoke(st: &Rc<PanelState>, path: &str, msg: &str) -> u64 {
+    let id = next_id();
+    let dec = Decoded::decode(b"");
+    let e = build(st, id, true, path, false, &dec, Some(msg));
+    st.file_edits.borrow_mut().push(Rc::clone(&e));
+    attach_tab(st, &e);
+    id
+}
+
+/// 冒烟用：查某个路径的占位层几何（没有占位层就 None）。
+pub fn placeholder_layout(st: &Rc<PanelState>, path: &str) -> Option<PlaceholderLayout> {
+    let e = st
+        .file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .cloned()?;
+    let ph = e.placeholder.borrow();
+    let ph = ph.as_ref()?;
+    let area = ph.box_.allocation();
+    // translate_coordinates：把控件自己的坐标换算到目标控件的坐标系
+    let (sx, sy) = ph.spinner.translate_coordinates(&ph.box_, 0.0, 0.0)?;
+    let (lx, ly) = ph.label.translate_coordinates(&ph.box_, 0.0, 0.0)?;
+    let sa = ph.spinner.allocation();
+    let la = ph.label.allocation();
+    let (cx, cy) = ph.content.translate_coordinates(&ph.box_, 0.0, 0.0)?;
+    let ca = ph.content.allocation();
+    Some(PlaceholderLayout {
+        area_w: area.width(),
+        area_h: area.height(),
+        content_x: cx as i32,
+        content_y: cy as i32,
+        content_w: ca.width(),
+        content_h: ca.height(),
+        spinner_x: sx as i32,
+        spinner_y: sy as i32,
+        spinner_w: sa.width(),
+        spinner_h: sa.height(),
+        label_x: lx as i32,
+        label_y: ly as i32,
+        label_w: la.width(),
+        label_h: la.height(),
+    })
 }
 
 /// 摘掉载入占位层（阶段 105）：内容到了就调它。
