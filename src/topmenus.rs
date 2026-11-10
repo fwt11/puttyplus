@@ -372,22 +372,27 @@ pub fn top_menu_titles() -> Vec<&'static str> {
 
 /// 某个菜单项在**当前平台**上要不要显示。
 ///
-/// ⚠️ **Windows 上数据库工作台的入口先藏起来**（跨平台版 阶段 C5）：
-///
-/// - 首版承诺的范围是「**终端 + SFTP + 命令行契约**」，DB 工作台在
-///   Windows 上只保证**能编译**（说明它可移植），**没在 Windows 上实测**；
-/// - 菜单里摆一个点进去会出问题的入口，比不摆更糟 ⇒ Windows 上不显示；
-/// - 代码原样保留（`panel::dbui` 那套还在编）⇒ 第二版放开入口即可。
-///
-/// ⚠️ 只管**显示**；快捷键那条路在 action 分发处另外拦（见 `main.rs`）。
+/// ⚠️ **Windows 上数据库工作台的入口已经放开了**（2026-11-10）：DB 工作台
+///    在 Windows 上**不再隐藏**——它的代码本来就是平台无关的（GTK 那一层
+///    零平台分支），后端也早有 Windows 分支（PostgreSQL 改走回环 TCP 桥）。
+///    早先藏它只是因为「首版没在 Windows 上实测」，现在这个理由不成立了。
 pub fn entry_visible(entry: &MenuEntry) -> bool {
-    #[cfg(windows)]
-    {
-        if let MenuEntry::Item { action: "db", .. } = entry {
-            return false;
-        }
-    }
-    let _ = entry;
+    entry_visible_on(entry, cfg!(target_os = "windows"))
+}
+
+/// 菜单项的可见性判据（`is_windows` 只是参数 ⇒ **本地就能单测**）。
+///
+/// ⚠️ **两个平台都不藏任何菜单项**（2026-11-10 起）：DB 工作台的入口在
+///    Windows 上也显示。
+///
+/// ⚠️ `is_windows` 这个参数**留着**：以后真有「某平台不支持」的菜单项时，
+///    这里仍是**唯一的收口点**（别在各处零散地藏）。⚠️ 也正因为它是个
+///    参数，「谁在哪个平台藏了什么」能一条单测钉死 ⇒ 别让人又把 DB 入口
+///    藏回去（那条单测会红）。
+pub fn entry_visible_on(entry: &MenuEntry, is_windows: bool) -> bool {
+    // ⚠️ 曾经的分支：Windows 上把 DB 工作台的入口藏掉（首版没在 Windows
+    //    上实测）⇒ 2026-11-10 去掉了。
+    let _ = (entry, is_windows);
     true
 }
 
@@ -597,6 +602,32 @@ pub fn missing_actions(registered: &[&str]) -> Vec<(&'static str, &'static str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **DB 工作台的入口在 Windows 上也要显示**（2026-11-10）。
+    ///
+    /// ⚠️ 早先 Windows 上是**藏掉**这个入口的（首版范围只有「终端 + SFTP +
+    ///    命令行契约」，DB 工作台没在 Windows 上实测）⇒ 现在放开了：DB 那套
+    ///    代码本来就平台无关（GTK 层零平台分支），后端也早有 Windows 分支。
+    ///
+    /// ⚠️ **这条单测的锚**：谁把 `entry_visible_on` 改回「Windows 上藏 DB
+    ///    入口」，它立刻红（`is_windows` 是参数 ⇒ 本地就能测，不用等
+    ///    Windows CI）。
+    #[test]
+    fn db_入口在_windows_上也显示() {
+        let db = MenuEntry::Item {
+            icon: "database-symbolic",
+            label: "数据库工作台",
+            action: "db",
+            danger: false,
+            shortcut: None,
+            enabled: None,
+        };
+        assert!(
+            entry_visible_on(&db, true),
+            "Windows 上又把 DB 工作台的入口藏起来了（它早就该开放了）"
+        );
+        assert!(entry_visible_on(&db, false));
+    }
 
     /// 文件菜单里得有「清空最近连接」（最近连接太多时的清理入口）。
     #[test]

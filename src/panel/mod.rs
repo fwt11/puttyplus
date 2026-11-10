@@ -2189,36 +2189,11 @@ pub fn on_open_forwards(st: &Rc<PanelState>) {
 /// 连上数据库之后才允许显示数据库管理页面」）⇒ 这里只是**发起连接**，
 /// 页面由 `dbui::mount` 在连上之后挂出来。连不上时弹对话框说清楚。
 pub fn on_open_db(st: &Rc<PanelState>) {
-    // ⚠️ **Windows 上先拦下来**（跨平台版 阶段 C5）：首版承诺的范围是
-    //    「终端 + SFTP + 命令行契约」，DB 工作台在 Windows 上只保证能编译、
-    //    没实测 ⇒ 这里弹一句提示就返回。
-    #[cfg(windows)]
-    {
-        let _ = st;
-        db_unavailable();
+    if !check_db_channel(st) {
         return;
     }
-    #[cfg(not(windows))]
-    {
-        if !check_db_channel(st) {
-            return;
-        }
-        dbui::ensure(st);
-        dbui::connect_current(st);
-    }
-}
-
-/// Windows 上数据库工作台未验证 ⇒ 统一的一句话提示。
-///
-/// ⚠️ 入口有好几个（顶栏菜单、侧栏、「新建」菜单、标签页「+」），
-///    逐个藏容易漏 ⇒ 都在这里收口。
-#[cfg(windows)]
-fn db_unavailable() {
-    dialogs::info(
-        None,
-        "数据库工作台",
-        "数据库工作台的 Windows 版尚未验证，首版暂不开放。",
-    );
+    dbui::ensure(st);
+    dbui::connect_current(st);
 }
 
 /// 只**准备**数据库工作台，**不连**。
@@ -2229,20 +2204,10 @@ fn db_unavailable() {
 /// 双击某条具体的数据库连接时走这条：那条连接由 `dbui::use_profile`
 /// 选中并连上——要是这里先连了"上次用的那条"，就得连错一次再断开重连。
 pub fn on_open_db_page(st: &Rc<PanelState>) {
-    // ⚠️ 同 `on_open_db`：Windows 上这个入口也关着（见那里）。
-    #[cfg(windows)]
-    {
-        let _ = st;
-        db_unavailable();
+    if !check_db_channel(st) {
         return;
     }
-    #[cfg(not(windows))]
-    {
-        if !check_db_channel(st) {
-            return;
-        }
-        dbui::ensure(st);
-    }
+    dbui::ensure(st);
 }
 
 /// 数据库通道只支持 SSH 会话：通道要挂在一条已认证的 SSH 连接上。
