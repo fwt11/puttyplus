@@ -57,7 +57,7 @@ use zeroize::Zeroizing;
 use crate::args::ConnOptions;
 use crate::platform::localpath;
 use crate::theme::State;
-use crate::util::{find_program_in_path, path_basename, path_join, path_parent};
+use crate::util::{path_basename, path_join, path_parent};
 
 use pane::Pane;
 use queue::{QueueItem, QueueUi};
@@ -426,17 +426,29 @@ impl SftpPanel {
         // 用 async-channel + 主线程 spawn_local 循环替代）
         let (tx, rx) = std::sync::mpsc::channel::<WorkerCmd>();
         let (ui_tx, ui_rx) = async_channel::unbounded::<PanelEvent>();
-        // 转发承接策略：终端 spawn 的 ssh/plink 已通过 -L/-R/-D argv 承接
-        // 转发，进程内再绑同一端口只会 EADDRINUSE 撞车。进程内转发只承接
-        // 终端不带的情形（找不到 ssh/plink、非 SSH 协议），以及后续转发
-        // 管理 UI 动态添加的规则（不经过 ssh argv，天然无冲突）。
-        let worker_forwards = if opts.is_ssh()
-            && (find_program_in_path("plink").is_some()
-                || find_program_in_path("ssh").is_some())
-        {
-            Vec::new()
-        } else {
+        // 转发承接策略：⚠️ **跟终端用哪条路走**（`term::use_inproc_ssh`），
+        // **不是**「系统里有没有 ssh/plink」——
+        //
+        // - 终端走 **spawn**（Linux 主线）：ssh/plink 已经用 `-L/-R/-D` 的
+        //   argv 承接了转发，进程内再绑同一个端口只会 EADDRINUSE 撞车；
+        // - 终端走 **inproc**（Windows 默认）：终端**根本没有** ssh 进程
+        //   ⇒ 转发只能由程序内的转发引擎承接 ⇒ 这里要把规则交下去。
+        //
+        // ⚠️ **旧判据在 Windows 上必错**（用户 2026-11-10 追这个特色时
+        //    挖出来的）：旧判据是「系统里找得到 ssh/plink 就当转发归它管」
+        //    ⇒ Windows 机器上**只要装了 OpenSSH**（Win10/11 的可选功能，
+        //    很多人装了），转发就被判给了一个**根本不会被 spawn** 的 ssh
+        //    ⇒ 转发**静默失效**（界面上一点提示都没有）。
+        //
+        // ⚠️ Linux 主线**零变化**：`use_inproc_ssh()` 在 Linux 上恒为 false
+        //    ⇒ 转发照旧进 ssh 的 argv。
+        let worker_forwards = if crate::backend::forward::needs_inproc_forwards(
+            opts.is_ssh(),
+            crate::term::use_inproc_ssh(),
+        ) {
             opts.forwards.clone()
+        } else {
+            Vec::new()
         };
         worker::spawn_worker(
             opts.host.clone(),

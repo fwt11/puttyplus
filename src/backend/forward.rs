@@ -558,6 +558,35 @@ async fn socks5_handshake(sock: &mut TcpStream) -> Result<(String, u16), String>
     Ok((host, port))
 }
 
+/* ---------------- 谁来承接转发 ---------------- */
+
+/// 命令行的转发规则（`-L/-R/-D`）**由谁承接**。
+///
+/// - `true`  ⇒ 由**程序内的转发引擎**承接（[`FwdRule`] / 本模块的
+///   `start_local` / `start_remote` / `start_socks` 全部走 russh 的
+///   direct-tcpip 通道 ⇒ 平台无关）。
+/// - `false` ⇒ 交给**终端 spawn 的 ssh/plink** 承接（它们用 `-L/-R/-D`
+///   的 argv 自己实现）⇒ 进程内就不要再绑同一个端口（会 EADDRINUSE）。
+///
+/// ⚠️ **判据是「终端用哪条路连」，不是「系统里有没有 ssh」**：
+///
+///    - 终端走 **spawn**（Linux 主线）：转发进 ssh 的 argv；
+///    - 终端走 **inproc**（Windows 默认）：终端**根本没有** ssh 进程 ⇒
+///      转发只能由程序内承接。
+///
+///    ⚠️ 旧判据（「系统里找得到 ssh/plink 就当转发归它管」）在 Windows 上
+///    **必错**：Win10/11 把 OpenSSH 做成可选功能，很多人装了 ⇒ 转发被判给
+///    一个**根本不会被 spawn** 的 ssh ⇒ 转发静默失效、界面上一点提示都没有。
+///
+/// ⚠️ `is_ssh = false`（telnet/串口等）⇒ 没有 SSH 通道 ⇒ 转发无处可去 ⇒
+///    返回 false（不假装能做）。
+pub fn needs_inproc_forwards(is_ssh: bool, term_inproc: bool) -> bool {
+    if !is_ssh {
+        return false;
+    }
+    term_inproc
+}
+
 /* ---------------- 会话级规则：持久化 + 与 PuTTY 互转 ---------------- */
 
 /// 一条会话级转发规则。
@@ -871,6 +900,18 @@ impl FwdEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 转发承接看的是终端走哪条路() {
+        // ⚠️ **Windows 默认 inproc** ⇒ 转发必须由程序内承接
+        //    （哪怕系统里装了 OpenSSH，终端也不 spawn 它）。
+        assert!(needs_inproc_forwards(true, true));
+        // Linux 主线：终端 spawn ssh ⇒ 转发进 ssh 的 argv ⇒ 程序内别重复绑
+        assert!(!needs_inproc_forwards(true, false));
+        // 非 SSH 协议（telnet/串口）：没有 SSH 通道 ⇒ 转发无处可去
+        assert!(!needs_inproc_forwards(false, true));
+        assert!(!needs_inproc_forwards(false, false));
+    }
 
     #[test]
     fn parse_cli_colon_form() {

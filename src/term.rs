@@ -2495,7 +2495,13 @@ fn new_term_backend() -> TermView {
 /// ⇒ Linux 上要自测这条通路，得配 `PP_TERM_BACKEND=ghostty`。
 ///
 /// 环境变量 `PP_TERM_SSH=inproc|spawn` 可强制切换（自测用）。
-fn use_inproc_ssh() -> bool {
+///
+/// ⚠️ **别改成私有**：端口转发要靠它决定"转发由谁承接"（见
+///    `panel::PanelState` 里 `worker_forwards` 那段）——终端走 spawn 时
+///    转发进 ssh 的 argv，终端走 inproc 时转发由程序内的转发引擎承接。
+///    两边必须**用同一个判断**，否则会出现"终端没 spawn ssh、转发却发给了
+///    ssh"的空转（Windows 装了 OpenSSH 时必现）。
+pub fn use_inproc_ssh() -> bool {
     match std::env::var("PP_TERM_SSH")
         .unwrap_or_default()
         .trim()
