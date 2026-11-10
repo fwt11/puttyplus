@@ -252,6 +252,74 @@ mod tests {
         assert!(serialize_quick_cmds(&[QuickCmd::new("g", "l", "   ")]).is_empty());
         assert!(parse_quick_cmds("g\tl\t").is_empty());
     }
+
+    /* ---- 终端渲染后端（2026-11-10） ---- */
+
+    /// 两个后端都在时，**听设置里的**。
+    #[test]
+    fn 后端选择_两个都能用时听设置的() {
+        assert_eq!(
+            effective_term_backend_with(Some(BACKEND_VTE), true, true),
+            BACKEND_VTE
+        );
+        assert_eq!(
+            effective_term_backend_with(Some(BACKEND_GHOSTTY), true, true),
+            BACKEND_GHOSTTY
+        );
+    }
+
+    /// 没选 / 选了个认不出来的 ⇒ 落回平台默认（Linux = VTE）。
+    #[test]
+    fn 后端选择_没选就用平台默认() {
+        assert_eq!(
+            effective_term_backend_with(None, true, true),
+            BACKEND_VTE,
+            "两个都能用时默认应是 VTE"
+        );
+        assert_eq!(
+            effective_term_backend_with(Some("  "), true, true),
+            BACKEND_VTE,
+            "空白等于没选"
+        );
+        assert_eq!(
+            effective_term_backend_with(Some("vt"), true, true),
+            BACKEND_VTE,
+            "认不出来的值当没选"
+        );
+    }
+
+    /// ⚠️ **选了本机用不了的后端 ⇒ 退回平台默认，别卡住**
+    /// （Windows 上没有 VTE：老配置里存着 `vte` 也不能让终端起不来）。
+    #[test]
+    fn 后端选择_选了本机用不了的就退回默认() {
+        // 模拟 Windows：只有 ghostty 能用
+        assert_eq!(
+            effective_term_backend_with(Some(BACKEND_VTE), false, true),
+            BACKEND_GHOSTTY,
+            "Windows 上选了 VTE ⇒ 应当退回 ghostty"
+        );
+        // 模拟 Linux 上没编 ghostty
+        assert_eq!(
+            effective_term_backend_with(Some(BACKEND_GHOSTTY), true, false),
+            BACKEND_VTE,
+            "没编 ghostty 时选了它 ⇒ 应当退回 VTE"
+        );
+        // Windows 上默认就是 ghostty
+        assert_eq!(
+            effective_term_backend_with(None, false, true),
+            BACKEND_GHOSTTY
+        );
+    }
+
+    /// 本机**实际生效**的后端必须是能用的那个（别选出一个编不出来的）。
+    #[test]
+    fn 后端选择_实际生效的那个一定能用() {
+        let eff = effective_term_backend();
+        assert!(
+            backend_usable(eff),
+            "实际生效的后端 {eff} 在本机不可用"
+        );
+    }
 }
 
 /// 侧边栏是否显示（[ui] show_sidebar，默认 true）。
@@ -703,6 +771,91 @@ pub fn set_term_font_family(v: Option<&str>) {
     match v {
         Some(f) if !f.trim().is_empty() => set_str("ui", "term_font_family", f.trim()),
         _ => remove_str("ui", "term_font_family"),
+    }
+}
+
+/* ---------------- 终端渲染后端（2026-11-10） ---------------- */
+
+/// 终端**渲染后端**的名字。
+pub const BACKEND_VTE: &str = "vte";
+pub const BACKEND_GHOSTTY: &str = "ghostty";
+
+/// 全局终端后端（`None` = 用平台默认）。
+///
+/// ⚠️ **只有 Linux 上真的有两个可选**：Windows 上没有 VTE
+///    （`vte4-sys` 在 Windows 上编不过）⇒ 恒 ghostty。
+///    ⇒ Windows 上这一项**不显示**（见 `settingsui::terminal_page`）。
+///
+/// 干什么用（用户 2026-11-10）：两个后端编进同一个二进制 ⇒ 跨平台开发时
+/// 不用改环境变量就能在 Linux 上跑 Windows 那条渲染路径。
+pub fn term_backend() -> Option<String> {
+    let s = get_str("ui", "term_backend");
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// 设全局终端后端（`None` = 恢复平台默认）。
+pub fn set_term_backend(v: Option<&str>) {
+    match v {
+        Some(k) if !k.trim().is_empty() => set_str("ui", "term_backend", k.trim()),
+        _ => remove_str("ui", "term_backend"),
+    }
+}
+
+/// 这个平台上**能不能**用某个后端。
+///
+/// ⚠️ 纯逻辑（好单测）：Windows 上 VTE 不可用 ⇒ 设置里选它等于没选。
+pub fn backend_usable(kind: &str) -> bool {
+    match kind {
+        BACKEND_VTE => cfg!(target_os = "linux"),
+        BACKEND_GHOSTTY => cfg!(feature = "ghostty"),
+        _ => false,
+    }
+}
+
+/// 当前**实际生效**的后端（设置 → 平台默认）。
+///
+/// ⚠️ 设置里存的值如果这个平台上不可用 ⇒ 退回平台默认（别卡住）。
+pub fn effective_term_backend() -> &'static str {
+    effective_term_backend_with(
+        term_backend().as_deref(),
+        backend_usable(BACKEND_VTE),
+        backend_usable(BACKEND_GHOSTTY),
+    )
+}
+
+/// 纯逻辑版：给定「设置里选了什么」与「两个后端在本机能不能用」
+/// ⇒ 实际生效的后端。
+///
+/// ⚠️ **为什么要把平台差异抽成参数**：不抽的话这段逻辑只在"当前这台机器
+///    的配置"下可测（单测跑在 Linux ⇒ 永远验不到 Windows 那条分支）。
+///    抽出来以后，两个平台的行为都能在 Linux 上测。
+pub fn effective_term_backend_with(
+    setting: Option<&str>,
+    vte_ok: bool,
+    ghostty_ok: bool,
+) -> &'static str {
+    if let Some(k) = setting.map(str::trim) {
+        if k == BACKEND_VTE && vte_ok {
+            return BACKEND_VTE;
+        }
+        if k == BACKEND_GHOSTTY && ghostty_ok {
+            return BACKEND_GHOSTTY;
+        }
+        // ⚠️ 选了本机用不了的（老配置 / 换了平台 / 认不出来的值）
+        //    ⇒ 落回平台默认，**别卡住**。
+    }
+    // 平台默认：能用 VTE 就是 VTE（Linux），否则 ghostty（Windows）。
+    // ⚠️ 用"能不能用"当判据而不是 `cfg!(target_os)`：Linux 上万一没编
+    //    ghostty，默认也还是 VTE（编出来的那个才是真能用的）。
+    if vte_ok {
+        BACKEND_VTE
+    } else {
+        BACKEND_GHOSTTY
     }
 }
 

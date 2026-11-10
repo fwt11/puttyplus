@@ -37,6 +37,21 @@ say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 say "版本: $(grep -m1 '^version' Cargo.toml)"
 say "cargo: $(cargo --version 2>/dev/null | tail -1)"
 
+# ⚠️ **Zig 预检**（2026-11-10）：终端引擎 ghostty 现在是**默认特性**
+#    ⇒ 编译 libghostty-vt 要 Zig 0.17.x。缺了就早说人话，别让 cargo
+#    抛一堆看不懂的 build.rs 错误。
+if [ -n "${ZIG:-}" ]; then
+    say "zig: $("$ZIG" version 2>&1 | tail -1)"
+elif command -v zig >/dev/null 2>&1; then
+    say "zig: $(zig version 2>&1 | tail -1)"
+else
+    echo "!! 缺少 Zig 0.17：ghostty 是默认特性，编译 libghostty-vt 需要它。" >&2
+    echo "   装法一：官方 tarball https://ziglang.org/download/0.17.1/" >&2
+    echo "   装法二：pip install ziglang==0.17.1（同一个 Zig 二进制）" >&2
+    echo "   装好后：export ZIG=/path/to/zig" >&2
+    exit 1
+fi
+
 if [ "$do_clean" = 1 ]; then
     say "cargo clean"
     cargo clean

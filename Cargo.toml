@@ -18,19 +18,17 @@ panic = "abort"
 opt-level = "s"
 
 [features]
-default = []
-# 终端第二引擎：libghostty-vt（Ghostty 的终端内核，跨平台都有）。
+# ⚠️ **ghostty 现在是默认特性**（2026-11-10，用户拍板）：两个后端都编进
+#    同一个二进制 ⇒ 设置里能让用户**选**用 libvte 还是 ghostty
+#    ⇒ 跨平台开发时不用改环境变量就能在 Linux 上跑 Windows 那条渲染路径。
 #
-# ⚠️ **Linux 上默认关闭**：Linux 侧终端仍走 VTE（主线零回归），所以
-# 日常构建不需要 Zig，CI 的 Linux job 也一行不用改。开了这个特性
-# 就能在 Linux 上**试跑 ghostty 后端**（自测用）。
+# ⚠️ **代价**：编译 libghostty-vt 需要 **Zig 0.17.x**（ZIG 环境变量或 PATH
+#    里的 `zig`）⇒ **Linux 从源码构建也要装 Zig 了**（发行版包里两个后端
+#    都有 ⇒ 用户装 deb 不受影响）。详见 `docs/跨平台-构建说明.md`。
 #
-# ⚠️ **Windows 上是常驻的**（见下面的 `[target.'cfg(windows)']` 段）——
-# Windows 没有 VTE，终端后端只能是 ghostty ⇒ Windows 构建**不需要**
-# 额外加特性。
-#
-# ⚠️ 编译 libghostty-vt 需要 **Zig 0.17.x**（ZIG 环境变量或 PATH 里的
-# `zig`）。详见 `docs/跨平台-构建说明.md`。
+# ⚠️ Windows 上**必须**有它（Windows 没有 VTE）⇒ 即使用
+#    `--no-default-features` 也编不出终端 ⇒ Windows 上别关这个特性。
+default = ["ghostty"]
 ghostty = ["dep:ghostty-vt"]
 
 [dependencies]
@@ -70,9 +68,11 @@ futures-util = { version = "0.3", default-features = false }
 [target.'cfg(target_os = "linux")'.dependencies]
 vte4 = { version = "0.10", features = ["v0_80"] }
 
-# Windows：终端后端是 ghostty（常驻）+ ConPTY 的 Win32 调用。
+# Windows：ConPTY 的 Win32 调用。
+#
+# ⚠️ **ghostty-vt 不在这里了**：它移到上面的 `[dependencies]`（可选）⇒
+#    两个平台共用一份，由 `default = ["ghostty"]` 统一开启。
 [target.'cfg(windows)'.dependencies]
-ghostty-vt = "0.8"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",

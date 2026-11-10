@@ -39,11 +39,11 @@ pub mod vte;
 ///
 /// ⚠️ Linux 上需要 `ghostty` 特性（会编译 libghostty-vt ⇒ 要 Zig 0.17）；
 /// Windows 上**常驻**（Windows 没有 VTE，终端后端只能是它）。
-#[cfg(any(feature = "ghostty", target_os = "windows"))]
+#[cfg(feature = "ghostty")]
 pub mod ghostty;
 
 /// ghostty 自绘终端控件（跨平台版 阶段 C3 起）。
-#[cfg(any(feature = "ghostty", target_os = "windows"))]
+#[cfg(feature = "ghostty")]
 pub mod ghostty_view;
 
 /// 本程序目前只做了 Linux 与 Windows。
@@ -54,14 +54,14 @@ compile_error!("目前只支持 Linux 与 Windows（macOS 待在后续版本做�
 use gtk::prelude::*;
 #[cfg(target_os = "linux")]
 use vte4::prelude::*;
-#[cfg(any(feature = "ghostty", target_os = "windows"))]
+#[cfg(feature = "ghostty")]
 use gtk::prelude::*;
-#[cfg(any(feature = "ghostty", target_os = "windows"))]
+#[cfg(feature = "ghostty")]
 use gtk::glib::prelude::*;
 
-#[cfg(any(feature = "ghostty", target_os = "windows"))]
+#[cfg(feature = "ghostty")]
 use ghostty_view::GhosttyView;
-#[cfg(any(feature = "ghostty", target_os = "windows"))]
+#[cfg(feature = "ghostty")]
 use ghostty::GhosttyTerm;
 
 /// 终端视图：后端无关的句柄。
@@ -74,7 +74,7 @@ pub enum TermView {
     #[cfg(target_os = "linux")]
     Vte(vte4::Terminal),
     /// Windows（以及 Linux 上的自测）：ghostty 自绘终端。
-    #[cfg(any(feature = "ghostty", target_os = "windows"))]
+    #[cfg(feature = "ghostty")]
     Ghostty(GhosttyView),
 }
 
@@ -125,7 +125,7 @@ impl TermView {
     /// **新建一个 ghostty 后端的终端**（Windows 默认走这个）。
     ///
     /// ⚠️ Linux 上只是给自测用（主线仍然是 VTE）。
-    #[cfg(any(feature = "ghostty", target_os = "windows"))]
+    #[cfg(feature = "ghostty")]
     pub fn new_ghostty() -> Self {
         TermView::Ghostty(GhosttyView::new())
     }
@@ -146,7 +146,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.upcast_ref::<gtk::Widget>(),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.widget(),
         }
     }
@@ -159,7 +159,7 @@ impl TermView {
                 return true;
             }
         }
-        #[cfg(any(feature = "ghostty", target_os = "windows"))]
+        #[cfg(feature = "ghostty")]
         {
             if GhosttyView::is_terminal_widget(w) {
                 return true;
@@ -186,7 +186,7 @@ impl TermView {
                 return Some(TermView::Vte(t.clone()));
             }
         }
-        #[cfg(any(feature = "ghostty", target_os = "windows"))]
+        #[cfg(feature = "ghostty")]
         {
             if let Some(v) = GhosttyView::from_widget(w) {
                 return Some(TermView::Ghostty(v));
@@ -200,7 +200,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.add_controller(c),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.area().add_controller(c),
         }
     }
@@ -212,7 +212,7 @@ impl TermView {
             TermView::Vte(t) => {
                 t.grab_focus();
             }
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 v.area().grab_focus();
             }
@@ -227,7 +227,7 @@ impl TermView {
                 t.set_hexpand(hexpand);
                 t.set_vexpand(vexpand);
             }
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 v.area().set_hexpand(hexpand);
                 v.area().set_vexpand(vexpand);
@@ -242,7 +242,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::set_appearance(t, font_size, bell),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 // ⚠️ ghostty 后端：字号自己算（响铃暂不支持——内核的
                 // BEL 事件已经在事件流里，应用层要的话自己去取）。
@@ -260,7 +260,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::apply_colors(t),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 // ⚠️ ghostty 自绘用的是**内核自己那套配色**（OSC 改色
                 // 也要生效）⇒ 这里不刷界面主题的配色。
@@ -274,7 +274,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::apply_palette(t, p),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 let _ = p;
                 v.queue_draw();
@@ -287,7 +287,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.set_mouse_autohide(on),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 // ⚠️ 自绘终端还没有接鼠标 ⇒ 没有「系统指针」可藏。
                 let _ = on;
@@ -301,7 +301,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.set_scrollback_lines(n),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 // ⚠️ ghostty 的回滚缓冲是**按字节**限的（内核 Options
                 // 里的 max_scrollback），不是按行 ⇒ 这里只能忽略。
@@ -316,7 +316,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.scrollback_lines(),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.scrollback_lines(),
         }
     }
@@ -328,7 +328,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.feed(bytes),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.feed(bytes),
         }
     }
@@ -338,7 +338,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.feed_child(bytes),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.feed_child(bytes),
         }
     }
@@ -348,7 +348,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.reset(hard, clear),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.reset(hard, clear),
         }
     }
@@ -360,7 +360,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.row_count(),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.row_count(),
         }
     }
@@ -370,7 +370,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.column_count(),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.column_count(),
         }
     }
@@ -380,7 +380,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.set_size(cols, rows),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.set_size(cols, rows),
         }
     }
@@ -399,7 +399,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::cursor_row(t),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.cursor_row(),
         }
     }
@@ -415,7 +415,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::ansi_rows(t, start, end),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.ansi_rows(start, end),
         }
     }
@@ -425,7 +425,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::screen_text(t, rows, cols),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.screen_text(rows, cols),
         }
     }
@@ -438,7 +438,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::visible_text(t),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.visible_text(),
         }
     }
@@ -450,7 +450,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::search_set_pattern(t, text),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.search_set_pattern(text),
         }
     }
@@ -460,7 +460,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.search_find_next(),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.search_find_next(),
         }
     }
@@ -470,7 +470,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.search_find_previous(),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.search_find_previous(),
         }
     }
@@ -482,7 +482,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::copy_selection(t),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 // ⚠️ ghostty 的选区还没接（内核有 selection 模块，
                 // 但我们没做鼠标拖选）⇒ 暂时无事可做。
@@ -496,7 +496,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::paste_clipboard(t),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.paste_clipboard(),
         }
     }
@@ -508,7 +508,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => t.watch_child(pid),
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 // ⚠️ ghostty 后端不接管子进程——**我们自己管**（PTY 读
                 // 线程结束时就知道子进程没了）。
@@ -525,7 +525,7 @@ impl TermView {
             TermView::Vte(t) => {
                 t.connect_child_exited(move |_t, status| cb(status));
             }
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.connect_child_exited(cb),
         }
     }
@@ -543,7 +543,7 @@ impl TermView {
                     }
                 });
             }
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.connect_title_changed(cb),
         }
     }
@@ -565,7 +565,7 @@ impl TermView {
                     }
                 });
             }
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.connect_cwd_changed(cb),
         }
     }
@@ -585,7 +585,7 @@ impl TermView {
                 #[cfg(target_os = "linux")]
                 t.set_pty(Some(pty.vte_pty()));
             }
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => v.attach_pty(pty),
         }
     }
@@ -603,7 +603,7 @@ impl TermView {
         match self {
             #[cfg(target_os = "linux")]
             TermView::Vte(_) => false,
-            #[cfg(any(feature = "ghostty", target_os = "windows"))]
+            #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
                 v.attach_shell(chan, rx);
                 true

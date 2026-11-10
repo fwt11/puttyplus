@@ -2453,27 +2453,54 @@ fn build_ready_hook(
 
 /// 新建终端后端。
 ///
-/// ⚠️ **默认按平台**：Linux 用 VTE（主线，行为零变化），
-/// Windows 用 ghostty 自绘（Windows 没有 VTE）。
+/// ⚠️ **优先级**：环境变量（自测用）→ 设置项（用户选的）→ 平台默认。
 ///
-/// ⚠️ `PP_TERM_BACKEND=ghostty` 可**强制**用 ghostty 后端——
-/// Linux 上自测用（`examples/term_reconnect_smoke.rs` 那套冒烟
-/// 换个环境变量就能跑 ghostty 后端）。
+/// ⚠️ `PP_TERM_BACKEND=ghostty|vte` 可**强制**用某个后端——自测用
+/// （`examples/term_reconnect_smoke.rs` 那套冒烟换个环境变量就能跑
+/// ghostty 后端）。
 fn new_term_backend() -> TermView {
+    // ① **环境变量**（自测用，最高优先）：`PP_TERM_BACKEND=ghostty|vte`
     let forced = std::env::var("PP_TERM_BACKEND").unwrap_or_default();
     if forced.eq_ignore_ascii_case("ghostty") {
-        #[cfg(any(feature = "ghostty", target_os = "windows"))]
+        #[cfg(feature = "ghostty")]
         {
             return TermView::new_ghostty();
         }
-        #[cfg(not(any(feature = "ghostty", target_os = "windows")))]
+        #[cfg(not(feature = "ghostty"))]
         {
             // ⚠️ 说了要用 ghostty 却没编 ⇒ 说清楚，别静默换一个后端
-            eprintln!(
-                "PP_TERM_BACKEND=ghostty 但本次构建没有 ghostty 后端（要 --features ghostty）"
-            );
+            eprintln!("PP_TERM_BACKEND=ghostty 但本次构建没有 ghostty 后端");
         }
     }
+    if forced.eq_ignore_ascii_case("vte") {
+        // ⚠️ **VTE 只有 Linux 有**（Windows 上 `vte4-sys` 编不过）。
+        #[cfg(target_os = "linux")]
+        {
+            return TermView::new();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("PP_TERM_BACKEND=vte 但本平台没有 VTE（只有 ghostty）");
+        }
+    }
+
+    // ② **设置项**（2026-11-10，用户拍板）：两个后端都编进了同一个二进制
+    //    ⇒ 用户能在「首选项中心 → 终端」里选用 libvte 还是 ghostty
+    //    ⇒ 跨平台开发时不用改环境变量就能跑另一条渲染路径。
+    //
+    // ⚠️ **只影响新开的终端**：已经开着的终端是建好后就不换后端的。
+    if crate::settings::effective_term_backend() == crate::settings::BACKEND_GHOSTTY {
+        #[cfg(feature = "ghostty")]
+        {
+            return TermView::new_ghostty();
+        }
+        #[cfg(not(feature = "ghostty"))]
+        {
+            eprintln!("设置里选了 ghostty 后端，但本次构建没有编进去");
+        }
+    }
+
+    // ③ 平台默认（Linux = VTE，其它 = ghostty）
     TermView::new()
 }
 

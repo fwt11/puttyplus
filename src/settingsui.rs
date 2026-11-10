@@ -148,6 +148,12 @@ pub const SETTINGS: &[SettingItem] = &[
         from: "会话选项",
     },
     SettingItem {
+        id: "term_backend",
+        label: "终端引擎",
+        page: Page::Terminal,
+        from: "（新）首选项中心「终端」页",
+    },
+    SettingItem {
         id: "xfer_resume",
         label: "断点续传",
         page: Page::Transfer,
@@ -531,6 +537,44 @@ fn appearance_page(root: &gtk::Box) {
 
 /// 终端页：终端配色 / 终端字号。
 fn terminal_page(root: &gtk::Box) {
+    /* ---- 终端引擎（2026-11-10，用户拍板） ---- */
+    //
+    // ⚠️ **两个后端都编进了同一个二进制** ⇒ 用户能选用 libvte 还是
+    //    ghostty ⇒ 跨平台开发时不用改环境变量就能在 Linux 上跑 Windows
+    //    那条渲染路径。
+    //
+    // ⚠️ **只在两个后端都可用时才显示**：Windows 上没有 VTE
+    //    （`vte4-sys` 在 Windows 上编不过）⇒ 那一项恒 ghostty ⇒ 不给
+    //    用户一个「选了也没用」的下拉框。
+    if crate::settings::backend_usable(crate::settings::BACKEND_VTE)
+        && crate::settings::backend_usable(crate::settings::BACKEND_GHOSTTY)
+    {
+        let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        sec.append(&section(tr("终端引擎")));
+
+        let combo = gtk::ComboBoxText::new();
+        combo.append(Some(crate::settings::BACKEND_VTE), "libvte");
+        combo.append(Some(crate::settings::BACKEND_GHOSTTY), "ghostty");
+        // ⚠️ **先设当前值、再接回调**（同上面的语言下拉：否则
+        //    `set_active_id` 自己就触发 `changed` ⇒ 一开窗口就把值"改"一遍）。
+        combo.set_active_id(Some(crate::settings::effective_term_backend()));
+
+        let tip = hint_label(
+            tr("libvte 是 Linux 的 GTK 终端控件，ghostty 是 Ghostty 的终端内核。两个后端都编进了这个程序，切换只对新开的终端生效。"),
+        );
+        let tip2 = hint_label(
+            tr("ghostty 引擎还在完善中：自定义配色、鼠标拖选复制、录制回放暂不可用。"),
+        );
+        combo.connect_changed(move |c| {
+            let Some(id) = c.active_id() else { return };
+            crate::settings::set_term_backend(Some(&id));
+        });
+        sec.append(&combo);
+        sec.append(&tip);
+        sec.append(&tip2);
+        root.append(&sec);
+    }
+
     /* ---- 终端配色 ---- */
     {
         let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);

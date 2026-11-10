@@ -2,6 +2,15 @@ Source: puttyplus
 Section: net
 Priority: optional
 Maintainer: fwt11 <wutong.feng@qq.com>
+# ⚠️ **Zig 0.17 是构建依赖，但写不进 Build-Depends**：
+#    终端引擎 ghostty 是**默认特性**（2026-11-10 用户拍板）⇒ 编译
+#    libghostty-vt 需要 Zig 0.17.x；而 **Debian 官方仓库至今没有 zig 包**
+#    （trixie 里只有 python3-zigpy 那些同名前缀的无关包）⇒ 写进去的话
+#    这个包在 Debian 自己的构建系统里**永远编不出来**。
+#    ⇒ 折中：Build-Depends 里不写，改由 debian/rules 在编译前**检查**
+#    （缺了就报一句人话 + 装法），由打包环境自己提供 Zig。
+#    装法：官方 tarball https://ziglang.org/download/0.17.1/
+#          或 `pip install ziglang==0.17.1`（同一个 Zig 二进制）。
 Build-Depends: debhelper-compat (= 13),
                cargo,
                pkg-config,

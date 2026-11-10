@@ -18,6 +18,21 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 override_dh_auto_test:
 
 override_dh_auto_build:
+	# ⚠️ **Zig 预检**：终端引擎 ghostty 是**默认特性**（2026-11-10）⇒
+	#    编译 libghostty-vt 要 Zig 0.17.x。Debian 官方仓库**没有 zig 包**
+	#    ⇒ 没法写进 Build-Depends（见 debian/control 的说明）⇒ 在这儿查。
+	#    缺了就报一句人话 + 装法，别让 cargo 抛一堆看不懂的 build.rs 错误。
+	@if [ -n "$$ZIG" ]; then \
+		"$$ZIG" version; \
+	elif command -v zig >/dev/null 2>&1; then \
+		zig version; \
+	else \
+		echo "缺少 Zig 0.17：ghostty 是默认特性，编译 libghostty-vt 需要它。"; \
+		echo "  装法一：官方 tarball https://ziglang.org/download/0.17.1/"; \
+		echo "  装法二：pip install ziglang==0.17.1（同一个 Zig 二进制）"; \
+		echo "  装好后：export ZIG=/path/to/zig"; \
+		exit 1; \
+	fi
 	cargo build --release --locked
 	# ⚠️ 摘掉弱符号的 glibc 版本要求（pidfd_spawnp / pidfd_getpid 是 glibc
 	#    2.39 才有的，Rust 的 std 以**弱引用**方式用它们）。

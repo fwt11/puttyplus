@@ -82,6 +82,11 @@ ssh 子进程长什么样 —— 每一处都要和 PuTTY 对得上。
 - **分屏**：一个终端页签里可以左右 / 上下切分，同时盯住几路输出（顶部「终端」菜单 →
   「左右分屏」/「上下分屏」；右键菜单里也能从当前那块分）；每个终端页签各有一组
   自己的分屏布局，互不干扰。
+- **终端引擎可以自己选**：**libvte**（Linux 的 GTK 终端控件）与 **ghostty**
+  （Ghostty 的终端内核，Windows 版用的就是它）**编进同一个二进制** ⇒ 首选项
+  「终端」页有个「终端引擎」下拉框随时切（只对新开的终端生效；Windows 上没有
+  这一项 —— 那边只有 ghostty）。⚠️ ghostty 引擎还在完善中：自定义配色、鼠标
+  拖选复制、录制回放暂不可用。
 - 终端查找、复制粘贴、按键广播、终端日志、会话录制与回放。
 
 ### 三、数据库工作台
@@ -167,6 +172,13 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 | **SFTP 文件面板** | ✅ 可用。列表、上下级、新建、重命名、删除、传输队列、拖拽上传、剪贴板粘贴上传 |
 | **命令行参数契约** | ✅ 与 Linux 版**逐条一致**：同样那 73 条黄金基准，PASS=73 FAIL=0 |
 
+另外两块**特色功能在 Windows 上也开放了**（2026-11-10）：
+
+| 能力 | Windows 状态 |
+|---|---|
+| **端口映射**（`-L`/`-R`/`-D`） | ✅ 可用。由本程序自己的**进程内转发**承接（走 SSH 的 `direct-tcpip` 通道）——⚠️ 承接方看的是「终端用哪条路连」，不是「系统里有没有 ssh」 |
+| **数据库工作台**（PostgreSQL / MySQL） | ✅ 可用。⚠️ **一处部署侧差别**：Unix 上 PostgreSQL 走本地套接字（远端多半不校验密码），Windows 走 `127.0.0.1` 回环 TCP ⇒ 远端 `pg_hba.conf` 必须放行 TCP + 密码认证 |
+
 ⚠️ **Windows 上的 SSH 是「我们自己实现的」**（阶段 C7）：Windows 默认没装
 `ssh.exe`（OpenSSH 是可选功能），`plink` 又不想依赖 ⇒ 终端改成用 russh
 **在进程内**说 SSH：申请远程 pty、开 shell、键盘字节直接写进去、窗口尺寸
@@ -182,11 +194,10 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 
 **首版不做 / 未验证的**：
 
-- **数据库工作台**：代码保留编译，但**入口隐藏**（顶栏菜单里不显示，其余入口点了
-  会提示「Windows 版尚未验证」）。第二版再放开。
 - **桌面通知**：Windows 首版不做（状态栏有一句兜底）。
 - **录制/回放**：ghostty 内核的 `cursor_row()` 是视口内行号、与 VTE 的绝对行号
   语义不同 ⇒ 录制在 ghostty 后端暂不准（Linux 的 VTE 后端不受影响）。
+- **终端引擎切换**：Windows 上没有这一项（那边没有 VTE，只有一个可选）。
 
 构建（**只能在 Windows 上编**，Linux 交叉编译会卡在 `glib-sys` 需要的 Windows
 sysroot 上）：
@@ -306,6 +317,7 @@ sudo dpkg -i puttyplus_<版本>-1_amd64.deb
 | `PUTTYPLUS_FOLLOW_MS` | 终端跟随目录的轮询间隔（毫秒，0 关闭） |
 | `PUTTYPLUS_WATCH_MS` | 文件列表的自动刷新间隔（毫秒，0 关闭） |
 | `PUTTYPLUS_CAPTURE_DIR` / `PUTTYPLUS_LOG_DIR` | 录制 / 日志的落盘目录 |
+| `PP_TERM_BACKEND` | 强制终端引擎（`ghostty` / `vte`），盖过首选项里的设置；自测用 |
 
 ## 目录结构
 
@@ -335,6 +347,8 @@ bash tools/cli_contract_check.sh              # 命令行契约回归（73 条�
 - 在 **Debian 13 (trixie)** 容器里编译 —— 它带 GTK 4.18.6 / VTE 0.80.1，
   正好是 `debian/control` 里声明的依赖下限（Ubuntu runner 只有 GTK 4.14，
   编译期就会被版本断言挡下）；
+- 装 **Zig 0.17**（终端引擎 ghostty 是默认特性 ⇒ 编译 libghostty-vt 要它），
+  并**自己下载 ghostty 源码**（校验 sha256）⇒ 编译那一步不联网；
 - 跑全部单元测试；
 - 跑三个关键 GUI 冒烟（`db_ui_smoke` / `db_empty_smoke` / `tree_panel_smoke`）——
   GTK 要求在主线程初始化，所以界面断言放在独立进程（example）里跑，
