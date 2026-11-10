@@ -473,15 +473,36 @@ pub fn flush(st: &Rc<PanelState>) {
                 // ⚠️ **xfer = 正在传**（只有 Run 才算）：文件列表里这一行
                 // 画呼吸背景（用户 2026-11-10）。排队等待的不算——一长串
                 // 等待项都在呼吸，反而看不出"现在在传哪个"。
-                let (ppct, ptext, pxfer) = match g.state {
-                    XferState::Wait => (0, tr("等待").to_string(), false),
-                    XferState::Run => (pct, format!("{pct}%"), true),
-                    XferState::Done => (100, tr("完成").to_string(), false),
-                    XferState::Skip => (0, tr("跳过").to_string(), false),
-                    XferState::Err => (0, tr("失败").to_string(), false),
-                    XferState::Cancel => (0, tr("取消").to_string(), false),
-                };
-                super::pane::set_progress(&st.pane(remote_src), &src_name, ppct, &ptext, pxfer);
+                //
+                // ⚠️ **终态文案（「完成」/「失败」…）走另一条路**：
+                //    `set_terminal` 让它**显示一会儿再渐隐**（用户 2026-11-10：
+                //    「下载完了，就显示一下完成，然后就慢慢消失吧，不要把
+                //    「完成」一直显示在那里」）。
+                let terminal = matches!(
+                    g.state,
+                    XferState::Done | XferState::Err | XferState::Skip | XferState::Cancel
+                );
+                if terminal {
+                    let (tpct, ttext) = match g.state {
+                        XferState::Done => (100, tr("完成").to_string()),
+                        XferState::Skip => (0, tr("跳过").to_string()),
+                        XferState::Err => (0, tr("失败").to_string()),
+                        _ => (0, tr("取消").to_string()),
+                    };
+                    super::pane::set_terminal(
+                        &st.pane(remote_src),
+                        &src_name,
+                        tpct,
+                        &ttext,
+                        super::pane::now_ms(),
+                    );
+                } else {
+                    let (ppct, ptext, pxfer) = match g.state {
+                        XferState::Wait => (0, tr("等待").to_string(), false),
+                        _ => (pct, format!("{pct}%"), true),
+                    };
+                    super::pane::set_progress(&st.pane(remote_src), &src_name, ppct, &ptext, pxfer);
+                }
             }
         }
     }
@@ -489,6 +510,9 @@ pub fn flush(st: &Rc<PanelState>) {
     // ⇒ 借用没放掉就是 RefCell 双重借用 panic。
     drop(items);
     refresh_btn(st);
+    // ⚠️ **再同步一次动画**：这一轮可能刚给某一行写上终态文案（「完成」）
+    //    ⇒ 得让动画定时器**继续跑**，把那行慢慢淡掉（不然它会一直挂着）。
+    super::sync_xfer_anim(st);
 }
 
 /// 取消选中行：运行中的置取消标志，等待中的直接标记取消。

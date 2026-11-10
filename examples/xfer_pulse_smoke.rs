@@ -79,6 +79,8 @@ fn build_view(busy: bool) -> (gtk::ApplicationWindow, gtk::TreeView) {
         gtk::glib::Type::STRING, // 9 PROGRESS
         gtk::glib::Type::STRING, // 10 MTIME_FULL
         gtk::glib::Type::BOOL,   // 11 XFER（正在传 ⇒ 呼吸背景）
+        gtk::glib::Type::F32,    // 12 FADE（进度文案透明度）
+        gtk::glib::Type::I64,    // 13 FADE_AT（终态文案起始时刻）
     ]);
     for (i, name) in ["normal.txt", "busy.txt"].iter().enumerate() {
         let it = model.append();
@@ -97,6 +99,8 @@ fn build_view(busy: bool) -> (gtk::ApplicationWindow, gtk::TreeView) {
                 (9, &if busy && i == 1 { &"42%" } else { &"" }),
                 (10, &"2026-11-10 12:00"),
                 (11, &(busy && i == 1)),
+                (12, &1.0f32),
+                (13, &0i64),
             ],
         );
     }

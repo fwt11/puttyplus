@@ -25,6 +25,11 @@ mod imp {
         /// 传输进度文案（"45%"/"完成"/""）；空串 = 不画进度
         pub progress: RefCell<String>,
         pub progress_pct: StdCell<i32>,
+        /// **进度文案的透明度**（1 = 完全可见，0 = 看不见）。
+        ///
+        /// 干什么用（用户 2026-11-10）：「下载完了，就显示一下完成，然后
+        /// 就慢慢消失吧」⇒ 终态文案（「完成」/「失败」…）停留一下再渐隐。
+        pub fade: StdCell<f32>,
         /// **这一行正在传输**（上传或下载）⇒ 画呼吸背景 + 左侧竖条。
         ///
         /// 干什么用（用户 2026-11-10）：「上传/下载的文件背景色可以呼吸
@@ -40,7 +45,14 @@ mod imp {
         type ParentType = gtk::CellRenderer;
     }
 
-    impl ObjectImpl for NameCellRenderer {}
+    impl ObjectImpl for NameCellRenderer {
+        fn constructed(&self) {
+            self.parent_constructed();
+            // ⚠️ **透明度默认必须是 1.0**：`#[derive(Default)]` 给的是 0.0
+            //    ⇒ 进度文案一出生就是全透明的 ⇒ 「45%」「完成」全都看不见。
+            self.fade.set(1.0);
+        }
+    }
 
     impl CellRendererImpl for NameCellRenderer {
         fn preferred_width<P: IsA<gtk::Widget>>(&self, _widget: &P) -> (i32, i32) {
@@ -165,25 +177,30 @@ mod imp {
             snapshot.pop();
 
             if let Some((pl, lw, lh)) = label {
+                // ⚠️ **终态文案渐隐**（用户 2026-11-10：「下载完了，就显示
+                //    一下完成，然后就慢慢消失吧」）——只有进度文案和它下面
+                //    那条进度条变淡，**文件名始终正常**。
+                let mut pcolor = color.clone();
+                pcolor.set_alpha(color.alpha() * self.fade.get().clamp(0.0, 1.0));
                 // 百分比：靠右、垂直居中
                 let px = cell_area.x() as f32 + cell_w - lw - 4.0;
                 let py = cell_area.y() as f32 + (cell_area.height() as f32 - lh) / 2.0;
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(px, py));
-                snapshot.append_layout(&pl, &color);
+                snapshot.append_layout(&pl, &pcolor);
                 snapshot.restore();
 
                 // 底部一条 2px 细进度条：不抢文字视觉，但一眼能看出快慢
                 let bar_x = cell_area.x() as f32 + 2.0;
                 let bar_y = (cell_area.y() + cell_area.height()) as f32 - 3.0;
                 let bar_w = (cell_w - 4.0).max(1.0);
-                let mut track = color.clone();
+                let mut track = pcolor.clone();
                 track.set_alpha(0.18);
                 snapshot.append_color(
                     &track,
                     &graphene::Rect::new(bar_x, bar_y, bar_w, 2.0),
                 );
-                let mut fill = color;
+                let mut fill = pcolor;
                 fill.set_alpha(0.75);
                 snapshot.append_color(
                     &fill,
@@ -221,5 +238,18 @@ impl NameCellRenderer {
     /// 这一行**正在传输**（上传或下载）⇒ 画呼吸背景。
     pub fn set_xfer(&self, on: bool) {
         self.imp().xfer.set(on);
+    }
+
+    /// **进度文案**的透明度（终态文案渐隐用；文件名本身不受影响）。
+    pub fn set_fade(&self, alpha: f32) {
+        self.imp().fade.set(alpha.clamp(0.0, 1.0));
+    }
+
+    /// 冒烟用：当前生效的**进度文案透明度**。
+    ///
+    /// 干什么用：验证"模型里的透明度 ⇒ 真的送到了渲染器"这一段链路
+    /// （模型对了但 cell data func 没调 `set_fade`，画面上还是不会淡）。
+    pub fn fade_alpha(&self) -> f32 {
+        self.imp().fade.get()
     }
 }

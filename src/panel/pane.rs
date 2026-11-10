@@ -37,6 +37,21 @@ pub const COL_MTIME_FULL: i32 = 10;
 /// 干什么用（用户 2026-11-10）：「上传/下载的文件背景色可以呼吸变化，
 /// 这样更明显些」——窄面板里进度文字经常被挤掉，光靠那几个字不够显眼。
 pub const COL_XFER: i32 = 11;
+/// **进度文案的透明度**（1 = 完全可见，0 = 看不见）。
+///
+/// 干什么用（用户 2026-11-10）：「下载完了，就显示一下完成，然后就慢慢
+/// 消失吧，不要把「完成」一直显示在那里」⇒ 终态文案停留一下再**渐隐**。
+pub const COL_FADE: i32 = 12;
+/// **终态文案的起始时刻**（单调毫秒）。
+///
+/// ⚠️ 三种状态：
+/// - `0`  = 这一行**从没显示过**终态文案（或又开始传了 ⇒ 复位成这个）
+/// - `>0` = 终态文案**正在淡出**（值 = 开始淡出的那一刻）
+/// - `<0` = **已经淡完**（别再显示；文案还留在模型里，但透明度是 0）
+///
+/// 干什么用：队列每刷新一次就会把状态写回文件行 ⇒ 没有这个标记的话，
+/// 淡完之后下一次刷新又会把「完成」点亮 ⇒ 用户看到「完成」反复冒出来。
+pub const COL_FADE_AT: i32 = 13;
 
 /* ---------------- 图标 ---------------- */
 
@@ -151,6 +166,8 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
             );
             // ⚠️ **正在传输的行 ⇒ 呼吸背景**（用户 2026-11-10）
             r.set_xfer(model.get::<bool>(iter, COL_XFER));
+            // ⚠️ **终态文案渐隐**（「完成」别一直挂在那儿）
+            r.set_fade(model.get::<f32>(iter, COL_FADE));
         }
     });
     view.append_column(&col_name);
@@ -238,6 +255,30 @@ impl Pane {
     }
 }
 
+/// 当前的**单调**时钟（毫秒）。
+///
+/// ⚠️ 用单调时钟而不是系统时间：改系统时间/时区不该让正在淡出的「完成」
+///    突然跳到别的阶段（甚至倒着走）。
+pub fn now_ms() -> u64 {
+    (glib::monotonic_time() / 1000).max(0) as u64
+}
+
+/// 按文件名在模型里找一行。
+fn find_row(pane: &Pane, name: &str) -> Option<gtk::TreeIter> {
+    let mut it = pane.model.iter_first();
+    while let Some(mut i) = it {
+        if pane.model.get::<String>(&i, COL_NAME) == name {
+            return Some(i);
+        }
+        it = if pane.model.iter_next(&mut i) {
+            Some(i)
+        } else {
+            None
+        };
+    }
+    None
+}
+
 /// 更新某一行文件名后面的传输进度。找不到（文件不在当前目录）返回 false。
 ///
 /// `xfer` = 这一行**正在传**（上传或下载）⇒ 名称单元格画呼吸背景
@@ -252,6 +293,11 @@ pub fn set_progress(pane: &Pane, name: &str, pct: i32, text: &str, xfer: bool) -
                     (COL_PCT as u32, &pct.clamp(0, 100)),
                     (COL_PROGRESS as u32, &text),
                     (COL_XFER as u32, &xfer),
+                    // ⚠️ **新文案 ⇒ 透明度复位**（否则上一次淡到一半的
+                    //    「完成」会让新文案也半透明）
+                    (COL_FADE as u32, &1.0f32),
+                    // ⚠️ **又开始传了 ⇒ 终态标记清掉**（这一行又要从头来过）
+                    (COL_FADE_AT as u32, &0i64),
                 ],
             );
             pane.view.queue_draw();
@@ -266,18 +312,156 @@ pub fn set_progress(pane: &Pane, name: &str, pct: i32, text: &str, xfer: bool) -
     false
 }
 
+/// 在某一行上写**终态文案**（「完成」/「失败」/…）并开始淡出。
+///
+/// 干什么用（用户 2026-11-10）：「下载完了，就显示一下完成，然后就慢慢消失吧，
+/// 不要把『完成』一直显示在那里」。
+///
+/// ⚠️ **只写一次**：已经显示过终态文案的行（正在淡出 `>0` / 已经淡完 `<0`）
+///    不会被再次点亮 ⇒ 否则队列每刷新一次就会把「完成」重新点亮，用户看到
+///    它反复冒出来。
+///
+/// 返回 true = 这次**真的写上**了（调用方据此决定要不要继续跑动画）。
+pub fn set_terminal(pane: &Pane, name: &str, pct: i32, text: &str, now_ms: u64) -> bool {
+    let Some(i) = find_row(pane, name) else {
+        return false;
+    };
+    let at: i64 = pane.model.get(&i, COL_FADE_AT);
+    if at != 0 {
+        // 正在淡出（>0）或已经淡完（<0）⇒ 别再点亮
+        return false;
+    }
+    pane.model.set(
+        &i,
+        &[
+            (COL_PCT as u32, &pct.clamp(0, 100)),
+            (COL_PROGRESS as u32, &text),
+            (COL_XFER as u32, &false),
+            (COL_FADE as u32, &1.0f32),
+            (COL_FADE_AT as u32, &(now_ms as i64)),
+        ],
+    );
+    pane.view.queue_draw();
+    true
+}
+
+/// 推进**所有行**的终态文案淡出（动画定时器每 60ms 调一次）。
+///
+/// 返回"还有没有在淡的"（没有了就该停定时器了）。
+pub fn tick_fade(pane: &Pane, now_ms: u64) -> bool {
+    let mut fading = false;
+    // ⚠️ **动过就要重画**：淡完那一刻 alpha 变 0 ⇒ 不重画的话「完成」还留在
+    //    屏幕上（模型里已经透明了，但界面没刷新）。
+    let mut touched = false;
+    let mut it = pane.model.iter_first();
+    while let Some(mut i) = it {
+        let at: i64 = pane.model.get(&i, COL_FADE_AT);
+        if at > 0 {
+            touched = true;
+            let elapsed = now_ms.saturating_sub(at as u64);
+            if super::fade::finished(elapsed) {
+                // ⚠️ **淡完了**：文案**留着**（但透明）——因为「已经淡完」这个
+                //    状态本身要靠它记住（`COL_FADE_AT = -1`），不然目录刷新
+                //    重建模型之后下一次队列刷新又会把「完成」点亮。
+                pane.model.set(
+                    &i,
+                    &[
+                        (COL_FADE as u32, &0.0f32),
+                        (COL_FADE_AT as u32, &-1i64),
+                    ],
+                );
+            } else {
+                let a = super::fade::alpha_of(elapsed);
+                pane.model.set(&i, &[(COL_FADE as u32, &a)]);
+                fading = true;
+            }
+        }
+        it = if pane.model.iter_next(&mut i) {
+            Some(i)
+        } else {
+            None
+        };
+    }
+    if touched {
+        pane.view.queue_draw();
+    }
+    fading
+}
+
+/// 这个面板里**还有没有**正在淡出的终态文案。
+pub fn has_fading(pane: &Pane) -> bool {
+    let mut it = pane.model.iter_first();
+    while let Some(mut i) = it {
+        let at: i64 = pane.model.get(&i, COL_FADE_AT);
+        if at > 0 {
+            return true;
+        }
+        it = if pane.model.iter_next(&mut i) {
+            Some(i)
+        } else {
+            None
+        };
+    }
+    false
+}
+
+/// 冒烟用：读某一行当前的终态状态（**文案**, **透明度**, **起始时刻**）。
+///
+/// 找不到这一行返回 None。
+pub fn row_terminal(pane: &Pane, name: &str) -> Option<(String, f32, i64)> {
+    let i = find_row(pane, name)?;
+    Some((
+        pane.model.get::<String>(&i, COL_PROGRESS),
+        pane.model.get::<f32>(&i, COL_FADE),
+        pane.model.get::<i64>(&i, COL_FADE_AT),
+    ))
+}
+
+/// 收集当前模型里所有**带终态文案**的行（正在淡出的 + 已经淡完的）。
+///
+/// 干什么用：`fill_model` 重建模型时把这些**搬回去** ⇒ 目录刷新（传输完成
+/// 后会自动刷新远程目录）不会把刚出现的「完成」一下抹掉。
+fn collect_terminal(pane: &Pane) -> Vec<(String, String, i64, f32)> {
+    let mut out = Vec::new();
+    let mut it = pane.model.iter_first();
+    while let Some(mut i) = it {
+        let at: i64 = pane.model.get(&i, COL_FADE_AT);
+        if at != 0 {
+            out.push((
+                pane.model.get::<String>(&i, COL_NAME),
+                pane.model.get::<String>(&i, COL_PROGRESS),
+                at,
+                pane.model.get::<f32>(&i, COL_FADE),
+            ));
+        }
+        it = if pane.model.iter_next(&mut i) {
+            Some(i)
+        } else {
+            None
+        };
+    }
+    out
+}
+
 /// 队列清空后把所有行的进度清掉（目录刷新失败时也不留旧百分比）。
+///
+/// ⚠️ **正在淡出的行不动**：队列排空时会调它，那时「完成」刚出现 ⇒
+///    一抹就没了，用户根本看不见（用户 2026-11-10：得**先看见**它慢慢消失）。
 pub fn clear_progress(pane: &Pane) {
     let mut it = pane.model.iter_first();
     while let Some(mut i) = it {
-        let _ = pane.model.set(
-            &i,
-            &[
-                (COL_PCT as u32, &0i32),
-                (COL_PROGRESS as u32, &""),
-                (COL_XFER as u32, &false),
-            ],
-        );
+        let at: i64 = pane.model.get(&i, COL_FADE_AT);
+        if at == 0 {
+            let _ = pane.model.set(
+                &i,
+                &[
+                    (COL_PCT as u32, &0i32),
+                    (COL_PROGRESS as u32, &""),
+                    (COL_XFER as u32, &false),
+                    (COL_FADE as u32, &1.0f32),
+                ],
+            );
+        }
         it = if pane.model.iter_next(&mut i) {
             Some(i)
         } else {
@@ -289,6 +473,10 @@ pub fn clear_progress(pane: &Pane) {
 
 /// 填充列表（隐藏过滤 + 目录显示“目录”）。对应 C 版 fill_model。
 pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
+    // ⚠️ **先收集终态文案**：目录刷新会重建整个模型 ⇒ 正在淡出的「完成」
+    //    得搬回去，不然它会被这一下抹掉（用户 2026-11-10：得**看得见**
+    //    「完成」慢慢消失，而不是目录一刷新就没了）。
+    let terminal = collect_terminal(pane);
     pane.model.clear();
     // 首行 ".."：进入上级目录（文件管理器惯例，取代工具栏「上级」按钮）
     {
@@ -313,6 +501,8 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
                 (COL_PCT as u32, &0i32),
                 (COL_PROGRESS as u32, &""),
                 (COL_XFER as u32, &false),
+                (COL_FADE as u32, &1.0f32),
+                (COL_FADE_AT as u32, &0i64),
             ],
         );
     }
@@ -353,6 +543,22 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
                 (COL_PCT as u32, &0i32),
                 (COL_PROGRESS as u32, &""),
                 (COL_XFER as u32, &false),
+                (COL_FADE as u32, &1.0f32),
+                (COL_FADE_AT as u32, &0i64),
+            ],
+        );
+    }
+    // ⚠️ **把终态文案搬回新模型**（目录刷新不该抹掉刚出现的「完成」）
+    for (name, text, at, alpha) in terminal {
+        let Some(i) = find_row(pane, &name) else {
+            continue; // 新列表里没这个文件了（换了目录/文件被删）⇒ 放弃
+        };
+        let _ = pane.model.set(
+            &i,
+            &[
+                (COL_PROGRESS as u32, &text),
+                (COL_FADE as u32, &alpha),
+                (COL_FADE_AT as u32, &at),
             ],
         );
     }
@@ -490,6 +696,8 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         glib::Type::STRING, // PROGRESS
         glib::Type::STRING, // MTIME_FULL（tooltip 用，不显示）
         glib::Type::BOOL,   // XFER（正在传输 ⇒ 呼吸背景）
+        glib::Type::F32,    // FADE（进度文案的透明度：终态文案渐隐用）
+        glib::Type::I64,    // FADE_AT（终态文案的起始时刻：0=没有，>0=正在淡出，<0=已淡完）
     ]);
     let view = gtk::TreeView::new();
     let entry = gtk::Entry::new();

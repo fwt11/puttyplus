@@ -18,6 +18,8 @@ pub mod closeguard;
 pub mod clipfiles;
 pub mod dialogs;
 pub mod dnd;
+/// **终态文案的淡出节奏**（「完成」显示一会儿再渐隐）。
+pub mod fade;
 pub mod fileedit;
 pub mod fwdmgr;
 pub mod mirrorui;
@@ -973,7 +975,10 @@ pub fn xfer_running_count(st: &Rc<PanelState>) -> usize {
 /// ⚠️ 定时器闭包只抓**弱引用**（面板没了就停）——抓强引用就是引用环。
 pub fn sync_xfer_anim(st: &Rc<PanelState>) {
     let busy = xfer_running(st).total() > 0;
-    if busy {
+    // ⚠️ **还有正在淡出的终态文案 ⇒ 动画也得继续**（用户 2026-11-10：
+    //    「完成」慢慢消失 ⇒ 传输早就结束了，但那一行还得继续淡）。
+    let fading = any_fading(st);
+    if busy || fading {
         if st.xfer_anim.borrow().is_some() {
             return; // 已经在跑了
         }
@@ -985,13 +990,17 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
             if st.dead.get() {
                 return glib::ControlFlow::Break;
             }
+            // ⚠️ **推进终态文案的淡出**（「完成」慢慢消失）
+            let now = pane::now_ms();
             // 文件列表（两栏）：正在传的行背景要跟着呼吸重画
             let rp = st.remote_pane.borrow().clone();
             if let Some(p) = rp {
+                pane::tick_fade(&p, now);
                 p.view.queue_draw();
             }
             let lp = st.local_pane.borrow().clone();
             if let Some(p) = lp {
+                pane::tick_fade(&p, now);
                 p.view.queue_draw();
             }
             // 队列窗口：方向列的 accent 色在呼吸
@@ -1001,6 +1010,14 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
             }
             // 工具栏「传输队列」按钮的图标：透明度呼吸
             queue::breathe_btn(&st);
+            // ⚠️ **没事做了就停**（省 CPU）。
+            //    ⚠️ 回调里**不能** `id.remove()` 自己（那会 panic）⇒ 只把
+            //    存起来的 SourceId 清掉，靠 `Break` 让 GLib 收掉这个源。
+            if xfer_running(&st).total() == 0 && !any_fading(&st) {
+                *st.xfer_anim.borrow_mut() = None;
+                queue::reset_btn_opacity(&st);
+                return glib::ControlFlow::Break;
+            }
             glib::ControlFlow::Continue
         });
         *st.xfer_anim.borrow_mut() = Some(id);
@@ -1011,6 +1028,23 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
         // 停了 ⇒ 图标恢复成不透明（别留个半透明的鬼影）
         queue::reset_btn_opacity(st);
     }
+}
+
+/// 两栏里**还有没有**正在淡出的终态文案（"完成"慢慢消失）。
+fn any_fading(st: &Rc<PanelState>) -> bool {
+    let rp = st.remote_pane.borrow().clone();
+    if let Some(p) = rp {
+        if pane::has_fading(&p) {
+            return true;
+        }
+    }
+    let lp = st.local_pane.borrow().clone();
+    if let Some(p) = lp {
+        if pane::has_fading(&p) {
+            return true;
+        }
+    }
+    false
 }
 
 fn render_status(st: &Rc<PanelState>) {
