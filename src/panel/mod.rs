@@ -748,6 +748,20 @@ pub fn notify_cwd_uri(st: &Rc<PanelState>, uri: &str) {
     follow_apply(st, &dec);
 }
 
+/// 这条终端**当前所在的远程目录**（远端那个 shell 的 cwd）。
+///
+/// 干什么用：**重连后回到原来的目录**（用户 2026-11-10）。终端自己
+/// 不知道 cwd（OSC 7 只有部分 shell 会发）⇒ 这里知道——目录跟随轮询
+/// （2 秒一次）问远端那个 shell 要它的 cwd，OSC 7 也往这儿汇。
+///
+/// ⚠️ **断线时不清空**：断了之后这个值正好就是「重连后要回去的目录」。
+///
+/// ⚠️ 目录跟随被用户关掉时，这个值会**停在最后一次观察到的目录**——
+///    那仍旧是「shell 上次在哪儿」，比没有强。
+pub fn last_term_cwd(st: &Rc<PanelState>) -> Option<String> {
+    st.follow_last.borrow().clone().filter(|d| !d.is_empty())
+}
+
 /// 这个会话的**终端存活状态**（阶段 65 / 审计 P0-4）。
 ///
 /// 三态：没起来过（Unknown）/ 活着（Alive）/ 起过但结束了（Dead）。

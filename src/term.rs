@@ -391,7 +391,21 @@ pub(crate) struct TermInner {
     ///
     /// ⚠️ 闭包**只能抓弱引用**（面板）——抓强引用就是引用环
     /// （TermPane → 钩子 → TermPane ⇒ 面板永远释放不掉）。
-    reconnect_hook: RefCell<Option<Box<dyn Fn() + 'static>>>,
+    reconnect_hook: RefCell<Option<Box<dyn Fn(i64) + 'static>>>,
+    /// **「我现在在哪个远程目录」的询问者**（上层知道）。
+    ///
+    /// 干什么用：**重连后回到原来的目录**（用户 2026-11-10：「终端短线
+    /// 重连后，应该还回到原来的目录」）。终端自己**不知道** cwd ——
+    /// OSC 7 只有部分 shell 会发 ⇒ 得问上层。
+    ///
+    /// ⚠️ 闭包**只能抓弱引用**（面板）——抓强引用就是引用环
+    /// （TermPane → 钩子 → TermPane ⇒ 面板永远释放不掉）。
+    cwd_provider: RefCell<Option<Box<dyn Fn() -> Option<String>>>>,
+    /// **新会话就绪后要 `cd` 回去的目录**（远程绝对路径）。
+    ///
+    /// 重连前把「我刚才在哪儿」记在这儿 ⇒ 新会话看见提示符后补一条
+    /// `cd '<目录>'` ⇒ 用户不用自己再 `cd` 一遍。
+    restore_dir: RefCell<Option<String>>,
     /// **断线时用户敲的输入**（阶段 99）：攒着，等重连成功**补发**进新会话。
     ///
     /// 干什么用：会话结束（ssh 子进程退了）之后用户还在敲命令 ⇒ 那几下
@@ -677,6 +691,8 @@ impl TermPane {
             menu_extra: RefCell::new(None),
             ready_hook: RefCell::new(None),
             reconnect_hook: RefCell::new(None),
+            cwd_provider: RefCell::new(None),
+            restore_dir: RefCell::new(None),
             pending_input: RefCell::new(Vec::new()),
             reconnecting: Cell::new(false),
             key_sink: RefCell::new(None),
@@ -759,6 +775,29 @@ impl TermPane {
         *self.inner.cwd_cb.borrow_mut() = Some(Box::new(cb));
     }
 
+    /// 装「**我现在在哪个远程目录**」的询问者（上层知道）。
+    ///
+    /// 干什么用：**重连后回到原来的目录**。终端自己不知道 cwd（OSC 7
+    /// 只有部分 shell 会发）⇒ 重连前问上层要一下，记下来，新会话就绪后
+    /// 补一条 `cd` 回去。
+    ///
+    /// ⚠️ 闭包**只能抓弱引用**（面板）——抓强引用就是引用环。
+    pub fn set_cwd_provider<F: Fn() -> Option<String> + 'static>(&self, f: F) {
+        *self.inner.cwd_provider.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// **指定**新会话就绪后要 `cd` 回去的目录（远程绝对路径）。
+    ///
+    /// 干什么用：重建终端页签（用户把「终端」子页签 × 掉之后又重建）
+    /// —— 新页签自带一条新会话 ⇒ 让它**直接开到原来那个目录**，跟
+    /// 「重连」一个效果。
+    pub fn set_restore_dir(&self, dir: &str) {
+        if dir.is_empty() {
+            return;
+        }
+        *self.inner.restore_dir.borrow_mut() = Some(dir.to_string());
+    }
+
     /// 远程标题变化回调（shell/程序经 OSC 0/2 设置标题时触发）。
     pub fn set_title_callback<F: Fn(&str) + 'static>(&self, cb: F) {
         *self.inner.title_cb.borrow_mut() = Some(Box::new(cb));
@@ -819,8 +858,11 @@ impl TermPane {
     /// 干什么用：「重新连接终端」时**顺带把断了的 SFTP 也救回来**
     /// （终端与 SFTP 是两条独立的连接）。
     ///
+    /// ⚠️ 参数 = **新的 ssh 启动时刻**（Unix 秒）：上层的目录跟随轮询
+    /// 靠它找远端那个 shell ⇒ 不更新的话它还拿旧时刻去比 ⇒ 找错 shell。
+    ///
     /// ⚠️ 闭包**只能抓弱引用**（面板）——抓强引用就是引用环。
-    pub fn set_reconnect_hook<F: Fn() + 'static>(&self, f: F) {
+    pub fn set_reconnect_hook<F: Fn(i64) + 'static>(&self, f: F) {
         *self.inner.reconnect_hook.borrow_mut() = Some(Box::new(f));
     }
 
@@ -1171,16 +1213,43 @@ impl TermInner {
         self.sync_banner_visibility();
         // VTE spawn 不自动清屏，重连时清掉上一会话的残留
         self.term.reset(true, true);
+        // **重连前记住「我刚才在哪个目录」** ⇒ 新会话就绪后补一条 `cd`
+        // 回去（用户 2026-11-10：「终端短线重连后，应该还回到原来的
+        // 目录」）。
+        //
+        // ⚠️ **问上层要**：终端自己不知道 cwd（OSC 7 只有部分 shell 会发），
+        //    面板知道（它用 exec 轮询跟着远端那个 shell）。
+        // ⚠️ 问不到就**沿用上次记下的**（面板暂时断了也还能回到老地方）。
+        if let Some(dir) = self.current_remote_dir() {
+            *self.restore_dir.borrow_mut() = Some(dir);
+        }
         spawn_term(self);
         // 阶段 99：告诉上层「这条终端重连了」⇒ 上层顺带把断了的 SFTP 救回来
+        //
+        // ⚠️ 参数 = **新的 ssh 启动时刻**：上层的目录跟随轮询靠它找远端
+        //    那个 shell（`ps` 里按 pts + 启动时间匹配）⇒ 不更新的话它还拿
+        //    旧 ssh 的时刻去比 ⇒ 找错 shell ⇒ 面板的目录乱跳。
         //
         // ⚠️ 用 `try_borrow`：钩子里万一又碰到重连（重入）也不会 panic，
         // 顶多少叫一次钩子。
         if let Ok(h) = self.reconnect_hook.try_borrow() {
             if let Some(h) = h.as_ref() {
-                h();
+                h(self.spawn_wall.get());
             }
         }
+    }
+
+    /// **这条终端现在在哪个远程目录**（问上层；问不到就用上次记下的）。
+    fn current_remote_dir(&self) -> Option<String> {
+        let asked = self.cwd_provider.borrow().as_ref().and_then(|f| f());
+        asked
+            .or_else(|| self.restore_dir.borrow().clone())
+            .filter(|d| !d.is_empty())
+    }
+
+    /// 这条会话是不是**交互式 shell**（能不能往里发 `cd`）。
+    fn interactive_shell(&self) -> bool {
+        restore_allowed(self.opts.remote_cmd.as_deref(), self.opts.no_shell)
     }
 
     /// 当前日志文件路径（没在记录时 None）。
@@ -2299,6 +2368,89 @@ fn feed_when_remote_ready(
     );
 }
 
+/// **这条会话能不能往里发 `cd`**（纯逻辑，单测直接测它）。
+///
+/// ⚠️ **远程命令 / `-N` 一律不行**：那种会话里根本没有 shell ⇒ 提示符
+///    永远不出现 ⇒ `feed_when_remote_ready` 只能靠超时兜底把命令发出去
+///    ⇒ 那行 `cd` 会被**打进正在运行的程序**（比如 vim），把用户的现场
+///    搞坏。
+fn restore_allowed(remote_cmd: Option<&str>, no_shell: bool) -> bool {
+    !no_shell && remote_cmd.is_none_or(|c| c.is_empty())
+}
+
+/// **「就绪后发哪个 `cd`」的决策**（纯逻辑，单测直接测它）。
+///
+/// - `interactive`：交互式 shell 吗（远程命令 / `-N` ⇒ 不是）；
+/// - `user_picked`：用户自己挑了目录吗（「在此处打开终端」）；
+/// - `dir`：要恢复的目录。
+///
+/// ⚠️ **用户的显式选择优先**：用户挑了目录 ⇒ **不**发恢复目录的 `cd`
+///    （否则恢复目录会把用户刚选的目录覆盖掉）。
+fn pick_restore_dir(
+    interactive: bool,
+    user_picked: bool,
+    dir: Option<&str>,
+) -> Option<String> {
+    if !interactive || user_picked {
+        return None;
+    }
+    let d = dir?;
+    if d.is_empty() {
+        return None;
+    }
+    Some(d.to_string())
+}
+
+/// 组装「**会话就绪后**」要发的东西的钩子。
+///
+/// 按顺序发三样：
+///
+/// 1. **用户自己装的钩子**（「在此处打开终端」：发 `cd <用户选的那个目录>`）；
+/// 2. **重连要恢复的目录**（发 `cd '<原来那个目录>'`）；
+/// 3. **断线时用户敲的输入**（阶段 99 的补发）。
+///
+/// ⚠️ **1 与 2 都是 `cd` ⇒ 用户的显式选择优先**：装了用户钩子就**不**再
+///    发恢复目录（否则恢复目录会把用户刚选的目录覆盖掉）。
+///
+/// ⚠️ 2 只在 `ReadyCmd::Cmd`（**看见 shell 提示符**）时发：`Probe` 是
+///    探路，那会儿远程还没进 shell，发过去会被登录脚本吃掉。
+///
+/// ⚠️ 3 也只在 `Cmd` 时发（同理）。
+fn build_ready_hook(
+    inner: &Rc<TermInner>,
+    user_hook: Option<Box<dyn Fn(&TermView, ReadyCmd) + 'static>>,
+    pending: Vec<u8>,
+) -> Option<Box<dyn Fn(&TermView, ReadyCmd) + 'static>> {
+    let picked = pick_restore_dir(
+        inner.interactive_shell(),
+        user_hook.is_some(),
+        inner.restore_dir.borrow().as_deref(),
+    );
+    let restore = picked.map(|d| crate::tabs::cwd_cmd(&d));
+    if pending.is_empty() && user_hook.is_none() && restore.is_none() {
+        return None;
+    }
+    let pending = RefCell::new(Some(pending));
+    Some(Box::new(move |term, what| {
+        if let Some(h) = &user_hook {
+            h(term, what);
+        }
+        if what != ReadyCmd::Cmd {
+            return;
+        }
+        // 先 cd 回原来的目录（重连后别把用户丢回 home）
+        if let Some(cmd) = &restore {
+            term.feed_child(cmd.as_bytes());
+        }
+        // 再补发断线时用户敲的输入
+        if let Some(bytes) = pending.borrow_mut().take() {
+            if !bytes.is_empty() {
+                term.feed_child(&bytes);
+            }
+        }
+    }))
+}
+
 /// 新建终端后端。
 ///
 /// ⚠️ **默认按平台**：Linux 用 VTE（主线，行为零变化），
@@ -2480,21 +2632,7 @@ fn spawn_term_inproc_ex(
                 inner_cb.reconnecting.set(false);
                 let pending = std::mem::take(&mut *inner_cb.pending_input.borrow_mut());
                 let user_hook = inner_cb.ready_hook.borrow_mut().take();
-                if !pending.is_empty() || user_hook.is_some() {
-                    let pending = RefCell::new(Some(pending));
-                    let hook: Box<dyn Fn(&TermView, ReadyCmd) + 'static> =
-                        Box::new(move |term, what| {
-                            if let Some(h) = &user_hook {
-                                h(term, what);
-                            }
-                            if what == ReadyCmd::Cmd {
-                                if let Some(bytes) = pending.borrow_mut().take() {
-                                    if !bytes.is_empty() {
-                                        term.feed_child(&bytes);
-                                    }
-                                }
-                            }
-                        });
+                if let Some(hook) = build_ready_hook(&inner_cb, user_hook, pending) {
                     feed_when_remote_ready(
                         &inner_cb.term,
                         hook,
@@ -2751,23 +2889,7 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 inner_cb.reconnecting.set(false);
                 let pending = std::mem::take(&mut *inner_cb.pending_input.borrow_mut());
                 let user_hook = inner_cb.ready_hook.borrow_mut().take();
-                if !pending.is_empty() || user_hook.is_some() {
-                    let pending = RefCell::new(Some(pending));
-                    let hook: Box<dyn Fn(&TermView, ReadyCmd) + 'static> =
-                        Box::new(move |term, what| {
-                            if let Some(h) = &user_hook {
-                                h(term, what);
-                            }
-                            // ⚠️ 只在**看见提示符**时补发（`Probe` 是探路，
-                            // 那会儿远程还没进 shell，发过去会被登录脚本吃掉）
-                            if what == ReadyCmd::Cmd {
-                                if let Some(bytes) = pending.borrow_mut().take() {
-                                    if !bytes.is_empty() {
-                                        term.feed_child(&bytes);
-                                    }
-                                }
-                            }
-                        });
+                if let Some(hook) = build_ready_hook(&inner_cb, user_hook, pending) {
                     feed_when_remote_ready(
                         &inner_cb.term,
                         hook,
@@ -2929,6 +3051,45 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **重连后要不要发「回到原目录」的 `cd`**（纯逻辑）。
+    ///
+    /// ⚠️ 远程命令 / `-N` 的会话里**没有 shell** ⇒ 那行 `cd` 会被打进
+    /// 正在运行的程序（比如 vim）⇒ 绝不能发。
+    #[test]
+    fn 恢复目录只在交互式shell里发() {
+        assert!(super::restore_allowed(None, false), "普通 ssh 会话应当能发");
+        assert!(
+            super::restore_allowed(Some(""), false),
+            "空的远程命令等同于没有远程命令"
+        );
+        assert!(
+            !super::restore_allowed(Some("ls -l"), false),
+            "远程命令会话里不能发 cd"
+        );
+        assert!(!super::restore_allowed(None, true), "-N（不要 shell）不能发 cd");
+    }
+
+    /// **用户的显式选择优先**（「在此处打开终端」挑了目录就别再覆盖它）。
+    #[test]
+    fn 用户挑了目录就不发恢复目录() {
+        assert_eq!(
+            super::pick_restore_dir(true, false, Some("/var/log")),
+            Some("/var/log".to_string())
+        );
+        assert_eq!(
+            super::pick_restore_dir(true, true, Some("/var/log")),
+            None,
+            "用户自己挑了目录 ⇒ 不该再发恢复目录的 cd"
+        );
+        assert_eq!(
+            super::pick_restore_dir(false, false, Some("/var/log")),
+            None,
+            "非交互式 shell ⇒ 不发"
+        );
+        assert_eq!(super::pick_restore_dir(true, false, None), None);
+        assert_eq!(super::pick_restore_dir(true, false, Some("")), None);
+    }
+
     /// **askpass 助手**（阶段 C8）：ssh 在 tty 上问密码时，我们让它问**我们**
     /// ——于是**两个平台都是「我们的对话框问一次」**。
     ///

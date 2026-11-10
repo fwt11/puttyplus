@@ -124,8 +124,18 @@ fn install_alive_hook(tp: &TermPane, st: &Rc<panel::PanelState>) {
 /// 重连」）。
 fn install_reconnect_hook(tp: &TermPane, st: &Rc<panel::PanelState>) {
     let stw = Rc::downgrade(st);
-    tp.set_reconnect_hook(move || {
+    // **「重连后回到原来的目录」**：终端自己不知道 cwd（OSC 7 只有部分
+    // shell 会发）⇒ 重连前问我们要「我刚才在哪个目录」。
+    //
+    // ⚠️ 闭包只抓**弱引用**（AGENTS.md 的引用环红线）。
+    let stw2 = stw.clone();
+    tp.set_cwd_provider(move || stw2.upgrade().and_then(|st| panel::last_term_cwd(&st)));
+    tp.set_reconnect_hook(move |spawn_at| {
         if let Some(st) = stw.upgrade() {
+            // 目录跟随轮询靠 ssh 的**启动时刻**去远端找那个 shell（`ps` 里
+            // 按 pts + 启动时间匹配）⇒ 重连后必须更新成**新的**那个时刻，
+            // 否则它还拿旧时刻去比 ⇒ 找错 shell ⇒ 面板的目录乱跳。
+            panel::set_term_spawn(&st, spawn_at);
             panel::reconnect_sftp_if_dead(&st);
         }
     });
@@ -1186,6 +1196,11 @@ impl Tabs {
         // 阶段 65：重建的终端也算一个
         install_alive_hook(&tp, &st);
         install_reconnect_hook(&tp, &st);
+        // **重建出来的终端直接开到原来那个目录**（跟「重连」一个效果）：
+        // 用户把「终端」子页签 × 掉再重建，不该又回到 home。
+        if let Some(dir) = panel::last_term_cwd(&st) {
+            tp.set_restore_dir(&dir);
+        }
         panel::set_term_spawn(&st, tp.spawn_time());
         panel::set_term(&st, &tp.terminal());
         // 拖文件到终端 = 上传到当前远程目录
