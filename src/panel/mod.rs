@@ -1415,6 +1415,9 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 submit_list(st, &cwd);
             }
         }
+        PanelEvent::PathResolved { path, result } => {
+            on_path_resolved(st, &path, result);
+        }
         PanelEvent::FileRead { id, path, result } => {
             if result.is_ok() {
                 st.retried.set(false);
@@ -1809,7 +1812,7 @@ pub fn on_entry_activated(st: &Rc<PanelState>, remote: bool, txt: &str) {
     }
 }
 
-pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bool) {
+pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bool, islink: bool) {
     if name == ".." {
         // 列表首行的上级导航条目（与原工具栏「上级」同语义）
         on_up(st, remote);
@@ -1829,6 +1832,14 @@ pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bo
             set_local_cwd(st, &full);
             fill_local_pane(st);
         }
+    } else if remote && islink {
+        // ⚠️ **软链**：列表里它是「软链自己」（不是目录）⇒ 不能直接当
+        //    文件开编辑器（服务端 stat 会说「这是目录」⇒ 弹报错 + 留一个
+        //    空编辑器页）。⇒ **先问一句它指向什么**：
+        //    - 指向目录 ⇒ **跟进去**（列它的内容）；
+        //    - 指向文件 ⇒ 照常开编辑器；
+        //    - 问不出来（断链/没权限）⇒ 弹一句提示，**不开编辑器**。
+        resolve_remote_link(st, &full);
     } else if remote {
         // 双击 → **编辑**（阶段 23）：不是下载。
         //
@@ -1838,6 +1849,55 @@ pub fn on_row_activated(st: &Rc<PanelState>, remote: bool, name: &str, isdir: bo
         fileedit::open_remote(st, &full, false);
     } else {
         fileedit::open_local(st, &full, false);
+    }
+}
+
+/// 问一句远端这个软链指向什么，再决定「进目录」还是「开编辑器」。
+///
+/// ⚠️ **为什么不能直接在 UI 线程问**：SFTP 连接**独占**在 worker 线程上
+/// ⇒ 只能发命令、等回包（`PanelEvent::PathResolved`）。
+fn resolve_remote_link(st: &Rc<PanelState>, path: &str) {
+    let _ = st.tx.borrow().as_ref().map(|tx| {
+        tx.send(WorkerCmd::ResolvePath {
+            path: path.to_string(),
+        })
+    });
+}
+
+/// 回包：软链指向目录 ⇒ 跟进去；指向文件 ⇒ 开编辑器；问不出来 ⇒ 只弹提示。
+fn on_path_resolved(st: &Rc<PanelState>, path: &str, result: Result<crate::backend::PathKind, String>) {
+    use crate::backend::PathKind;
+    // ⚠️ **防陈旧回包**：用户双击软链之后可能已经翻到别的目录了 ⇒
+    //    这时再把面板拽回旧路径会莫名其妙。⇒ 只处理「还在这一层」的。
+    let parent = crate::util::path_parent(path);
+    if st.pane_cwd(true) != parent {
+        return;
+    }
+    match result {
+        Ok(PathKind::Dir) => {
+            // 跟进去：列这个软链指向的目录（服务端自己会解析软链）
+            submit_list(st, path);
+        }
+        Ok(PathKind::File) => {
+            fileedit::open_remote(st, path, false);
+        }
+        Ok(PathKind::Other) => {
+            // ⚠️ 复用**已有的**文案（别新增英文表条目：表是自动生成的，
+            //    手工加会打乱排序 ⇒ 要加得整表重新生成）。
+            dialogs::show_error(
+                st.topwin().as_ref(),
+                tr("无法打开文件"),
+                &trf!("{path} 不是普通文件，内置查看/编辑器只处理文本文件", path = path),
+            );
+        }
+        Err(err) => {
+            // ⚠️ **断链 / 没权限**：只弹提示，**不留编辑器页**
+            dialogs::show_error(
+                st.topwin().as_ref(),
+                tr("无法打开文件"),
+                &format!("{path}\n{err}"),
+            );
+        }
     }
 }
 

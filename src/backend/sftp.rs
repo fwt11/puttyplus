@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::conn::SftpBackend;
 use super::resume::{self, Mark};
-use super::{checksum, BackendError, BackendResult, SftpEntry};
+use super::{checksum, BackendError, BackendResult, PathKind, SftpEntry};
 use crate::panel::worker::XferConflict;
 use crate::platform::localpath;
 use crate::util::{human_size, path_basename, path_join, path_parent};
@@ -144,6 +144,36 @@ impl SftpBackend {
             self.sftp().metadata(path).await,
             Ok(md) if (md.permissions.unwrap_or(0) & 0o170000) == 0o040000
         )
+    }
+
+    /// 问一句：这个路径指向的是**目录**还是**文件**（**跟随软链**）。
+    ///
+    /// ⚠️ **为什么要问**：SFTP 的目录列表里，软链是以**软链自己**的身份
+    /// 出现的（权限位 `l` ⇒ `is_dir == false`）⇒ 面板会把它当成文件 ⇒
+    /// 双击就去开编辑器 ⇒ 而服务端 `stat`（**跟随**软链）会说「这是目录」
+    /// ⇒ 于是弹一句「/bin 是目录，无法用文本查看/编辑器打开」，还留下一个
+    /// 空编辑器页。⇒ 先问一句「它到底指向什么」，再决定是**进目录**还是
+    /// **开编辑器**。
+    ///
+    /// ⚠️ 这里的 `metadata()` 是 **stat**（跟随软链）；要**不跟随**得用
+    /// `symlink_metadata()` —— 面板列表里的软链标记就是靠「不跟随」拿到的。
+    pub async fn path_kind(&self, path: &str) -> BackendResult<PathKind> {
+        let md = self
+            .sftp()
+            .metadata(path)
+            .await
+            .map_err(|e| BackendError(trf!("获取 {path} 属性失败: {e}", path = path, e = e)))?;
+        // ⚠️ 有些服务器不回报 permissions ⇒ 分不出目录/文件 ⇒ **当成文件**
+        //    （编辑器会自己报「读不了」；当成目录反而会弹「打开目录失败」，
+        //    看着像程序坏了）。
+        let Some(perms) = md.permissions else {
+            return Ok(PathKind::File);
+        };
+        Ok(match perms & 0o170000 {
+            0o040000 => PathKind::Dir,
+            0o100000 => PathKind::File,
+            _ => PathKind::Other,
+        })
     }
 
     /// 读取文本查看/编辑器要打开的文件，最多 `max` 字节。

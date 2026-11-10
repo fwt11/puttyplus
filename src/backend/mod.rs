@@ -50,6 +50,21 @@ pub struct SftpEntry {
     pub mtime: i64,
 }
 
+/// 路径指向的东西是什么（**跟随软链**后问出来的）。
+///
+/// ⚠️ 目录列表里的软链是以**软链自己**的身份出现的（`is_link == true`
+/// 且 `is_dir == false`）⇒ 要知道它指向目录还是文件，得另外问一次
+/// **跟随软链**的 stat（见 `sftp::SftpBackend::path_kind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    /// 目录
+    Dir,
+    /// 普通文件
+    File,
+    /// 其它（设备、管道、socket…）—— 内置编辑器处理不了
+    Other,
+}
+
 /// 与 C 版 perm_string 一致：'l'/'d'/'-' 开头 + rwx 九位（低位在前）。
 pub fn perm_string(p: u32, is_dir: bool, is_link: bool) -> String {
     let mut s = [0u8; 10];

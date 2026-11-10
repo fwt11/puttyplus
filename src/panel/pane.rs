@@ -33,6 +33,30 @@ pub const COL_PROGRESS: i32 = 9;
 /// 硬裁成「2026-10-27 0…」（阶段 86 / 复查 §2.2、N2）。
 pub const COL_MTIME_FULL: i32 = 10;
 
+/* ---------------- 图标 ---------------- */
+
+/// 目录的图标。
+pub const ICON_DIR: &str = "folder-symbolic";
+/// 普通文件的图标。
+pub const ICON_FILE: &str = "text-x-generic-symbolic";
+/// **软链接**的图标（GTK 标准的软链徽标）。
+///
+/// ⚠️ 为什么单独一个：用户 2026-11-10：「链接用链接的图标，文件用文件的
+/// 图标」——列表里一眼能看出哪个是链接。⇒ **只换图标，不加列**（面板本来
+/// 就挤，再加一列更挤）。
+pub const ICON_LINK: &str = "emblem-symbolic-link-symbolic";
+
+/// 权限串是不是「软链」。
+///
+/// ⚠️ 权限串的**第一个字符**就是类型位（跟 `ls -l` 一个规矩）：
+/// `l` = 软链、`d` = 目录、`-` = 普通文件（见 `backend::perm_string`）。
+///
+/// ⇒ 面板里**不用为软链单开一列**（用户：本来就挤，再加一列太挤了）⇒
+/// 直接从已有的权限列判断。
+pub fn is_link_perm(perm: &str) -> bool {
+    perm.starts_with('l')
+}
+
 /// 列表的统一行数据（远程 SftpEntry 与本地目录项都转成这个再填充）。
 pub struct RowData {
     pub name: String,
@@ -280,10 +304,14 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
         if r.hidden && !show_hidden {
             continue;
         }
-        let icon = if r.is_dir {
-            "folder-symbolic"
+        // ⚠️ **软链用「链接」图标**（用户 2026-11-10：「链接用链接的图标，
+        //    文件用文件的图标」）——**不加一列**（面板本来就挤）⇒ 只换图标。
+        let icon = if is_link_perm(&r.perm) {
+            ICON_LINK
+        } else if r.is_dir {
+            ICON_DIR
         } else {
-            "text-x-generic-symbolic"
+            ICON_FILE
         };
         let name = utf8_sanitize(r.name.as_bytes());
         let size_h = if r.is_dir { tr("目录").to_string() } else { human_size(r.size) };
@@ -369,17 +397,41 @@ pub fn read_local_dir(cwd: &str) -> Result<Vec<RowData>, String> {
     let mut rows = Vec::new();
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
-        let Ok(md) = ent.metadata() else { continue };
+        let path = ent.path();
+        // ⚠️ **Rust 的 `DirEntry::metadata()` 不跟随软链**（跟 `fs::metadata`
+        //    不一样！）⇒ 软链会被当成**文件** ⇒ 双击去开编辑器 ⇒ 打开目录
+        //    就会报「是目录，无法用文本查看/编辑器打开」（远端那边同一个毛病，
+        //    这次一起修）。
+        //
+        // ⇒ 分两步拿：
+        //    - `symlink_metadata()` = **软链自己**（类型位 `l`、大小=目标
+        //      路径的长度、`ls -l` 看到的那一串）；
+        //    - `fs::metadata()` = **跟随**软链后的**目标**（判定它是目录
+        //      还是文件 ⇒ 双击的行为跟真实目标一致）。
+        let Ok(lmd) = path.symlink_metadata() else {
+            continue;
+        };
+        let is_link = lmd.file_type().is_symlink();
+        // ⚠️ 断链（目标没了）⇒ 跟随失败 ⇒ 退回软链自己（仍显示，图标是
+        //    链接图标；双击时问路径类型会失败 ⇒ 弹一句提示）。
+        let md = if is_link {
+            std::fs::metadata(&path).unwrap_or_else(|_| lmd.clone())
+        } else {
+            lmd.clone()
+        };
         let is_dir = md.is_dir();
+        // 大小/时间：**软链显示它自己的**（跟 `ls -l` 一个规矩：软链的大小
+        // 是目标路径那串的长度），目录/文件显示目标的。
+        let shown = if is_link { &lmd } else { &md };
         rows.push(RowData {
             perm: crate::backend::perm_string(
-                crate::platform::perm::mode_of(&md),
+                crate::platform::perm::mode_of(shown),
                 is_dir,
-                false,
+                is_link,
             ),
             hidden: name.starts_with('.'),
-            mtime: crate::platform::perm::mtime_of(&md),
-            size: if is_dir { 0 } else { md.len() },
+            mtime: crate::platform::perm::mtime_of(shown),
+            size: if is_dir { 0 } else { shown.len() },
             name,
             is_dir,
         });
@@ -801,7 +853,12 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
             if let Some(it) = model2.iter(path) {
                 let name: String = model2.get(&it, COL_NAME);
                 let isdir: bool = model2.get(&it, COL_ISDIR);
-                super::on_row_activated(&st2, remote, &name, isdir);
+                // ⚠️ **软链怎么认**：不新增一列（面板本来就挤）⇒ 看**权限列**
+                //    的第一个字符——`l` 开头就是软链（跟 `ls -l` 一个规矩，
+                //    后端的 perm_string 就是这么写的）。
+                let perm: String = model2.get(&it, COL_PERM);
+                let islink = is_link_perm(&perm);
+                super::on_row_activated(&st2, remote, &name, isdir, islink);
             }
         });
     }
@@ -1143,6 +1200,53 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 软链怎么认：权限串的首字符（`ls -l` 的规矩）。
+    #[test]
+    fn 权限串首字符_l_就是软链() {
+        assert!(is_link_perm("lrwxrwxrwx"));
+        assert!(!is_link_perm("drwxr-xr-x"));
+        assert!(!is_link_perm("-rw-r--r--"));
+        assert!(!is_link_perm(""));
+    }
+
+    /// 本地软链：权限串要是 `l` 开头（图标才能区分），但**行为不变**——
+    /// 指向目录的软链仍然算「目录」（双击照样进得去）。
+    #[cfg(unix)]
+    #[test]
+    fn 本地软链标成软链但仍按目标判定目录() {
+        let dir = std::env::temp_dir().join(format!("pp_local_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("target")).expect("建目录");
+        std::fs::write(dir.join("target/a.txt"), "x").expect("写文件");
+        std::os::unix::fs::symlink(dir.join("target"), dir.join("dirlink")).expect("造软链");
+        std::os::unix::fs::symlink(dir.join("target/a.txt"), dir.join("filelink")).expect("造软链");
+
+        let rows = read_local_dir(dir.to_str().unwrap()).expect("读目录");
+        let get = |n: &str| {
+            rows.iter()
+                .find(|r| r.name == n)
+                .unwrap_or_else(|| panic!("列表里该有 {n}"))
+        };
+        // 软链 ⇒ 权限串 `l` 开头（图标能区分）
+        assert!(
+            is_link_perm(&get("dirlink").perm),
+            "目录软链的权限串该是 l 开头：{}",
+            get("dirlink").perm
+        );
+        assert!(
+            is_link_perm(&get("filelink").perm),
+            "文件软链的权限串该是 l 开头：{}",
+            get("filelink").perm
+        );
+        // ⚠️ 但**判定仍是按目标**：指向目录的软链还是「目录」
+        assert!(get("dirlink").is_dir, "指向目录的软链仍该算目录");
+        assert!(!get("filelink").is_dir, "指向文件的软链不该算目录");
+        // 普通文件/目录不是软链
+        assert!(!is_link_perm(&get("target").perm), "真目录不该算软链");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 「在此处打开终端」的目标目录：目录进它、文件进它的上级、没选进当前。
     #[test]

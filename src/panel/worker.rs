@@ -160,6 +160,13 @@ pub enum WorkerCmd {
         path: String,
         max: u64,
     },
+    /// 问一句这个远端路径（**跟随软链**）是目录还是文件。
+    ///
+    /// ⚠️ **为什么问**：目录列表里的软链是「软链自己」（`is_dir == false`）
+    /// ⇒ 双击它会被当成文件去开编辑器 ⇒ 而服务端 stat（跟随软链）会说
+    /// 「这是目录」⇒ 弹一句报错还留一个空编辑器页。⇒ 先问清楚再决定
+    /// 是**进目录**还是**开编辑器**。
+    ResolvePath { path: String },
     /// 内置编辑器：把修改写回远端（临时文件 + 原子改名）
     WriteFile {
         id: u64,
@@ -465,6 +472,11 @@ pub enum PanelEvent {
         id: u64,
         path: String,
         result: Result<Vec<u8>, String>,
+    },
+    /// ResolvePath 的结果：这个路径（**跟随软链**）是目录还是文件。
+    PathResolved {
+        path: String,
+        result: Result<crate::backend::PathKind, String>,
     },
     /// 内置编辑器：远端保存结果
     FileWritten {
@@ -773,6 +785,18 @@ pub fn spawn_worker(
                                 &conn,
                                 &conn_dead,
                                 PanelEvent::SimpleDone { path, result },
+                            );
+                        }
+                        WorkerCmd::ResolvePath { path } => {
+                            let result = match &conn {
+                                None => Err(tr("连接已断开").into()),
+                                Some(c) => c.path_kind(&path).await.map_err(|e| e.0),
+                            };
+                            send_ev(
+                                &ui_tx,
+                                &conn,
+                                &conn_dead,
+                                PanelEvent::PathResolved { path, result },
                             );
                         }
                         WorkerCmd::ReadFile { id, path, max } => {
