@@ -252,7 +252,28 @@ fn main() {
     );
     println!("[3] 双击断链 ⇒ 弹了提示，没留编辑器页");
 
-
+    // ---- 4) 读不出来 ⇒ 也不留编辑器页 ----
+    //
+    // ⚠️ 断链走的是「问路径类型」那条路（压根没进编辑器）⇒ 这里单独验
+    // 「**进了编辑器但读不出来**」的情况：直接用编辑器的入口打开一个目录
+    // （服务端 stat 说「这是目录」⇒ 读失败）。
+    //
+    // 用户原话：「这时候可以弹出提示窗口，但是不应该出现编辑器。」
+    let dirpath = format!("{dir}/target");
+    fileedit::open_remote(&st, &dirpath, false);
+    assert!(
+        wait_until(30_000, || matches!(
+            fileedit::load_state(&st, &dirpath),
+            fileedit::LoadState::Absent
+        )),
+        "读失败后不该一直停在转圈（占位页要关掉）"
+    );
+    assert_eq!(
+        fileedit::load_state(&st, &dirpath),
+        fileedit::LoadState::Absent,
+        "**读失败不该留下编辑器页**（占位页要关掉，只留一个提示框）"
+    );
+    println!("[4] 读失败 ⇒ 弹了提示，没留编辑器页");
 
     // 清理：关掉可能还开着的对话框 + 删场景
     for w in gtk::Window::list_toplevels() {

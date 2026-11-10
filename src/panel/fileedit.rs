@@ -454,8 +454,9 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         },
     ) {
         st.pending_file_reads.borrow_mut().remove(&id);
-        // 发出去了又失败了：占位层直接改成失败提示（别留个永远转圈的页）
-        fail_placeholder(&e, &tr("SFTP 尚未连接，无法读取远程文件。"));
+        // 发出去了又失败了：**页签也别留**（底下是空的占位页）⇒ 只弹提示
+        // （用户 2026-11-10：「可以弹出提示窗口，但是不应该出现编辑器」）。
+        close_tab(st, &e);
         dialogs::show_error(
             st.topwin().as_ref(),
             tr("无法打开文件"),
@@ -496,6 +497,27 @@ pub fn on_read(st: &Rc<PanelState>, id: u64, path: &str, result: Result<Vec<u8>,
             }
         }
         Err(err) => {
+            // ⚠️ **首次打开失败 ⇒ 关掉这个页签**（用户 2026-11-10：
+            // 「这时候可以弹出提示窗口，但是不应该出现编辑器」）。
+            //
+            // 底下还是**空的占位页** ⇒ 留着只是个空壳子（还白占一个页签、
+            // 一个标签标题）⇒ 不如只留一个对话框。**重载**失败则**留在原地**
+            // （底下已经有正文了，用户要对着原文继续改）。
+            let was_placeholder = existing
+                .as_ref()
+                .map(|e| e.placeholder.borrow().is_some())
+                .unwrap_or(false);
+            if was_placeholder {
+                if let Some(e) = &existing {
+                    close_tab(st, e);
+                }
+                dialogs::show_error(
+                    st.topwin().as_ref(),
+                    tr("读取远程文件失败"),
+                    &format!("{path}\n{err}"),
+                );
+                return;
+            }
             // 阶段 105：占位层改成失败提示（转圈停掉 + 红字）——
             // 别让用户对着一个永远在转圈的页面发呆。
             if let Some(e) = &existing {
