@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1674] = [
+pub static EN: [(&str, &str); 1681] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -98,6 +98,9 @@ pub static EN: [(&str, &str); 1674] = [
     ("[高亮] {v0} 扫描异常（{v1} 处原地打转），本次不高亮", "[Highlight] the {v0} scan went wrong ({v1} places made no progress), not highlighting this time"),
     ("data 字段不是合法 base64: {e}", "The data field is not valid base64: {e}"),
     ("ed25519（默认，快）", "ed25519 (default, fast)"),
+    ("hex 模式", "Hex mode"),
+    ("hex 模式是只读的，不能保存。", "Hex mode is read-only and cannot be saved."),
+    ("hex 模式：显示的是原始字节，不能编辑也不能保存。", "Hex mode: shows the raw bytes; it cannot be edited or saved."),
     ("salt 不是合法 base64: {e}", "The salt is not valid base64: {e}"),
     ("salt 长度异常", "Unexpected salt length"),
     ("scp 失败（退出码 {code}）", "scp failed (exit code {code})"),
@@ -127,6 +130,7 @@ pub static EN: [(&str, &str); 1674] = [
     ("{n}（必填）", "{n} (required)"),
     ("{path}\n\n文件大小 {v0}，超过内置查看/编辑上限 {v1}。\n请先下载到本地，再用外部编辑器打开。", "{path}\n\nFile size {v0}, over the built-in viewer/editor limit of {v1}.\nDownload it locally first and open it with an external editor."),
     ("{path}\n\n疑似二进制文件（含 NUL 字节或大量控制字符）。\n内置查看/编辑器只处理文本文件，请下载后用对应的外部程序打开。", "{path}\n\nLooks like a binary file (it contains NUL bytes or many control characters).\nThe built-in viewer/editor handles text files only; download it and open it with the matching external program."),
+    ("{path}\n\n这不是文本文件（含有 NUL 字节或大量控制字符）。\n是否以 hex 模式打开？", "{path}\n\nThis is not a text file (it contains NUL bytes or many control characters).\nOpen it in hex mode?"),
     ("{path} 不是普通文件，内置查看/编辑器只处理文本文件", "{path} is not a regular file; the built-in viewer/editor handles text files only"),
     ("{path} 不是普通文件，无法写入文本内容", "{path} is not a regular file, cannot write text content"),
     ("{path} 是目录，无法写入文本内容", "{path} is a directory, cannot write text content"),
@@ -271,6 +275,7 @@ pub static EN: [(&str, &str); 1674] = [
     ("代理命令无 stderr", "The proxy command has no stderr"),
     ("代理命令无 stdin", "The proxy command has no stdin"),
     ("代理命令无 stdout", "The proxy command has no stdout"),
+    ("以 hex 模式打开", "Open in Hex Mode"),
     ("以下 PuTTY 参数被忽略或需要留意：\n\n{v0}", "The following PuTTY arguments were ignored or need attention:\n\n{v0}"),
     ("会话", "Session"),
     ("会话 {name} 配置了代理 ({val})，代理设置不会自动生效", "Session {name} has a proxy configured ({val}), but the proxy setting does not take effect automatically"),
@@ -977,6 +982,7 @@ pub static EN: [(&str, &str); 1674] = [
     ("文件正在读取，请稍候再关闭。", "The file is being read, please wait before closing."),
     ("文件菜单", "File menu"),
     ("文件解析出 {v0} 列 × {v1} 行待导入", "The file was parsed into {v0} columns × {v1} rows to import"),
+    ("文件较大，只显示前 {shown}。", "The file is large; only the first {shown} are shown."),
     ("文件里没有数据行", "The file has no data rows"),
     ("文件面板", "File panel"),
     ("文件面板宽度", "File panel width"),
@@ -1526,6 +1532,7 @@ pub static EN: [(&str, &str); 1674] = [
     ("这一页放的是「零散但确实得调」的设置：宽度、列、镜像规则。改完多半要新开窗口才看得出效果。", "This page holds the settings that are scattered but do need adjusting: widths, columns, mirror rules. You usually have to open a new window to see the effect."),
     ("这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）", "This page is read-only: an ordinary query result cannot be changed (only the table browser tab can be edited)"),
     ("这一页是表浏览页签：可以进入编辑模式改数据", "This page is a table browser tab: you can enter edit mode and change the data"),
+    ("这不是文本文件", "Not a Text File"),
     ("这不是旧式 PEM 私钥（OpenSSH / PPK 不需要转换）", "This is not a legacy PEM private key (OpenSSH / PPK need no conversion)"),
     ("这不是表数据页签", "This is not a table data tab"),
     ("这不是表数据页签，用不了排序", "This is not a table data tab, so it cannot be sorted"),

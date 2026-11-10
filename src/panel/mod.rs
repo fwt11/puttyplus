@@ -22,6 +22,8 @@ pub mod dnd;
 pub mod fade;
 pub mod fileedit;
 pub mod fwdmgr;
+/// **二进制内容的 hex 转储**（hex 模式打开非文本文件时用）。
+pub mod hexdump;
 pub mod mirrorui;
 pub mod namecell;
 pub mod pane;

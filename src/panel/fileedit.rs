@@ -113,6 +113,15 @@ pub struct FileEdit {
     base_readonly: bool,
     /// 当前是否只读（= 用户选查看 或 内容不是合法 UTF-8）
     readonly: Cell<bool>,
+    /// **hex 模式**：这个编辑器打开的是**二进制文件** ⇒ 正文显示的是原始
+    /// 字节的 hex 转储。
+    ///
+    /// 干什么用（用户 2026-11-10）：「文本编辑器只能打开文本，对于非文本
+    /// 文件提供以 hex 模式打开的选项」⇒ **用户同意之后**才进这个模式。
+    ///
+    /// ⚠️ **hex 模式强制只读**：正文是**转储出来的文本**，不是文件本身 ⇒
+    ///    存回去会把原始数据换成转储文本 ⇒ 文件就毁了。
+    hex: Cell<bool>,
     view: gtk::TextView,
     /// 正文区（行号栏 + 正文，阶段 105）。
     ///
@@ -374,7 +383,7 @@ pub struct PlaceholderLayout {
 pub fn open_placeholder_for_smoke(st: &Rc<PanelState>, path: &str, msg: &str) -> u64 {
     let id = next_id();
     let dec = Decoded::decode(b"");
-    let e = build(st, id, true, path, false, &dec, Some(msg));
+    let e = build(st, id, true, path, false, &dec, false, Some(msg));
     st.file_edits.borrow_mut().push(Rc::clone(&e));
     attach_tab(st, &e);
     id
@@ -447,6 +456,67 @@ pub enum LoadState {
     Loading(String),
     /// 内容已经到位
     Loaded,
+}
+
+/// 冒烟用：某个路径的编辑器是不是 **hex 模式**（打开的是二进制文件）。
+///
+/// `None` = 没有这个编辑器。
+pub fn is_hex(st: &Rc<PanelState>, path: &str) -> Option<bool> {
+    st.file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .map(|e| e.hex.get())
+}
+
+/// 冒烟用：某个路径的编辑器正文**能不能编辑**。
+pub fn editable_for(st: &Rc<PanelState>, path: &str) -> Option<bool> {
+    st.file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .map(|e| e.view.is_editable())
+}
+
+/// 冒烟用：试着保存某个路径的编辑器。
+///
+/// 返回 false = 没保存（拒绝 / 没这个编辑器）。
+pub fn try_save(st: &Rc<PanelState>, path: &str) -> bool {
+    let Some(e) = st
+        .file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .cloned()
+    else {
+        return false;
+    };
+    save(&e, st)
+}
+
+/// 冒烟用：某个路径的编辑器**摆不摆「保存」按钮**。
+///
+/// `None` = 没有这个编辑器（返回 false）。
+pub fn save_btn_visible_for(st: &Rc<PanelState>, path: &str) -> bool {
+    st.file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .map(|e| save_btn_visible(e))
+        .unwrap_or(false)
+}
+
+/// 冒烟用：某个路径的编辑器**正文文本**（hex 模式下就是转储文本）。
+///
+/// `None` = 没有这个编辑器。
+pub fn text_of(st: &Rc<PanelState>, path: &str) -> Option<String> {
+    let e = st
+        .file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .cloned()?;
+    Some(buffer_text(&e))
 }
 
 /// 冒烟用：查某个路径的载入状态。
@@ -535,6 +605,7 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         path,
         readonly,
         &dec,
+        false,
         Some(&trf!("正在读取 {v0}…", v0 = path_basename(path))),
     );
     st.file_edits.borrow_mut().push(Rc::clone(&e));
@@ -824,7 +895,19 @@ fn apply_bytes(
         return Err(too_large_msg(path, data.len() as u64));
     }
     if looks_binary(&data) {
-        return Err(trf!("{path}\n\n疑似二进制文件（含 NUL 字节或大量控制字符）。\n内置查看/编辑器只处理文本文件，请下载后用对应的外部程序打开。", path = path));
+        // ⚠️ **不是文本 ⇒ 先问用户**（用户 2026-11-10）：「文本编辑器只能打开
+        //    文本，对于非文本文件提供以 hex 模式打开的选项，首先弹出一个窗口，
+        //    告诉用户这不是文本，问用户是否以 hex 模式打开，如果用户点击同意，
+        //    才打开编辑器以 hex 模式打开。如果用户不同意，则无动作。」
+        //
+        // ⚠️ **已经是 hex 模式了**（重新载入）⇒ 直接刷新，**不再问**
+        //    （否则用户每按一次 F5 就要点一遍）。
+        if find(st, id).map(|e| e.hex.get()).unwrap_or(false) {
+            open_hex(st, id, remote, path, base_readonly, &data);
+            return Ok(());
+        }
+        ask_hex(st, id, remote, path, base_readonly, data);
+        return Ok(());
     }
     let dec = Decoded::decode(&data);
 
@@ -833,6 +916,8 @@ fn apply_bytes(
         e.loading.set(false);
         e.saving.set(false);
         e.valid_utf8.set(dec.valid_utf8);
+        // ⚠️ **hex 标记复位**：文件可能从二进制变回文本（或反过来）
+        e.hex.set(false);
         e.readonly.set(base_readonly || !dec.valid_utf8);
         e.bom.set(dec.bom);
         e.crlf.set(dec.crlf);
@@ -860,11 +945,121 @@ fn apply_bytes(
         return Ok(());
     }
 
-    let e = build(st, id, remote, path, base_readonly, &dec, None);
+    let e = build(st, id, remote, path, base_readonly, &dec, false, None);
     st.file_edits.borrow_mut().push(Rc::clone(&e));
     attach_tab(st, &e);
     e.buffer.place_cursor(&e.buffer.start_iter());
     Ok(())
+}
+
+/* ---------------- hex 模式（打开二进制文件） ---------------- */
+
+/// 二进制文件 ⇒ **先问用户**要不要以 hex 模式打开。
+///
+/// 干什么用（用户 2026-11-10）：「文本编辑器只能打开文本，对于非文本文件
+/// 提供以 hex 模式打开的选项，首先弹出一个窗口，告诉用户这不是文本，问用户
+/// 是否以 hex 模式打开，如果用户点击同意，才打开编辑器以 hex 模式打开。
+/// 如果用户不同意，则无动作。」
+///
+/// ⚠️ 弹窗是**异步**的（GTK 对话框）⇒ 这函数只负责"问"，真正的打开在
+///    回调里做。
+fn ask_hex(
+    st: &Rc<PanelState>,
+    id: u64,
+    remote: bool,
+    path: &str,
+    base_readonly: bool,
+    data: Vec<u8>,
+) {
+    let parent = st.topwin();
+    let msg = trf!(
+        "{path}\n\n这不是文本文件（含有 NUL 字节或大量控制字符）。\n是否以 hex 模式打开？",
+        path = path
+    );
+    // ⚠️ 回调是 'static ⇒ 路径与数据都得**搬进去**（不能借栈上的）。
+    let path = path.to_string();
+    let st2 = Rc::clone(st);
+    dialogs::confirm_title(
+        parent.as_ref(),
+        tr("这不是文本文件"),
+        &msg,
+        tr("以 hex 模式打开"),
+        move |ok| {
+            if ok {
+                open_hex(&st2, id, remote, &path, base_readonly, &data);
+            } else {
+                // ⚠️ **用户不同意 ⇒ 无动作**
+                decline_hex(&st2, id);
+            }
+        },
+    );
+}
+
+/// 以 **hex 模式**打开（二进制文件）。
+///
+/// 正文是 `hexdump::dump` 的转储文本 ⇒ **只读**，不能编辑也不能保存
+/// （保存会把转储文本写回原文件 ⇒ 原始数据就没了）。
+fn open_hex(
+    st: &Rc<PanelState>,
+    id: u64,
+    remote: bool,
+    path: &str,
+    base_readonly: bool,
+    data: &[u8],
+) {
+    let text = super::hexdump::dump(data);
+    let total = data.len() as u64;
+    let dec = Decoded {
+        text: text.clone(),
+        bom: false,
+        crlf: false,
+        // ⚠️ 转储文本**不是**原始文件 ⇒ 不能当成合法 UTF-8 ⇒ 不能保存
+        valid_utf8: false,
+        bytes: total,
+    };
+
+    if let Some(e) = find(st, id) {
+        // 重新载入：保留窗口与 id，只换内容
+        e.hex.set(true);
+        e.loading.set(false);
+        e.saving.set(false);
+        e.valid_utf8.set(false);
+        e.readonly.set(true);
+        e.view.set_editable(false);
+        e.view.set_cursor_visible(false);
+        e.loading.set(true);
+        e.buffer.set_text(&text);
+        e.loading.set(false);
+        // 内容到了 ⇒ 占位层（首次打开时的「正在读取…」）摘掉，正文露出来
+        drop_placeholder(&e);
+        e.dirty.set(false);
+        e.size.set(total);
+        e.lang.set(Lang::Plain);
+        rebuild_gutter(&e);
+        apply_highlight(&e);
+        update_cursor(&e);
+        update_ui(&e);
+        return;
+    }
+
+    // 新建
+    let e = build(st, id, remote, path, base_readonly, &dec, true, None);
+    st.file_edits.borrow_mut().push(Rc::clone(&e));
+    attach_tab(st, &e);
+    e.buffer.place_cursor(&e.buffer.start_iter());
+}
+
+/// 用户**不同意**用 hex 打开 ⇒ 什么都不做。
+///
+/// ⚠️ 但远端那个**占位页**得撤掉：底下是空的，留着只是白占一个页签
+///    （用户 2026-11-10：「可以弹出提示窗口，但是不应该出现编辑器」）。
+///
+/// ⚠️ 底下**已经有正文**的（重新载入的情况）⇒ 保持原样，不动它。
+fn decline_hex(st: &Rc<PanelState>, id: u64) {
+    let Some(e) = find(st, id) else { return };
+    if e.placeholder.borrow().is_some() {
+        close_tab(st, &e);
+    }
 }
 
 /// 把编辑器挂到**连接页的子标签**上（阶段 12：不再是独立弹窗）。
@@ -998,6 +1193,11 @@ fn build(
     path: &str,
     base_readonly: bool,
     dec: &Decoded,
+    // **是不是 hex 模式**（打开的是二进制文件 ⇒ 正文是 hex 转储文本）。
+    //
+    // ⚠️ hex 模式**强制只读**：正文是转储出来的文本，不是文件内容 ⇒
+    //    存回去会把原始数据换成转储文本 ⇒ 文件就毁了。
+    hex: bool,
     // **载入提示**（阶段 105）：`Some(文案)` = 这是个**占位页**，正文还没
     // 到，先盖一层「正在读取…」。`None` = 内容已经在手上，直接开正文。
     pending: Option<&str>,
@@ -1189,6 +1389,11 @@ fn build(
         view.set_editable(false);
         view.set_cursor_visible(false);
     }
+    // ⚠️ **hex 模式一开始就锁死**（不能编辑 ⇒ 也就不会有"改完存回去"的事）
+    if hex {
+        view.set_editable(false);
+        view.set_cursor_visible(false);
+    }
 
     // ---- 行号栏 ----
     // 单独一个 TextView，靠"影子字符"把行高撑成和正文一致（见 rebuild_gutter）。
@@ -1376,7 +1581,8 @@ fn build(
         remote,
         path: path.to_string(),
         base_readonly,
-        readonly: Cell::new(base_readonly || !dec.valid_utf8),
+        readonly: Cell::new(base_readonly || !dec.valid_utf8 || hex),
+        hex: Cell::new(hex),
         view: view.clone(),
         body: row.clone().upcast(),
         placeholder: RefCell::new(placeholder),
@@ -1441,7 +1647,14 @@ fn build(
         e.loading.set(false);
     }
     // 语言判定 + 行号 + 高亮
-    e.lang.set(Lang::detect(path, first_line(&dec.text)));
+    //
+    // ⚠️ **hex 模式不做语言判定**：转储文本不是任何一种语言 ⇒ 判成
+    //    Plain（不高亮）。
+    e.lang.set(if hex {
+        Lang::Plain
+    } else {
+        Lang::detect(path, first_line(&dec.text))
+    });
     rebuild_gutter(&e);
     apply_highlight(&e);
     update_cursor(&e);
@@ -1784,7 +1997,15 @@ fn wire(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
 }
 
 fn update_ui(e: &FileEdit) {
-    let mode = if e.base_readonly { tr("查看") } else { tr("编辑") };
+    // ⚠️ **hex 模式要先说**：用户明明选的是"编辑"，标题却写「编辑」会让人
+    //    以为能改二进制（其实改不了，存回去就毁了文件）。
+    let mode = if e.hex.get() {
+        tr("hex 模式").to_string()
+    } else if e.base_readonly {
+        tr("查看").to_string()
+    } else {
+        tr("编辑").to_string()
+    };
     let base = base_name(&e.path, e.remote);
     let star = if e.dirty.get() { "● " } else { "" };
     let title = format!("{star}{mode} — {base}");
@@ -1823,7 +2044,9 @@ fn update_ui(e: &FileEdit) {
         tr("已保存")
     };
     let lang = e.lang.get();
-    let lang_txt = if lang == Lang::Plain {
+    let lang_txt = if e.hex.get() {
+        tr("hex").to_string()
+    } else if lang == Lang::Plain {
         tr("纯文本").to_string()
     } else if e.hl_on.get() {
         trf!("{v0} 高亮", v0 = lang.label())
@@ -1842,12 +2065,22 @@ fn update_ui(e: &FileEdit) {
         e.status.set_text(&format!("{base} · {note}"));
     }
 
-    let mut notes: Vec<&str> = Vec::new();
-    if !e.valid_utf8.get() {
-        notes.push(tr("文件不是有效 UTF-8：只读预览，非法字节显示为 �，不能保存。"));
+    // ⚠️ 用 `Vec<String>`：有的提示带参数（`trf!` 返回 String），有的是
+    //    固定文案（`tr!` 返回 &'static str）⇒ 统一收成 String。
+    let mut notes: Vec<String> = Vec::new();
+    if e.hex.get() {
+        notes.push(tr("hex 模式：显示的是原始字节，不能编辑也不能保存。").to_string());
+        if e.size.get() > super::hexdump::MAX_DUMP_BYTES as u64 {
+            notes.push(trf!(
+                "文件较大，只显示前 {shown}。",
+                shown = human_size(super::hexdump::MAX_DUMP_BYTES as u64)
+            ));
+        }
+    } else if !e.valid_utf8.get() {
+        notes.push(tr("文件不是有效 UTF-8：只读预览，非法字节显示为 �，不能保存。").to_string());
     }
-    if e.base_readonly && e.valid_utf8.get() {
-        notes.push(tr("只读查看：不会写回文件。"));
+    if e.base_readonly && e.valid_utf8.get() && !e.hex.get() {
+        notes.push(tr("只读查看：不会写回文件。").to_string());
     }
     e.notice.set_text(&notes.join(" "));
     e.notice.set_visible(!notes.is_empty());
@@ -2799,8 +3032,38 @@ pub fn resend_save(st: &Rc<PanelState>, id: u64, path: &str) {
     }
 }
 
+/// 这个编辑器**能不能保存**回文件。
+///
+/// ⚠️ **hex 模式一律不能**：正文是**转储出来的文本**，不是文件内容 ⇒ 存回去
+/// 会把原始二进制换成转储文本 ⇒ 文件直接毁了。
+///
+/// ⚠️ 这条**独立于**其它条件：就算只读/编码检查**都放行**，hex 也要否决
+///    （最外层那道防线，不能依赖里面的判断先挡住）。
+pub fn can_save(hex: bool, readonly: bool, valid_utf8: bool) -> bool {
+    if hex {
+        return false;
+    }
+    !readonly && valid_utf8
+}
+
 fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
-    if e.readonly.get() || !e.valid_utf8.get() || e.saving.get() || e.loading.get() {
+    // ⚠️ **hex 模式绝不保存**：正文是**转储出来的文本**，不是文件内容 ⇒
+    //    存回去会把原始二进制换成转储文本 ⇒ 文件直接毁了。
+    //    （保存按钮本来就隐藏了，这里是给 Ctrl+S / 快捷键兜底。）
+    if e.hex.get() {
+        // ⚠️ **静默拒绝 + 状态栏写一句**（不弹模态窗）：
+        //    保存按钮在 hex 模式**根本不摆** ⇒ 走到这里的都是 Ctrl+S；
+        //    而 hex 模式**不可编辑** ⇒ 用户其实什么都没改 ⇒ 弹窗只会
+        //    平白打断人。提示条里已经写着「不能编辑也不能保存」。
+        e.status_note
+            .set(Some(tr("hex 模式是只读的，不能保存。").to_string()));
+        update_ui(e);
+        return false;
+    }
+    if !can_save(e.hex.get(), e.readonly.get(), e.valid_utf8.get())
+        || e.saving.get()
+        || e.loading.get()
+    {
         return false;
     }
     let buf = e.buffer.clone();
@@ -3071,6 +3334,20 @@ fn too_large_msg(path: &str, size: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_模式一律不能保存() {
+        // ⚠️ **其它条件都放行**时，hex 也要否决 ——
+        //    这条单测就是"回退验证"的锚：把 `can_save` 里的 hex 判断删掉，
+        //    它立刻会红（端到端断言抓不住，因为只读/编码检查会先挡住）。
+        assert!(!can_save(true, false, true));
+        // 普通文件：只读 / 非法 UTF-8 都不能存
+        assert!(can_save(false, false, true));
+        assert!(!can_save(false, true, true));
+        assert!(!can_save(false, false, false));
+    }
+
     use super::*;
 
     #[test]

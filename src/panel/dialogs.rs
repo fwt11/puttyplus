@@ -492,9 +492,23 @@ pub fn confirm_with<F: FnOnce(bool) + 'static>(
     ok_label: &str,
     done: F,
 ) {
+    confirm_title(parent, tr("请确认"), message, ok_label, done);
+}
+
+/// **带自定义标题**的确认框。
+///
+/// 干什么用（用户 2026-11-10）：打开非文本文件时要问「要不要以 hex 模式
+/// 打开」——这句话本身就是标题（不是"请确认"那种通用词）。
+pub fn confirm_title<F: FnOnce(bool) + 'static>(
+    parent: Option<&gtk::Window>,
+    title: &str,
+    message: &str,
+    ok_label: &str,
+    done: F,
+) {
     // ⚠️ 走 `windows::dialog`：**必定**挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
-        tr("请确认"),
+        title,
         parent,
         &[
             (tr("取消"), gtk::ResponseType::Cancel),
