@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1692] = [
+pub static EN: [(&str, &str); 1693] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -895,6 +895,7 @@ pub static EN: [(&str, &str); 1692] = [
     ("把这个终端的屏幕文字逐行写进 {v0} 下的文件（会话名-时间戳.log）。\n抓的是屏幕而不是原始字节流：同一行被反复改写会记多行，滚过一屏以上或被清屏会漏记。\n文件里是纯文字、不含颜色（要颜色、能回放请用「录制会话到 .cast」）。\n分屏的两个终端各自开关、各自记；互不影响。", "Writes this terminal's screen text line by line to a file under {v0} (session-timestamp.log).\nIt captures the screen, not the raw byte stream: a line that is rewritten over and over is recorded repeatedly, and anything that scrolled more than one screen or was cleared is missed.\nThe file is plain text without colours (for colours and playback use \"Record session to .cast\" instead).\nEach half of a split terminal is switched on and recorded on its own; they do not affect each other."),
     ("把选中的 {v0} 行一起改掉（改完点「保存修改」才写库）。", "Change all of the selected {v0} rows (they are written to the database only when you click \"Save changes\")."),
     ("把选中的那个字段的类型设成下拉里挑的类型", "Set the type of the selected field to the one picked in the dropdown"),
+    ("拖动查看右侧的列", "Drag to see the columns on the right"),
     ("拖动查看完整文件名", "Drag to see the full file name"),
     ("拖进来的东西里没有可上传的本地文件", "None of the dropped items is a local file that can be uploaded"),
     ("按哪一列排序（不选就不排序）", "Which column to sort by (nothing selected means no sorting)"),

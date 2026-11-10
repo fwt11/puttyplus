@@ -108,6 +108,12 @@ pub struct Pane {
     pub name_adj: gtk::Adjustment,
     /// 名称列下方的窄滚动条（只有文件名超出时才显示）
     pub name_bar: gtk::Scrollbar,
+    /// **自己画的横向滚动条**（列表下方，常驻、12px 粗 ⇒ 好抓）。
+    ///
+    /// ⚠️ 为什么不用 GTK 自带的那条：它是 **overlay**（浮在内容上、鼠标
+    ///    蹭到底边才浮出来、只有 4px 粗）⇒ 用户反馈「很难选中并拖动」。
+    ///    ⇒ 横向改成 `External`（ScrolledWindow 不画它），自己画一条。
+    pub h_bar: gtk::Scrollbar,
     /// 列表视口（算名称列滚动条的宽度/位置用）
     pub sw: gtk::ScrolledWindow,
     /// 上传/下载按钮（**纯图标**，文字在 tooltip 里）。
@@ -138,6 +144,22 @@ pub struct FileCols {
 fn setup_trailing(col: &gtk::TreeViewColumn, min_width: i32, r: &gtk::CellRendererText) {
     col.set_min_width(min_width);
     r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+}
+
+/// 大小列的**下限**宽度（列头「大小」两个字 + 内边距装得下）。
+pub const SIZE_COL_MIN_W: i32 = 64;
+
+/// 单元格左右内边距（列宽 = 文字宽 + 这个 + 余量）。
+const SIZE_CELL_PAD: i32 = 12;
+
+/// 大小列的最终宽度：**内容要装得下的宽度** 与 **用户拉过的宽度**，取更宽的。
+///
+/// ⚠️ **不许比内容窄**（用户 2026-11-10：「如果文件列表中显示了文件大小列，
+///    那么一定要保证最长的大小显示完整，就是列宽按最长的文件大小来定」）
+///    ⇒ 窄了 GTK 就把文字省略成「104.4 …」⇒ 用户根本看不出文件多大。
+/// ⚠️ **也不许比用户拉过的窄**：用户手动加宽过就尊重它（他自己知道要什么）。
+pub fn size_col_width(content_w: i32, user_w: i32) -> i32 {
+    content_w.max(user_w).max(SIZE_COL_MIN_W)
 }
 
 /// 往 `view` 上挂 名称/大小/权限/修改时间 四列（权限列仅远程面板有）。
@@ -177,7 +199,19 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     let r_txt2 = gtk::CellRendererText::new();
     // ⚠️ 阶段 76 / 审计 P1-15：大小**右对齐**（数字按位对齐，好读）。
     gtk::prelude::CellRendererExt::set_alignment(&r_txt2, 1.0, 0.5);
-    setup_trailing(&col_size, 64, &r_txt2);
+    setup_trailing(&col_size, SIZE_COL_MIN_W, &r_txt2);
+    // ⚠️ **列宽由 [`apply_size_col_width`] 按「最长的那个大小」算**
+    //    （`min_width` + `fixed_width`），**不靠 sizing**。
+    //
+    //    GTK4 的规矩（查过 gtk/deprecated/gtktreeviewcolumn.c 与
+    //    gtktreeview.c）：`_gtk_tree_view_column_request_width()` 里
+    //    **fixed_width != -1 就用它**（**跟 sizing 无关**）⇒ 设了
+    //    fixed_width，列宽就是它；而用户拖列宽时 GTK 做的是
+    //    `gtk_tree_view_column_set_fixed_width (column, 拖出来的宽度)`
+    //    ⇒ 拖完的宽度就存在 fixed_width 里 ⇒ 我们只要**别覆盖**它
+    //    （`apply_size_col_width` 取「当前实际宽度」与「内容宽度」的
+    //    **更宽**那个 ⇒ 用户拖宽了不会被弹回去）。
+    col_size.set_resizable(true);
     col_size.pack_start(&r_txt2, false);
     col_size.add_attribute(&r_txt2, "text", COL_SIZE_H);
     view.append_column(&col_size);
@@ -188,6 +222,7 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
         col.set_title(tr("权限"));
         let r = gtk::CellRendererText::new();
         setup_trailing(&col, 72, &r);
+        col.set_resizable(true);
         col.pack_start(&r, false);
         col.add_attribute(&r, "text", COL_PERM);
         view.append_column(&col);
@@ -200,6 +235,7 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     // 原来这里写死 min_width(108)：一个不可压缩的下限，正好是把横向滚动条
     // 逼出来的帮凶之一。现在改成"可收缩 + 小下限"。
     setup_trailing(&col_mtime, 120, &r);
+    col_mtime.set_resizable(true);
     col_mtime.pack_start(&r, false);
     col_mtime.add_attribute(&r, "text", COL_MTIME);
     // ⚠️ **默认显示**（阶段 86 / 复查 §2.2、N2）。
@@ -478,6 +514,8 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
     //    「完成」慢慢消失，而不是目录一刷新就没了）。
     let terminal = collect_terminal(pane);
     pane.model.clear();
+    // ⚠️ **这一批的大小文案**（列宽按最长的那个算 ⇒ 见 `apply_size_col_width`）。
+    let mut size_texts: Vec<String> = Vec::new();
     // 首行 ".."：进入上级目录（文件管理器惯例，取代工具栏「上级」按钮）
     {
         let icon = "go-up";
@@ -521,6 +559,8 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
         };
         let name = utf8_sanitize(r.name.as_bytes());
         let size_h = if r.is_dir { tr("目录").to_string() } else { human_size(r.size) };
+        // ⚠️ **收集大小文案**：列宽按**最长的那个**算（用户 2026-11-10）。
+        size_texts.push(size_h.clone());
         let perm = r.perm.clone();
         let mtime = mtime_str(r.mtime);
         let mtime_full = mtime_full_str(r.mtime);
@@ -565,7 +605,44 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
     // 目录换了：名称列的滚动范围重算，并回到最左
     update_name_scroll(&pane.model, &pane.view, &pane.name_col, &pane.name_adj);
     pane.name_renderer.set_offset(0.0);
+    // ⚠️ **大小列按最长的那个大小定宽**（用户 2026-11-10：「如果文件列表中显示了
+    //    文件大小列，那么一定要保证最长的大小显示完整，就是列宽按最长的文件大小
+    //    来定」）⇒ 窄了 GTK 就把文字省略成「104.4 …」，用户根本看不出文件多大。
+    apply_size_col_width(pane, longest_size_width(&pane.view, &size_texts));
     pane.view.queue_draw();
+}
+
+/// 这一批里**最长的大小文案**要占多宽（像素，含单元格内边距）。
+///
+/// ⚠️ **先按字符数粗筛、再用 Pango 实测**：目录里可能有几千个文件，每个都
+///    去量一遍 Pango 会拖慢刷新 ⇒ 只量字符数最多的那几个候选（单位字母宽度
+///    不同，"1.2 TB" 与 "104.4 KB" 字符数一样多但宽度不同）。
+fn longest_size_width(view: &gtk::TreeView, texts: &[String]) -> i32 {
+    let Some(max_chars) = texts.iter().map(|t| t.chars().count()).max() else {
+        return 0;
+    };
+    let mut w = 0i32;
+    for t in texts {
+        if t.chars().count() + 2 < max_chars {
+            continue; // 明显更短 ⇒ 不可能是最宽的
+        }
+        let (tw, _) = view.create_pango_layout(Some(t)).pixel_size();
+        w = w.max(tw);
+    }
+    w + SIZE_CELL_PAD
+}
+
+/// 按内容宽度给大小列定宽（并尊重用户手动拉过的宽度）。
+fn apply_size_col_width(pane: &Pane, content_w: i32) {
+    // 用户拉过的宽度 = 列当前的**实际**宽度（GTK 拖列宽时把它写进了
+    // fixed_width ⇒ 这里读到的就是用户拖出来的那个值）
+    let user_w = pane.col_size.width().max(0);
+    let want = size_col_width(content_w, user_w);
+    // ⚠️ `min_width` 一起抬上去 ⇒ 用户**没法**把它拖到比内容还窄
+    //    （拖了也会被弹回来）⇒ 「最长的大小一定显示完整」这条是**保证**的，
+    //    不是"默认如此"。
+    pane.col_size.set_min_width(want);
+    pane.col_size.set_fixed_width(want);
 }
 
 /// 名字列横向滚动条用的 adjustment。
@@ -997,10 +1074,17 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     //
     // 以前是 Never（"所有列始终可见"），但名称列下限提到 160px 之后，
     // 窄面板里右侧的「大小/权限」会被挤出视口**再也看不到** ⇒
-    // 横向能滚才能看到它们（滚动条是标准那条，出现在需要时）。
+    // 横向能滚才能看到它们。
     //
     // 长文件名仍然**不撑列**：它在名称列内部滑 + 超宽时画省略号。
-    sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    //
+    // ⚠️ **横向改成 `External`（2026-11-10，用户：「远程文件列表下面的横向
+    //    滚动条很难选中并拖动」）**：GTK 自带那条是 **overlay**——浮在内容
+    //    上、鼠标蹭到底边才浮出来、而且只有 4px 粗 ⇒ 窄面板里几乎抓不住。
+    //    ⇒ 横向让 ScrolledWindow **别画**，自己在列表下面挂一条**常驻的**
+    //    12px 滚动条（见下面的 `h_bar`）。
+    //    竖向照旧（Automatic + overlay）：竖条要是常驻的就会实占文件名宽度。
+    sw.set_policy(gtk::PolicyType::External, gtk::PolicyType::Automatic);
     // 强制 overlay：有些桌面（KDE 等）在全局关掉 overlay scrolling，
     // 竖向滚动条会实占 14px；文件面板本来就窄，这里不允许它吃文件名宽度
     sw.set_overlay_scrolling(true);
@@ -1009,6 +1093,35 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
     sw.set_hexpand(true);
     sw.set_vexpand(true);
     box_.append(&sw);
+
+    // ---- 自己画的横向滚动条（常驻、12px 粗 ⇒ 好抓）----
+    let h_bar = {
+        let adj = sw.hadjustment();
+        let bar = gtk::Scrollbar::new(gtk::Orientation::Horizontal, Some(&adj));
+        bar.add_css_class("pp-hscroll");
+        bar.set_tooltip_text(Some(tr("拖动查看右侧的列")));
+        bar.set_visible(false);
+        // ⚠️ **有横向溢出才显示**（没溢出时留一条灰杠反而像坏了）。
+        let upd = Rc::new({
+            let bar = bar.clone();
+            let adj = adj.clone();
+            move || {
+                let over = adj.upper() - adj.page_size() > 0.5;
+                bar.set_visible(over);
+            }
+        });
+        upd();
+        {
+            let upd = Rc::clone(&upd);
+            adj.connect_notify_local(Some("upper"), move |_, _| upd());
+        }
+        {
+            let upd = Rc::clone(&upd);
+            adj.connect_notify_local(Some("page-size"), move |_, _| upd());
+        }
+        box_.append(&bar);
+        bar
+    };
 
     // 名称列专用横向滚动条：只滚文件名文字，其他列不动。
     // 放在列表下方（6px 薄条，不压住最后一行），没有超长文件名时隐藏。
@@ -1119,6 +1232,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         name_renderer: cols.name_renderer,
         name_adj,
         name_bar,
+        h_bar,
         sw,
         transfer_btn: transfer,
     }
@@ -1434,6 +1548,21 @@ mod tests {
         assert!(!is_link_perm("drwxr-xr-x"));
         assert!(!is_link_perm("-rw-r--r--"));
         assert!(!is_link_perm(""));
+    }
+
+    /// **大小列的宽度：装得下内容，也尊重用户拉过的**（用户 2026-11-10：
+    /// 「一定要保证最长的大小显示完整，就是列宽按最长的文件大小来定」）。
+    #[test]
+    fn 大小列宽_不许比内容窄_也不许比用户拉过的窄() {
+        // 内容要 90px ⇒ 至少 90px（哪怕用户只拉了 40px ⇒ 装不下 ⇒ 弹回）
+        assert_eq!(size_col_width(90, 40), 90);
+        // 用户拉到了 140px ⇒ 尊重（更宽）
+        assert_eq!(size_col_width(90, 140), 140);
+        // 内容很小 ⇒ 也有下限（列头「大小」两个字要装得下）
+        assert_eq!(size_col_width(10, 0), SIZE_COL_MIN_W);
+        assert_eq!(size_col_width(0, 0), SIZE_COL_MIN_W);
+        // 用户拉得极宽也照旧尊重
+        assert_eq!(size_col_width(10, 300), 300);
     }
 
     /// 本地软链：权限串要是 `l` 开头（图标才能区分），但**行为不变**——

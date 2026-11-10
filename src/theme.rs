@@ -1110,13 +1110,39 @@ paned > separator:hover { background-color: @pp_accent; }
 .pp-thin-scrollbar scrollbar.vertical slider { min-height: 36px; }
 .pp-thin-scrollbar scrollbar.horizontal slider { min-width: 36px; }
 .pp-thin-scrollbar scrollbar slider:hover { background-color: alpha(@pp_fg, 0.50); }
-/* 文件名列专用：只滚名称文字，窄到 8px */
-scrollbar.pp-name-scroll { min-height: 4px; background: transparent; border: none; margin: 0; }
-scrollbar.pp-name-scroll slider {
-  min-height: 3px; min-width: 24px; border-radius: 2px; border: none;
-  background-color: alpha(@pp_fg, 0.30);
+
+/* 文件列表的横向滚动条（**自己画的那条**，2026-11-10）
+ *
+ * ⚠️ **为什么自己画**：GTK 自带那条是 overlay（浮在内容上、鼠标蹭到底边
+ *    才浮出来、只有 4px 粗）⇒ 用户反馈「远程文件列表下面的横向滚动条很难
+ *    选中并拖动」。⇒ 横向改成 External（ScrolledWindow 不画它），自己在
+ *    列表下面挂一条**常驻**的：12px 高、槽有底色、滑块够粗 ⇒ 一眼看得见、
+ *    一把抓得住。
+ */
+scrollbar.pp-hscroll {
+  min-height: 12px; background: transparent; border: none; margin: 0;
 }
-scrollbar.pp-name-scroll slider:hover { background-color: alpha(@pp_fg, 0.50); }
+scrollbar.pp-hscroll > trough {
+  background-color: alpha(@pp_fg, 0.10); border: none; border-radius: 6px;
+  min-height: 6px; margin: 3px 4px;
+}
+scrollbar.pp-hscroll > slider {
+  min-height: 6px; min-width: 40px; border-radius: 3px; border: none;
+  background-color: alpha(@pp_fg, 0.38);
+}
+scrollbar.pp-hscroll > slider:hover { background-color: alpha(@pp_fg, 0.60); }
+
+/* 文件名列专用：只滚名称文字（比横向滚动条细一点，但也要抓得住） */
+scrollbar.pp-name-scroll { min-height: 10px; background: transparent; border: none; margin: 0; }
+scrollbar.pp-name-scroll > trough {
+  background-color: alpha(@pp_fg, 0.08); border: none; border-radius: 5px;
+  min-height: 4px; margin: 3px 0;
+}
+scrollbar.pp-name-scroll slider {
+  min-height: 6px; min-width: 40px; border-radius: 3px; border: none;
+  background-color: alpha(@pp_fg, 0.35);
+}
+scrollbar.pp-name-scroll slider:hover { background-color: alpha(@pp_fg, 0.60); }
 
 /* ---------------- 右键菜单（自建 Popover） ----------------
    终端右键菜单是 Popover + Box + Button，不是 PopoverMenu，所以系统主题不会
