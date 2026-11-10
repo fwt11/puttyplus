@@ -23,6 +23,7 @@ pub mod fwdmgr;
 pub mod mirrorui;
 pub mod namecell;
 pub mod pane;
+pub mod pulse;
 pub mod quickcmd;
 pub mod queue;
 pub mod relay;
@@ -173,6 +174,11 @@ pub struct PanelState {
     /// 找到它。⚠️ 按钮挂在面板上，面板属于本状态的控件树 ⇒ 这里存
     /// **强引用**不会成环（按钮不反过来抓 `PanelState`）。
     pub queue_btn: RefCell<Option<gtk::Button>>,
+    /// **传输动画定时器**（呼吸相位）——只在**有东西在传**时存在。
+    ///
+    /// 干什么用（用户 2026-11-10）：传输中的文件行背景呼吸、队列按钮图标
+    /// 跟着闪一下 ⇒ 空闲时一点 CPU 都不占。
+    pub xfer_anim: RefCell<Option<glib::SourceId>>,
 
     /* 进程内端口转发（worker → Forwards 事件回填；状态栏摘要、tooltip 明细、
        转发管理窗口共用同一份视图快照，含停用项与失败原因） */
@@ -371,6 +377,11 @@ impl SftpPanel {
             items: RefCell::new(Vec::new()),
             queue_ui: RefCell::new(None),
             queue_btn: RefCell::new(None),
+            /// **传输动画定时器**（呼吸相位）——只在**有东西在传**时存在。
+            ///
+            /// 干什么用（用户 2026-11-10）：传输中的文件行背景呼吸、队列
+            /// 按钮图标闪一下 ⇒ 空闲时一点 CPU 都不占。
+            xfer_anim: RefCell::new(None),
             mirror_ui: RefCell::new(None),
             file_edits: RefCell::new(Vec::new()),
             pending_file_reads: RefCell::new(HashMap::new()),
@@ -949,6 +960,57 @@ pub fn count_running(states: &[(worker::XferState, bool)]) -> XferRunning {
 /// 传输进行中的条目总数。
 pub fn xfer_running_count(st: &Rc<PanelState>) -> usize {
     xfer_running(st).total()
+}
+
+/// **传输动画**（呼吸相位）：有东西在传就起定时器，传完就停。
+///
+/// 干什么用（用户 2026-11-10）：传输中的**文件行背景呼吸**、队列按钮图标
+/// 跟着闪一下 ⇒ 比光看进度文字显眼得多。
+///
+/// ⚠️ **相位按时间算**（见 `pulse::phase`）⇒ 这个定时器只负责"持续重绘"，
+///    多个面板各起各的也**天然同步**（不会互相打架）。
+///
+/// ⚠️ 定时器闭包只抓**弱引用**（面板没了就停）——抓强引用就是引用环。
+pub fn sync_xfer_anim(st: &Rc<PanelState>) {
+    let busy = xfer_running(st).total() > 0;
+    if busy {
+        if st.xfer_anim.borrow().is_some() {
+            return; // 已经在跑了
+        }
+        let weak = Rc::downgrade(st);
+        let id = glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            let Some(st) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if st.dead.get() {
+                return glib::ControlFlow::Break;
+            }
+            // 文件列表（两栏）：正在传的行背景要跟着呼吸重画
+            let rp = st.remote_pane.borrow().clone();
+            if let Some(p) = rp {
+                p.view.queue_draw();
+            }
+            let lp = st.local_pane.borrow().clone();
+            if let Some(p) = lp {
+                p.view.queue_draw();
+            }
+            // 队列窗口：方向列的 accent 色在呼吸
+            let qu = st.queue_ui.borrow().as_ref().map(|q| q.view.clone());
+            if let Some(v) = qu {
+                v.queue_draw();
+            }
+            // 工具栏「传输队列」按钮的图标：透明度呼吸
+            queue::breathe_btn(&st);
+            glib::ControlFlow::Continue
+        });
+        *st.xfer_anim.borrow_mut() = Some(id);
+    } else {
+        if let Some(id) = st.xfer_anim.borrow_mut().take() {
+            id.remove();
+        }
+        // 停了 ⇒ 图标恢复成不透明（别留个半透明的鬼影）
+        queue::reset_btn_opacity(st);
+    }
 }
 
 fn render_status(st: &Rc<PanelState>) {
@@ -1558,6 +1620,8 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
         PanelEvent::XferDrained { results } => {
             // 队列空了 ⇒ 忙态与角标要撤掉（阶段 102）
             queue::refresh_btn(&st);
+            // 呼吸动画也停掉（没东西在传了 ⇒ 别占 CPU）
+            sync_xfer_anim(&st);
             // 整个传输队列清空（不是每个提交批次）→ 通知 + 有失败/取消时
             // 汇总一次。追加的新批次在同一个窗口里，不会提前弹。
             pane::clear_progress(&st.pane(true));

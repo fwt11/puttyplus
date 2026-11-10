@@ -24,6 +24,8 @@ pub const QCOL_STATE: i32 = 5;
 pub const QCOL_ID: i32 = 6;
 /// 状态列前景色（失败 = 红，其余 = NULL 走主题色）
 pub const QCOL_FAIL: i32 = 7;
+/// **这一行正在传**（上传或下载）⇒ 方向列用 accent 色（随呼吸变亮/变暗）
+pub const QCOL_ACTIVE: i32 = 8;
 
 /// 一个传输项在 UI 侧的记录。
 pub struct QueueItem {
@@ -113,6 +115,7 @@ pub fn ensure(st: &Rc<PanelState>) {
         glib::Type::STRING, // STATE
         glib::Type::U64,    // ID
         glib::Type::STRING, // 失败态前景色（空 = 用主题默认色）
+        glib::Type::BOOL,   // 正在传（方向列用 accent 色 + 呼吸）
     ]);
 
     let view = gtk::TreeView::with_model(&model);
@@ -143,6 +146,32 @@ pub fn ensure(st: &Rc<PanelState>) {
         col.pack_start(&r, true);
         if *progress {
             col.add_attribute(&r, "value", QCOL_PCT);
+        } else if i == 0 {
+            // **方向列**：正在传的行用 accent 色（随呼吸变亮/变暗）
+            // ⇒ 任务列表里一眼看出"现在在传哪几个"（用户 2026-11-10：
+            // 「任务列表等图标也可以有一些动态效果」）。
+            //
+            // ⚠️ 颜色从**视图**的样式上下文取（跟着主题走）⇒ 闭包抓一份
+            //    视图的克隆（视图是控件树里的强引用，不会成环）。
+            let view_for_color = view.clone();
+            col.set_cell_data_func(&r, move |_col, cell, model, iter| {
+                let Some(rt) = cell.downcast_ref::<gtk::CellRendererText>() else {
+                    return;
+                };
+                let dir: String = model.get(iter, QCOL_DIR);
+                rt.set_text(Some(&dir));
+                let active: bool = model.get(iter, QCOL_ACTIVE);
+                if active {
+                    let mut c = super::pulse::accent(&view_for_color);
+                    c.set_alpha(super::pulse::alpha(0.55, 1.0));
+                    // ⚠️ GTK4 的 CellRendererText「前景色」是**颜色字符串**
+                    //    （不是 RGBA）⇒ 用 rgba() 的 CSS 写法（带透明度）。
+                    rt.set_foreground(Some(&c.to_string()));
+                } else {
+                    // ⚠️ **要显式清掉**：否则上一行留下的 accent 色会粘着
+                    rt.set_foreground(None);
+                }
+            });
         } else {
             col.add_attribute(&r, "text", i as i32);
         }
@@ -315,6 +344,7 @@ pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
             (QCOL_STATE as u32, &waiting),
             (QCOL_ID as u32, &id),
             (QCOL_FAIL as u32, &""),
+            (QCOL_ACTIVE as u32, &false),
         ],
     );
     let path = qu.model.path(&iter);
@@ -325,8 +355,44 @@ pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
     // 进度已经画在文件面板的文件名后面（flush 里更新）。
 }
 
+/// 工具栏「传输队列」按钮的图标：**透明度呼吸**（动态效果）。
+///
+/// 干什么用（用户 2026-11-10）：「任务列表等图标也可以有一些动态效果」。
+///
+/// ⚠️ 呼吸相位是**按时间算的**（`pulse::phase`）⇒ 这里只是把当前相位
+///    映射成透明度 ⇒ 多个面板天然同步。
+pub fn breathe_btn(st: &Rc<PanelState>) {
+    set_btn_opacity(st, super::pulse::alpha(0.45, 1.0) as f64);
+}
+
+/// 传输停了 ⇒ 图标恢复成完全不透明（别留个半透明的鬼影）。
+pub fn reset_btn_opacity(st: &Rc<PanelState>) {
+    set_btn_opacity(st, 1.0);
+}
+
+/// 设置「传输队列」按钮里那个图标的透明度。
+fn set_btn_opacity(st: &Rc<PanelState>, a: f64) {
+    let Some(b) = st.queue_btn.borrow().clone() else {
+        return;
+    };
+    let Some(child) = b.child() else { return };
+    let Some(row) = child.downcast_ref::<gtk::Box>() else {
+        return;
+    };
+    let mut cur = row.first_child();
+    while let Some(c) = cur {
+        if let Some(i) = c.downcast_ref::<gtk::Image>() {
+            i.set_opacity(a);
+        }
+        cur = c.next_sibling();
+    }
+}
+
 /// 刷新所有行的进度显示（对应 C 版 xfer_flush_idle）。
 pub fn flush(st: &Rc<PanelState>) {
+    // ⚠️ **先同步动画**：有东西在传就起呼吸定时器（传完自动停）。
+    //    放前面是因为下面有一堆提前 return 的路径。
+    super::sync_xfer_anim(st);
     let qu = st.queue_ui.borrow();
     let Some(qu) = qu.as_ref() else { return };
     let items = st.items.borrow();
@@ -373,6 +439,9 @@ pub fn flush(st: &Rc<PanelState>) {
         } else {
             ""
         };
+        // **正在传**（只有真在跑的那些才算；排队等待的不算——否则一长串
+        // 等待项都在呼吸，反而看不出"现在在传哪个"）。
+        let active = g.state == XferState::Run;
         qu.model.set(
             &ti,
             &[
@@ -381,6 +450,7 @@ pub fn flush(st: &Rc<PanelState>) {
                 (QCOL_SPEED as u32, &sp),
                 (QCOL_STATE as u32, &state),
                 (QCOL_FAIL as u32, &fail),
+                (QCOL_ACTIVE as u32, &active),
             ],
         );
 
@@ -400,15 +470,18 @@ pub fn flush(st: &Rc<PanelState>) {
                 )
             };
             if src_parent == cwd {
-                let (ppct, ptext) = match g.state {
-                    XferState::Wait => (0, tr("等待").to_string()),
-                    XferState::Run => (pct, format!("{pct}%")),
-                    XferState::Done => (100, tr("完成").to_string()),
-                    XferState::Skip => (0, tr("跳过").to_string()),
-                    XferState::Err => (0, tr("失败").to_string()),
-                    XferState::Cancel => (0, tr("取消").to_string()),
+                // ⚠️ **xfer = 正在传**（只有 Run 才算）：文件列表里这一行
+                // 画呼吸背景（用户 2026-11-10）。排队等待的不算——一长串
+                // 等待项都在呼吸，反而看不出"现在在传哪个"。
+                let (ppct, ptext, pxfer) = match g.state {
+                    XferState::Wait => (0, tr("等待").to_string(), false),
+                    XferState::Run => (pct, format!("{pct}%"), true),
+                    XferState::Done => (100, tr("完成").to_string(), false),
+                    XferState::Skip => (0, tr("跳过").to_string(), false),
+                    XferState::Err => (0, tr("失败").to_string(), false),
+                    XferState::Cancel => (0, tr("取消").to_string(), false),
                 };
-                super::pane::set_progress(&st.pane(remote_src), &src_name, ppct, &ptext);
+                super::pane::set_progress(&st.pane(remote_src), &src_name, ppct, &ptext, pxfer);
             }
         }
     }

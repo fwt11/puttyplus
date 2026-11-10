@@ -32,6 +32,11 @@ pub const COL_PROGRESS: i32 = 9;
 /// ⚠️ 列里显示的是**短格式**（`COL_MTIME`）：完整格式在 120px 的列里会被
 /// 硬裁成「2026-10-27 0…」（阶段 86 / 复查 §2.2、N2）。
 pub const COL_MTIME_FULL: i32 = 10;
+/// **这一行正在传输**（上传或下载）⇒ 名称单元格画呼吸背景。
+///
+/// 干什么用（用户 2026-11-10）：「上传/下载的文件背景色可以呼吸变化，
+/// 这样更明显些」——窄面板里进度文字经常被挤掉，光靠那几个字不够显眼。
+pub const COL_XFER: i32 = 11;
 
 /* ---------------- 图标 ---------------- */
 
@@ -144,6 +149,8 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
                 model.get::<String>(iter, COL_PROGRESS),
                 model.get::<i32>(iter, COL_PCT),
             );
+            // ⚠️ **正在传输的行 ⇒ 呼吸背景**（用户 2026-11-10）
+            r.set_xfer(model.get::<bool>(iter, COL_XFER));
         }
     });
     view.append_column(&col_name);
@@ -232,7 +239,10 @@ impl Pane {
 }
 
 /// 更新某一行文件名后面的传输进度。找不到（文件不在当前目录）返回 false。
-pub fn set_progress(pane: &Pane, name: &str, pct: i32, text: &str) -> bool {
+///
+/// `xfer` = 这一行**正在传**（上传或下载）⇒ 名称单元格画呼吸背景
+/// （用户 2026-11-10）。
+pub fn set_progress(pane: &Pane, name: &str, pct: i32, text: &str, xfer: bool) -> bool {
     let mut it = pane.model.iter_first();
     while let Some(mut i) = it {
         if pane.model.get::<String>(&i, COL_NAME) == name {
@@ -241,6 +251,7 @@ pub fn set_progress(pane: &Pane, name: &str, pct: i32, text: &str) -> bool {
                 &[
                     (COL_PCT as u32, &pct.clamp(0, 100)),
                     (COL_PROGRESS as u32, &text),
+                    (COL_XFER as u32, &xfer),
                 ],
             );
             pane.view.queue_draw();
@@ -261,7 +272,11 @@ pub fn clear_progress(pane: &Pane) {
     while let Some(mut i) = it {
         let _ = pane.model.set(
             &i,
-            &[(COL_PCT as u32, &0i32), (COL_PROGRESS as u32, &"")],
+            &[
+                (COL_PCT as u32, &0i32),
+                (COL_PROGRESS as u32, &""),
+                (COL_XFER as u32, &false),
+            ],
         );
         it = if pane.model.iter_next(&mut i) {
             Some(i)
@@ -297,6 +312,7 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
                 (COL_HIDDEN as u32, &hidden),
                 (COL_PCT as u32, &0i32),
                 (COL_PROGRESS as u32, &""),
+                (COL_XFER as u32, &false),
             ],
         );
     }
@@ -336,6 +352,7 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
                 (COL_HIDDEN as u32, &hidden),
                 (COL_PCT as u32, &0i32),
                 (COL_PROGRESS as u32, &""),
+                (COL_XFER as u32, &false),
             ],
         );
     }
@@ -472,6 +489,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         glib::Type::I32,    // PCT
         glib::Type::STRING, // PROGRESS
         glib::Type::STRING, // MTIME_FULL（tooltip 用，不显示）
+        glib::Type::BOOL,   // XFER（正在传输 ⇒ 呼吸背景）
     ]);
     let view = gtk::TreeView::new();
     let entry = gtk::Entry::new();

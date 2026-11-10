@@ -25,6 +25,12 @@ mod imp {
         /// 传输进度文案（"45%"/"完成"/""）；空串 = 不画进度
         pub progress: RefCell<String>,
         pub progress_pct: StdCell<i32>,
+        /// **这一行正在传输**（上传或下载）⇒ 画呼吸背景 + 左侧竖条。
+        ///
+        /// 干什么用（用户 2026-11-10）：「上传/下载的文件背景色可以呼吸
+        /// 变化，这样更明显些」——进度文字在窄面板里经常被挤掉，光靠
+        /// 那几个字不够显眼 ⇒ 整行给个会呼吸的底色。
+        pub xfer: StdCell<bool>,
     }
 
     #[glib::object_subclass]
@@ -62,6 +68,36 @@ mod imp {
             }
             let progress = self.progress.borrow().clone();
             let pct = self.progress_pct.get().clamp(0, 100);
+
+            // ⚠️ **传输中的行：背景呼吸**（用户 2026-11-10）。
+            //
+            // 画在**文字底下**（append_color 先画，后面的文字压在上面），
+            // 左侧再补一条实色竖条 ⇒ 眼睛扫一列就能挑出"哪几行在传"。
+            if self.xfer.get() {
+                let accent = crate::panel::pulse::accent(widget);
+                let mut bg = accent;
+                bg.set_alpha(crate::panel::pulse::alpha(0.06, 0.26));
+                snapshot.append_color(
+                    &bg,
+                    &graphene::Rect::new(
+                        cell_area.x() as f32,
+                        cell_area.y() as f32,
+                        cell_area.width() as f32,
+                        cell_area.height() as f32,
+                    ),
+                );
+                let mut bar = accent;
+                bar.set_alpha(0.85);
+                snapshot.append_color(
+                    &bar,
+                    &graphene::Rect::new(
+                        cell_area.x() as f32,
+                        cell_area.y() as f32,
+                        3.0,
+                        cell_area.height() as f32,
+                    ),
+                );
+            }
 
             #[allow(deprecated)]
             let ctx = widget.style_context();
@@ -180,5 +216,10 @@ impl NameCellRenderer {
     pub fn set_progress(&self, text: String, pct: i32) {
         self.imp().progress.replace(text);
         self.imp().progress_pct.set(pct.clamp(0, 100));
+    }
+
+    /// 这一行**正在传输**（上传或下载）⇒ 画呼吸背景。
+    pub fn set_xfer(&self, on: bool) {
+        self.imp().xfer.set(on);
     }
 }

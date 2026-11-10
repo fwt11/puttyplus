@@ -36,6 +36,8 @@ fn build(viewport: i32, show_mtime: bool) -> (gtk::ApplicationWindow, gtk::TreeV
         gtk::glib::Type::BOOL,   // 隐藏
         gtk::glib::Type::I32,    // 百分比（传输进度）
         gtk::glib::Type::STRING, // 传输进度文案
+        gtk::glib::Type::STRING, // 修改时间全写（tooltip 用）
+        gtk::glib::Type::BOOL,   // 正在传输（呼吸背景）
     ]);
     for (name, size, perm, mt) in [
         ("graph.tar.gz", "58M", "-rw-r--r--", "2026-02-08 16:31"),
@@ -56,6 +58,8 @@ fn build(viewport: i32, show_mtime: bool) -> (gtk::ApplicationWindow, gtk::TreeV
                 (7, &false),
                 (8, &0i32),
                 (9, &""),
+                (10, &mt),
+                (11, &false),
             ],
         );
     }
