@@ -15,7 +15,7 @@ use crate::args::ConnOptions;
 use crate::menu;
 use crate::platform::pty::PtySession;
 use crate::termview::TermView;
-use crate::util::find_program_in_path;
+use crate::util::find_program_in_path_win;
 use crate::i18n::tr;
 use crate::trf;
 
@@ -130,7 +130,7 @@ fn forward_flags(o: &ConnOptions) -> Vec<(String, String)> {
 }
 
 pub fn build_ssh_argv(o: &ConnOptions) -> Option<Vec<String>> {
-    let ssh = find_program_in_path("ssh")?;
+    let ssh = find_program_in_path_win("ssh")?;
     let mut av = vec![ssh.to_string_lossy().into_owned()];
     if o.port != 22 {
         av.push("-p".into());
@@ -185,7 +185,7 @@ pub fn build_ssh_argv(o: &ConnOptions) -> Option<Vec<String>> {
 }
 
 pub fn build_plink_argv(o: &ConnOptions) -> Option<Vec<String>> {
-    let plink = find_program_in_path("plink")?;
+    let plink = find_program_in_path_win("plink")?;
     let mut av = vec![plink.to_string_lossy().into_owned()];
     av.push(format!("-{}", o.proto));
     av.push("-P".into());
@@ -244,7 +244,7 @@ fn build_bridge_argv(o: &ConnOptions) -> Option<Vec<String>> {
             Some(vec![selfs, "--bridge-serial".into(), o.host.clone(), sercfg])
         }
         "raw" => {
-            let nc = find_program_in_path("nc")?;
+            let nc = find_program_in_path_win("nc")?;
             Some(vec![
                 nc.to_string_lossy().into_owned(),
                 o.host.clone(),
@@ -466,7 +466,7 @@ impl TermInner {
         let o = &self.opts;
         if o.is_ssh() {
             // 装了 putty 优先用 plink（与 putty 参数行为完全一致）
-            if find_program_in_path("plink").is_some() {
+            if find_program_in_path_win("plink").is_some() {
                 build_plink_argv(o).unwrap_or_default()
             } else {
                 build_ssh_argv(o).unwrap_or_default()
@@ -2509,14 +2509,17 @@ fn new_term_backend() -> TermView {
 /// - `spawn`：起 `ssh` 子进程 + 本地 pty（**Linux 主线**，行为零变化）。
 /// - `inproc`：**进程内实现 SSH 客户端**（russh 直接驱动终端内核）。
 ///
-/// ⚠️ **Windows 默认 `inproc`**：Windows 默认没有 `ssh.exe`（OpenSSH 是
-/// 「可选功能」，很多机器根本没装），`plink` 我们又不想依赖 ⇒ 走
-/// spawn 必然失败（用户 2026-11-08 报的「找不到可用的客户端程序」）。
+/// ⚠️ **Windows 的默认（2026-11-10，用户拍板）**：**有外部客户端
+///    （`ssh.exe` / `plink.exe`）就 spawn，一个都没有才走进程内**。
 ///
-/// ⚠️ **Linux 主线仍然是 spawn**（AGENTS.md 的零回归红线）：终端里跑的
-/// 是用户自己的 ssh ⇒ `~/.ssh/config`、agent、ProxyJump、known_hosts
-/// 的语义**全都在**（进程内那条路做不到这个 ⇒ 那是 Windows 版的已知
-/// 差异，文档里写明）。
+/// - 有客户端 ⇒ 走 spawn ⇒ 终端里跑的是**用户自己的 ssh** ⇒
+///   `~/.ssh/config`、agent、ProxyJump、known_hosts 的语义**跟 Linux 版
+///   一样**（进程内那条路做不到这些 ⇒ 那才是差异）；
+/// - 没有客户端 ⇒ spawn 必然失败（用户 2026-11-08 报的「找不到可用的
+///   客户端程序」）⇒ 兜底走**进程内**（Windows 默认没装 OpenSSH，
+///   很多机器根本没装）。
+///
+/// ⚠️ **Linux 主线仍然是 spawn**（AGENTS.md 的零回归红线）。
 ///
 /// ⚠️ `inproc` **只有 ghostty 后端能用**（VTE 的输入必须过一个 pty）
 /// ⇒ Linux 上要自测这条通路，得配 `PP_TERM_BACKEND=ghostty`。
@@ -2537,8 +2540,39 @@ pub fn use_inproc_ssh() -> bool {
     {
         "inproc" | "1" | "on" => true,
         "spawn" | "0" | "off" => false,
-        _ => cfg!(target_os = "windows"),
+        _ => default_inproc_ssh(),
     }
+}
+
+/// **默认走哪条路**（不带环境变量时）。
+///
+/// ⚠️ 「系统里有没有客户端」要**认 `.exe`**（Windows 上是 `ssh.exe` /
+///    `plink.exe`）⇒ 用 [`crate::util::find_program_in_path_win`]。
+///
+/// ⚠️ **ssh 与 plink 都要算**：终端真正 spawn 出去的是哪个客户端，由
+///    `TermInner::ssh_argv` 决定，而那儿是「**装了 putty 优先用 plink**」
+///    （C 版同款规则，从首个发布版就有）⇒ 判定必须跟它**一致**，否则会
+///    出现「判定说有客户端、实际拼不出 argv」的空转。
+pub fn default_inproc_ssh() -> bool {
+    default_inproc_ssh_with(
+        cfg!(target_os = "windows"),
+        crate::util::find_program_in_path_win("ssh").is_some()
+            || crate::util::find_program_in_path_win("plink").is_some(),
+    )
+}
+
+/// 纯逻辑版：给「是不是 Windows」与「系统里有没有外部客户端」⇒ 默认走哪条路。
+///
+/// ⚠️ **参数化是为了好单测**：不抽的话这段逻辑只在"当前这台机器"下可测
+///    （单测跑在 Linux ⇒ 永远验不到 Windows 那条分支）。
+pub fn default_inproc_ssh_with(is_windows: bool, has_client: bool) -> bool {
+    if !is_windows {
+        // Linux：永远 spawn（零回归红线：终端里跑用户自己的 ssh）
+        return false;
+    }
+    // Windows：**有外部客户端就 spawn**（语义跟 Linux 版一样），
+    // 一个都没有才走进程内（Windows 默认没装 OpenSSH ⇒ 那是兜底）
+    !has_client
 }
 
 /// 终端所在的最上层窗口（给弹窗当父窗口）。
@@ -2832,12 +2866,14 @@ fn spawn_term(inner: &Rc<TermInner>) {
     let o = &inner.opts;
     inner.child_alive.set(false);
 
-    // ⚠️ **Windows 上不能走 spawn 那条路**（阶段 C7）：Windows 默认没装
-    //    `ssh.exe`（OpenSSH 是可选功能），`plink` 我们又不想依赖 ⇒
-    //    走 spawn 必然失败（用户 2026-11-08 报的「找不到可用的客户端
-    //    程序」）⇒ 改成**进程内实现 SSH 客户端**。
-    //    ⚠️ **Linux 主线仍然是 spawn**（零回归红线：终端里跑的是用户
-    //    自己的 ssh ⇒ ~/.ssh/config / agent / ProxyJump 语义全都在）。
+    // ⚠️ **Windows 上默认走 spawn**（2026-11-10，用户拍板）：**系统里有
+    //    外部客户端（`ssh.exe` / `plink.exe`）就 spawn** ⇒ 终端里跑的是
+    //    用户自己的 ssh ⇒ `~/.ssh/config` / agent / ProxyJump 的语义跟
+    //    Linux 版一样。
+    //    **一个都没有**（Windows 默认没装 OpenSSH）⇒ spawn 必然失败
+    //    （用户 2026-11-08 报的「找不到可用的客户端程序」）⇒ 兜底走
+    //    **进程内实现 SSH 客户端**。
+    //    ⚠️ **Linux 主线仍然是 spawn**（零回归红线）。
     if o.is_ssh() && use_inproc_ssh() {
         spawn_term_inproc(inner, None);
         return;
@@ -3084,6 +3120,25 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **默认走哪条路**（2026-11-10 用户拍板：Windows 上「有外部客户端就
+    /// spawn，否则进程内」）。
+    #[test]
+    fn 终端默认走哪条路() {
+        // Linux：**永远 spawn**（零回归红线：终端里跑用户自己的 ssh）
+        assert!(!super::default_inproc_ssh_with(false, false));
+        assert!(!super::default_inproc_ssh_with(false, true));
+        // Windows：**有客户端就 spawn**（语义跟 Linux 版一样），
+        // 一个都没有才走进程内（Windows 默认没装 OpenSSH ⇒ 那是兜底）
+        assert!(
+            !super::default_inproc_ssh_with(true, true),
+            "Windows 上装了 ssh.exe ⇒ 应当 spawn"
+        );
+        assert!(
+            super::default_inproc_ssh_with(true, false),
+            "Windows 上没有 ssh.exe ⇒ 应当走进程内"
+        );
+    }
+
     /// **重连后要不要发「回到原目录」的 `cd`**（纯逻辑）。
     ///
     /// ⚠️ 远程命令 / `-N` 的会话里**没有 shell** ⇒ 那行 `cd` 会被打进

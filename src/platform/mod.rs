@@ -25,6 +25,8 @@ pub mod notify;
 pub mod paths;
 pub mod perm;
 pub mod pty;
+/// ConPTY 的 UTF-16LE ⇄ UTF-8 转换（**不带平台门控** ⇒ Linux 上也能单测）。
+pub mod utf16;
 
 /// Windows 的 ConPTY（伪终端）。
 ///

@@ -244,7 +244,7 @@ pub fn convert_pem_to_openssh(path: &Path) -> Result<PathBuf, String> {
     if pem_is_encrypted(&data) {
         return Err(trf!("这是带口令的旧式 PEM，应用内无法安全地输入口令转换。\n请在终端执行：\nssh-keygen -p -f {v0}", v0 = path.display()));
     }
-    let Some(bin) = crate::util::find_program_in_path("ssh-keygen") else {
+    let Some(bin) = crate::util::find_program_in_path_win("ssh-keygen") else {
         return Err(tr("找不到 ssh-keygen，请先安装 OpenSSH 客户端").to_string());
     };
 
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn pem_conversion_roundtrip_when_ssh_keygen_available() {
-        if crate::util::find_program_in_path("ssh-keygen").is_none() {
+        if crate::util::find_program_in_path_win("ssh-keygen").is_none() {
             return; // 环境里没有 OpenSSH 工具就跳过（逻辑本身在拒绝路径已覆盖）
         }
         let dir = tmpdir("pemconv");

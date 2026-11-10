@@ -78,6 +78,15 @@ use windows_sys::Win32::System::Threading::{
 /// 写一起堵住）。
 pub struct ConPty {
     inner: Arc<Mutex<Inner>>,
+    /// **UTF-16LE ⇒ UTF-8 的管道适配器**（输出方向）。
+    ///
+    /// ⚠️ ConPTY 的输出**是 UTF-16LE** ⇒ 不解码的话屏幕上全是乱码。
+    /// ⚠️ **必须有状态**：半个码元 / 半个代理对会跨两次读（见
+    ///    [`crate::platform::utf16`]）⇒ 这套逻辑放在**不带平台门控**的
+    ///    模块里，Linux 上也能单测。
+    /// ⚠️ **单独一把锁**（不跟 `inner` 共用）：读线程会**阻塞**在管道读上
+    ///    ⇒ 共用一把锁的话，用户敲键（写路径）也会被堵住。
+    pipe: Mutex<crate::platform::utf16::Utf16Pipe>,
 }
 
 /// 会话持有的 Win32 资源。
@@ -158,6 +167,7 @@ impl ConPty {
                 output: Some(Arc::new(output)),
                 process: 0,
             })),
+            pipe: Mutex::new(crate::platform::utf16::Utf16Pipe::new()),
         })
     }
 
@@ -280,11 +290,15 @@ impl ConPty {
     }
 
     /// 读子进程的输出（阻塞）。返回 0 表示对端已关闭（EOF）。
+    ///
+    /// ⚠️ **返回的是 UTF-8**：ConPTY 的管道里是 **UTF-16LE** ⇒ 这里解码成
+    ///    UTF-8 再给上层（终端内核只认 UTF-8）。
+    /// ⚠️ **两次读之间可能只拿到半个码元 / 半个代理对** ⇒ 解码器有状态
+    ///    （见 [`crate::platform::utf16`]）。
+    /// ⚠️ **读循环本身在 `utf16.rs` 里**（不带平台门控）⇒ Linux 上也能单测
+    ///    （这个文件整个是 `#![cfg(target_os="windows")]` ⇒ 这里的逻辑在
+    ///    Linux 上根本不会被编译）。
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        // ⚠️ **不能持着锁读**：读是阻塞的 ⇒ 持锁会把写（敲键）也一起堵住。
         let out = {
             let g = self.lock();
             g.output.clone()
@@ -294,22 +308,24 @@ impl ConPty {
             None => return Err(io::Error::other("ConPTY 已关闭")),
         };
         let mut r: &File = &out;
-        loop {
-            match r.read(buf) {
-                Ok(n) => return Ok(n),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                // 对端关了 ⇒ 当成 EOF（上层按 0 收尾）。
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Ok(0),
-                Err(e) => return Err(e),
-            }
-        }
+        // ⚠️ **只锁 pipe 那把锁**（不锁 `inner`）⇒ 阻塞读不会堵住敲键。
+        let mut pipe = self.pipe.lock().unwrap_or_else(|e| e.into_inner());
+        crate::platform::utf16::read_decoded(&mut |b| r.read(b), buf, &mut pipe)
     }
 
     /// 写给子进程（用户敲的键）。
+    ///
+    /// ⚠️ **输入方向也是 UTF-16LE**：我们给的是 UTF-8 ⇒ 得先编码，
+    ///    否则中文变乱码、ASCII 变成「每个字符后面跟个 NUL」。
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
+        // ⚠️ 终端给的是 UTF-8 字节 ⇒ 先当**文本**解出来再编码成 UTF-16LE。
+        //    （按键几乎都是 ASCII ⇒ 这一步不会丢东西；万一有非法字节，
+        //    `from_utf8_lossy` 换成 U+FFFD，不至于让整个输入流崩掉。）
+        let text = String::from_utf8_lossy(bytes);
+        let enc = crate::platform::utf16::utf8_to_utf16le(&text);
         let inp = {
             let g = self.lock();
             g.input.clone()
@@ -319,7 +335,7 @@ impl ConPty {
             None => return Err(io::Error::other("ConPTY 已关闭")),
         };
         let mut w: &File = &inp;
-        w.write_all(bytes)
+        w.write_all(&enc)
     }
 
     /// 改窗口大小（用户拖了窗口边缘）。

@@ -45,15 +45,70 @@ pub fn find_program_in_path(name: &str) -> Option<std::path::PathBuf> {
         return p.is_file().then(|| p.to_path_buf());
     }
     let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        if dir.is_absolute() || dir.exists() {
-            let cand = dir.join(name);
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+    let names = [name.to_string()];
+    find_exec_in_dirs(&dirs, &names)
+}
+
+/// 在**给定**的目录列表里、按候选文件名依次找可执行文件。
+///
+/// ⚠️ **抽成纯函数是为了好单测**：Windows 那条路（认 `.exe`）在 Linux 上
+///    根本跑不到 ⇒ 不抽出来就只能等 Windows CI 才暴露。
+///
+/// ⚠️ **目录优先、候选名其次**（跟 Windows 自己找可执行文件的顺序一致：
+///    PATH 里**靠前**的目录优先，同一个目录里再按候选名的优先级）。
+pub fn find_exec_in_dirs(
+    dirs: &[std::path::PathBuf],
+    cands: &[String],
+) -> Option<std::path::PathBuf> {
+    for dir in dirs {
+        if !(dir.is_absolute() || dir.exists()) {
+            continue;
+        }
+        for c in cands {
+            let cand = dir.join(c);
             if cand.is_file() {
                 return Some(cand);
             }
         }
     }
     None
+}
+
+/// Windows 上要试的候选文件名（**按优先级**）。
+///
+/// ⚠️ **`.exe` 必须排第一**：Windows 上 `ssh` 的真名是 `ssh.exe` ⇒ 只试
+///    原名会「明明装了 OpenSSH 也说找不到」（用户 2026-11-08 报的正是这个）。
+pub fn win_exec_candidates(name: &str) -> Vec<String> {
+    vec![
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        format!("{name}.bat"),
+        name.to_string(),
+    ]
+}
+
+/// 在 PATH 里查找可执行文件（**认平台的扩展名**）。
+///
+/// ⚠️ **Windows 上必须用这个**：Windows 的可执行文件是 `ssh.exe` ⇒
+///    `dir.join("ssh")` 找到的是**没有扩展名**的文件 ⇒ `is_file()` 为假
+///    ⇒ **明明装了 OpenSSH 也说「找不到可用的客户端程序」**
+///    （用户 2026-11-08 在 Windows 上报的正是这个）。
+///
+/// ⇒ Windows 上依次试 `名字.exe` / `名字.cmd` / `名字.bat` / 原名；
+///    其它平台就是原名（**保持原行为**，73 条契约不受影响）。
+pub fn find_program_in_path_win(name: &str) -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return find_program_in_path(name);
+    }
+    // Windows 上路径分隔符是 `\`（也容许 `/`）。
+    if name.contains('/') || name.contains('\\') {
+        let p = std::path::Path::new(name);
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+    find_exec_in_dirs(&dirs, &win_exec_candidates(name))
 }
 
 /// 与 C 的 atoi 语义一致：跳过前导空白后解析可选符号整数，解析失败返回 0。
@@ -294,6 +349,82 @@ mod tests {
         init_prgname();
         let second = gtk::glib::prgname().expect("第二次仍应设上");
         assert_eq!(first, second, "重复调用不该改动程序名");
+    }
+
+    /* ---- PATH 里找可执行文件（Windows 认 `.exe`） ---- */
+
+    /// ⚠️ **Windows 的候选名顺序**：`.exe` 必须排第一。
+    #[test]
+    fn windows候选名exe排第一() {
+        let c = win_exec_candidates("ssh");
+        assert_eq!(c[0], "ssh.exe", "`.exe` 必须排第一");
+        assert!(c.contains(&"ssh.cmd".to_string()));
+        assert!(c.contains(&"ssh.bat".to_string()));
+        assert!(
+            c.contains(&"ssh".to_string()),
+            "原名也得留着（有的机器上就是无扩展名）"
+        );
+    }
+
+    /// ⚠️ **目录里只有 `ssh.exe`** ⇒ 也能找到（这是用户 2026-11-08 在
+    /// Windows 上报「找不到可用的客户端程序」的根因）。
+    ///
+    /// ⚠️ 这条在 **Linux 上就能验**（用假目录 + 假文件名）⇒ 不用等
+    ///    Windows CI 才发现。
+    #[test]
+    fn 目录里只有exe也能找到() {
+        let dir = crate::util::testutil::temp_home("winexe");
+        let exe = dir.join("ssh.exe");
+        std::fs::write(&exe, b"fake").unwrap();
+        let dirs = vec![dir.clone()];
+        let got = find_exec_in_dirs(&dirs, &win_exec_candidates("ssh"));
+        assert_eq!(got.as_deref(), Some(exe.as_path()), "应当找到 ssh.exe");
+    }
+
+    /// ⚠️ **只有无扩展名的 `ssh`** ⇒ 也能找到（兼容老机器）。
+    #[test]
+    fn 目录里只有原名也能找到() {
+        let dir = crate::util::testutil::temp_home("winplain");
+        let plain = dir.join("ssh");
+        std::fs::write(&plain, b"fake").unwrap();
+        let dirs = vec![dir.clone()];
+        let got = find_exec_in_dirs(&dirs, &win_exec_candidates("ssh"));
+        assert_eq!(got.as_deref(), Some(plain.as_path()));
+    }
+
+    /// ⚠️ **`.exe` 优先于同目录里的无扩展名文件**（Windows 的规矩）。
+    #[test]
+    fn 同目录exe优先于原名() {
+        let dir = crate::util::testutil::temp_home("winprio");
+        let exe = dir.join("ssh.exe");
+        let plain = dir.join("ssh");
+        std::fs::write(&exe, b"fake").unwrap();
+        std::fs::write(&plain, b"fake").unwrap();
+        let dirs = vec![dir.clone()];
+        let got = find_exec_in_dirs(&dirs, &win_exec_candidates("ssh"));
+        assert_eq!(got.as_deref(), Some(exe.as_path()), "`.exe` 应当优先");
+    }
+
+    /// **PATH 里靠前的目录优先**（跟 Windows 自己找可执行文件的顺序一致）。
+    #[test]
+    fn 路径里靠前的目录优先() {
+        let d1 = crate::util::testutil::temp_home("winpath1");
+        let d2 = crate::util::testutil::temp_home("winpath2");
+        let e1 = d1.join("ssh.exe");
+        let e2 = d2.join("ssh.exe");
+        std::fs::write(&e1, b"fake").unwrap();
+        std::fs::write(&e2, b"fake").unwrap();
+        let dirs = vec![d1.clone(), d2.clone()];
+        let got = find_exec_in_dirs(&dirs, &win_exec_candidates("ssh"));
+        assert_eq!(got.as_deref(), Some(e1.as_path()));
+    }
+
+    /// **找不到** ⇒ 返回 `None`（别瞎返回一个不存在的路径）。
+    #[test]
+    fn 找不到就是找不到() {
+        let dir = crate::util::testutil::temp_home("winmiss");
+        let dirs = vec![dir];
+        assert!(find_exec_in_dirs(&dirs, &win_exec_candidates("ssh")).is_none());
     }
 
     /// 同 tag 的两次调用必须拿到**不同**的目录。

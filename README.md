@@ -168,7 +168,7 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 
 | 能力 | Windows 状态 |
 |---|---|
-| **终端会话** | ✅ 可用。终端内核换成 **libghostty-vt**（Ghostty 的终端内核）+ 自绘渲染（cairo + pangocairo），中文输入法自己挂。**SSH 是进程内实现的**（russh 直接驱动终端内核）⇒ **不需要装 `ssh.exe`，也不需要 `plink`** |
+| **终端会话** | ✅ 可用。终端内核换成 **libghostty-vt**（Ghostty 的终端内核）+ 自绘渲染（cairo + pangocairo），中文输入法自己挂。**SSH 优先用系统里的客户端**（有 `ssh.exe` / `plink.exe` 就 spawn 它 ⇒ 语义跟 Linux 版一样）；**一个都没有才走进程内**（russh 直接驱动终端内核）⇒ **不装任何外部程序也能跑** |
 | **SFTP 文件面板** | ✅ 可用。列表、上下级、新建、重命名、删除、传输队列、拖拽上传、剪贴板粘贴上传 |
 | **命令行参数契约** | ✅ 与 Linux 版**逐条一致**：同样那 73 条黄金基准，PASS=73 FAIL=0 |
 
@@ -179,18 +179,26 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
 | **端口映射**（`-L`/`-R`/`-D`） | ✅ 可用。由本程序自己的**进程内转发**承接（走 SSH 的 `direct-tcpip` 通道）——⚠️ 承接方看的是「终端用哪条路连」，不是「系统里有没有 ssh」 |
 | **数据库工作台**（PostgreSQL / MySQL） | ✅ 可用。⚠️ **一处部署侧差别**：Unix 上 PostgreSQL 走本地套接字（远端多半不校验密码），Windows 走 `127.0.0.1` 回环 TCP ⇒ 远端 `pg_hba.conf` 必须放行 TCP + 密码认证 |
 
-⚠️ **Windows 上的 SSH 是「我们自己实现的」**（阶段 C7）：Windows 默认没装
-`ssh.exe`（OpenSSH 是可选功能），`plink` 又不想依赖 ⇒ 终端改成用 russh
-**在进程内**说 SSH：申请远程 pty、开 shell、键盘字节直接写进去、窗口尺寸
-用 SSH 的 window-change 告诉远程端。⇒ **跑起来不需要任何外部程序**
-（连 Git Bash 都不用，只有「跑 73 条契约」才需要）。
+⚠️ **Windows 上的 SSH 走哪条路**（阶段 3，2026-11-10 用户拍板）：
+
+- **系统里有 `ssh.exe`（或 `plink.exe`）⇒ 就 spawn 它** ⇒ 终端里跑的
+  是**用户自己的客户端** ⇒ `~/.ssh/config`、agent、ProxyJump、known_hosts
+  的语义**跟 Linux 版一样**；
+- **一个都没有**（Windows 默认没装 OpenSSH，它是「可选功能」）⇒ 兜底走
+  **进程内**的 SSH（russh 直接驱动终端内核）：申请远程 pty、开 shell、
+  键盘字节直接写进去、窗口尺寸用 SSH 的 window-change 告诉远程端。
+  ⇒ **跑起来不需要任何外部程序**（连 Git Bash 都不用，只有「跑 73 条契约」
+  才需要）。
 
 ⚠️ **与 Linux 版的已知差异**（Linux 主线**不变**，仍然是 spawn 用户自己的
 `ssh` ⇒ `~/.ssh/config`、agent、ProxyJump 的语义全都在）：
 
-- Windows 版终端**不读 `~/.ssh/config`**（别名展开由本程序自己做，
-  `HostName`/`Port`/`User`/`IdentityFile` 生效，但 **ProxyJump 等不支持**）；
-- 端口转发走本程序自己的进程内转发，不经 `ssh -L/-R/-D`。
+- ⚠️ **只有走进程内那条路时**（系统里没有 `ssh.exe` / `plink.exe`），
+  Windows 版终端才**不读 `~/.ssh/config`**（别名展开由本程序自己做，
+  `HostName`/`Port`/`User`/`IdentityFile` 生效，但 **ProxyJump 等不支持**）
+  ⇒ **装了 OpenSSH 就没这个差异**；
+- 走进程内那条路时，端口转发走本程序自己的进程内转发，不经 `ssh -L/-R/-D`
+  （走 spawn 那条路时转发进 ssh 的 argv，与 Linux 版一致）。
 
 **首版不做 / 未验证的**：
 
