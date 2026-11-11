@@ -1409,9 +1409,18 @@ impl DbGrid {
             }
         }
         hb.append(&vb);
-        // 「⋮」：这一列的操作菜单（dbx 的列头右侧小三角）
-        let tri = gtk::Image::from_icon_name("view-more-symbolic");
-        tri.set_pixel_size(12);
+        // **小齿轮**：这一列的选项。
+        //
+        // ⚠️ **原来用的是「⋮」（view-more-symbolic）**——用户 2026-11-11 报：
+        //    「三个点感觉怪怪的，让人以为好像是一个菜单」。
+        //    ⇒ 换成**齿轮**（`preferences-system-symbolic`）：
+        //    - 不用「⋮」：那三个点是「更多」的通用记号 ⇒ 看着像整个表格的
+        //      菜单，而且竖排三点在 12px 下就是一团噪点。
+        //    - 不用「▼」（`pan-down-symbolic`）：下拉箭头**也是**菜单的通用
+        //      记号 ⇒ 换过去还是像菜单。
+        //    - 齿轮 = 「这一列的设置」，**不像菜单**，一眼能懂。
+        let tri = gtk::Image::from_icon_name("preferences-system-symbolic");
+        tri.set_pixel_size(13);
         tri.set_tooltip_text(Some(tr("这一列的操作")));
         let tri2 = tri.clone();
         {

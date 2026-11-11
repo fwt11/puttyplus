@@ -165,7 +165,16 @@ fn main() {
         // ② **点三角不会顺带触发排序**（GTK4 里点子控件仍会冒泡到列头按钮）。
         {
             let tris = grid.column_tris();
-            assert_eq!(tris.len(), 5, "每列都该有一个「⋮」按钮");
+            assert_eq!(tris.len(), 5, "每列都该有一个列操作按钮");
+            // ⚠️ **不是「⋮」了**（用户 2026-11-11：「三个点感觉怪怪的，让人
+            //    以为好像是一个菜单」）⇒ 换成齿轮（`preferences-system-symbolic`）。
+            for t in &tris {
+                assert_eq!(
+                    t.icon_name().as_deref(),
+                    Some("preferences-system-symbolic"),
+                    "列头的按钮还是「⋮」——看着像菜单"
+                );
+            }
             let tri = &tris[0];
             let (wx, wy) = tri
                 .translate_coordinates(&win, 0.0, 0.0)
