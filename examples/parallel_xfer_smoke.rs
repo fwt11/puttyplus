@@ -49,7 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user,
         None,
         Vec::new(),
-        Vec::new(),
         // 转发规则的来源（连接中枢按来源分组）
         "smoke".into(),
         cmd_rx,

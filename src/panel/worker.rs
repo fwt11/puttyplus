@@ -602,8 +602,8 @@ pub fn spawn_worker(
     port: i32,
     user: String,
     proxycmd: Option<String>,
-    forwards: Vec<String>,
-    inproc_forwards: Vec<String>,
+    // **这条连接要在进程内承接的转发规则**（已算好；终端那边算的是同一份）。
+    fwd_rules: Vec<crate::backend::forward::FwdRule>,
     // **转发规则的来源标识**（哪个连接条目要的）。
     //
     // ⚠️ **为什么要带它**：同一台服务器可能被好几个连接条目引用，各自带
@@ -718,12 +718,10 @@ pub fn spawn_worker(
                                     let _ = ui_tx.try_send(PanelEvent::Connected(Ok(cwd)));
                                     // 先装载连接参数自带的规则，再同步完整快照给 UI
                                     // （Forwards 无条件发送：管理窗口/状态栏依赖它重置）
-                                    // 两份规则集：连接参数里的（终端不承接时）
-                                    // + 连接管理器配的「进程内端口映射」（始终进程内）
-                                    let mut rules = rules_of(&forwards);
-                                    rules.extend(rules_of(&inproc_forwards));
+                                    // ⚠️ **规则挂在共享连接上**（不在本面板上）⇒
+                                    //    关掉文件面板不会把端口映射一起停掉。
                                     let failed = c
-                                        .apply_forward_rules(rules)
+                                        .apply_forward_rules(fwd_rules.clone())
                                         .await
                                         .into_iter()
                                         .map(|(rule, why)| trf!("{rule}：{why}", rule = rule, why = why))
@@ -1396,15 +1394,6 @@ pub fn spawn_worker(
             //    的任务，worker 线程能自己退出来。
         })
         .expect("spawn sftp-worker")
-}
-
-/// 连接参数里的转发规则（内部形字符串列表）→ 规则集。
-/// 逐条走 parse_rules：坏条目就地丢弃，不牵连其余规则。
-fn rules_of(forwards: &[String]) -> Vec<crate::backend::forward::FwdRule> {
-    forwards
-        .iter()
-        .flat_map(|f| crate::backend::forward::parse_rules(f))
-        .collect()
 }
 
 /// 盯着一条连接：**它断了就上报** [`PanelEvent::Disconnected`]。

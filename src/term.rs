@@ -2781,52 +2781,62 @@ fn spawn_term_inproc_ex(
         .name("pp-ssh-shell".into())
         .spawn(move || {
             let o = o_bg;
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = res_tx.send_blocking(Err(format!("创建运行时失败: {e}")));
-                    return;
-                }
-            };
+            // ⚠️ **用全局运行时**（连接中枢在那儿）：终端与文件面板、
+            //    数据库工作台要共用**同一条** SSH 连接 ⇒ russh 的 Handle
+            //    必须绑在同一个 runtime 上（Handle 跨 runtime 用不了）。
+            let rt = crate::backend::hub::runtime();
             rt.block_on(async move {
                 // ⚠️ **阶段 C8**：用**算好的那个**密码（显式 > 缓存）。
                 let pw = pw_bg.as_deref().filter(|p| !p.is_empty());
-                let (session, _rfwd) = match crate::backend::conn::connect_session(
-                    &o.host,
-                    o.port,
-                    &o.user,
-                    pw,
-                    o.keyfile.as_deref().filter(|k| !k.is_empty()),
-                    o.proxycmd.as_deref().filter(|c| !c.is_empty()),
-                    o.keepalive_sec,
-                    o.auth_method,
-                    o.auth_order,
-                )
-                .await
-                {
+                // ⚠️ **共享连接**：同一台服务器（host+port+user）在整个程序里
+                //    只有一条 SSH 连接 ⇒ 终端与文件面板、数据库工作台、
+                //    端口映射共用它 ⇒ **密码只问一次**。
+                let creds = crate::backend::hub::Creds {
+                    password: pw.map(str::to_string),
+                    keyfile: o.keyfile.clone().filter(|k| !k.is_empty()),
+                    proxycmd: o.proxycmd.clone().filter(|c| !c.is_empty()),
+                    keepalive_sec: o.keepalive_sec,
+                    auth_method: o.auth_method,
+                    auth_order: o.auth_order,
+                };
+                let skey = crate::backend::hub::ServerKey::new(&o.host, o.port, &o.user);
+                let shared = match crate::backend::hub::acquire(skey, &creds).await {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = res_tx.send_blocking(Err(e.0));
                         return;
                     }
                 };
+                // ⚠️ **端口映射挂在这条共享连接上**（与文件面板同一份规则、
+                //    同一个来源 ⇒ 两边算出同一份时不会互相重启）。
+                if o.is_ssh() {
+                    let rules = crate::backend::forward::inproc_rules(
+                        true,
+                        true,
+                        &o.forwards,
+                        &o.inproc_forwards,
+                    );
+                    let _ = shared
+                        .apply_forward_rules(&crate::backend::conn::fwd_source(&o), rules)
+                        .await;
+                }
+                // ⚠️ **shared 必须活到会话结束**：它是这条共享连接的持有者 ⇒
+                //    掉了就等于「最后一个使用者放手」⇒ 连接被断开。
+                let _shared_guard = shared;
+                let session = _shared_guard.session().clone();
                 let opened = if no_shell {
-                    crate::backend::shell::ShellChannel::open_bare(&session).await
+                    crate::backend::shell::ShellChannel::open_bare(session.as_ref()).await
                 } else {
                     match remote_cmd.as_deref().filter(|c| !c.is_empty()) {
                         Some(cmd) => {
                             crate::backend::shell::ShellChannel::open_exec(
-                                &session, cmd, cols, rows, want_pty,
+                                session.as_ref(), cmd, cols, rows, want_pty,
                             )
                             .await
                         }
                         None => {
                             crate::backend::shell::ShellChannel::open_shell(
-                                &session, cols, rows, want_pty,
+                                session.as_ref(), cols, rows, want_pty,
                             )
                             .await
                         }

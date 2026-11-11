@@ -124,6 +124,18 @@ pub struct Creds {
     pub auth_order: AuthOrder,
 }
 
+/// **所有活着的连接**（弱引用清单）。
+///
+/// ⚠️ **为什么不用「注册表槽位数」当连接数**：注册表每个 key 只记「当前
+///    那一条」⇒ 万一同一个 key 建了两条（复用失效了），槽位数仍然是 1 ⇒
+///    **看不出问题**。⇒ 这里列**真正活着**的每一个连接对象。
+///
+/// ⇒ [`conn_count`] 与 [`live_connections`] 都以这张清单为准（同源）。
+fn live_list() -> &'static Mutex<Vec<Weak<SharedConn>>> {
+    static L: OnceLock<Mutex<Vec<Weak<SharedConn>>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 /// 一条**共享**的 SSH 连接。
 ///
 /// ⚠️ **转发规则挂在连接上，不挂在某个面板上** ⇒ 关掉文件面板**不会**把
@@ -333,6 +345,12 @@ const MANUAL_SOURCE: &str = "\u{0}manual";
 
 impl Drop for SharedConn {
     fn drop(&mut self) {
+        // 从活连接清单里摘掉自己（清单不能只进不出 ⇒ 否则越用越大）。
+        // ⚠️ 此刻自己的强引用已经归零 ⇒ `upgrade()` 返回 None ⇒ 被摘掉。
+        live_list()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|w| w.upgrade().is_some());
         // 最后一个使用者放手了 ⇒ 这条连接该收了。
         //
         // ⚠️ **规则表在 Drop 里拿不出来**（tokio 的 Mutex 不能同步取）⇒
@@ -473,37 +491,33 @@ async fn acquire_inner(key: ServerKey, creds: Creds) -> BackendResult<Arc<Shared
         me: me.clone(),
     });
     *slot.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&shared));
+    live_list()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Arc::downgrade(&shared));
     Ok(shared)
 }
 
 /// **当前有几条共享连接**（诊断用）。
+///
+/// ⚠️ **数的是真正活着的连接对象**，不是注册表槽位——后者会掩盖
+///    「同一个 key 建了两条」这种问题（见 [`live_list`]）。
 pub fn conn_count() -> usize {
-    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-    reg.values()
-        .filter(|s| {
-            s.current
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .and_then(|w| w.upgrade())
-                .is_some()
-        })
+    live_list()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|w| w.upgrade().is_some())
         .count()
 }
 
 /// 列出当前活着的连接（诊断用：`键 → 使用者数`）。
 pub fn live_connections() -> Vec<(ServerKey, usize)> {
-    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let list = live_list().lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
-    for (key, slot) in reg.iter() {
-        if let Some(c) = slot
-            .current
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|w| w.upgrade())
-        {
-            out.push((key.clone(), c.users()));
+    for w in list.iter() {
+        if let Some(c) = w.upgrade() {
+            out.push((c.key.clone(), c.users()));
         }
     }
     out

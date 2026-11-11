@@ -335,6 +335,14 @@ pub struct SftpPanel {
 }
 
 impl SftpPanel {
+    /// **面板连上了没有**（远程侧）。
+    ///
+    /// 干什么用：外部（冒烟/自检）要等一个**可靠**的「已连接」信号——
+    /// `pane_cwd` 一开始就是 `/`（不是信号），状态栏上的文字也不是。
+    pub fn conn_ok(&self) -> bool {
+        self.st.conn_ok.get()
+    }
+
     pub fn new(opts: &ConnOptions) -> SftpPanel {
         let st = Rc::new(PanelState {
             pw: RefCell::new(opts.password.clone()),
@@ -442,21 +450,18 @@ impl SftpPanel {
         //
         // ⚠️ Linux 主线**零变化**：`use_inproc_ssh()` 在 Linux 上恒为 false
         //    ⇒ 转发照旧进 ssh 的 argv。
-        let worker_forwards = if crate::backend::forward::needs_inproc_forwards(
+        let worker_forwards = crate::backend::forward::inproc_rules(
             opts.is_ssh(),
             crate::term::use_inproc_ssh(),
-        ) {
-            opts.forwards.clone()
-        } else {
-            Vec::new()
-        };
+            &opts.forwards,
+            &opts.inproc_forwards,
+        );
         worker::spawn_worker(
             opts.host.clone(),
             opts.port,
             opts.user.clone(),
             opts.proxycmd.clone(),
             worker_forwards,
-            opts.inproc_forwards.clone(),
             // ⚠️ **转发规则的来源**：哪个连接条目要的 ⇒ 同一台服务器被
             //    多个条目引用时，各来源的规则互不清掉。
             crate::backend::conn::fwd_source(opts),

@@ -609,6 +609,37 @@ pub fn needs_inproc_forwards(is_ssh: bool, term_inproc: bool) -> bool {
     term_inproc
 }
 
+/// **这条连接要在进程内承接的转发规则**（终端与文件面板算出**同一份**）。
+///
+/// ⚠️ **两边必须一致**：终端与文件面板都往**同一条共享连接**上装规则 ⇒
+///    算得不一样就会互相把对方的规则换掉（转发反复重启、端口撞车）。
+///
+/// - `forwards`：命令行的 `-L/-R/-D` ⇒ **只有终端走进程内时**才由程序内
+///   承接（终端走 spawn 时它们在 ssh 的 argv 里 ⇒ 进程内再绑同一个端口
+///   会 EADDRINUSE）。
+/// - `inproc_forwards`：连接配置里的「进程内端口映射」⇒ 始终由程序内承接。
+pub fn inproc_rules(
+    is_ssh: bool,
+    term_inproc: bool,
+    forwards: &[String],
+    inproc_forwards: &[String],
+) -> Vec<FwdRule> {
+    if !is_ssh {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if needs_inproc_forwards(is_ssh, term_inproc) {
+        out.extend(parse_all(forwards));
+    }
+    out.extend(parse_all(inproc_forwards));
+    out
+}
+
+/// 逐条解析规则列表（坏条目就地丢弃，不牵连其余规则）。
+fn parse_all(list: &[String]) -> Vec<FwdRule> {
+    list.iter().flat_map(|f| parse_rules(f)).collect()
+}
+
 /* ---------------- 会话级规则：持久化 + 与 PuTTY 互转 ---------------- */
 
 /// 一条会话级转发规则。
