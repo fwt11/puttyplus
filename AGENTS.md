@@ -536,6 +536,30 @@ forwards=<个数> remote_cmd=<set|->
 
 ## gtk4-rs 0.11 已踩过的坑
 
+- ⚠️ **GTK4 的 CSS 选择器匹配的是「节点名」不是控件类型**（2026-11-11 查 GTK
+  4.25 源码 `gtk/gtklabel.c` 的 `gtk_widget_class_set_css_name` 得出）：
+  ① 按钮里的文字是**一个独立的 `label` 节点** ⇒ 我们主题里那条 blanket 规则
+  `label { color: @pp_fg }` 给它一个**显式**颜色 ⇒ 按钮自己的
+  `color: @pp_on_accent`（**只是继承**下去）被盖掉 ⇒ 浅色主题下 = 强调蓝底 +
+  深色字（用户 2026-11-11 报：首选项里选中的「标准」「中」两个按钮）。
+  ⇒ **凡是给容器设了状态色的，容器里的 label 都要单独再定一条**
+  （`button:checked label { … }`）。
+  ⚠️ `GtkToggleButton` 的节点名就是 `button`（`gtk/gtktogglebutton.c`）⇒
+  `button:checked` **匹配得上**，只是颜色没传到里面的文字；
+  ② **自己画的 cell renderer，取色要自己算对状态**：文件列表的文件名列是
+  我们自己画的（`panel/namecell.rs`）⇒ 颜色由我们取 ⇒ 少算 `:focus` ⇒ 拿
+  `:selected` 的深色字画在 GTK 的实心强调底上 = 蓝底黑字（其余列是 GTK 自己
+  画的 ⇒ 是白的 ⇒ 只有文件名看不清）。
+  ⚠️ `:focus` **只在树视图真有键盘焦点时**才算（跟 GTK 的
+  `gtk_cell_renderer_get_state()` 一个口径）⇒ 否则「点别处之后」光标行底色
+  退回浅色、字还是白的 ⇒ 白字压浅底 = 看不见。
+  ⚠️ **CSS 单测别只 `contains()` 半句话**（注释里也写着那句话 ⇒ 删掉规则
+  单测照样绿 = 假阳性）⇒ 要匹配**规则块本身**；
+- ⚠️ **GTK 的 `mix()` 权重是「第二个颜色的占比」**：`mix(#ff0000, #0000ff, 0.25)`
+  = **75% 红 + 25% 蓝** ⇒ 想要「淡强调底」得写 `mix(accent, bg, 0.86)`。
+  ⚠️ 别当成「第一个颜色的权重」（差一次就反了）。实测法（不用截图）：
+  CSS 里 `@define-color x mix(...)` + `style_context().lookup_color("x")`
+  ⇒ 直接读出算出来的 RGBA；
 - **GTK4 的 `TreePath` 没有 `parent()`**（GTK3 有）：找父行得用
   `path.indices()` 拿下标，再 `TreePath::from_indices(&idxs[..len-1])` 重建父路径；
   写 `child.parent()` 会编译到 `MountOperation::parent` 上去（报"方法名不匹配"）；
