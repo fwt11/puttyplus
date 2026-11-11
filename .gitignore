@@ -29,3 +29,15 @@ __pycache__/
 # 编辑器与系统
 *.swp
 .DS_Store
+
+# ⚠️ 2026-11-11：**台账（AGENTS.md / RESUME.md / ROADMAP / FEATURE_PARITY /
+#    DBX_PLAN / UI 审计文档）已经入库** ⇒ 换台机器 clone 下来就能接着干。
+#    下面这些仍是**纯本地产物**，各机器统一忽略。
+/release-github/
+/.git-dev-old/
+/.ui-audit/
+/.shots/
+/.zcode/
+
+# C 版遗留源码（已冻结、不再维护，只留作历史依据 ⇒ 不入库）
+/c/
