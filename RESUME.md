@@ -27,9 +27,19 @@
 - ⚠️ **为什么本地全绿**：`cargo test --lib` 与 `cargo build --release`
   **都不编 example** ⇒ 签名漂移本地永远发现不了。
 - **修法**：① 补上那个参数（`islink=false`，"sub" 是普通目录）；
-  ② **CI 加一步「编译全部 example」**（119 个 example 全编一遍，不只 CI
+  ② **CI 加一步「编译全部 example」**（119 个 example 全查一遍，不只 CI
   跑的那 5 个）⇒ 签名漂移立刻红；③ **AGENTS.md 的每阶段动作补上
   `cargo build --release --examples`** ⇒ 本地就能抓到。
+- **两个提交（已 push）**：`26b74fe`（CI 修红）+ `210a941`（台账入库）。
+  ⇒ **CI 第 60 轮（Linux）**：单元测试 ✓、**编译全部 example ✓**（arm64 +
+  amd64 都过）、GUI 冒烟 ✓、契约 ✓、打包 deb ✓ ⇒ **绿**；
+  **CI 第 48 轮（Windows）**：绿。
+- ⚠️ **本地一个坑**：按 CI 那套跑 GUI 冒烟时**改了 `HOME`** ⇒ cargo 找不到
+  rustup/cargo 的家 ⇒ 换了 rustc ⇒ **依赖指纹全变 ⇒ 全量重编**（119 个
+  example 要 10 分钟）⇒ `db_ui_smoke` 撞上 180s 超时被误判成失败。
+  ⇒ 跑之前 `export CARGO_HOME=/home/fwt/.cargo RUSTUP_HOME=/home/fwt/.rustup`。
+  ⚠️ **CI 没这个问题**（那边 `RUSTUP_HOME=/opt/rust/rustup`、
+  `CARGO_HOME=/opt/rust/cargo` 是用 `$GITHUB_ENV` 固定到后续步骤的）。
 - ⚠️ **教训**：改了 `pub fn` 的签名 ⇒ **先把所有调用点 grep 一遍**
   （`grep -rn "函数名" src/ examples/`）⇒ example 也是调用点。
 - ⚠️ **看 CI 失败的办法**（没有 token、拿不到 run 级日志时）：
