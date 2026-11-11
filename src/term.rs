@@ -2554,25 +2554,57 @@ pub fn use_inproc_ssh() -> bool {
 ///    （C 版同款规则，从首个发布版就有）⇒ 判定必须跟它**一致**，否则会
 ///    出现「判定说有客户端、实际拼不出 argv」的空转。
 pub fn default_inproc_ssh() -> bool {
-    default_inproc_ssh_with(
-        cfg!(target_os = "windows"),
-        crate::util::find_program_in_path_win("ssh").is_some()
-            || crate::util::find_program_in_path_win("plink").is_some(),
-    )
+    decide_term_ssh(
+        crate::settings::term_ssh().as_deref(),
+        backend_supports_inproc(),
+    ) == TermSsh::Shared
 }
 
-/// 纯逻辑版：给「是不是 Windows」与「系统里有没有外部客户端」⇒ 默认走哪条路。
+/// **终端走哪条路**。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TermSsh {
+    /// spawn 用户自己的 ssh/plink（沿用 `~/.ssh/config`、agent、ProxyJump…）
+    Spawn,
+    /// **并入共享连接**：终端在连接中枢那条 SSH 连接上开自己的通道
+    Shared,
+}
+
+/// **算终端该走哪条路**（纯逻辑，好单测）。
 ///
-/// ⚠️ **参数化是为了好单测**：不抽的话这段逻辑只在"当前这台机器"下可测
-///    （单测跑在 Linux ⇒ 永远验不到 Windows 那条分支）。
-pub fn default_inproc_ssh_with(is_windows: bool, has_client: bool) -> bool {
-    if !is_windows {
-        // Linux：永远 spawn（零回归红线：终端里跑用户自己的 ssh）
-        return false;
+/// ⚠️ **两个输入**：
+/// - `setting`：用户选的（`shared` / `spawn` / 没设 ⇒ `None`）；
+/// - `backend_ok`：**当前终端后端能不能用进程内 SSH**（ghostty 可以；
+///   VTE 的键盘输入必须过本地 pty ⇒ 阶段 B2 落地之前不行）。
+///
+/// ⚠️ **默认 = 并入共享连接**（用户 2026-11-11 拍板：「对每个服务器的访问
+///    只需要一个连接」）⇒ 终端也得上这条连接，否则「一个连接」做不到。
+///
+/// ⚠️ **后端不支持 ⇒ 退回 spawn**（不是报错）：用户要的是「能用」⇒
+///    宁可退回，也别开不出终端。
+pub fn decide_term_ssh(setting: Option<&str>, backend_ok: bool) -> TermSsh {
+    match setting.map(str::trim) {
+        Some(crate::settings::TERM_SSH_SPAWN) => TermSsh::Spawn,
+        _ => {
+            if backend_ok {
+                TermSsh::Shared
+            } else {
+                TermSsh::Spawn
+            }
+        }
     }
-    // Windows：**有外部客户端就 spawn**（语义跟 Linux 版一样），
-    // 一个都没有才走进程内（Windows 默认没装 OpenSSH ⇒ 那是兜底）
-    !has_client
+}
+
+/// **当前终端后端能不能用进程内 SSH**（= 能不能并入共享连接）。
+///
+/// ⚠️ **VTE 还不行**：VTE 的键盘输入必须过一个本地 pty ⇒ 阶段 B2
+///    （假 pty 接入）落地之前，Linux 默认后端只能用 spawn。
+pub fn backend_supports_inproc() -> bool {
+    match crate::settings::effective_term_backend() {
+        crate::settings::BACKEND_GHOSTTY => cfg!(feature = "ghostty"),
+        // ⚠️ 阶段 B2 落地后这里改成 true。
+        crate::settings::BACKEND_VTE => false,
+        _ => false,
+    }
 }
 
 /// 终端所在的最上层窗口（给弹窗当父窗口）。
@@ -3130,22 +3162,40 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// **默认走哪条路**（2026-11-10 用户拍板：Windows 上「有外部客户端就
-    /// spawn，否则进程内」）。
+    /// **终端走哪条路**（2026-11-11 用户拍板：默认并入共享连接，
+    /// 留一个开关切回 spawn）。
     #[test]
-    fn 终端默认走哪条路() {
-        // Linux：**永远 spawn**（零回归红线：终端里跑用户自己的 ssh）
-        assert!(!super::default_inproc_ssh_with(false, false));
-        assert!(!super::default_inproc_ssh_with(false, true));
-        // Windows：**有客户端就 spawn**（语义跟 Linux 版一样），
-        // 一个都没有才走进程内（Windows 默认没装 OpenSSH ⇒ 那是兜底）
-        assert!(
-            !super::default_inproc_ssh_with(true, true),
-            "Windows 上装了 ssh.exe ⇒ 应当 spawn"
+    fn 终端走哪条路() {
+        use super::TermSsh;
+        // 1) 用户明确选了 spawn ⇒ 永远 spawn（哪怕后端支持并入）
+        assert_eq!(
+            super::decide_term_ssh(Some("spawn"), true),
+            TermSsh::Spawn,
+            "用户选了 spawn ⇒ 哪怕后端支持也应当 spawn"
         );
-        assert!(
-            super::default_inproc_ssh_with(true, false),
-            "Windows 上没有 ssh.exe ⇒ 应当走进程内"
+        // 2) 用户选了 shared + 后端支持 ⇒ 并入共享连接
+        assert_eq!(
+            super::decide_term_ssh(Some("shared"), true),
+            TermSsh::Shared
+        );
+        // 3) 用户选了 shared + 后端不支持 ⇒ 退回 spawn
+        //    （宁可退回，也别开不出终端）
+        assert_eq!(
+            super::decide_term_ssh(Some("shared"), false),
+            TermSsh::Spawn,
+            "后端不支持进程内 SSH ⇒ 应当退回 spawn"
+        );
+        // 4) 没设 + 后端支持 ⇒ 默认并入共享连接（用户拍板的默认）
+        assert_eq!(
+            super::decide_term_ssh(None, true),
+            TermSsh::Shared,
+            "默认应当并入共享连接（一个服务器一条连接）"
+        );
+        // 5) 没设 + 后端不支持（Linux 的 VTE，阶段 B2 之前）⇒ spawn（现状不变）
+        assert_eq!(
+            super::decide_term_ssh(None, false),
+            TermSsh::Spawn,
+            "后端不支持 ⇒ 维持现状（spawn）"
         );
     }
 

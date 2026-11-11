@@ -154,6 +154,12 @@ pub const SETTINGS: &[SettingItem] = &[
         from: "（新）首选项中心「终端」页",
     },
     SettingItem {
+        id: "term_ssh",
+        label: "终端连接方式",
+        page: Page::Terminal,
+        from: "（新）首选项中心「终端」页",
+    },
+    SettingItem {
         id: "xfer_resume",
         label: "断点续传",
         page: Page::Transfer,
@@ -572,6 +578,48 @@ fn terminal_page(root: &gtk::Box) {
         sec.append(&combo);
         sec.append(&tip);
         sec.append(&tip2);
+        root.append(&sec);
+    }
+
+    /* ---- 终端连接方式（2026-11-11，用户拍板） ---- */
+    //
+    // ⚠️ **默认 = 并入共享连接**：同一台服务器只开一条 SSH 连接，文件面板、
+    //    端口映射、数据库、终端都走它 ⇒ 密码只问一次。
+    //    ⚠️ **代价**：并入之后终端**不走用户自己的 ssh** ⇒
+    //    `~/.ssh/config`（ProxyJump 等）不生效 ⇒ 需要的话切回 spawn。
+    {
+        let sec = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        sec.append(&section(tr("终端连接方式")));
+
+        let combo = gtk::ComboBoxText::new();
+        combo.append(Some(crate::settings::TERM_SSH_SHARED), tr("并入共享连接"));
+        combo.append(Some(crate::settings::TERM_SSH_SPAWN), tr("spawn 自己的 ssh"));
+        // ⚠️ **先设当前值、再接回调**（同上面的终端引擎下拉：否则
+        //    `set_active_id` 自己就触发 `changed` ⇒ 一开窗口就把值"改"一遍）。
+        let cur = crate::settings::term_ssh()
+            .unwrap_or_else(|| crate::settings::TERM_SSH_SHARED.to_string());
+        combo.set_active_id(Some(cur.as_str()));
+
+        let tip = hint_label(tr(
+            "并入共享连接：同一台服务器只开一条 SSH 连接，文件面板、端口映射、数据库、终端共用它（密码只问一次）。",
+        ));
+        let tip2 = hint_label(tr(
+            "spawn 自己的 ssh：沿用 ~/.ssh/config、ssh-agent、ProxyJump（但每台服务器会多一条连接）。",
+        ));
+        combo.connect_changed(move |c| {
+            let Some(id) = c.active_id() else { return };
+            crate::settings::set_term_ssh(Some(&id));
+        });
+        sec.append(&combo);
+        sec.append(&tip);
+        sec.append(&tip2);
+        // ⚠️ **当前后端不支持 ⇒ 明确告诉用户「已经退回 spawn 了」**
+        //    （否则他选了「并入共享连接」却发现还是多开连接 ⇒ 以为设置没生效）
+        if !crate::term::backend_supports_inproc() {
+            sec.append(&hint_label(tr(
+                "当前终端引擎还不支持进程内 SSH，这个选择暂时退回 spawn。",
+            )));
+        }
         root.append(&sec);
     }
 

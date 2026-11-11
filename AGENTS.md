@@ -179,10 +179,12 @@ Linux 版一样**）；**一个都没有**（Windows 默认没装 OpenSSH，它�
 ⚠️ **判定要认 `.exe`**：`util::find_program_in_path_win` 依次试
 `名字.exe`/`.cmd`/`.bat`/原名 ⇒ 以前只找无扩展名的 `ssh` ⇒ **明明装了
 OpenSSH 也说「找不到可用的客户端程序」**（用户 2026-11-08 报的正是这个）。
-⚠️ **Linux 主线仍然是 spawn 用户自己的 `ssh`**（零回归红线）。
+⚠️ **这条规则已被 2026-11-11 的「连接中枢」取代**：终端**默认并入共享
+连接**（一个服务器一条 SSH 连接），并**留了开关**切回 spawn ⇒ 见下面
+「⭐ 连接中枢」一节。
 ⚠️ 进程内 SSH **只有 ghostty 后端能用**（VTE 的输入必须过本地 pty）⇒
 Linux 上自测要配 `PP_TERM_BACKEND=ghostty`；`PP_TERM_SSH=inproc|spawn`
-可强制切换（Windows 默认 = 有客户端就 spawn，没有就 inproc）。
+→ 可强制切换（首选项 →「终端」页 →「终端连接方式」也能切）。
 ⚠️ **ConPTY 双向都是 UTF-16LE** ⇒ 不转码就满屏乱码、中文打不进去 ⇒
 转码在 `src/platform/utf16.rs`（**不带平台门控** ⇒ Linux 上能单测：
 `read_decoded` + `Utf16Pipe`，24 条单测 + `examples/utf16_pipe_smoke.rs`
@@ -249,6 +251,80 @@ cargo run --example db_ui_e2e -- 182.92.244.132 22 root 127.0.0.1 5432 \
 ⚠️ **写库范围**：只碰 `id >= 900000` 的探针行 + 自建自删的 `pp_probe_*`
 对象；用户自己的 3 行（id 1/2/3）不受影响；中途崩会残留探针对象
 （e2e 开头会清 `id >= 900000` 的探针行）。
+
+## ⭐ 连接中枢：一个服务器一条 SSH 连接（2026-11-11 起）
+
+用户拍板的方向：
+> 「我们默认情况下 sftp, 端口映射, 数据库管理等等都走通道，
+> 　我们可以保证对每个服务器的访问只需要一个连接。」
+
+⇒ **同一台服务器（host+port+user）在整个程序里只有一条 SSH 连接**，
+各个功能在它上面开自己的**通道**：
+
+| 功能 | 通道类型 |
+|---|---|
+| SFTP 文件面板 | `session` channel + `subsystem sftp` |
+| 交互终端（进程内） | `session` channel + `request_pty` + `request_shell` |
+| 端口映射（`-L`/`-R`/`-D`） | `direct-tcpip` / `tcpip-forward` |
+| 数据库工作台 | `direct-tcpip` → 远程 5432/3306 |
+
+⚠️ **SFTP 走 `subsystem` 而不是 `direct-tcpip`**：OpenSSH 默认是
+`Subsystem sftp internal-sftp` —— 那个进程**只走 SSH 子系统**、**没有 TCP
+端口** ⇒ `direct-tcpip` 连不上。通道类型不同，**底层是同一条连接**。
+
+### 代码在哪
+
+- `src/backend/hub.rs`：**连接中枢**。
+  - `hub::runtime()`：**全局 multi_thread tokio 运行时**。⚠️ **必须只有
+    一个**：russh 的 `Handle` 绑定在创建它的 runtime 上 ⇒ 跨 runtime 用不了
+    ⇒「一条连接多方共用」的前提是各方同 runtime。⚠️ **必须 multi_thread**：
+    SFTP worker 的命令循环是 `Runtime::block_on`（阻塞线程等命令）⇒
+    current_thread 会被独占 ⇒ 多面板没法共用。
+  - `hub::ServerKey`：**复用粒度** = `host+port+user`（**归一化过**：主机名
+    大小写/空白、端口 0、空用户 ⇒ 同一个服务器不会因为写法不同被当成两台）。
+  - `hub::acquire(key, creds)`：**拿（或建）一条共享连接**。⚠️ **不管调用方
+    在哪个 runtime 上，连接都建在全局 runtime 上**（否则那条连接会跟着
+    调用方的 runtime 一起死，别的使用者莫名断线）。
+  - `hub::SharedConn`：会话 + 远程转发登记表 + **进程内转发规则集（按来源
+    分组）**。
+  - **引用计数**：最后一个使用者放手才断（面板关了但终端还在用 ⇒ 不断）。
+- `src/backend/conn.rs`：`SftpBackend` 持有**共享连接**（不再自己建一条）；
+  `close()` **只关 SFTP 通道、不断连接**；`connect_with_source()` 指定转发
+  规则的来源；`open_sftp_session()` 在既有会话上开 SFTP 通道。
+- `src/panel/worker.rs`：面板 worker 改用**全局运行时**（命令循环改成
+  「处理完再挂下一条阻塞任务」⇒ 退出时不留挂着的任务）。
+- `src/term.rs`：进程内 SSH 走 `hub::acquire` ⇒ 终端与面板共用一条连接。
+
+### 转发规则挂在**连接**上，不挂面板
+
+⚠️ **关掉文件面板不会把端口映射一起停掉**（映射是会话级功能）。
+⚠️ **规则按来源分组**（`SharedConn::forwards` 是
+`HashMap<来源, Vec<FwdEntry>>`）：同一台服务器可能被**好几个连接条目**引用
+（不同名字、不同转发规则）⇒ 共用一条连接后，后连的那个不能把前一个的规则
+清掉 ⇒ 各来源只覆盖自己那一份。来源 = 连接条目名（`conn::fwd_source`）。
+⚠️ **停规则要等监听端口真释放**（`ActiveForward::wait`）：`abort()` 是异步
+取消 ⇒ 端口还占着 ⇒ 紧接着重新 bind 同一个端口必撞 EADDRINUSE。
+
+### 终端走哪条路（开关）
+
+⚠️ **用户 2026-11-11 拍板**：终端**默认并入共享连接**，但**留一个开关**切回
+spawn（首选项 →「终端」页 →「终端连接方式」，或环境变量
+`PP_TERM_SSH=inproc|spawn`）。
+⚠️ **并入的代价**：终端**不走用户自己的 ssh** ⇒ `~/.ssh/config`
+（ProxyJump 等）不生效 ⇒ 需要的话切回 spawn。
+⚠️ **后端不支持 ⇒ 退回 spawn**（不是报错）：VTE 的键盘输入必须过本地 pty
+⇒ 阶段 B2（假 pty 接入）落地之前，Linux 默认后端只能用 spawn。
+⚠️ **判定必须与「转发由谁承接」用同一个函数**（`term::use_inproc_ssh()`）⇒
+否则会出现「终端没 spawn ssh、转发却发给了 ssh」的空转。
+
+### 怎么验
+
+```bash
+cargo run --example hub_share_smoke        # 中枢本体：复用 / 多通道 / 来源分组 / 引用计数
+PP_TERM_SSH=inproc PP_TERM_BACKEND=ghostty \
+  xvfb-run -a cargo run --example hub_shared_gui_smoke   # 端到端：终端 + 面板 = 1 条连接
+```
+⚠️ 两个冒烟都要**本机测试 sshd 在 127.0.0.1:2233**（公钥认证）。
 
 ## 核心规则（改代码前必读）
 

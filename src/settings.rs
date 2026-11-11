@@ -806,6 +806,29 @@ pub fn set_term_backend(v: Option<&str>) {
     }
 }
 
+/// 终端的连接方式：**并入共享连接**（`shared`）/ **spawn 自己的 ssh**（`spawn`）。
+pub const TERM_SSH_SHARED: &str = "shared";
+pub const TERM_SSH_SPAWN: &str = "spawn";
+
+/// 终端的连接方式（`None` = 用默认）。
+pub fn term_ssh() -> Option<String> {
+    let s = get_str("ui", "term_ssh");
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// 设终端的连接方式（`None` = 恢复默认）。
+pub fn set_term_ssh(v: Option<&str>) {
+    match v {
+        Some(k) if !k.trim().is_empty() => set_str("ui", "term_ssh", k.trim()),
+        _ => remove_str("ui", "term_ssh"),
+    }
+}
+
 /// 这个平台上**能不能**用某个后端。
 ///
 /// ⚠️ 纯逻辑（好单测）：Windows 上 VTE 不可用 ⇒ 设置里选它等于没选。
