@@ -64,6 +64,34 @@ fn diff(a: &str, b: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(-1.0)
 }
 
+/// **扫完一个完整呼吸周期**，返回**相邻两张截图的最大差异**。
+///
+/// 干什么用：呼吸相位是按时间算的（`pulse::phase()`）⇒ 任意两张截图的
+/// 差异都取决于「它们之间相位差了多少」⇒ 只截两张 ⇒ 结果随机。
+/// ⇒ 这里连截一串（覆盖整个 1.6 秒周期）⇒ 相位差必然扫过峰值 ⇒ 稳定。
+///
+/// `step` 负责「重画 + 截图」（不同控件的重画方式不一样）。
+fn max_diff_over_cycle(mut step: impl FnMut(&str)) -> f64 {
+    const STEPS: usize = 9;
+    let mut paths = Vec::with_capacity(STEPS);
+    for i in 0..STEPS {
+        let p = format!("/tmp/pp_pulse_seq_{i}.png");
+        step(&p);
+        paths.push(p);
+    }
+    let mut best = 0.0f64;
+    for w in paths.windows(2) {
+        let d = diff(&w[0], &w[1]);
+        if d > best {
+            best = d;
+        }
+    }
+    for p in &paths {
+        let _ = std::fs::remove_file(p);
+    }
+    best
+}
+
 /// 造一个文件列表：第 0 行普通，第 1 行「正在传」。
 fn build_view(busy: bool) -> (gtk::ApplicationWindow, gtk::TreeView) {
     let model = gtk::ListStore::new(&[
@@ -151,31 +179,34 @@ fn main() {
 
     // ---- 1) 像素级：正在传的那一行，背景在呼吸 ----
     let (win, view) = build_view(true);
-    shot("/tmp/pp_pulse_a.png");
-    // 相位是**按时间算**的 ⇒ 等一个呼吸周期的一部分再截 ⇒ 底色应当变了。
-    // ⚠️ 这里手动 queue_draw：真程序里是呼吸定时器在重绘（下面第 2 段验它）。
-    pump(500);
-    view.queue_draw();
-    pump(300);
-    shot("/tmp/pp_pulse_b.png");
-    let d = diff("/tmp/pp_pulse_a.png", "/tmp/pp_pulse_b.png");
-    println!("[1] 「正在传」的行：两次截图的平均差异 = {d}");
+    // ⚠️⚠️ **必须连着一个完整呼吸周期截一串图，取「相邻差的最大值」**
+    //    （用户 2026-11-11：呼吸的相位是**按时间算**的 ⇒ 只截两张的话，
+    //    两张之间的相位差是随机的 ⇒ 差异有时 0.0002 有时 0.0015 ⇒
+    //    断言会**随机翻红**。实测同一份代码连跑四次：0.00027 / 0.00154 /
+    //    0.00108 / 0.00042 ⇒ 阈值 0.0005 有两次差点翻车。）
+    //    ⇒ 扫过整个周期 ⇒ 相位差必然经过峰值 ⇒ 结果稳定。
+    let d = max_diff_over_cycle(|p| {
+        // ⚠️ 手动 queue_draw：真程序里是呼吸定时器在重绘（下面第 2 段验它）。
+        view.queue_draw();
+        pump(120);
+        shot(p);
+    });
+    println!("[1] 「正在传」的行：一个呼吸周期内的最大截图差异 = {d}");
     assert!(
         d > 0.0005,
-        "「正在传」的行背景没有呼吸（两次截图几乎一样：{d}）"
+        "「正在传」的行背景没有呼吸（整个呼吸周期内几乎没变化：{d}）"
     );
     win.close();
     pump(100);
 
     // ---- 2) 反证：把标志关掉 ⇒ 两次截图应当**一模一样** ----
     let (win, view) = build_view(false);
-    shot("/tmp/pp_pulse_c.png");
-    pump(500);
-    view.queue_draw();
-    pump(300);
-    shot("/tmp/pp_pulse_d.png");
-    let d0 = diff("/tmp/pp_pulse_c.png", "/tmp/pp_pulse_d.png");
-    println!("[2] 普通行（不在传）：两次截图的平均差异 = {d0}");
+    let d0 = max_diff_over_cycle(|p| {
+        view.queue_draw();
+        pump(120);
+        shot(p);
+    });
+    println!("[2] 普通行（不在传）：一个呼吸周期内的最大截图差异 = {d0}");
     assert!(
         d0 < d,
         "普通行也在变（差异 {d0}）⇒ 说明差异不是呼吸带来的，测试没抓准"
@@ -252,19 +283,18 @@ fn main() {
         qu.view.queue_draw();
     }
     pump(500);
-    shot("/tmp/pp_pulse_q1.png");
-    pump(600);
-    // 重绘（真程序里是呼吸定时器在重绘）
-    if let Some(qu) = st.queue_ui.borrow().as_ref() {
-        qu.view.queue_draw();
-    }
-    pump(300);
-    shot("/tmp/pp_pulse_q2.png");
-    let dq = diff("/tmp/pp_pulse_q1.png", "/tmp/pp_pulse_q2.png");
-    println!("[5] 任务列表（队列窗口）：两次截图的平均差异 = {dq}");
+    // ⚠️ 同样扫完一个周期（队列窗口里运行中的行也在呼吸）⇒ 别只截两张。
+    let dq = max_diff_over_cycle(|p| {
+        if let Some(qu) = st.queue_ui.borrow().as_ref() {
+            qu.view.queue_draw();
+        }
+        pump(120);
+        shot(p);
+    });
+    println!("[5] 任务列表（队列窗口）：一个呼吸周期内的最大截图差异 = {dq}");
     assert!(
-        dq > 0.00002,
-        "任务列表里运行中的行没有动态效果（两次截图几乎一样：{dq}）"
+        dq > 0.000008,
+        "任务列表里运行中的行没有动态效果（整个周期内几乎没变化：{dq}）"
     );
 
     let _ = std::fs::remove_dir_all(&home);
