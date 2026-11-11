@@ -53,6 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         Vec::new(),
         Vec::new(),
+        // 转发规则的来源（连接中枢按来源分组）
+        "smoke".into(),
         rx_cmd,
         ui_tx,
         // 阶段 99：会话生死标志（UI 靠它判断"这次失败能不能自愈"）

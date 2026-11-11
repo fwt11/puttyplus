@@ -457,6 +457,9 @@ impl SftpPanel {
             opts.proxycmd.clone(),
             worker_forwards,
             opts.inproc_forwards.clone(),
+            // ⚠️ **转发规则的来源**：哪个连接条目要的 ⇒ 同一台服务器被
+            //    多个条目引用时，各来源的规则互不清掉。
+            crate::backend::conn::fwd_source(opts),
             rx,
             ui_tx,
             // ⚠️ **会话生死标志与 UI 共享**（阶段 99）：UI 靠它判断

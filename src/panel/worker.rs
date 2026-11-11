@@ -604,6 +604,12 @@ pub fn spawn_worker(
     proxycmd: Option<String>,
     forwards: Vec<String>,
     inproc_forwards: Vec<String>,
+    // **转发规则的来源标识**（哪个连接条目要的）。
+    //
+    // ⚠️ **为什么要带它**：同一台服务器可能被好几个连接条目引用，各自带
+    //    不同的转发规则 ⇒ 共享同一条 SSH 连接后，后连的那个不能把前一个
+    //    的规则清掉 ⇒ 规则按来源分组。
+    fwd_source: String,
     rx: Receiver<WorkerCmd>,
     ui_tx: async_channel::Sender<PanelEvent>,
     conn_dead: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -611,10 +617,13 @@ pub fn spawn_worker(
     std::thread::Builder::new()
         .name("sftp-worker".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime");
+            // ⚠️ **用全局运行时**（连接中枢在那儿）：russh 的 `Handle`
+            //    绑定在创建它的 runtime 上 ⇒ 面板要借共享连接，就必须和
+            //    建连接的那条路在同一个 runtime 上。
+            //
+            // ⚠️ **全局运行时是 multi_thread**：多个面板的 `block_on` 会
+            //    并发进入它（current_thread 会被独占 ⇒ 第二个面板进不去）。
+            let rt = crate::backend::hub::runtime();
             rt.block_on(async move {
                 // 传输调度器与命令循环共享同一条连接（并发 SFTP 请求）
                 let mut conn: Option<Arc<SftpBackend>> = None;
@@ -628,21 +637,31 @@ pub fn spawn_worker(
                 // std mpsc 接入异步循环：recv 挂到阻塞线程池上，等待期间
                 // 当前线程继续驱动运行时（转发/保活不断流）
                 let rx = Arc::new(Mutex::new(rx));
+                // ⚠️ **下一条命令的阻塞任务在「处理完上一条之后」才起**：
+                //    退出时就不会留下一条永远等着的阻塞任务。旧写法是在
+                //    循环开头就挂上 ⇒ 退出时它还挂着 ⇒ 运行时 drop 会一直
+                //    等它（worker 线程退不出来，得靠超时强杀）。
+                //    ⚠️ 现在用的是**全局**运行时（静态、永远不 drop）⇒
+                //    挂着的那条会一直占着阻塞池的一个线程 ⇒ 更不能留。
                 let mut next_cmd = {
                     let rx = Arc::clone(&rx);
                     tokio::task::spawn_blocking(move || rx.lock().unwrap().recv())
                 };
 
-                while let Ok(Ok(cmd)) = next_cmd.await {
-                    next_cmd = {
-                        let rx = Arc::clone(&rx);
-                        tokio::task::spawn_blocking(move || rx.lock().unwrap().recv())
+                loop {
+                    let Ok(Ok(cmd)) = next_cmd.await else {
+                        break;
                     };
                     match cmd {
                         WorkerCmd::Shutdown => {
                             if let Some(d) = db.take() {
                                 d.stop();
                             }
+                            // ⚠️ **代号 +1**：盯着连接的那个任务靠它判断
+                            //    「我盯的那条已经不是当前这条了」⇒ 它会退出、
+                            //    放开手里的连接引用 ⇒ 共享连接才能在最后一个
+                            //    使用者放手时真的断掉（否则连接会一直挂着）。
+                            conn_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             break;
                         }
                         WorkerCmd::Connect {
@@ -665,7 +684,7 @@ pub fn spawn_worker(
                             let pw = password.as_deref().filter(|p| !p.is_empty());
                             let kf = keyfile.as_deref().filter(|k| !k.is_empty());
                             let pc = proxycmd.as_deref().filter(|c| !c.is_empty());
-                            match conn::connect(
+                            match conn::connect_with_source(
                                 &host,
                                 port,
                                 &user,
@@ -675,6 +694,7 @@ pub fn spawn_worker(
                                 keepalive_sec,
                                 auth_method,
                                 auth_order,
+                                &fwd_source,
                             )
                             .await
                             {
@@ -1355,6 +1375,11 @@ pub fn spawn_worker(
                             }
                         },
                     }
+                    // 处理完再挂下一条命令的阻塞任务（退出时就不会留下挂着的）。
+                    next_cmd = {
+                        let rx = Arc::clone(&rx);
+                        tokio::task::spawn_blocking(move || rx.lock().unwrap().recv())
+                    };
                 }
                 stop_scheduler(&mut xfer_tx, &mut xfer_task);
                 if let Some(d) = db.take() {
@@ -1364,13 +1389,11 @@ pub fn spawn_worker(
                     c.close().await;
                 }
             });
-            // ⚠️ **tokio 的运行时 drop 会等所有阻塞任务结束** ⇒ 命令循环里那条
-            // 「等下一条命令」的 `spawn_blocking(recv)` 永远等不到（`Shutdown`
-            // 之后不会再有命令了）⇒ **worker 线程退不出来**（`join()` 一直挂
-            // 着）。症状：转发规则的冒烟跑完 8 步断言**全过**，却卡在收尾
-            // （打不出「[9] shutdown clean」），只能被 timeout 杀掉。
-            // ⇒ 给一个宽限期强制收尾（把那条阻塞任务中止掉）。
-            rt.shutdown_timeout(std::time::Duration::from_millis(200));
+            // ⚠️ **不再关运行时**：现在用的是**全局**运行时（连接中枢在那儿，
+            //    别的面板/终端还在用）⇒ 关它等于把别人的连接一起掀了。
+            //    原来那个「shutdown_timeout 强杀阻塞任务」的收尾也不需要了：
+            //    命令循环改成「处理完再挂下一条阻塞任务」⇒ 退出时没有挂着
+            //    的任务，worker 线程能自己退出来。
         })
         .expect("spawn sftp-worker")
 }

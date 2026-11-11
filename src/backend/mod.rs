@@ -14,6 +14,7 @@ pub mod dbhist;
 pub mod dbmeta;
 pub mod dbstore;
 pub mod forward;
+pub mod hub;
 pub mod known_hosts;
 pub mod mirror;
 pub mod proxy;

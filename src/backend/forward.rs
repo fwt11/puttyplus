@@ -277,6 +277,13 @@ pub struct ActiveForward {
     session: Option<Arc<Handle<HostKeyHandler>>>,
     /// 本地 accept 循环（L/D）的中止句柄；R 没有本地监听
     abort: Option<tokio::task::AbortHandle>,
+    /// accept 循环的任务句柄（L/D）。
+    ///
+    /// ⚠️ **为什么留着它**：`abort()` 是**异步**取消 ⇒ 监听 socket 还在
+    ///    ⇒ 立刻重新 bind 同一个端口会 EADDRINUSE（"同一个监听端口换一
+    ///    个目标"这种常见改法必踩）。⇒ 停规则时**等这个任务真的结束**
+    ///    （见 [`ActiveForward::wait`]），监听 socket 才会被释放。
+    accept_task: Option<tokio::task::JoinHandle<()>>,
     /// 已接入连接的泵任务。停止转发时必须一并 abort：否则删掉规则后
     /// 老连接还能继续跑数据，UI 上却已经"没有这条转发了"。
     /// accept 循环每次接入时按 is_finished 顺手清理，长命转发不积累句柄。
@@ -303,6 +310,16 @@ impl ActiveForward {
                     let _ = s.cancel_tcpip_forward(h, u32::from(p)).await;
                 });
             }
+        }
+    }
+
+    /// **等 accept 循环真的结束**（⇒ 监听 socket 释放、端口可再绑）。
+    ///
+    /// ⚠️ **必须在重新绑定同一个端口之前调**：`stop()` 只是 `abort()`，
+    ///    取消是异步的 ⇒ 不等的话端口还占着 ⇒ EADDRINUSE。
+    pub async fn wait(&mut self) {
+        if let Some(h) = self.accept_task.take() {
+            let _ = h.await;
         }
     }
 }
@@ -343,6 +360,7 @@ async fn start_local(
             }
         }
     });
+    let abort = task.abort_handle();
     Ok(ActiveForward {
         listen: Some(listen),
         target_host: spec.target_host.clone(),
@@ -350,7 +368,8 @@ async fn start_local(
         remote_bind: None,
         rfwd: RfwdTable::default(),
         session: None,
-        abort: Some(task.abort_handle()),
+        abort: Some(abort),
+        accept_task: Some(task),
         pumps,
     })
 }
@@ -413,6 +432,7 @@ async fn start_remote(
         rfwd,
         session: Some(session),
         abort: None,
+        accept_task: None,
         pumps: Arc::new(Mutex::new(Vec::new())),
     })
 }
@@ -447,6 +467,7 @@ async fn start_socks(
             }
         }
     });
+    let abort = task.abort_handle();
     Ok(ActiveForward {
         listen: Some(listen),
         target_host: String::new(),
@@ -454,7 +475,8 @@ async fn start_socks(
         remote_bind: None,
         rfwd: RfwdTable::default(),
         session: None,
-        abort: Some(task.abort_handle()),
+        abort: Some(abort),
+        accept_task: Some(task),
         pumps,
     })
 }
@@ -893,6 +915,18 @@ impl FwdEntry {
     pub fn stop(&mut self) {
         if let Some(a) = self.active.take() {
             a.stop();
+        }
+    }
+
+    /// **停掉这条规则，并等监听端口真正释放**。
+    ///
+    /// ⚠️ **什么时候必须用它**：要**重新绑定同一个监听端口**的时候
+    ///    （改了转发目标 / 换掉一条规则）⇒ `stop()` 只是 `abort()`，
+    ///    取消是异步的 ⇒ 不等就会 EADDRINUSE。
+    pub async fn stop_wait(&mut self) {
+        if let Some(mut a) = self.active.take() {
+            a.stop();
+            a.wait().await;
         }
     }
 }

@@ -17,7 +17,6 @@ use russh::keys::PrivateKeyWithHashAlg;
 use russh::client::{AuthResult, Handle};
 use russh_sftp::client::SftpSession;
 use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex as AsyncMutex;
 
 use super::forward::RfwdTable;
 use super::known_hosts::{self, HostKeyCheck};
@@ -49,7 +48,7 @@ pub fn is_loopback(host: &str) -> bool {
 
 /// check_server_key 在 russh 握手任务里执行，把决定带回给 connect 调用方。
 #[derive(Clone)]
-pub(crate) struct HostKeyHandler {
+pub struct HostKeyHandler {
     host: String,
     port: i32,
     decision: Arc<Mutex<Option<Result<HostKeyCheck, String>>>>,
@@ -210,18 +209,19 @@ fn strerror_local(e: &russh::Error) -> String {
 /// `SftpSession` 内部按请求 id 分发，多个文件可以并发读写同一条连接。
 /// 并发数由设置 `[xfer] parallel` 控制，不额外新建 SSH/TCP 连接。
 pub struct SftpBackend {
-    /// Arc 共享：进程内转发任务（forward.rs）需要开新通道，而 russh 0.63
-    /// 的 Handle 不可 Clone（channel_open 系列只要求 &self）
-    session: Arc<Handle<HostKeyHandler>>,
-    sftp: SftpSession,
-    /// 进程内转发规则集（含停用项），随连接生命周期启停
-    /// （forward.rs，Rust-only；1.4 起规则本体与运行态分离）
+    /// **共享连接**（连接中枢）：会话 + 转发规则集都在它里面。
     ///
-    /// 用异步 Mutex：传输任务只读连接，但转发增删仍需要独占规则集。
-    forwards: AsyncMutex<Vec<super::forward::FwdEntry>>,
-    /// 远程转发（-R）的入站登记表：与 handler 共享同一张表，
-    /// 服务器送回入站连接时据此找客户端侧的目标
-    rfwd: RfwdTable,
+    /// ⚠️ **为什么不再自己建一条**：同一个服务器（host+port+user）在整个
+    ///    程序里只有一条 SSH 连接 ⇒ SFTP 面板、数据库工作台、端口映射、
+    ///    终端都在它上面开自己的通道（见 [`super::hub`]）。
+    shared: Arc<super::hub::SharedConn>,
+    sftp: SftpSession,
+    /// **转发规则的来源标识**：这些规则是「哪个连接条目」要的。
+    ///
+    /// ⚠️ **为什么按来源分组**：同一台服务器可能被好几个连接条目引用
+    ///    （不同名字、不同转发规则）⇒ 共用一条连接后，后连的那个不能把
+    ///    前一个的规则清掉 ⇒ 规则按来源分组，各来源只覆盖自己那一份。
+    source: String,
     /// 连接标识（host:port）。断点续传的 mark 用它做键的一部分，
     /// 免得两台同名主机的半截文件互相续上
     pub id: String,
@@ -318,8 +318,11 @@ pub(crate) async fn connect_session(
     Ok((session, rfwd))
 }
 
-/// 与 C 版相同的认证顺序：
-/// none（探测可用方法）→ 有密码时 password → kbdint → 指定私钥 → agent/默认密钥。
+/// **连上一台服务器并打开 SFTP 子系统**（走连接中枢）。
+///
+/// ⚠️ **同一台服务器只有一条连接**：走 [`super::hub::acquire`] 借连接
+///    （有活的就复用，没有才新建）⇒ 文件面板、数据库工作台、端口映射、
+///    终端共享同一条 SSH 连接。
 #[allow(clippy::too_many_arguments)]
 pub async fn connect(
     host: &str,
@@ -332,7 +335,7 @@ pub async fn connect(
     auth_method: crate::args::AuthMethod,
     auth_order: crate::args::AuthOrder,
 ) -> BackendResult<SftpBackend> {
-    let (mut session, rfwd) = connect_session(
+    connect_with_source(
         host,
         port,
         user,
@@ -342,11 +345,73 @@ pub async fn connect(
         keepalive_sec,
         auth_method,
         auth_order,
+        &default_source(host, port, user),
     )
-    .await?;
+    .await
+}
 
-    // SFTP 子系统。三步都加超时：认证已通过但网关不回应 channel open /
-    // subsystem 时，不能把 UI 永久卡在「正在连接」。
+/// 同 [`connect`]，但**指定转发规则的来源**（是「哪个连接条目」要的）。
+///
+/// ⚠️ **来源要能区分连接条目**：同一台服务器可能被好几个条目引用，各自带
+///    不同的转发规则 ⇒ 共用一条连接后，后连的那个不能把前一个的规则清掉。
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_with_source(
+    host: &str,
+    port: i32,
+    user: &str,
+    password: Option<&str>,
+    keyfile: Option<&str>,
+    proxycmd: Option<&str>,
+    keepalive_sec: u32,
+    auth_method: crate::args::AuthMethod,
+    auth_order: crate::args::AuthOrder,
+    source: &str,
+) -> BackendResult<SftpBackend> {
+    let creds = super::hub::Creds {
+        password: password.map(str::to_string),
+        keyfile: keyfile.map(str::to_string),
+        proxycmd: proxycmd.map(str::to_string),
+        keepalive_sec,
+        auth_method,
+        auth_order,
+    };
+    let key = super::hub::ServerKey::new(host, port, user);
+    let shared = super::hub::acquire(key, &creds).await?;
+    let sftp = open_sftp_session(shared.session()).await?;
+    Ok(SftpBackend {
+        shared,
+        sftp,
+        source: source.to_string(),
+        id: format!("{host}:{port}"),
+        sha1_tool: Mutex::new(None),
+    })
+}
+
+/// 默认的转发规则来源（没带连接条目时用）。
+pub fn default_source(host: &str, port: i32, user: &str) -> String {
+    let k = super::hub::ServerKey::new(host, port, user);
+    format!("{}@{}:{}", k.user, k.host, k.port)
+}
+
+/// **转发规则的来源标识**：这些规则是「哪个连接条目」要的。
+///
+/// ⚠️ **要能区分连接条目**：同一台服务器可能被好几个条目引用，各自带
+///    不同的转发规则 ⇒ 共用一条连接后，后连的那个不能把前一个的规则清掉
+///    ⇒ 来源就是「条目身份」。
+pub fn fwd_source(o: &crate::args::ConnOptions) -> String {
+    match o.session_name.as_deref().map(str::trim) {
+        Some(n) if !n.is_empty() => format!("entry:{n}"),
+        _ => default_source(&o.host, o.port, &o.user),
+    }
+}
+
+/// 在**已有会话**上打开 SFTP 子系统通道。
+///
+/// 三步都加超时：认证已通过但网关不回应 channel open / subsystem 时，
+/// 不能把 UI 永久卡在「正在连接」。
+pub async fn open_sftp_session(
+    session: &Handle<HostKeyHandler>,
+) -> BackendResult<SftpSession> {
     let channel = tokio::time::timeout(SETUP_TIMEOUT, session.channel_open_session())
         .await
         .map_err(|_| BackendError(tr("SFTP 通道初始化失败: 超时（服务器未响应通道请求）").into()))?
@@ -372,15 +437,7 @@ pub async fn connect(
     .await
     .map_err(|_| BackendError(tr("SFTP 通道初始化失败: 超时（服务器未回应 SFTP 协议版本）").into()))?
     .map_err(|e| BackendError(trf!("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）", e = e)))?;
-
-    Ok(SftpBackend {
-        session: Arc::new(session),
-        sftp,
-        forwards: AsyncMutex::new(Vec::new()),
-        rfwd,
-        id: format!("{host}:{port}"),
-        sha1_tool: Mutex::new(None),
-    })
+    Ok(sftp)
 }
 
 /// 认证链的一种候选凭据（none 探测不算，它是服务端能力协商）。
@@ -741,7 +798,7 @@ impl SftpBackend {
     /// 在同一 SSH 连接上另开一条 SFTP 子系统通道。
     /// 跨服务器传输把它交给源 worker：目标侧不需要重新认证。
     pub async fn open_sftp(&self) -> BackendResult<SftpSession> {
-        let ch = tokio::time::timeout(SETUP_TIMEOUT, self.session.channel_open_session())
+        let ch = tokio::time::timeout(SETUP_TIMEOUT, self.shared.session().channel_open_session())
             .await
             .map_err(|_| BackendError(tr("创建 SFTP 通道失败: 超时（服务器未响应通道请求）").into()))?
             .map_err(|e| BackendError(trf!("创建 SFTP 通道失败: {e}", e = e)))?;
@@ -770,7 +827,8 @@ impl SftpBackend {
     ) -> BackendResult<russh::ChannelStream<russh::client::Msg>> {
         let ch = tokio::time::timeout(
             SETUP_TIMEOUT,
-            self.session
+            self.shared
+                .session()
                 .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0),
         )
         .await
@@ -782,53 +840,21 @@ impl SftpBackend {
     }
 
     /// 装载会话级转发规则集（1.4：连接启动时调用）。
-    /// 先清掉旧规则（会话参数是唯一真源），再逐条启动启用的；
     /// 停用规则保留在列表里但不绑定。返回未能启动的 (规则, 原因)。
+    ///
+    /// ⚠️ **规则挂在共享连接上**（不在本面板上）⇒ 关掉文件面板不会把
+    ///    端口映射一起停掉。
     pub async fn apply_forward_rules(
         &self,
         rules: Vec<super::forward::FwdRule>,
     ) -> Vec<(String, String)> {
-        let mut forwards = self.forwards.lock().await;
-        for e in forwards.iter_mut() {
-            e.stop();
-        }
-        *forwards = rules
-            .into_iter()
-            .map(super::forward::FwdEntry::new)
-            .collect();
-        let mut fails = Vec::new();
-        let session = Arc::clone(&self.session);
-        for e in forwards.iter_mut() {
-            if !e.rule.enabled {
-                continue;
-            }
-            if let Err(err) = e.start(session.clone(), self.rfwd.clone()).await {
-                fails.push((e.rule.display(), err.0));
-            }
-        }
-        fails
+        self.shared.apply_forward_rules(&self.source, rules).await
     }
 
     /// 运行时新增一条规则（转发管理窗口）。规格为内部形
     /// （`L:[监听地址:]端口:主机:端口`），建好即启用。
     pub async fn add_forward_rule(&self, spec: &str) -> BackendResult<()> {
-        let rule = super::forward::parse_rules(spec)
-            .into_iter()
-            .find(|r| r.enabled)
-            .ok_or_else(|| BackendError(trf!("无法识别的转发规格：{spec}", spec = spec)))?;
-        let mut forwards = self.forwards.lock().await;
-        if forwards
-            .iter()
-            .any(|e| e.rule.spec == rule.spec && e.rule.kind == rule.kind)
-        {
-            return Err(BackendError(trf!("该转发已存在：{v0}", v0 = rule.display())));
-        }
-        let mut entry = super::forward::FwdEntry::new(rule);
-        entry
-            .start(Arc::clone(&self.session), self.rfwd.clone())
-            .await?;
-        forwards.push(entry);
-        Ok(())
+        self.shared.add_forward_rule(spec).await
     }
 
     /// 停用 / 启用一条规则（key = `FwdEntry::key`）。
@@ -839,50 +865,24 @@ impl SftpBackend {
         key: &str,
         enabled: bool,
     ) -> BackendResult<()> {
-        let mut forwards = self.forwards.lock().await;
-        let Some(idx) = forwards.iter().position(|e| e.key() == key) else {
-            return Err(BackendError(trf!("转发规则不存在：{key}", key = key)));
-        };
-        if enabled {
-            forwards[idx].rule.enabled = true;
-            forwards[idx]
-                .start(Arc::clone(&self.session), self.rfwd.clone())
-                .await
-                .inspect_err(|_| {
-                    forwards[idx].rule.enabled = false;
-                })?;
-        } else {
-            forwards[idx].rule.enabled = false;
-            forwards[idx].stop();
-        }
-        Ok(())
+        self.shared.set_forward_rule_enabled(key, enabled).await
     }
 
     /// 停止并移除一条规则。
     pub async fn remove_forward_rule(&self, key: &str) -> bool {
-        let mut forwards = self.forwards.lock().await;
-        let Some(idx) = forwards.iter().position(|e| e.key() == key) else {
-            return false;
-        };
-        forwards[idx].stop();
-        forwards.remove(idx);
-        true
+        self.shared.remove_forward_rule(key).await
     }
 
     /// 转发规则快照（UI 每次刷新用；规则本体留在连接里）。
     pub async fn forward_snapshot(&self) -> Vec<FwdInfo> {
-        let forwards = self.forwards.lock().await;
-        forwards
-            .iter()
-            .map(|e| FwdInfo {
-                key: e.key(),
-                text: e.rule.display(),
-                enabled: e.rule.enabled,
-                active: e.active().is_some(),
-                listen: e.active().and_then(|a| a.listen),
-                err: e.err().map(|s| s.to_string()),
-            })
-            .collect()
+        self.shared.forward_snapshot().await
+    }
+
+    /// **共享连接**（会话 + 转发规则都在里面）。
+    ///
+    /// 终端并入共享连接时用它开自己的 shell 通道。
+    pub fn shared(&self) -> &Arc<super::hub::SharedConn> {
+        &self.shared
     }
 
     /// 这条 SSH 会话**断了没有**（服务端关了 / 网络断了 / 空闲超时）。
@@ -895,22 +895,16 @@ impl SftpBackend {
     /// 现在 worker 盯着这个标志 ⇒ 断了就**主动上报**，UI 立刻把状态改成
     /// 「已断开」，并在下一次操作（刷新 / 换目录）时**自动重连**。
     pub fn is_closed(&self) -> bool {
-        self.session.is_closed()
+        self.shared.is_closed()
     }
 
+    /// **关掉本面板这条 SFTP 通道**（**不断连接**）。
+    ///
+    /// ⚠️ **为什么不断**：连接是**共享**的 ⇒ 面板关了，终端/数据库可能
+    ///    还在用同一条 ⇒ 断开由连接中枢按引用计数管（最后一个使用者放手
+    ///    才断）。转发规则也**留在连接上**（关面板不该停掉端口映射）。
     pub async fn close(&self) {
-        {
-            let mut forwards = self.forwards.lock().await;
-            for f in forwards.iter_mut() {
-                f.stop();
-            }
-            forwards.clear();
-        }
         let _ = self.sftp.close().await;
-        let _ = self
-            .session
-            .disconnect(russh::Disconnect::ByApplication, "bye", "en")
-            .await;
     }
 
     /// 带退出码/错误输出的执行（直连预检与 scp 用）。
@@ -925,7 +919,8 @@ impl SftpBackend {
         timeout_ms: u64,
     ) -> BackendResult<ExecOut> {
         let mut ch = self
-            .session
+            .shared
+            .session()
             .channel_open_session()
             .await
             .map_err(|e| BackendError(trf!("创建通道失败: {e}", e = e)))?;
@@ -993,7 +988,8 @@ impl SftpBackend {
         max_out: usize,
     ) -> BackendResult<String> {
         let mut ch = self
-            .session
+            .shared
+            .session()
             .channel_open_session()
             .await
             .map_err(|e| BackendError(trf!("创建通道失败: {e}", e = e)))?;
