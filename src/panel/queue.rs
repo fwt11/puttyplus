@@ -229,34 +229,8 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
     // ⚠️ **转圈 = 「还有东西在传」**（用户 2026-11-11 要的动态效果）
     //    ⇒ 队列每次刷新都调这里 ⇒ 数量与转圈自己就同步了。
     set_btn_spinning(st, n > 0);
-
-    // 角标 + 图标
-    if let Some(child) = b.child() {
-        if let Some(row) = child.downcast_ref::<gtk::Box>() {
-            let mut cur = row.first_child();
-            while let Some(c) = cur {
-                if let Some(l) = c.downcast_ref::<gtk::Label>() {
-                    // ⚠️ **不 hide，只是把文字清空**：角标 `width_chars(1)`
-                    // 已经预留了一格宽 ⇒ 出现/消失时工具栏不会左右跳。
-                    l.set_text(&if n > 0 { n.to_string() } else { String::new() });
-                    // ⚠️ **底色只在真有数字时才上**（用户 2026-11-07 报：
-                    // 「上传结束了还是这样，结束了就不要这个蓝色的块了吧」——
-                    // 底色/圆角/内边距全在 `.pp-xfer-badge-on` 里 ⇒ 空闲时
-                    // 角标 Label 只剩一格空白，不会在按钮旁挂个蓝胶囊）。
-                    if n > 0 {
-                        l.add_css_class("pp-xfer-badge-on");
-                    } else {
-                        l.remove_css_class("pp-xfer-badge-on");
-                    }
-                }
-                // ⚠️ **不再把图标换成 `content-loading-symbolic`**（用户
-                //    2026-11-11）：那个图标是**静态**的一圈虚线 ⇒ 看着像
-                //    「卡住了」而不是「在转」⇒ 改成在原来那个队列图标上
-                //    **叠一个真在转的圈**（见 `panel::ring`）。
-                cur = c.next_sibling();
-            }
-        }
-    }
+    // 角标数字（0 ⇒ 数字清空、蓝圆不画）。
+    set_badge(st, n);
 
     if n > 0 {
         // tooltip 说清方向：「上传中 2 个」比「2 个进行中」有用
@@ -277,17 +251,32 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
     super::render_status(st);
 }
 
+/// 设角标上的数字（0 = 没有东西在传 ⇒ 数字清空、蓝圆不画）。
+///
+/// ⚠️ **数字和蓝圆一起管**：只清数字不画圆 ⇒ 传完了还剩个空蓝圆挂在
+///    按钮上（用户 2026-10-07 报过「结束了就不要这个蓝色的块了吧」）。
+pub fn set_badge(st: &Rc<PanelState>, n: usize) {
+    if let Some(b) = st.xfer_badge.borrow().as_ref() {
+        b.set_count(n);
+    }
+}
+
 /// 冒烟用：队列按钮角上那个**转动的圈**现在转不转。
 ///
 /// ⚠️ 为什么要单独开一个口：忙态（`pp-xfer-busy` 那个底色）与角标是
 ///    **两回事**——角标有数字、按钮变底色，都不代表「有东西在传」；
 ///    转圈才是「正在传」的唯一信号（用户 2026-11-11 要的就是它）。
 pub fn btn_ring_spinning(st: &Rc<PanelState>) -> bool {
-    st.xfer_ring
+    st.xfer_badge
         .borrow()
         .as_ref()
-        .map(|r| r.spinning())
+        .map(|b| b.ring_spinning())
         .unwrap_or(false)
+}
+
+/// 冒烟用：队列按钮上那个圈现在转到哪个角度了（`None` = 面板还没建）。
+pub fn btn_ring_angle(st: &Rc<PanelState>) -> Option<f64> {
+    st.xfer_badge.borrow().as_ref().map(|b| b.ring_angle())
 }
 
 /// 冒烟用：队列按钮的当前状态
@@ -296,25 +285,20 @@ pub fn btn_ring_spinning(st: &Rc<PanelState>) -> bool {
 /// `None` = 面板上还没有这个按钮（面板还没建）。
 ///
 /// ⚠️ 第三个值（有没有底色）是给「传完了不该剩个蓝胶囊」这条钉住的
-/// （用户 2026-11-07 报）—— 底色类 `.pp-xfer-badge-on` 只在真有数字时
-/// 才挂上。
+/// （用户 2026-10-07 报）—— 蓝圆只在真有数字时才画。
 pub fn btn_state(st: &Rc<PanelState>) -> Option<(String, bool, bool)> {
     let b = st.queue_btn.borrow().clone()?;
-    let mut badge = String::new();
-    let mut badge_on = false;
-    if let Some(child) = b.child() {
-        if let Some(row) = child.downcast_ref::<gtk::Box>() {
-            let mut cur = row.first_child();
-            while let Some(c) = cur {
-                if let Some(l) = c.downcast_ref::<gtk::Label>() {
-                    badge = l.text().to_string();
-                    badge_on = l.has_css_class("pp-xfer-badge-on");
-                    break;
-                }
-                cur = c.next_sibling();
-            }
-        }
-    }
+    // ⚠️ **别把角标 clone 出来**（`XferBadge` 不是 `Clone`）⇒ 借出来
+    //    读两个数就还回去。
+    let (badge, badge_on) = {
+        let g = st.xfer_badge.borrow();
+        let badge = g.as_ref()?;
+        let n = badge.count();
+        (
+            if n > 0 { n.to_string() } else { String::new() },
+            badge.has_dot(),
+        )
+    };
     Some((badge, b.has_css_class("pp-xfer-busy"), badge_on))
 }
 
@@ -368,23 +352,23 @@ pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
     // 进度已经画在文件面板的文件名后面（flush 里更新）。
 }
 
-/// 工具栏「传输队列」按钮：**传输中 ⇒ 图标上叠一个转动的圈**。
+/// 工具栏「传输队列」按钮：**传输中 ⇒ 角标外面转一个圈**。
 ///
 /// 干什么用（用户 2026-11-11）：「上传下载文件时传输队列图标可以改为原来
-/// 静态的图标上加个转动的圈」⇒ 底下还是原来那个队列图标，上面盖一个
-/// 小转圈（`gtk::Spinner`，它自己会转 ⇒ 不用我们另起定时器）。
+/// 静态的图标上加个转动的圈」⇒ 底下还是原来那个队列图标，角标外面套一个
+/// 在转的圈。
 ///
 /// ⚠️ **比以前的「透明度呼吸」好在哪**：呼吸是「整张图标一起明暗」⇒ 看不出
 ///    「在转」还是「卡住了」；转圈是**进度语义**（业界通用）⇒ 一眼知道
 ///    还在忙。
 pub fn set_btn_spinning(st: &Rc<PanelState>, on: bool) {
-    // ⚠️ 直接拿 `PanelState` 里存的那个圈 ⇒ **不翻控件树**
+    // ⚠️ 直接拿 `PanelState` 里存的那个角标 ⇒ **不翻控件树**
     //    （翻树要认 `Overlay`/`DrawingArea` 的层级 ⇒ 改布局就静默失效）。
-    let guard = st.xfer_ring.borrow();
-    let Some(ring) = guard.as_ref() else {
+    let guard = st.xfer_badge.borrow();
+    let Some(badge) = guard.as_ref() else {
         return;
     };
-    ring.set_spinning(on);
+    badge.set_spinning(on);
 }
 
 /// 刷新所有行的进度显示（对应 C 版 xfer_flush_idle）。

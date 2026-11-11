@@ -43,6 +43,7 @@ pub mod worker;
 /// （`clipfiles::read_local_paths`，见「粘贴上传」）。
 #[cfg(unix)]
 pub mod xdnd11;
+pub mod xferbadge;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -179,11 +180,11 @@ pub struct PanelState {
     /// 找到它。⚠️ 按钮挂在面板上，面板属于本状态的控件树 ⇒ 这里存
     /// **强引用**不会成环（按钮不反过来抓 `PanelState`）。
     pub queue_btn: RefCell<Option<gtk::Button>>,
-    /// 「传输队列」按钮角上那个**转动的圈**（用户 2026-11-11 要的忙态）。
+    /// 「传输队列」按钮上那个**角标**（数字 + 外面转的圈，用户 2026-11-11）。
     ///
     /// ⚠️ 存在这儿而不是从控件树里翻：翻控件树要认 `Overlay`/`DrawingArea`
-    ///    的层级 ⇒ 一旦有人改了布局就静默失效（圈再也不转）。
-    pub xfer_ring: RefCell<Option<ring::Ring>>,
+    ///    的层级 ⇒ 一旦有人改了布局就静默失效（圈再也不转、数字读不到）。
+    pub xfer_badge: RefCell<Option<xferbadge::XferBadge>>,
     /// **传输动画定时器**（呼吸相位）——只在**有东西在传**时存在。
     ///
     /// 干什么用（用户 2026-11-10）：传输中的文件行背景呼吸、队列按钮图标
@@ -395,7 +396,7 @@ impl SftpPanel {
             items: RefCell::new(Vec::new()),
             queue_ui: RefCell::new(None),
             queue_btn: RefCell::new(None),
-            xfer_ring: RefCell::new(None),
+            xfer_badge: RefCell::new(None),
             /// **传输动画定时器**（呼吸相位）——只在**有东西在传**时存在。
             ///
             /// 干什么用（用户 2026-11-10）：传输中的文件行背景呼吸、队列

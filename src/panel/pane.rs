@@ -967,31 +967,18 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         // 「还在传几个」，空闲时藏起来。角标是这个按钮**唯一的信息增量**
         // ——图标本身不会变，用户扫一眼就知道"有没有东西在传、还有几件"。
         let queue = gtk::Button::new();
-        // ⚠️ 圈建在块**外面** ⇒ 后面要交给 `PanelState`（队列刷新时开关它）。
-        let ring = super::ring::Ring::new(11);
+        // ⚠️ **角标是个自成一体的控件**（`panel::xferbadge`）：蓝圆 + 数字
+        //    + 外面转的弧，全都自己摆 ⇒ 保证同心、保证是正圆。
+        //
+        // ⚠️⚠️ **圈是围着角标数字转的**（用户 2026-11-11：「你可以在 1 周围
+        //    有个圆圈在转？」）。
+        let badge = super::xferbadge::XferBadge::new();
         {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             let img = gtk::Image::from_icon_name("view-list-symbolic");
             img.set_pixel_size(16);
-            // ⚠️ **传输中 ⇒ 图标上叠一个转动的圈**（用户 2026-11-11：
-            //    「上传下载文件时传输队列图标可以改为原来静态的图标上加个
-            //    转动的圈」）。
-            //    ⇒ 用 `Overlay`：底下还是原来那个队列图标（**不再换成
-            //    `content-loading-symbolic` 那个静态的加载图标**），上面
-            //    盖一个自己画的小转圈（见 `panel::ring`）。
-            ring.widget().set_halign(gtk::Align::End);
-            ring.widget().set_valign(gtk::Align::End);
-            let ov = gtk::Overlay::new();
-            ov.set_child(Some(&img));
-            let rw = ring.widget().clone();
-            ov.add_overlay(&rw);
-            let badge = gtk::Label::new(None);
-            badge.add_css_class("pp-xfer-badge");
-            // 固定一格宽 ⇒ 空闲时也不占地方，传输中出现/消失时
-            // 工具栏不会左右跳
-            badge.set_width_chars(1);
-            row.append(&ov);
-            row.append(&badge);
+            row.append(&img);
+            row.append(badge.widget());
             queue.set_child(Some(&row));
         }
         queue.add_css_class("flat");
@@ -1004,7 +991,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         toolbar.append(&queue);
         // 队列刷新时要用它刷忙态与角标 ⇒ 交一份给 PanelState（阶段 102）
         st.queue_btn.replace(Some(queue));
-        st.xfer_ring.replace(Some(ring));
+        st.xfer_badge.replace(Some(badge));
     } else {
         // 目录镜像：把本地当前目录单向推到远端当前目录，源在本地，
         // 入口跟着源走（以前挂在远程面板的 ⋯ 里，语义是反的）。

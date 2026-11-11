@@ -856,31 +856,35 @@ const COMPONENTS: &str = r#"
 }
 .pp-chip-warn { background-color: mix(@pp_warn, @pp_bg, 0.84); color: @pp_fg; }
 .pp-chip-err { background-color: mix(@pp_err, @pp_bg, 0.82); color: @pp_fg; }
-/* 传输队列按钮的**数量角标**（阶段 102）：还在传几个。
-   ⚠️ 别复用 `.pp-chip`：那个类带着状态色语义（绿=正常 / 黄=警告 /
-   红=出错），角标说的是"数量"，不是"状态"。
+/* 「传输队列」按钮上的**角标**（阶段 102 + 2026-11-11 重做）。
+   形状：**一个蓝圆（圆里写数字），外面套一圈在转的弧**。
 
-   ⚠️ **底色必须只在"真有数字"时才上**（`.pp-xfer-badge-on`）：
-   角标 Label 是**常驻**的（空闲时只清空文字、不 hide ⇒ 工具栏不会抖），
-   要是底色也常驻 ⇒ **传完了还剩一个蓝色胶囊挂在按钮旁边**
-   （用户 2026-11-07 报）。所以底色/圆角/内边距全放进 `-on` 类，
-   空闲时这个 Label 只占 `width_chars(1)` 的空白。 */
-.pp-xfer-badge {
-  font-size: 0.8em;
-  font-weight: 600;
-}
-/* 「传输队列」按钮角上那个**转动的圈**（用户 2026-11-11）。
-   ⚠️ 颜色走 CSS 变量 ⇒ 画的时候读控件样式上下文的前景色就能拿到
-   ⇒ **不用在 Rust 里再抄一份配色**（抄了就跟主题不同步）。
-   ⚠️ 只定 `color`：画弧时读的是 `style_context().color()`。 */
-.pp-xfer-ring {
+   ⚠️ **三个部件各拿一个类**，颜色全从样式上下文的前景色读
+      （`style_context().color()`）⇒ 换主题/换配色自动跟着换，
+      Rust 里一份配色都不抄：
+
+      | 部件 | 类 | 颜色 |
+      |---|---|---|
+      | 蓝圆（数字底） | `.pp-xfer-dot` | `@pp_accent` |
+      | 转动的弧 | `.pp-xfer-ring` | `@pp_fg` |
+      | 数字 | `.pp-xfer-num` | `@pp_on_accent` |
+
+   ⚠️ **弧用中性前景色而不是强调色**：蓝圆本身就是强调色 ⇒ 弧也是强调色
+      的话两者糊成一坨、看不出是「一个圈」⇒ 用中性前景色才看得出是套在
+      蓝圆外面的一圈。
+
+   ⚠️ **数字用 `@pp_on_accent`**（强调色上的文字色）⇒ 白字配蓝底，
+      对比度跟主题走。 */
+.pp-xfer-dot {
   color: @pp_accent;
 }
-.pp-xfer-badge-on {
-  background-color: @pp_accent;
+.pp-xfer-ring {
+  color: @pp_fg;
+}
+.pp-xfer-num {
   color: @pp_on_accent;
-  border-radius: 9px;
-  padding: 0px 5px;
+  font-size: 0.8em;
+  font-weight: 700;
 }
 /* 传输队列按钮的**忙态**（阶段 102）：有东西在传。
    ⚠️ **别给这个按钮加 `flat`**：Adwaita 的 `button.flat` 是
