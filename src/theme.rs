@@ -770,6 +770,7 @@ list > row:selected .dim-label, listbox > row:selected .dim-label {
   color: @pp_dim_sel;
 }
 treeview.view:selected { background-color: @pp_accent_soft; color: @pp_fg; }
+/* 聚焦的那一行：实底 + on_accent 文字（同 BASE 那条）。 */
 treeview.view:selected:focus {
   background-color: @pp_accent;
   color: @pp_on_accent;
@@ -1380,6 +1381,20 @@ button.flat:hover { background-color: @pp_hover; }
    了一块。这里换成浅强调底 + 正常文字色，两种状态都看得见、也还能分辨。 */
 button.flat:checked { background-color: @pp_accent_soft; color: @pp_fg; }
 button.flat:checked:hover { background-color: mix(@pp_accent, @pp_bg, 0.80); }
+/* ⚠️ **按钮里的文字是独立的 `label` 节点**（不是按钮自己画字）⇒ 上面那条
+   blanket 规则 `label { color: @pp_fg }` 给它一个**显式**颜色 ⇒ 按钮自己
+   那条 `color: @pp_on_accent`（选中态 / 主按钮）只是**继承**下去 ⇒ 被盖掉。
+   ⇒ 浅色主题下就是「强调蓝底 + 深色字」，看不清（用户 2026-11-11 报：
+   首选项里选中的「标准」「中」两个按钮）。
+   ⇒ 这里给 label 节点**单独**定一条（`button:checked label` 的特异度
+   高于 blanket 的 `label` ⇒ 赢）。 */
+button:checked label,
+button.suggested-action label,
+button.destructive-action label {
+  color: @pp_on_accent;
+}
+/* 平面按钮的选中态是「淡强调底 + 正常文字」⇒ 文字也得跟着正常色 */
+button.flat:checked label { color: @pp_fg; }
 /* 工具栏上的纯图标按钮：压到 30px 见方。
    结果表工具栏一排要放 5-8 颗（下一页/导出/编辑/插入/删除/保存/放弃），
    Adwaita 默认 padding 一颗就 40px 宽，右侧会被窗口切掉。文字改成图标后
@@ -1490,7 +1505,14 @@ list > row:selected .dim-label, listbox > row:selected .dim-label {
   color: @pp_dim_sel;
 }
 treeview.view:selected { background-color: @pp_accent_soft; color: @pp_fg; }
-treeview.view:selected:focus { background-color: @pp_accent; color: @pp_on_accent; }
+/* 聚焦的那一行（键盘光标行）：**实底 + on_accent 文字**。
+   ⚠️ 文字颜色要由**取色的一方**自己算对：文件名的单元格是我们自己画的
+   （`panel::namecell`），它得把 `:focus` 状态也算进去，否则会拿
+   `:selected` 的深色字画在实底上 = 蓝底黑字（用户 2026-11-11 报）。 */
+treeview.view:selected:focus {
+  background-color: @pp_accent;
+  color: @pp_on_accent;
+}
 
 /* 侧栏标题栏的「＋新建」（阶段 92）。
    ⚠️ 不用 `list-add-symbolic`：symbolic 图标是细线条，浅色底上几乎看不见
@@ -1868,6 +1890,45 @@ mod tests {
             ] {
                 assert!(css.contains(sel), "{t:?} 的 CSS 缺 {sel}");
             }
+        }
+    }
+
+    /// 选中态的**文字**必须跟得住底色（用户 2026-11-11 报：「选中的颜色
+    /// 都太深了，看不清文字」，首选项里选中的按钮与文件列表的选中行都中招）。
+    ///
+    /// ⚠️ **根因**：按钮/单元格里那行字是**独立的 `label` 节点** ⇒ blanket
+    ///    规则 `label { color: @pp_fg }` 给它一个**显式**颜色 ⇒ 容器自己的
+    ///    `color: @pp_on_accent`（只是继承）被盖掉 ⇒ 浅色主题下蓝底黑字。
+    #[test]
+    fn 选中态的文字跟得住底色() {
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+            let css = css_text(t).expect("非 System 主题都该有 CSS");
+            // ① 按钮里的文字（独立 label 节点）要单独给一条
+            //
+            // ⚠️ **要匹配规则块本身，不能只匹配 "button:checked label"**——
+            //    注释里也写着这句话 ⇒ 只匹配那半句的话，删掉规则单测照样绿
+            //    （= 假阳性，钉不住）。
+            assert!(
+                css.contains(
+                    "button:checked label,\nbutton.suggested-action label,\n\
+                     button.destructive-action label {\n  color: @pp_on_accent;\n}"
+                ),
+                "{t:?} 的 CSS 缺「按钮里的文字跟着状态色」⇒ 选中时蓝底黑字"
+            );
+            assert!(
+                css.contains("button.flat:checked label { color: @pp_fg; }"),
+                "{t:?} 的 CSS 缺「平面按钮选中时文字回正常色」"
+            );
+            // ② 树视图「聚焦的选中行」是**实底 + on_accent 文字**
+            //    （取色的那一方要自己算对状态 ⇒ 见 `panel::namecell`）
+            assert!(
+                css.contains("treeview.view:selected:focus"),
+                "{t:?} 的 CSS 缺树视图聚焦选中行规则"
+            );
+            assert!(
+                css.contains("color: @pp_on_accent;"),
+                "{t:?} 的树视图选中行没有 on_accent 文字色"
+            );
         }
     }
 

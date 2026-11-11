@@ -113,13 +113,7 @@ mod imp {
 
             #[allow(deprecated)]
             let ctx = widget.style_context();
-            let mut state = gtk::StateFlags::NORMAL;
-            if flags.contains(gtk::CellRendererState::INSENSITIVE) {
-                state |= gtk::StateFlags::INSENSITIVE;
-            }
-            if flags.contains(gtk::CellRendererState::SELECTED) {
-                state |= gtk::StateFlags::SELECTED;
-            }
+            let state = cell_text_state(flags, widget.is_focus());
             ctx.save();
             ctx.set_state(state);
             let color = ctx.color();
@@ -251,5 +245,74 @@ impl NameCellRenderer {
     /// （模型对了但 cell data func 没调 `set_fade`，画面上还是不会淡）。
     pub fn fade_alpha(&self) -> f32 {
         self.imp().fade.get()
+    }
+}
+
+/// 单元格取色时用的**状态**（**纯函数**，便于单测）。
+///
+/// ⚠️ **`:focus` 一定要算进去**（用户 2026-11-11 报：文件列表里选中行
+///    「看不清文字」）。
+///
+/// 键盘光标行（cursor row）被选中时，GTK 画的**底**是实心强调色
+/// （`treeview.view:selected:focus`），文字色按约定是 on_accent（白）。
+/// 而文件名这一列是**我们自己画字**的 ⇒ 颜色由这里取 ⇒ 少算一个
+/// `:focus`，就会拿 `:selected` 的**深色字**画在**实底**上 = 蓝底黑字
+/// （其余列是 GTK 自己画的 ⇒ 它们是白的 ⇒ 只有文件名看不清，特别怪）。
+///
+/// ⚠️ **只有在树视图真的有键盘焦点时才算 `:focus`**：跟 GTK 自己的
+///    `gtk_cell_renderer_get_state()` 一个口径 ⇒ 不然「点别处之后」
+///    光标行的底色退回浅色、字还是白的 ⇒ 白字压浅底 = 看不见。
+pub fn cell_text_state(flags: gtk::CellRendererState, has_focus: bool) -> gtk::StateFlags {
+    let mut state = gtk::StateFlags::NORMAL;
+    if flags.contains(gtk::CellRendererState::INSENSITIVE) {
+        state |= gtk::StateFlags::INSENSITIVE;
+    }
+    if flags.contains(gtk::CellRendererState::SELECTED) {
+        state |= gtk::StateFlags::SELECTED;
+    }
+    if flags.contains(gtk::CellRendererState::FOCUSED) && has_focus {
+        state |= gtk::StateFlags::FOCUSED;
+    }
+    state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 光标行（选中 + 聚焦）⇒ 状态里**必须有** `:focus`。
+    ///
+    /// ⚠️ 这条是「回退验证」的锚：把 `cell_text_state` 里的 FOCUSED 那行
+    ///    删掉，它立刻会红（蓝底深字 ⇒ 文件名看不清）。
+    #[test]
+    fn 光标行要算上聚焦状态() {
+        let flags = gtk::CellRendererState::SELECTED | gtk::CellRendererState::FOCUSED;
+        let st = cell_text_state(flags, true);
+        assert!(st.contains(gtk::StateFlags::SELECTED));
+        assert!(
+            st.contains(gtk::StateFlags::FOCUSED),
+            "光标行少了 :focus ⇒ 会拿深色字画在实底上（蓝底黑字）"
+        );
+    }
+
+    /// 树视图**没有**键盘焦点 ⇒ 不算 `:focus`（跟 GTK 一个口径）。
+    ///
+    /// ⚠️ 反过来也算错：算了 ⇒ 底色是浅的、字是白的 ⇒ 白字压浅底 = 看不见。
+    #[test]
+    fn 没焦点就不算聚焦状态() {
+        let flags = gtk::CellRendererState::SELECTED | gtk::CellRendererState::FOCUSED;
+        let st = cell_text_state(flags, false);
+        assert!(st.contains(gtk::StateFlags::SELECTED));
+        assert!(
+            !st.contains(gtk::StateFlags::FOCUSED),
+            "树视图没焦点时不该算 :focus ⇒ 白字压浅底，看不见"
+        );
+    }
+
+    /// 普通行：什么都不该多算。
+    #[test]
+    fn 普通行就是普通状态() {
+        let st = cell_text_state(gtk::CellRendererState::empty(), true);
+        assert_eq!(st, gtk::StateFlags::NORMAL);
     }
 }
