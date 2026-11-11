@@ -121,6 +121,17 @@ pub struct Pane {
     /// 暴露出来是给冒烟断言用的：用户 2026-10-28 要求「主界面尽量少用
     /// 文字」，按钮条一律图标 + tooltip——这条得钉住，别哪天改回文字按钮。
     pub transfer_btn: gtk::Button,
+    /// **整表重绘的次数**（诊断用）。
+    ///
+    /// ⚠️ **为什么要有它**：传输期的呼吸动画每一帧都要变 ⇒ 早期实现直接
+    ///    `view.queue_draw()` ⇒ **整棵文件列表**每一帧都重画 ⇒ 每个可见行
+    ///    都要新建 Pango 布局 + 量文字宽度 ⇒ 主线程一帧几十毫秒（实测
+    ///    59ms）⇒ 堡垒机的远程桌面再乘一个 X 往返 ⇒ **整个界面卡死**
+    ///    （菜单也点不动），进度积压后一起回放 ⇒「从 2% 突然跳到 80%」。
+    ///
+    /// ⇒ 现在只标脏**正在传的那一行** ⇒ 这个计数在一次上传里应该很小
+    ///    （只有目录刷新那几次）⇒ 冒烟拿它当断言（见 `examples/xfer_stall_smoke.rs`）。
+    pub full_redraws: std::cell::Cell<u64>,
 }
 
 /// 文件列表的列（名称之后的那些）。
@@ -336,7 +347,13 @@ pub fn set_progress(pane: &Pane, name: &str, pct: i32, text: &str, xfer: bool) -
                     (COL_FADE_AT as u32, &0i64),
                 ],
             );
-            pane.view.queue_draw();
+            // ⚠️⚠️ **不要 `view.queue_draw()`**（用户 2026-11-11 报「上传时
+            //    界面完全卡住」）：上面那次 `model.set` 已经让 GTK **只把这
+            //    一行**标成脏 ⇒ 下一次绘制只重画这一行。
+            //    整棵 `queue_draw()` 会把**所有可见行**都重画一遍 ⇒ 每个
+            //    可见行都要新建 Pango 布局 + 量文字宽度 ⇒ 主线程一帧几十
+            //    毫秒 ⇒ 堡垒机的远程桌面再乘一个 RTT ⇒ **整个界面卡死**
+            //    （菜单也点不动），进度积压后一起回放 ⇒ 「2% 突然跳到 80%」。
             return true;
         }
         it = if pane.model.iter_next(&mut i) {
@@ -377,7 +394,7 @@ pub fn set_terminal(pane: &Pane, name: &str, pct: i32, text: &str, now_ms: u64) 
             (COL_FADE_AT as u32, &(now_ms as i64)),
         ],
     );
-    pane.view.queue_draw();
+    // ⚠️ **不整表重画**（同 `set_progress`）：`model.set` 已经让这一行变脏。
     true
 }
 
@@ -388,6 +405,9 @@ pub fn tick_fade(pane: &Pane, now_ms: u64) -> bool {
     let mut fading = false;
     // ⚠️ **动过就要重画**：淡完那一刻 alpha 变 0 ⇒ 不重画的话「完成」还留在
     //    屏幕上（模型里已经透明了，但界面没刷新）。
+    //    ⚠️⚠️ **但只重画「动过的那几行」**（`model.set` 已经把它们标脏）
+    //    ⇒ **不要 `view.queue_draw()`**：那会把所有可见行都重画一遍 ⇒
+    //    主线程一帧几十毫秒 ⇒ 远程桌面上整个界面卡死（用户 2026-11-11）。
     let mut touched = false;
     let mut it = pane.model.iter_first();
     while let Some(mut i) = it {
@@ -419,9 +439,39 @@ pub fn tick_fade(pane: &Pane, now_ms: u64) -> bool {
         };
     }
     if touched {
-        pane.view.queue_draw();
+        // ⚠️ **只让动过的那几行重画**：`model.set` 已经把它们标脏了 ⇒
+        //    这里**不要**再 `view.queue_draw()`（那是整表重画）。
     }
     fading
+}
+
+/// **只让「正在传输」的那一行重画**（呼吸动画用）。
+///
+/// 干什么用（用户 2026-11-11 报「上传时界面完全卡住」）：传输期的呼吸效果
+/// 要**每一帧**都变 ⇒ 以前每帧都 `view.queue_draw()` ⇒ **整棵文件列表**都
+/// 要重画 ⇒ 每个可见行都要新建 Pango 布局 + 量文字宽度 ⇒ 主线程一帧几十
+/// 毫秒 ⇒ 堡垒机那种远程桌面再乘一个 RTT ⇒ **整个界面卡死**（菜单也点不动）。
+///
+/// ⇒ 现在只把**正在传的那一行**标脏（`model.set` ⇒ GTK 只重画它）。
+///
+/// 返回值：有没有找到正在传的行（没有就不用白跑一趟）。
+pub fn repaint_xfer_rows(pane: &Pane) -> bool {
+    let mut any = false;
+    let mut it = pane.model.iter_first();
+    while let Some(mut i) = it {
+        let xfer: bool = pane.model.get(&i, COL_XFER);
+        if xfer {
+            any = true;
+            // 写回同一个值：GTK 照样发 "row-changed" ⇒ 这一行被标脏。
+            pane.model.set(&i, &[(COL_XFER as u32, &true)]);
+        }
+        it = if pane.model.iter_next(&mut i) {
+            Some(i)
+        } else {
+            None
+        }
+    }
+    any
 }
 
 /// 这个面板里**还有没有**正在淡出的终态文案。
@@ -504,7 +554,7 @@ pub fn clear_progress(pane: &Pane) {
             None
         };
     }
-    pane.view.queue_draw();
+    queue_draw_full(pane);
 }
 
 /// 填充列表（隐藏过滤 + 目录显示“目录”）。对应 C 版 fill_model。
@@ -609,7 +659,7 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
     //    文件大小列，那么一定要保证最长的大小显示完整，就是列宽按最长的文件大小
     //    来定」）⇒ 窄了 GTK 就把文字省略成「104.4 …」，用户根本看不出文件多大。
     apply_size_col_width(pane, longest_size_width(&pane.view, &size_texts));
-    pane.view.queue_draw();
+    queue_draw_full(pane);
 }
 
 /// 这一批里**最长的大小文案**要占多宽（像素，含单元格内边距）。
@@ -1250,7 +1300,19 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         h_bar,
         sw,
         transfer_btn: transfer,
+        full_redraws: std::cell::Cell::new(0),
     }
+}
+
+/// **整表重画**（把整棵列表标脏 ⇒ 所有可见行下一帧都重画）。
+///
+/// ⚠️ **只在「内容真的全变了」时用**（目录刷新、行号重排…）。
+///    ⚠️ **传输期的进度/动画绝不能用它** ⇒ 一次上传里调用它几百次 ⇒
+///    主线程被绘制拖死（用户 2026-11-11：上传时界面完全卡住）。
+///    ⇒ 那些地方只改**模型里的那一行**（`model.set`）⇒ GTK 只重画那一行。
+pub fn queue_draw_full(pane: &Pane) {
+    pane.full_redraws.set(pane.full_redraws.get() + 1);
+    pane.view.queue_draw();
 }
 
 /// 「在此处打开终端」的**目标目录**。

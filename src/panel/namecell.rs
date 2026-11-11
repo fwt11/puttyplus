@@ -9,10 +9,27 @@
 //! `offset` 由面板底部（名称列正下方）的窄滚动条驱动。
 
 use std::cell::{Cell as StdCell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene};
+
+/// **文件名单元格被画过多少次**（诊断用，全局计数）。
+///
+/// ⚠️ **为什么要有它**：用户 2026-11-11 报「上传时界面完全卡住、进度从 2%
+///    跳到 80%」。根因是传输期的每一帧都**整表重画** ⇒ 每个可见行都要
+///    画一遍 ⇒ 主线程被绘制拖死。
+///
+/// ⇒ 这个计数**跟谁触发的重画无关**（只数真正画了几行）⇒ 可以直接当
+///    回归断言：正常上传期间应该「每帧只画正在传的那一行」，
+///    一旦有人改回整表重画 ⇒ 计数会涨一个数量级 ⇒ 冒烟当场红。
+static DRAW_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 画了多少次（见 [`DRAW_COUNT`]）。
+pub fn draw_count() -> u64 {
+    DRAW_COUNT.load(Ordering::Relaxed)
+}
 
 mod imp {
     use super::*;
@@ -78,6 +95,8 @@ mod imp {
             if text.is_empty() {
                 return;
             }
+            // ⚠️ **画一行就记一次**（诊断用）：整表重画 ⇒ 这个数会飞涨。
+            DRAW_COUNT.fetch_add(1, Ordering::Relaxed);
             let progress = self.progress.borrow().clone();
             let pct = self.progress_pct.get().clamp(0, 100);
 

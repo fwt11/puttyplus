@@ -227,7 +227,21 @@ pub struct SftpBackend {
     pub id: String,
     /// 远程可用的 SHA-1 工具（checksum.rs）：None = 还没试过，
     /// Some("") = 试过了都没有。Mutex 是因为 exec 要 &self 又要缓存结果
-    pub(crate) sha1_tool: Mutex<Option<&'static str>>,
+    ///
+    /// ⚠️ **用 `Arc` 包着**：传输那条通道的后端是另建的一个 `SftpBackend`
+    ///    ⇒ 两者共用同一份「远端有哪个 sha1 工具」的缓存 ⇒ 不用重复探测。
+    pub(crate) sha1_tool: Arc<Mutex<Option<&'static str>>>,
+    /// **传输专用**的那条 SFTP 通道（懒创建 + 缓存）。
+    ///
+    /// ⚠️ **为什么传输要单独一条通道**（用户 2026-11-11 报「上传时别的
+    ///    请求回不来」）：SSH 的**通道窗口是每通道一份** ⇒ 大文件上传会把
+    ///    **它那条通道**的窗口吃光 ⇒ 服务端想回一个目录列表/属性查询，
+    ///    也得等窗口 ⇒ 面板的刷新、存在性预检、目录跟随全都排在上传后面
+    ///    ⇒ 看起来「界面卡住了」。
+    ///
+    /// ⇒ 传输另开一条 `subsystem sftp` 通道 ⇒ 窗口各算各的 ⇒ 互不挤占。
+    ///    ⚠️ **底层还是同一条 SSH 连接**（连接中枢）⇒ 不多一次认证。
+    transfer_sftp: tokio::sync::Mutex<Option<Arc<SftpBackend>>>,
 }
 
 /// 转发规则的一行运行态快照（UI 渲染用；规则本体不离开连接）。
@@ -383,7 +397,8 @@ pub async fn connect_with_source(
         sftp,
         source: source.to_string(),
         id: format!("{host}:{port}"),
-        sha1_tool: Mutex::new(None),
+        sha1_tool: Arc::new(Mutex::new(None)),
+        transfer_sftp: tokio::sync::Mutex::new(None),
     })
 }
 
@@ -810,6 +825,39 @@ impl SftpBackend {
             .await
             .map_err(|_| BackendError(tr("初始化 SFTP 失败: 超时（服务器未回应 SFTP 协议版本）").into()))?
             .map_err(|e| BackendError(trf!("初始化 SFTP 失败: {e}", e = e)))
+    }
+
+    /// **传输专用**的后端：**自己的 SFTP 通道**（第一次调用时开，之后缓存）。
+    ///
+    /// ⚠️ **为什么传输要单独一条通道**（用户 2026-11-11 报「上传时界面
+    ///    完全卡住、别的请求回不来」）：
+    ///
+    /// SSH 的**通道窗口是每通道一份**。大文件上传会把**它那条通道**的窗口
+    /// 吃光（数据在通道里排队）⇒ 服务端想回一个目录列表 / 属性查询，也得
+    /// 等窗口腾出来 ⇒ 面板的刷新、存在性预检、目录跟随全排在上传后面 ⇒
+    /// 看起来就像「界面卡住了」。
+    ///
+    /// ⇒ 传输另开一条 `subsystem sftp` 通道 ⇒ **窗口各算各的** ⇒ 互不挤占。
+    /// ⚠️ **底层还是同一条 SSH 连接**（连接中枢）⇒ 不多一次认证、不多一条 TCP。
+    ///
+    /// ⚠️ **开不出来就退回共用那条**（老服务器不让开第二个通道）：传输照做，
+    ///    只是没有「不挤占」这个好处。
+    pub async fn transfer_backend(self: &Arc<Self>) -> BackendResult<Arc<SftpBackend>> {
+        let mut g = self.transfer_sftp.lock().await;
+        if let Some(c) = g.as_ref() {
+            return Ok(Arc::clone(c));
+        }
+        let sftp = self.open_sftp().await?;
+        let c = Arc::new(SftpBackend {
+            shared: Arc::clone(&self.shared),
+            sftp,
+            source: self.source.clone(),
+            id: self.id.clone(),
+            sha1_tool: Arc::clone(&self.sha1_tool),
+            transfer_sftp: tokio::sync::Mutex::new(None),
+        });
+        *g = Some(Arc::clone(&c));
+        Ok(c)
     }
 
     /// 在现有连接上开一条到 `host:port` 的 direct-tcpip 通道，返回双向流。

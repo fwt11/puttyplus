@@ -1022,15 +1022,23 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
             // ⚠️ **推进终态文案的淡出**（「完成」慢慢消失）
             let now = pane::now_ms();
             // 文件列表（两栏）：正在传的行背景要跟着呼吸重画
+            //
+            // ⚠️⚠️ **只重画「正在传的那一行」**（用户 2026-11-11 报「上传时
+            //    界面完全卡住，点什么都不顶用，进度从 2% 跳到 80%」）：
+            //    以前这里 `p.view.queue_draw()` ⇒ **整棵文件列表**每一帧都
+            //    重画 ⇒ 每个可见行都要新建 Pango 布局 + 量文字宽度 ⇒ 主线程
+            //    一帧几十毫秒（实测 59ms）⇒ 堡垒机的远程桌面再乘一个 RTT ⇒
+            //    **整个 GTK 主循环被拖死**（菜单也点不动）⇒ 积压的事件随后
+            //    一起回放 ⇒ 进度看起来「突然从 2% 跳到 80%」。
             let rp = st.remote_pane.borrow().clone();
             if let Some(p) = rp {
                 pane::tick_fade(&p, now);
-                p.view.queue_draw();
+                pane::repaint_xfer_rows(&p);
             }
             let lp = st.local_pane.borrow().clone();
             if let Some(p) = lp {
                 pane::tick_fade(&p, now);
-                p.view.queue_draw();
+                pane::repaint_xfer_rows(&p);
             }
             // 队列窗口：方向列的 accent 色在呼吸
             let qu = st.queue_ui.borrow().as_ref().map(|q| q.view.clone());

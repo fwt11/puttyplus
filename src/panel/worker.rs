@@ -1584,7 +1584,7 @@ fn spawn_job(
             TransferJob::File(it) => {
                 let name = localpath::basename(&it.src);
                 let shared = it.shared.clone();
-                run_transfer(Some(conn.as_ref()), it, &ui_tx).await;
+                run_transfer(Some(&conn), it, &ui_tx).await;
                 let state = shared.lock().unwrap().state;
                 (key, vec![(name, state)])
             }
@@ -1593,7 +1593,7 @@ fn spawn_job(
                 for it in items {
                     let name = localpath::basename(&it.src);
                     let shared = it.shared.clone();
-                    run_transfer(Some(conn.as_ref()), it, &ui_tx).await;
+                    run_transfer(Some(&conn), it, &ui_tx).await;
                     out.push((name, shared.lock().unwrap().state));
                 }
                 (None, out)
@@ -1696,7 +1696,7 @@ fn stop_scheduler(
 }
 
 async fn run_transfer(
-    conn: Option<&SftpBackend>,
+    conn: Option<&Arc<SftpBackend>>,
     it: XferSpec,
     ui_tx: &async_channel::Sender<PanelEvent>,
 ) {
@@ -1705,6 +1705,16 @@ async fn run_transfer(
         g.state = XferState::Err;
         g.msg = Some(tr("连接已断开").into());
         return;
+    };
+    // ⚠️ **传输走「自己的 SFTP 通道」**（用户 2026-11-11 报「上传时界面完全
+    //    卡住、别的请求回不来」）：SSH 的通道窗口是每通道一份 ⇒ 大文件上传
+    //    会把它那条通道的窗口吃光 ⇒ 服务端连目录列表都回不来 ⇒ 面板的刷新/
+    //    预检/目录跟随全排在上传后面 ⇒ 看起来像界面卡死。
+    //    ⇒ 传输另开一条 `subsystem sftp`（同一条 SSH 连接，不多一次认证）。
+    //    ⚠️ **开不出来就退回共用那条**（老服务器不让开第二个通道）。
+    let c = match c.transfer_backend().await {
+        Ok(t) => t,
+        Err(_) => Arc::clone(c),
     };
     {
         let mut g = it.shared.lock().unwrap();
@@ -1718,6 +1728,14 @@ async fn run_transfer(
 
     let shared = it.shared.clone();
     let ui = ui_tx.clone();
+    // ⚠️ **进度事件限流**（用户 2026-11-11 报「上传时界面完全卡住」）：
+    //    每 64KB 报一次 ⇒ 8Mbps 下约 16 次/秒；本地大带宽能到几百次/秒。
+    //    ⇒ UI 更新按 **每 100ms 最多一次** 发（数字本身每次都记进 `shared`
+    //    ⇒ 不会丢进度，只是刷新得没那么密）。
+    //    ⚠️ 人眼看进度条 10 次/秒已经够了；再密只是白烧主线程。
+    let last_tick = std::sync::Arc::new(std::sync::Mutex::new(
+        std::time::Instant::now() - std::time::Duration::from_millis(200),
+    ));
     let sink = ProgressSink::new(move |done, total, cur| {
         let cancel = {
             let mut g = shared.lock().unwrap();
@@ -1734,7 +1752,12 @@ async fn run_transfer(
             }
             g.cancel
         };
-        let _ = ui.try_send(PanelEvent::XferTick);
+        // 限流：不到 100ms 就不发 UI 事件（`shared` 里的数字已经是新的）
+        let mut last = last_tick.lock().unwrap();
+        if last.elapsed() >= std::time::Duration::from_millis(100) {
+            *last = std::time::Instant::now();
+            let _ = ui.try_send(PanelEvent::XferTick);
+        }
         cancel
     });
 
