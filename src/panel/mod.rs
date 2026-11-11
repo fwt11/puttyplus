@@ -30,6 +30,7 @@ pub mod pane;
 pub mod pulse;
 pub mod quickcmd;
 pub mod queue;
+pub mod ring;
 pub mod relay;
 pub mod subtabs;
 pub mod relayui;
@@ -178,6 +179,11 @@ pub struct PanelState {
     /// 找到它。⚠️ 按钮挂在面板上，面板属于本状态的控件树 ⇒ 这里存
     /// **强引用**不会成环（按钮不反过来抓 `PanelState`）。
     pub queue_btn: RefCell<Option<gtk::Button>>,
+    /// 「传输队列」按钮角上那个**转动的圈**（用户 2026-11-11 要的忙态）。
+    ///
+    /// ⚠️ 存在这儿而不是从控件树里翻：翻控件树要认 `Overlay`/`DrawingArea`
+    ///    的层级 ⇒ 一旦有人改了布局就静默失效（圈再也不转）。
+    pub xfer_ring: RefCell<Option<ring::Ring>>,
     /// **传输动画定时器**（呼吸相位）——只在**有东西在传**时存在。
     ///
     /// 干什么用（用户 2026-11-10）：传输中的文件行背景呼吸、队列按钮图标
@@ -389,6 +395,7 @@ impl SftpPanel {
             items: RefCell::new(Vec::new()),
             queue_ui: RefCell::new(None),
             queue_btn: RefCell::new(None),
+            xfer_ring: RefCell::new(None),
             /// **传输动画定时器**（呼吸相位）——只在**有东西在传**时存在。
             ///
             /// 干什么用（用户 2026-11-10）：传输中的文件行背景呼吸、队列
@@ -1030,14 +1037,14 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
             if let Some(v) = qu {
                 v.queue_draw();
             }
-            // 工具栏「传输队列」按钮的图标：透明度呼吸
-            queue::breathe_btn(&st);
+            // ⚠️ **按钮的忙态不再靠「透明度呼吸」**（用户 2026-11-11 改成
+            //    「图标上加个转动的圈」）⇒ 忙态由 `queue::refresh_btn` 按
+            //    「队列里还有几个在传」直接开关转圈（不用定时器驱动）。
             // ⚠️ **没事做了就停**（省 CPU）。
             //    ⚠️ 回调里**不能** `id.remove()` 自己（那会 panic）⇒ 只把
             //    存起来的 SourceId 清掉，靠 `Break` 让 GLib 收掉这个源。
             if xfer_running(&st).total() == 0 && !any_fading(&st) {
                 *st.xfer_anim.borrow_mut() = None;
-                queue::reset_btn_opacity(&st);
                 return glib::ControlFlow::Break;
             }
             glib::ControlFlow::Continue
@@ -1047,8 +1054,8 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
         if let Some(id) = st.xfer_anim.borrow_mut().take() {
             id.remove();
         }
-        // 停了 ⇒ 图标恢复成不透明（别留个半透明的鬼影）
-        queue::reset_btn_opacity(st);
+        // 停了 ⇒ 转圈也停（转圈由 `refresh_btn` 按队列状态开关 ⇒ 这里
+        // 不用管；留着是为了「没跑过 flush」时也不留个转着的圈）
     }
 }
 

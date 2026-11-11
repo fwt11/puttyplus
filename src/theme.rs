@@ -869,6 +869,13 @@ const COMPONENTS: &str = r#"
   font-size: 0.8em;
   font-weight: 600;
 }
+/* 「传输队列」按钮角上那个**转动的圈**（用户 2026-11-11）。
+   ⚠️ 颜色走 CSS 变量 ⇒ 画的时候读控件样式上下文的前景色就能拿到
+   ⇒ **不用在 Rust 里再抄一份配色**（抄了就跟主题不同步）。
+   ⚠️ 只定 `color`：画弧时读的是 `style_context().color()`。 */
+.pp-xfer-ring {
+  color: @pp_accent;
+}
 .pp-xfer-badge-on {
   background-color: @pp_accent;
   color: @pp_on_accent;

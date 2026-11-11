@@ -226,6 +226,9 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
     let Some(b) = st.queue_btn.borrow().clone() else { return };
     let running = super::xfer_running(st);
     let n = running.total();
+    // ⚠️ **转圈 = 「还有东西在传」**（用户 2026-11-11 要的动态效果）
+    //    ⇒ 队列每次刷新都调这里 ⇒ 数量与转圈自己就同步了。
+    set_btn_spinning(st, n > 0);
 
     // 角标 + 图标
     if let Some(child) = b.child() {
@@ -246,13 +249,10 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
                         l.remove_css_class("pp-xfer-badge-on");
                     }
                 }
-                if let Some(i) = c.downcast_ref::<gtk::Image>() {
-                    i.set_icon_name(Some(if n > 0 {
-                        "content-loading-symbolic"
-                    } else {
-                        "view-list-symbolic"
-                    }));
-                }
+                // ⚠️ **不再把图标换成 `content-loading-symbolic`**（用户
+                //    2026-11-11）：那个图标是**静态**的一圈虚线 ⇒ 看着像
+                //    「卡住了」而不是「在转」⇒ 改成在原来那个队列图标上
+                //    **叠一个真在转的圈**（见 `panel::ring`）。
                 cur = c.next_sibling();
             }
         }
@@ -275,6 +275,19 @@ pub fn refresh_btn(st: &Rc<PanelState>) {
 
     // 状态行上的「传输中 N 个」也跟着变（数量变了要重画）
     super::render_status(st);
+}
+
+/// 冒烟用：队列按钮角上那个**转动的圈**现在转不转。
+///
+/// ⚠️ 为什么要单独开一个口：忙态（`pp-xfer-busy` 那个底色）与角标是
+///    **两回事**——角标有数字、按钮变底色，都不代表「有东西在传」；
+///    转圈才是「正在传」的唯一信号（用户 2026-11-11 要的就是它）。
+pub fn btn_ring_spinning(st: &Rc<PanelState>) -> bool {
+    st.xfer_ring
+        .borrow()
+        .as_ref()
+        .map(|r| r.spinning())
+        .unwrap_or(false)
 }
 
 /// 冒烟用：队列按钮的当前状态
@@ -355,37 +368,23 @@ pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
     // 进度已经画在文件面板的文件名后面（flush 里更新）。
 }
 
-/// 工具栏「传输队列」按钮的图标：**透明度呼吸**（动态效果）。
+/// 工具栏「传输队列」按钮：**传输中 ⇒ 图标上叠一个转动的圈**。
 ///
-/// 干什么用（用户 2026-11-10）：「任务列表等图标也可以有一些动态效果」。
+/// 干什么用（用户 2026-11-11）：「上传下载文件时传输队列图标可以改为原来
+/// 静态的图标上加个转动的圈」⇒ 底下还是原来那个队列图标，上面盖一个
+/// 小转圈（`gtk::Spinner`，它自己会转 ⇒ 不用我们另起定时器）。
 ///
-/// ⚠️ 呼吸相位是**按时间算的**（`pulse::phase`）⇒ 这里只是把当前相位
-///    映射成透明度 ⇒ 多个面板天然同步。
-pub fn breathe_btn(st: &Rc<PanelState>) {
-    set_btn_opacity(st, super::pulse::alpha(0.45, 1.0) as f64);
-}
-
-/// 传输停了 ⇒ 图标恢复成完全不透明（别留个半透明的鬼影）。
-pub fn reset_btn_opacity(st: &Rc<PanelState>) {
-    set_btn_opacity(st, 1.0);
-}
-
-/// 设置「传输队列」按钮里那个图标的透明度。
-fn set_btn_opacity(st: &Rc<PanelState>, a: f64) {
-    let Some(b) = st.queue_btn.borrow().clone() else {
+/// ⚠️ **比以前的「透明度呼吸」好在哪**：呼吸是「整张图标一起明暗」⇒ 看不出
+///    「在转」还是「卡住了」；转圈是**进度语义**（业界通用）⇒ 一眼知道
+///    还在忙。
+pub fn set_btn_spinning(st: &Rc<PanelState>, on: bool) {
+    // ⚠️ 直接拿 `PanelState` 里存的那个圈 ⇒ **不翻控件树**
+    //    （翻树要认 `Overlay`/`DrawingArea` 的层级 ⇒ 改布局就静默失效）。
+    let guard = st.xfer_ring.borrow();
+    let Some(ring) = guard.as_ref() else {
         return;
     };
-    let Some(child) = b.child() else { return };
-    let Some(row) = child.downcast_ref::<gtk::Box>() else {
-        return;
-    };
-    let mut cur = row.first_child();
-    while let Some(c) = cur {
-        if let Some(i) = c.downcast_ref::<gtk::Image>() {
-            i.set_opacity(a);
-        }
-        cur = c.next_sibling();
-    }
+    ring.set_spinning(on);
 }
 
 /// 刷新所有行的进度显示（对应 C 版 xfer_flush_idle）。

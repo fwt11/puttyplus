@@ -365,6 +365,12 @@ fn main() {
         assert_eq!(badge, "1", "有一个在传 ⇒ 角标显示 1");
         assert!(busy, "有东西在传 ⇒ 按钮要是忙态");
         assert!(badge_on, "有数字 ⇒ 角标要有底色");
+        // ⚠️ **转圈**（用户 2026-11-11 要的动态效果）：有东西在传 ⇒ 圈在转。
+        //    这是「正在传」最直观的信号（角标与底色都只是「有数字」）。
+        assert!(
+            panel::queue::btn_ring_spinning(&st),
+            "有东西在传 ⇒ 队列按钮上的圈要转起来"
+        );
         let txt = st.pane(true).status_lbl.text().to_string();
         assert!(
             txt.contains("上传中 1 个"),
@@ -378,6 +384,11 @@ fn main() {
         let (badge, busy, badge_on) = panel::queue::btn_state(&st).unwrap();
         assert_eq!(badge, "", "传完了角标要清空");
         assert!(!busy, "传完了不该还是忙态");
+        // ⚠️ **圈也要停**：传完了还转 ⇒ 用户以为还在传（用户 2026-11-11）。
+        assert!(
+            !panel::queue::btn_ring_spinning(&st),
+            "传完了 ⇒ 队列按钮上的圈要停下来"
+        );
         assert!(
             !badge_on,
             "传完了角标不该留底色（用户 2026-11-07：别剩个蓝色的块）"
