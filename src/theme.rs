@@ -944,6 +944,12 @@ button.pp-xfer-busy {
   background-color: @pp_accent_soft;
   color: @pp_fg;
 }
+/* ⚠️ **这里的文字要回正常色**：按钮里的文字是**独立的 label 节点** ⇒
+   下面那条 blanket 规则 `label { color: @pp_fg }` 给了它显式颜色 ⇒
+   按钮自己那条 `color: @pp_fg` 只是继承 ⇒ 而 `button:checked label`
+   （强调底 ⇒ 白字）会盖住它 ⇒ **淡底 + 白字 = 看不清**。
+   ⇒ 淡底的选中态都要在这里把 label 拉回正常色。 */
+.pp-segmented button:checked label { color: @pp_fg; }
 .pp-segmented button:focus-visible { outline: 2px solid alpha(@pp_accent, 0.55); }
 .pp-swatch { border-radius: 4px; }
 /* 空态（阶段 51 结构化；**阶段 96 重新设计**）：工作台还没有任何页签时
@@ -1402,6 +1408,10 @@ button.destructive-action label {
 }
 /* 平面按钮的选中态是「淡强调底 + 正常文字」⇒ 文字也得跟着正常色 */
 button.flat:checked label { color: @pp_fg; }
+/* ⚠️ **凡是「淡底」的选中态都要来一条**（白字压淡底 = 看不清）：
+   上面 `button.flat:checked`、COMPONENTS 里的 `.pp-segmented button:checked`
+   都是淡底 ⇒ 各自都要把 label 拉回正常色。实底（`button:checked`）才用
+   on_accent（白字）。 */
 /* 工具栏上的纯图标按钮：压到 30px 见方。
    结果表工具栏一排要放 5-8 颗（下一页/导出/编辑/插入/删除/保存/放弃），
    Adwaita 默认 padding 一颗就 40px 宽，右侧会被窗口切掉。文字改成图标后
@@ -1925,6 +1935,13 @@ mod tests {
             assert!(
                 css.contains("button.flat:checked label { color: @pp_fg; }"),
                 "{t:?} 的 CSS 缺「平面按钮选中时文字回正常色」"
+            );
+            // ⚠️ **淡底的选中态也要有**：`.pp-segmented`（数据库工作台的分段
+            //    控件）选中时是 accent_soft **淡底** ⇒ 文字必须回正常色，
+            //    否则被上面那条「强调底 ⇒ 白字」盖成 **白字压淡底** = 看不清。
+            assert!(
+                css.contains(".pp-segmented button:checked label { color: @pp_fg; }"),
+                "{t:?} 的 CSS 缺「分段控件选中时文字回正常色」"
             );
             // ② 树视图「聚焦的选中行」是**实底 + on_accent 文字**
             //    （取色的那一方要自己算对状态 ⇒ 见 `panel::namecell`）
