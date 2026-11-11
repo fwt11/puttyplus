@@ -160,6 +160,12 @@ pub const SETTINGS: &[SettingItem] = &[
         from: "（新）首选项中心「终端」页",
     },
     SettingItem {
+        id: "editor_max_bytes",
+        label: "编辑器查看上限",
+        page: Page::Advanced,
+        from: "（新）首选项中心「高级」页",
+    },
+    SettingItem {
         id: "xfer_resume",
         label: "断点续传",
         page: Page::Transfer,
@@ -919,6 +925,26 @@ fn advanced_page(root: &gtk::Box) {
         root.append(&bbox);
         spin.connect_value_changed(|s| {
             crate::settings::set_sftp_pane_pos(s.value() as i32);
+        });
+    }
+
+    /* ---- 内置查看/编辑器的大小上限（用户 2026-11-11 提的） ---- */
+    //
+    // ⚠️ 以前硬编码 8 MiB（「调大只会让 TextView 卡死」）⇒ 现在给用户开关，
+    //    但**上限封在 64 MiB**（再大真的会冻住）。
+    {
+        let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        bbox.append(&gtk::Label::new(Some(tr("编辑器查看上限"))));
+        let spin = gtk::SpinButton::with_range(1.0, 64.0, 1.0);
+        let cur = crate::settings::editor_max_bytes() / 1024 / 1024;
+        spin.set_value(cur.max(1) as f64);
+        spin.set_tooltip_text(Some(tr(
+            "内置查看/编辑器能打开多大的文件（MB）。调太大会让文本控件卡住。",
+        )));
+        bbox.append(&spin);
+        root.append(&bbox);
+        spin.connect_value_changed(|s| {
+            crate::settings::set_editor_max_bytes((s.value() as u64) * 1024 * 1024);
         });
     }
 

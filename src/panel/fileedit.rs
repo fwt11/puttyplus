@@ -43,9 +43,13 @@ use crate::util::{human_size, path_basename};
 use crate::i18n::tr;
 use crate::trf;
 
-/// 内置查看/编辑器的单文件上限。硬编码，不给用户改——调大只会让
-/// `TextView` 卡死，不是"支持大文件"。
-pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// 内置查看/编辑器的单文件上限（**用户可改**：首选项 →「高级」页）。
+///
+/// ⚠️ 以前硬编码 8 MiB（「不给用户改——调大只会让 `TextView` 卡死」）⇒
+///    用户 2026-11-11 要求改成可配置 ⇒ 改成读设置（上限封在 64 MiB）。
+pub fn max_bytes() -> u64 {
+    crate::settings::editor_max_bytes()
+}
 
 /// 语法高亮的大小上限：分词 + 上 tag 都跑在主线程上，超过这个就不高亮
 /// （状态栏会说明），免得打开一个大文件就卡住。
@@ -619,7 +623,7 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         super::RetryOp::ReadFile {
             id,
             path: path.to_string(),
-            max: MAX_BYTES,
+            max: max_bytes(),
         },
     );
     if !send(
@@ -627,7 +631,7 @@ pub fn open_remote(st: &Rc<PanelState>, path: &str, readonly: bool) {
         WorkerCmd::ReadFile {
             id,
             path: path.to_string(),
-            max: MAX_BYTES,
+            max: max_bytes(),
         },
     ) {
         st.pending_file_reads.borrow_mut().remove(&id);
@@ -891,7 +895,7 @@ fn apply_bytes(
     base_readonly: bool,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    if data.len() as u64 > MAX_BYTES {
+    if data.len() as u64 > max_bytes() {
         return Err(too_large_msg(path, data.len() as u64));
     }
     if looks_binary(&data) {
@@ -3001,11 +3005,11 @@ pub fn resend_save(st: &Rc<PanelState>, id: u64, path: &str) {
         bytes: 0,
     };
     let data = dec.encode(&text);
-    if data.len() as u64 > MAX_BYTES {
+    if data.len() as u64 > max_bytes() {
         dialogs::show_error(
             Some(&e.win),
             tr("无法保存"),
-            &trf!("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", v0 = human_size(data.len() as u64), v1 = human_size(MAX_BYTES)),
+            &trf!("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", v0 = human_size(data.len() as u64), v1 = human_size(max_bytes())),
         );
         return;
     }
@@ -3078,11 +3082,11 @@ fn save(e: &Rc<FileEdit>, st: &Rc<PanelState>) -> bool {
         bytes: 0,
     };
     let data = dec.encode(&text);
-    if data.len() as u64 > MAX_BYTES {
+    if data.len() as u64 > max_bytes() {
         dialogs::show_error(
             Some(&e.win),
             tr("无法保存"),
-            &trf!("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", v0 = human_size(data.len() as u64), v1 = human_size(MAX_BYTES)),
+            &trf!("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", v0 = human_size(data.len() as u64), v1 = human_size(max_bytes())),
         );
         return false;
     }
@@ -3200,7 +3204,7 @@ fn do_reload(e: &Rc<FileEdit>, st: &Rc<PanelState>) {
             WorkerCmd::ReadFile {
                 id: e.id,
                 path: e.path.clone(),
-                max: MAX_BYTES,
+                max: max_bytes(),
             },
         ) {
             st.pending_file_reads.borrow_mut().remove(&e.id);
@@ -3279,11 +3283,11 @@ fn read_local(path: &str) -> Result<Vec<u8>, String> {
     if !md.is_file() {
         return Err(trf!("{path} 不是普通文件，内置查看/编辑器只处理文本文件", path = path));
     }
-    if md.len() > MAX_BYTES {
+    if md.len() > max_bytes() {
         return Err(too_large_msg(path, md.len()));
     }
     let data = std::fs::read(path).map_err(|e| trf!("读取 {path} 失败: {e}", path = path, e = e))?;
-    if data.len() as u64 > MAX_BYTES {
+    if data.len() as u64 > max_bytes() {
         return Err(too_large_msg(path, data.len() as u64));
     }
     Ok(data)
@@ -3328,8 +3332,17 @@ fn temp_path(dir: &Path, tag: &str) -> PathBuf {
     dir.join(format!(".{tag}-{}-{n}.tmp", std::process::id()))
 }
 
+/// **测试钩子**：读一个本地文件，超限时返回那句提示（`None` = 能读）。
+///
+/// ⚠️ 为什么要有它：上限改成**可配置**以后，光看设置项的值不算数——
+///    得证明这个上限**真的挡住了打开文件**。而 `read_local` 是私有的，
+///    端到端又只能看到弹窗 ⇒ 这里开一个只读的口子给冒烟用。
+pub fn local_read_err(path: &str) -> Option<String> {
+    read_local(path).err()
+}
+
 fn too_large_msg(path: &str, size: u64) -> String {
-    trf!("{path}\n\n文件大小 {v0}，超过内置查看/编辑上限 {v1}。\n请先下载到本地，再用外部编辑器打开。", path = path, v0 = human_size(size), v1 = human_size(MAX_BYTES))
+    trf!("{path}\n\n文件大小 {v0}，超过内置查看/编辑上限 {v1}。\n请先下载到本地，再用外部编辑器打开。", path = path, v0 = human_size(size), v1 = human_size(max_bytes()))
 }
 
 #[cfg(test)]

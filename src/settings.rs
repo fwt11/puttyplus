@@ -117,6 +117,30 @@ mod tests {
         assert_ne!(safe_key("a:b"), safe_key("a_b"));
     }
 
+    /// 编辑器查看上限的解析（纯函数，不碰文件）。
+    ///
+    /// ⚠️ **写坏了的值必须回默认值**，不能当 0（＝不限）——一个手滑写坏的
+    ///    配置不该让「打开文件」变成「随便读几个 G」。
+    #[test]
+    fn 编辑器上限的解析() {
+        assert_eq!(parse_editor_max_bytes(""), DEFAULT_EDITOR_MAX_BYTES);
+        assert_eq!(parse_editor_max_bytes("abc"), DEFAULT_EDITOR_MAX_BYTES);
+        assert_eq!(parse_editor_max_bytes("-1"), DEFAULT_EDITOR_MAX_BYTES);
+        // 正常值原样透传（前后空格不算数）
+        assert_eq!(parse_editor_max_bytes("1048576"), 1048576);
+        assert_eq!(parse_editor_max_bytes("  2097152  "), 2097152);
+        // 越界的夹到范围里（调太大真的会冻住 TextView）
+        assert_eq!(parse_editor_max_bytes("0"), EDITOR_MAX_BYTES_FLOOR);
+        assert_eq!(parse_editor_max_bytes("1"), EDITOR_MAX_BYTES_FLOOR);
+        assert_eq!(
+            parse_editor_max_bytes("999999999999"),
+            EDITOR_MAX_BYTES_CEILING
+        );
+        // 默认值本身在允许范围里
+        assert!(DEFAULT_EDITOR_MAX_BYTES >= EDITOR_MAX_BYTES_FLOOR);
+        assert!(DEFAULT_EDITOR_MAX_BYTES <= EDITOR_MAX_BYTES_CEILING);
+    }
+
     /// 最近连接上限的解析（纯逻辑，不碰文件）。
     #[test]
     fn 最近连接上限的解析() {
@@ -331,6 +355,44 @@ pub fn language() -> crate::i18n::Lang {
 /// 保存界面语言。
 pub fn set_language(l: crate::i18n::Lang) {
     set_str("general", "language", l.code());
+}
+
+/* ---------------- 内置查看/编辑器的大小上限 ---------------- */
+
+/// 内置查看/编辑器的单文件上限（**默认** 8 MiB）。
+pub const DEFAULT_EDITOR_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// 能调到的上限：再大 `TextView` 真的会卡死（打开一个大文件就冻住）。
+pub const EDITOR_MAX_BYTES_CEILING: u64 = 64 * 1024 * 1024;
+/// 能调到的下限：再小连普通配置文件都打不开。
+pub const EDITOR_MAX_BYTES_FLOOR: u64 = 64 * 1024;
+
+/// 内置查看/编辑器的单文件上限（**用户可改**，用户 2026-11-11 提的）。
+///
+/// ⚠️ 以前是硬编码 8 MiB（「不给用户改——调大只会让 TextView 卡死」）⇒
+///    现在给用户一个开关，但**上限封在 64 MiB**（再大真的会冻住）。
+pub fn editor_max_bytes() -> u64 {
+    parse_editor_max_bytes(&get_str("editor", "max_bytes"))
+}
+
+/// 设内置查看/编辑器的大小上限（自动夹到合法范围）。
+pub fn set_editor_max_bytes(v: u64) {
+    set_str(
+        "editor",
+        "max_bytes",
+        &parse_editor_max_bytes(&v.to_string()).to_string(),
+    );
+}
+
+/// 上限值的解析（**纯函数**，便于单测）。
+///
+/// ⚠️ 认不出来（缺键 / 写坏了）⇒ 回**默认值**，而不是当成 0（= 不限）：
+/// 一个手滑写坏的值不该让「打开文件」变成「随便读几个 G」。
+pub fn parse_editor_max_bytes(v: &str) -> u64 {
+    let t = v.trim();
+    match t.parse::<u64>() {
+        Ok(n) => n.clamp(EDITOR_MAX_BYTES_FLOOR, EDITOR_MAX_BYTES_CEILING),
+        Err(_) => DEFAULT_EDITOR_MAX_BYTES,
+    }
 }
 
 /* ---------------- 最近连接（上限 / 命令行启动是否记录） ---------------- */
