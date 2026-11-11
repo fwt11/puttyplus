@@ -227,6 +227,21 @@ jobs:
             exit 1
           }
 
+      - name: 编译全部 example（119 个冒烟都得能编）
+        # ⚠️ **为什么单独一步**：单测（`cargo test --lib`）与 `cargo build
+        #    --release` **都不编 example** ⇒ 改了公开签名（例如
+        #    `panel::on_row_activated` 多了个 `islink`）而漏改某个 example
+        #    ⇒ **本地全绿、CI 才红**。
+        #    ⇒ 2026-11-10 真踩了：`01efb43`（软链双击跟进去）改了那个签名
+        #    却漏了 `examples/selfheal_smoke.rs` ⇒ CI 从第 50 轮起**连红
+        #    10 轮**（每次都挂在「GUI 冒烟」这步）才被人看见。
+        #    ⇒ 这里把**所有** example 编译一遍（**不只**下面 GUI 冒烟跑的那
+        #    5 个）⇒ 签名漂移立刻红，不用等人肉翻日志。
+        #    ⚠️ 用 **check** 而不是 build：119 个 example 各自的 release
+        #    二进制要链接一遍，慢得没必要 ⇒ 这里只验「能不能编过」。
+        #    （GUI 冒烟那步自己会 release 编译它跑的那 5 个。）
+        run: cargo check --locked --examples
+
       - name: GUI 冒烟（example 跑在主线程）
         # ⚠️ GTK 的断言只能在这儿测：example 是独立进程 ⇒ gtk::init() 在
         #    主线程里能成功 ⇒ UI 断言真的会跑（单测里那几个会按设计跳过）。

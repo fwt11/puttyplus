@@ -79,7 +79,7 @@ fn main() {
     //
     // ⚠️ 这一步模拟的是「点目录」：命令发出去了（重试的"怎么重发"也就
     // 记下来了），随后 worker 回了一个失败（连接断了）。
-    panel::on_row_activated(&st, true, "sub", true);
+    panel::on_row_activated(&st, true, "sub", true, false);
     let list_id = st.last_list.get();
     panel::handle_event(
         &st,
