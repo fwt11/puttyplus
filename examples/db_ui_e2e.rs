@@ -2393,6 +2393,71 @@ fn main() {
             "刚打开应当在第一页：{foot_page:?}"
         );
 
+        // ---- 阶段 84 D3：属性页里的「建表语句」（只读、可复制）----
+        //
+        // ⚠️ **属性页是懒建的**（切过去才建）⇒ 建表语句要等**字段 + 外键**
+        // 两份元数据都回来才有 ⇒ 得轮询等。
+        {
+            let doc_idx = dbui::current_doc_index(&st).expect("应当有一个当前文档");
+            assert!(
+                dbui::doc_focus_now(&st, doc_idx, 2),
+                "切不到属性页"
+            );
+            let mut ddl = String::new();
+            for _ in 0..60 {
+                pump(300);
+                ddl = dbui::props_ddl_text(&st, schema, "demo_users").unwrap_or_default();
+                if ddl.contains("CREATE TABLE") {
+                    break;
+                }
+            }
+            println!("[6.16.2] 属性页的建表语句：\n{ddl}");
+            assert!(
+                ddl.contains("CREATE TABLE"),
+                "属性页该显示建表语句：{ddl}"
+            );
+            assert!(
+                ddl.contains("demo_users"),
+                "建表语句里该有表名：{ddl}"
+            );
+            assert!(ddl.contains("\"id\""), "建表语句里该有 id 字段：{ddl}");
+            assert!(
+                ddl.contains("PRIMARY KEY"),
+                "建表语句里该有主键约束：{ddl}"
+            );
+            // ---- 「复制」按钮：点了剪贴板里就该有这段建表语句 ----
+            //
+            // ⚠️ **剪贴板读是异步的**（GTK4 没有同步读）⇒ 读一次只能拿到
+            // 一个回调 ⇒ 得边泵主循环边读。
+            assert!(
+                dbui::props_ddl_copy_now(&st, schema, "demo_users"),
+                "「复制」按钮点不动"
+            );
+            let clip: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+            {
+                let clip2 = std::rc::Rc::clone(&clip);
+                puttyplus::platform::clipboard::read_text(move |t| {
+                    *clip2.borrow_mut() = t;
+                });
+            }
+            for _ in 0..40 {
+                pump(200);
+                if clip.borrow().is_some() {
+                    break;
+                }
+            }
+            let got = clip.borrow().clone().unwrap_or_default();
+            println!("[6.16.3] 剪贴板里前 60 字 = {}", &got.chars().take(60).collect::<String>());
+            assert!(
+                got.contains("CREATE TABLE"),
+                "剪贴板里没有建表语句：{got}"
+            );
+            // 切回数据页（后面的用例还要用网格）
+            dbui::doc_focus_now(&st, doc_idx, 0);
+            pump(300);
+        }
+
         // 打开列显示设置，把第 2 列藏掉
         assert!(
             dbui::open_column_dialog_now(&st, tidx),

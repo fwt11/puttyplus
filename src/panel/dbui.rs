@@ -411,6 +411,12 @@ enum PendingReq {
     ObjectStats { schema: String, table: String },
     /// 统计符合条件的行数（阶段 84：底栏的「总行数」按钮）
     RowCount { tab_id: u64 },
+    /// 属性页里的**建表语句**（阶段 84 D3）——回包要填到哪张表的属性页
+    PropsDdl {
+        schema: String,
+        table: String,
+        part: PropsDdlPart,
+    },
     /// 导入向导（阶段 18）：要目标表的列信息，回包才知道怎么映射
     ImportPrep {
         schema: String,
@@ -454,6 +460,16 @@ enum StructPart {
     ForeignKeys,
     /// 触发器（阶段 49；**只读**）
     Triggers,
+}
+
+/// 属性页的**建表语句**要的两块素材（阶段 84 D3）。
+///
+/// ⚠️ **两个都到齐才拼得出来**：`CREATE TABLE` 里既有字段（列定义）
+/// 也有外键约束 ⇒ 少一块就拼不出完整的一段话。
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PropsDdlPart {
+    Fields,
+    ForeignKeys,
 }
 
 impl StructPart {
@@ -2654,7 +2670,7 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // dbx 底部那一长条信息量很大：`共 N 行 | 耗时 | N 项待保存 | 当前 SQL |
     // SUM/AVG | 每页行数 | 分页控件 | 导出`。我们原先只有页签工具栏里那颗
     // 「下一页」按钮，其余信息全缺——用户看不出"这一页取了多少行""还有没有
-    // 下一���"。
+    // 下一页"。
     let foot_info = gtk::Label::new(Some(""));
     foot_info.add_css_class("dim-label");
     foot_info.set_xalign(0.0);
@@ -3202,6 +3218,13 @@ struct TableDoc {
     slots: RefCell<HashMap<i32, gtk::Box>>,
     /// 「属性」视图自己那张网格（**不共享**——共享的那张是给独立属性窗口用的）
     props_grid: RefCell<Option<gtk::Grid>>,
+    /// 「属性」视图里的**建表语句**（阶段 84 D3；只读、可复制）
+    props_ddl: RefCell<Option<gtk::TextView>>,
+    /// 属性页那颗「复制」按钮（冒烟要点它 ⇒ 得存着）
+    props_ddl_copy: RefCell<Option<gtk::Button>>,
+    /// 属性页拼 DDL 用的素材（字段 / 外键）—— 两个都到齐才拼得出来
+    props_cols: RefCell<Option<Vec<dbmeta::ColumnDef>>>,
+    props_fk: RefCell<Option<Vec<dbmeta::ForeignKey>>>,
     /// 「结构」视图的结构页签（关文档时要把它从 `ui.struct_tabs` 里摘掉）
     struct_tab: RefCell<Option<Rc<StructTab>>>,
     /// 「ER」视图的 ER 页签（同上）
@@ -3244,11 +3267,38 @@ impl TableDoc {
                 let grid = build_stats_grid();
                 let sc = gtk::ScrolledWindow::new();
                 sc.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+                // ⚠️ **统计这块要吃掉剩余高度**（阶段 84 D3）：属性页下面还要
+                // 放「建表语句」，但那一段是**固定高度**的（长了自己滚）⇒
+                // 上面这块 flex。
+                //
+                // ⚠️ **别反过来写 vexpand(false)**（踩过）：那样它按内容高，
+                // 而 Grid 是**回包之后**才加行的 ⇒ 量高度的时候只有表头
+                // 那一行 ⇒ 11 行属性全被裁掉，页面上只看得见「属性 | 值」
+                // 两个表头字。
                 sc.set_vexpand(true);
                 sc.set_child(Some(&grid));
                 *self.props_grid.borrow_mut() = Some(grid);
                 slot.append(&sc);
                 request_object_stats(st, ui, &self.schema, &self.table);
+                // ---- 阶段 84 D3：属性页里的「建表语句」（只读、可复制）----
+                let (ddl_box, ddl_view, ddl_copy) = build_props_ddl_box(st, ui);
+                *self.props_ddl.borrow_mut() = Some(ddl_view);
+                *self.props_ddl_copy.borrow_mut() = Some(ddl_copy);
+                // ⚠️ **DDL 那一段固定高度**（长了自己在里面滚）：它比统计表
+                // 更需要空间，但两段都 flex 的话 GTK 会平分 ⇒ DDL 只剩
+                // 几行高，看不全建表语句。
+                ddl_box.set_vexpand(false);
+                ddl_box.set_size_request(-1, 240);
+                slot.append(&ddl_box);
+                // 两块素材都要（字段 + 外键）⇒ 拼得出完整的 CREATE TABLE
+                request_props_ddl(st, ui, &self.schema, &self.table, PropsDdlPart::Fields);
+                request_props_ddl(
+                    st,
+                    ui,
+                    &self.schema,
+                    &self.table,
+                    PropsDdlPart::ForeignKeys,
+                );
             }
             DOC_PAGE_ER => {
                 let tab = build_er_tab(st, ui, &self.schema, Some(&self.table));
@@ -3365,6 +3415,10 @@ fn new_table_doc(
         data: Rc::clone(&data),
         slots: RefCell::new(slots),
         props_grid: RefCell::new(None),
+        props_ddl: RefCell::new(None),
+        props_ddl_copy: RefCell::new(None),
+        props_cols: RefCell::new(None),
+        props_fk: RefCell::new(None),
         struct_tab: RefCell::new(None),
         er_tab: RefCell::new(None),
         built: RefCell::new(HashSet::new()),
@@ -4738,6 +4792,130 @@ fn build_stats_grid() -> gtk::Grid {
         grid.attach(&h2, 1, 0, 1, 1);
     }
     grid
+}
+
+/// 属性页里的**「建表语句」区块**（阶段 84 D3，对标 dbx 属性抽屉里的 DDL）。
+///
+/// **为什么是只读 + 可复制**：这一段是给人**看**的（贴到别处、存成文件、
+/// 发给同事），不是给人**改**的——要改结构去「结构」页（那边能改、能执行）。
+/// ⇒ 做成只读文本区 + 一颗「复制」按钮。
+///
+/// ⚠️ **视图没有这一段**：视图的定义（`CREATE VIEW … AS SELECT …`）得问
+/// 数据库自己（PG 的 `pg_get_viewdef` / MySQL 的 `SHOW CREATE VIEW`），
+/// 我们没有这条通路 ⇒ 视图只显示一句说明，**不假装有**。
+///
+/// 返回 `(外层盒子, 文本区)`：文本区要存进 [`TableDoc`]，元数据到了才能填。
+fn build_props_ddl_box(
+    st: &Rc<PanelState>,
+    ui: &DbUi,
+) -> (gtk::Box, gtk::TextView, gtk::Button) {
+    let view = gtk::TextView::new();
+    view.set_monospace(true);
+    view.set_wrap_mode(gtk::WrapMode::None);
+    // ⚠️ **只读**：这一段不是编辑器（能改的话，用户会以为改完能保存）
+    view.set_editable(false);
+    view.set_top_margin(6);
+    view.set_bottom_margin(6);
+    view.set_left_margin(6);
+    view.set_right_margin(6);
+    // 跟结构页的 DDL 一样上高亮（拼出来的就是 SQL）
+    {
+        let hl = SqlHl::new(&view.buffer());
+        let hl2 = Rc::clone(&hl);
+        view.buffer().connect_changed(move |_| {
+            hl2.schedule();
+        });
+        hl.apply();
+    }
+    let sw = gtk::ScrolledWindow::new();
+    sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    sw.set_vexpand(true);
+    sw.set_child(Some(&view));
+    sw.add_css_class("frame");
+
+    // 标题行：「建表语句」+「复制」
+    let title = gtk::Label::new(Some(tr("建表语句")));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    let btn_copy = gtk::Button::with_label(tr("复制"));
+    btn_copy.add_css_class("flat");
+    btn_copy.set_tooltip_text(Some(tr("把这段建表语句复制到剪贴板")));
+    {
+        let view2 = view.clone();
+        let st2 = Rc::clone(st);
+        btn_copy.connect_clicked(move |_| {
+            let buf = view2.buffer();
+            let text = buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string();
+            crate::platform::clipboard::write_text(&text);
+            // ⚠️ **给个回执**：点了「复制」屏幕上什么反应都没有 ⇒ 用户
+            // 不知道到底复制成功没有（剪贴板在无桌面环境里还可能失败）。
+            let slot = st2.db_ui.borrow();
+            let Some(u) = slot.as_ref() else { return };
+            set_status(u, tr("已复制建表语句到剪贴板"), false);
+        });
+    }
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    head.append(&title);
+    head.append(&btn_copy);
+
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    box_.set_vexpand(true);
+    box_.append(&head);
+    box_.append(&sw);
+    (box_, view, btn_copy)
+}
+
+/// 属性页要的两块素材（阶段 84 D3）。
+fn request_props_ddl(
+    st: &Rc<PanelState>,
+    ui: &DbUi,
+    schema: &str,
+    table: &str,
+    part: PropsDdlPart,
+) {
+    let id = next_id(ui);
+    ui.pending.borrow_mut().insert(
+        id,
+        PendingReq::PropsDdl {
+            schema: schema.to_string(),
+            table: table.to_string(),
+            part,
+        },
+    );
+    let req = match part {
+        PropsDdlPart::Fields => DbMetaReq::Columns {
+            schema: schema.to_string(),
+            table: table.to_string(),
+        },
+        PropsDdlPart::ForeignKeys => DbMetaReq::ForeignKeys {
+            schema: schema.to_string(),
+            table: table.to_string(),
+        },
+    };
+    send_cmd(st, ui, WorkerCmd::DbMeta { id, req });
+}
+
+/// 属性页的建表语句：**两块素材都到齐了**才拼得出来（阶段 84 D3）。
+fn refresh_props_ddl(ui: &DbUi, doc: &Rc<TableDoc>) {
+    let (Some(cols), Some(fk)) = (
+        doc.props_cols.borrow().clone(),
+        doc.props_fk.borrow().clone(),
+    ) else {
+        return;
+    };
+    let Some(view) = doc.props_ddl.borrow().clone() else {
+        return;
+    };
+    if doc.is_view {
+        view.buffer().set_text(&tr(
+            "这是视图，没有 CREATE TABLE 语句——视图的定义由数据库自己维护。",
+        ));
+        return;
+    }
+    let proto = current_proto(ui);
+    let ddl = dbmeta::build_ddl(proto, &doc.schema, &doc.table, &cols, &fk);
+    view.buffer().set_text(&ddl);
 }
 
 /// 属性窗口（属性 | 值 两列）。
@@ -7241,6 +7419,44 @@ pub fn on_meta(
                 Err(e) => on_row_count(&tab, Err(e)),
             }
         }
+        // ---- 阶段 84 D3：属性页的建表语句 ----
+        //
+        // ⚠️ **两块素材分开回来**（字段一块、外键一块）⇒ 每次回包都试着
+        // 拼一次；凑不齐就什么都不做（拼一半的 CREATE TABLE 更吓人）。
+        PendingReq::PropsDdl {
+            schema,
+            table,
+            part,
+        } => {
+            let Some(doc) = find_doc(ui, &schema, &table) else { return };
+            match (part, result) {
+                (PropsDdlPart::Fields, Ok(DbMetaPayload::Columns(cols))) => {
+                    *doc.props_cols.borrow_mut() = Some(cols);
+                }
+                (PropsDdlPart::ForeignKeys, Ok(DbMetaPayload::ForeignKeys(fk))) => {
+                    *doc.props_fk.borrow_mut() = Some(fk);
+                }
+                // ⚠️ **失败要说一句**：否则 DDL 区一直空白 ⇒ 用户分不清
+                // 「还没好」还是「读不出来」。⚠️ **不许拿半截的 DDL 充数**
+                // （少外键的那份 CREATE TABLE 会让人以为表本来就没外键）。
+                (part, Err(e)) => {
+                    let what = match part {
+                        PropsDdlPart::Fields => tr("读字段失败"),
+                        PropsDdlPart::ForeignKeys => tr("读外键失败"),
+                    };
+                    if let Some(view) = doc.props_ddl.borrow().clone() {
+                        view.buffer().set_text(&trf!(
+                            "{what}，没拼出建表语句：{e}",
+                            what = what,
+                            e = e
+                        ));
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            refresh_props_ddl(ui, &doc);
+        }
         PendingReq::ObjectStats { schema, table } => match result {
             Ok(DbMetaPayload::ObjectStats(Some(stats))) => {
                 // ⚠️ **表文档里的「属性」视图有自己的一张网格**（阶段 72e）——
@@ -9116,6 +9332,35 @@ pub fn result_total_button_now(st: &Rc<PanelState>, tab_idx: usize) -> Option<gt
         return None;
     };
     Some(tab.btn_total.clone())
+}
+
+/// 冒烟 / e2e 用：属性页里的**建表语句**（阶段 84 D3）。
+///
+/// 返回 `None` = 这张表的属性页还没建出来（没切到那一页）。
+/// ⚠️ **空串是合法的**：元数据还没回来时就是空的（不是错）。
+pub fn props_ddl_text(st: &Rc<PanelState>, schema: &str, table: &str) -> Option<String> {
+    let slot = st.db_ui.borrow();
+    let ui = slot.as_ref()?;
+    let doc = find_doc(ui, schema, table)?;
+    let view = doc.props_ddl.borrow().clone()?;
+    let buf = view.buffer();
+    Some(buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string())
+}
+
+/// 冒烟 / e2e 用：点属性页的「复制」按钮（阶段 84 D3）。
+///
+/// 返回 `false` = 这张表的属性页还没建出来（或压根没有那颗按钮）。
+pub fn props_ddl_copy_now(st: &Rc<PanelState>, schema: &str, table: &str) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(doc) = find_doc(ui, schema, table) else {
+        return false;
+    };
+    let Some(btn) = doc.props_ddl_copy.borrow().clone() else {
+        return false;
+    };
+    btn.emit_clicked();
+    true
 }
 
 /// 冒烟测试用：跳到第 N 页（阶段 45）。

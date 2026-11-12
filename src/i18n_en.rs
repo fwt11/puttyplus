@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1717] = [
+pub static EN: [(&str, &str); 1724] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -171,6 +171,7 @@ pub static EN: [(&str, &str); 1717] = [
     ("{what}段缺失（应为 端口:主机:端口）: {s}", "The {what} part is missing (expected port:host:port): {s}"),
     ("{what}端口无效: {s}", "Invalid {what} port: {s}"),
     ("{what}，对象树已刷新", "{what}; the object tree has been refreshed"),
+    ("{what}，没拼出建表语句：{e}", "{what}, so the CREATE TABLE statement could not be built: {e}"),
     ("{zh}（原文：{msg}）", "{zh} (original: {msg})"),
     ("~/.ssh 下没有找到私钥。生成一对就能用了。", "No private key was found under ~/.ssh. Generate a pair to get started."),
     ("~/.ssh 目录还不存在，先生成一对密钥（会一并建好目录）。", "The ~/.ssh directory does not exist yet; generate a key pair first (it creates the directory too)."),
@@ -721,6 +722,7 @@ pub static EN: [(&str, &str); 1717] = [
     ("已填入编辑器（没有自动执行）", "Filled into the editor (not executed automatically)"),
     ("已填入：{f}（按回车查库）", "Inserted: {f} (press Enter to query)"),
     ("已复制定义", "Definition copied"),
+    ("已复制建表语句到剪贴板", "Copied the CREATE TABLE statement to the clipboard"),
     ("已复制第 {v0} 行（改完点保存修改才生效）", "Row {v0} copied (it only takes effect when you save the changes)"),
     ("已复制：{name}", "Copied: {name}"),
     ("已导入 {v0} 个会话。", "Imported {v0} sessions."),
@@ -790,6 +792,7 @@ pub static EN: [(&str, &str); 1717] = [
     ("应用", "Apply"),
     ("应用变更", "Apply the changes"),
     ("建目录", "Create directory"),
+    ("建表语句", "CREATE TABLE statement"),
     ("开", "On"),
     ("开/关按键广播（发往其它标签的终端）", "Turn key broadcast on/off (sent to the terminals of the other tabs)"),
     ("开启事务失败: {v0}", "Failed to begin the transaction: {v0}"),
@@ -903,6 +906,7 @@ pub static EN: [(&str, &str); 1717] = [
     ("把这个终端录成 asciicast v3（{v0} 下的 会话名-时间戳.cast）。\n录的是屏幕渲染出来的行（带颜色），不是原始字节流：\n· 你敲的命令会一个个敲出来（光标行逐次重写）；\n· 输入事件不录，所以文件里不会有你敲的密码；\n· 已经输出完的行被反复改写只留最后一次（进度条这类）；\n· 终端被清屏会漏；输出快过采样间隔时可能丢行（横幅上会写丢了多少行）。\n分屏的两个终端各自录制；互不影响。", "Record this terminal as asciicast v3 (sessionname-timestamp.cast under {v0}).\nWhat is recorded are the lines rendered on the screen (with colours), not the raw byte stream:\n· the commands you type are typed out one by one (the cursor line is rewritten each time);\n· input events are not recorded, so the file will not contain the password you typed;\n· a line that is rewritten over and over only keeps its last version (progress bars and the like);\n· lines lost when the terminal is cleared; lines can get lost when the output is faster than the sampling interval (the banner says how many were lost).\nThe two terminals of a split are recorded separately; they do not affect each other."),
     ("把这个终端的会话断开重连一次（ssh 子进程会被杀掉再起一个）。\n会话已经断了的话，屏幕上那条「会话已结束」也可以直接点。", "Disconnect and reconnect the session of this terminal (the ssh subprocess is killed and a new one is started).\nIf the session is already gone, you can also click the \"Session ended\" line on the screen."),
     ("把这个终端的屏幕文字逐行写进 {v0} 下的文件（会话名-时间戳.log）。\n抓的是屏幕而不是原始字节流：同一行被反复改写会记多行，滚过一屏以上或被清屏会漏记。\n文件里是纯文字、不含颜色（要颜色、能回放请用「录制会话到 .cast」）。\n分屏的两个终端各自开关、各自记；互不影响。", "Writes this terminal's screen text line by line to a file under {v0} (session-timestamp.log).\nIt captures the screen, not the raw byte stream: a line that is rewritten over and over is recorded repeatedly, and anything that scrolled more than one screen or was cleared is missed.\nThe file is plain text without colours (for colours and playback use \"Record session to .cast\" instead).\nEach half of a split terminal is switched on and recorded on its own; they do not affect each other."),
+    ("把这段建表语句复制到剪贴板", "Copy this CREATE TABLE statement to the clipboard"),
     ("把选中的 {v0} 行一起改掉（改完点「保存修改」才写库）。", "Change all of the selected {v0} rows (they are written to the database only when you click \"Save changes\")."),
     ("把选中的那个字段的类型设成下拉里挑的类型", "Set the type of the selected field to the one picked in the dropdown"),
     ("拖动查看右侧的列", "Drag to see the columns on the right"),
@@ -1512,6 +1516,8 @@ pub static EN: [(&str, &str); 1717] = [
     ("读取远程文件 {path} 失败: {e}", "Failed to read the remote file {path}: {e}"),
     ("读取远程文件失败", "Failed to read the remote file"),
     ("读取远程目录失败", "Failed to read the remote directory"),
+    ("读外键失败", "Failed to read the foreign keys"),
+    ("读字段失败", "Failed to read the columns"),
     ("读定义失败：{e}", "Reading the definition failed: {e}"),
     ("读对象属性失败：{e}", "Reading the object properties failed: {e}"),
     ("读表结构失败：{e}", "Reading the table structure failed: {e}"),
@@ -1585,6 +1591,7 @@ pub static EN: [(&str, &str); 1717] = [
     ("这是 asciicast v1（2015 年的老格式），本程序只读 v2 / v3。\n可用 asciinema rec --format asciicast-v2 重录一遍。", "This is asciicast v1 (the old format from 2015), this program only reads v2 / v3.\nYou can record it again with asciinema rec --format asciicast-v2."),
     ("这是带口令的旧式 PEM，应用内无法安全地输入口令转换。\n请在终端执行：\nssh-keygen -p -f {v0}", "This is a legacy PEM with a passphrase, it cannot be converted inside the application because the passphrase cannot be entered safely there.\nRun this in a terminal:\nssh-keygen -p -f {v0}"),
     ("这是当前会话的临时覆盖，优先于连接里的默认设置（连接编辑器 →「会话」页）。\n字号与响铃保存后立即生效；保活、终端类型、认证优先级需重新建立连接才生效（子进程环境与认证链都在启动时定下）。配置按会话名保存，同名会话共用一份。", "This is a temporary override for the current session and takes precedence over the defaults of the connection (connection editor → \"Session\" page).\nFont size and bell take effect as soon as they are saved; keepalive, terminal type and authentication priority need the connection to be established again (the subprocess environment and the authentication chain are fixed at startup). The settings are stored per session name, sessions with the same name share them."),
+    ("这是视图，没有 CREATE TABLE 语句——视图的定义由数据库自己维护。", "This is a view, so there is no CREATE TABLE statement — the database maintains the view definition itself."),
     ("这条会话不是从连接管理器里的条目连上的（命令行直接开的），\n没有地方写回配置。\n先在连接管理器里建一个条目，或从已有的条目连上再来保存。", "This session was not opened from an entry of the connection manager (it was started from the command line),\nso there is nowhere to write the configuration back.\nCreate an entry in the connection manager first, or connect from an existing entry and then save."),
     ("这条连接挂在当前会话上（{preset_session}）。\n数据库通道复用这条 SSH 连接，不新建连接、不占本地端口。", "This connection hangs on the current session ({preset_session}).\nThe database channel reuses this SSH connection; it opens no new connection and takes no local port."),
     ("这条连接用的私钥文件（列表是 ~/.ssh 里的私钥，私钥管理器列的也是这些）。\n留空 = 不指定；选了它，认证方式用「只用指定的私钥文件」时才生效。", "The private key file of this connection (the list holds the private keys in ~/.ssh, the private key manager lists the same ones).\nEmpty = none; it only takes effect when the authentication method is \"private key file only\"."),

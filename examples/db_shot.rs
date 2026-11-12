@@ -170,6 +170,18 @@ fn main() {
     }
     pump(600);
 
+    // 可选：切到文档的某个视图再拍（0 数据 / 1 结构 / 2 属性 / 3 ER）。
+    //
+    // ⚠️ **属性页是懒建的**（切过去才建）⇒ 切完要多等一会儿，等元数据回来。
+    let doc_page: Option<i32> = args.get(11).and_then(|s| s.parse().ok());
+    if let Some(p) = doc_page {
+        if let Some(idx) = dbui::current_doc_index(&st) {
+            dbui::doc_focus_now(&st, idx, p);
+            println!("[5.1] 切到文档视图 {p}");
+        }
+        pump(3000);
+    }
+
     // 窗口摆到 README 要的尺寸
     {
         let slot = st.db_ui.borrow();
