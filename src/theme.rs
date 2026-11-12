@@ -912,19 +912,18 @@ button.pp-xfer-busy {
 .pp-vault-badge.pp-chip-ok { color: @pp_ok; border-color: @pp_ok; }
 .pp-vault-badge.pp-chip-warn { color: @pp_warn; border-color: @pp_warn; }
 .pp-vault-badge.pp-chip-err { color: @pp_err; border-color: @pp_err; }
-/* 条件条（阶段 48）：dbx 风格的 WHERE / ORDER BY 条 + 已生效条件的 chip。
-   ⚠️ **不借用 `.pp-chip`**：那个类带着状态色语义（绿=正常 / 黄=警告 /
-   红=出错），条件 chip 是"中性的当前筛选"，混用会让人以为条件出了问题。 */
+/* 条件条（阶段 84 改版）：**一行**的 `WHERE [输入框] ▾ ✕ | 排序 列▾ ↑`。
+   ⚠️ **「WHERE」标签是蓝色的**：界面上有两个筛选（这个=服务端条件，
+   旁边的「筛本页」=本地筛行），用户最常犯的错就是把两者当成一回事。
+   标签 + 颜色就是用来一眼分开的（dbx 也是这么做的）。 */
 .pp-condbar { padding: 1px 0px; }
 .pp-condbar button, .pp-condbar entry { padding-top: 2px; padding-bottom: 2px; }
-.pp-cond-chip {
-  border-radius: 6px;
-  padding: 1px 6px;
-  background-color: @pp_accent_soft;
-  color: @pp_fg;
+.pp-where-label {
+  color: @pp_accent;
+  font-weight: bold;
+  /* 标签文字别被压扁（中文 + 英文混排时容易挤成竖排） */
+  padding: 0px 2px;
 }
-.pp-cond-chip label { padding: 0px; }
-.pp-cond-chip button { padding: 0px 2px; min-height: 0px; min-width: 0px; margin: 0px; }
 /* 分段控件（阶段 49）：表设计器里的 `字段 | 索引 | 外键 | 触发器 | DDL`。
    是一排自己画的 ToggleButton（**不是** GtkStackSwitcher——它内部那排
    按钮是 homogeneous 的，每个按钮平分整行宽度，5 个按钮摊满 640px，

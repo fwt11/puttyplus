@@ -1,20 +1,21 @@
-//! 阶段 48 冒烟：可视化 **WHERE / ORDER BY 条件条**（对标 dbx 的条件条）。
+//! 阶段 84 冒烟：**常驻 WHERE 框**（对标 dbx 的「一个宽输入框 + 回车即检索」）。
 //!
 //! **不连真库**——纯界面验证，所以远端数据库连不上也能跑。
 //!
-//! 验五件事：
+//! 验六件事：
 //! 1. 表浏览页签上条件条**是亮的**（普通查询结果页签不该有）；
-//! 2. 两个下拉都填上了列（条件列 + 排序列）；
-//! 3. 点「+ 条件」→ 生成 WHERE（**按列类型转义**：整数列不加引号），
-//!    且条件条上出现 chip；
-//! 4. 挑排序列 → 生成 ORDER BY，点方向按钮能切 ASC/DESC；
-//! 5. 「清除」把条件与排序都清干净。
+//! 2. **回车即查库**：在 WHERE 框里写条件 → 回车 → 生效的 WHERE 就是它；
+//! 3. 条件助手「填入」**按列类型转义**（整数列不加引号，文本列加引号），
+//!    填进去的是**一段可读的文本**，不是一个当场生效的条件；
+//! 4. 分号被**拒绝**（一条查询只能一条语句）；
+//! 5. 挑排序列 → 生成 ORDER BY，点方向按钮能切 ASC/DESC；
+//! 6. 「清除」把条件与排序都清干净。
 //!
-//! ⚠️ 走的是**真实的按钮回调**（`emit_clicked`），不是直接调内部函数——
-//! 直接调的话，按钮灰了、回调断了都测不出来。
+//! ⚠️ 走的是**真实的控件回调**（`emit_activate` / `emit_clicked`），不是直接
+//! 调内部函数——直接调的话，回调断了都测不出来。
 //!
 //! 用法（无桌面时用 xvfb-run）：
-//!   xvfb-run -a cargo run --example cond_bar_smoke
+//!   xvfb-run -a cargo run --example where_box_smoke
 
 #![allow(deprecated)] // 结果表沿用 TreeView/ListStore（与主程序一致）
 
@@ -45,16 +46,16 @@ impl Drop for IniGuard {
 
 fn main() {
     let app = gtk::Application::builder()
-        .application_id("x.y.PpCondBar")
+        .application_id("x.y.PpWhereBox")
         .build();
     app.connect_activate(|app| {
-        // ⚠️ **必须装主题**：自定义 CSS 类（.pp-cond-chip）只有 theme::apply()
-        // 之后才生效——不装主题的话 chip 是"没上妆"的默认样式。
+        // ⚠️ **必须装主题**：自定义 CSS 类（.pp-where-label）只有
+        // theme::apply() 之后才生效——不装主题的话标签是"没上妆"的默认样式。
         puttyplus::theme::apply(puttyplus::theme::Theme::Dark);
 
         // 别碰用户的真实配置
         let db_ini = std::env::temp_dir().join(format!(
-            "pp-cond-bar-smoke-{}.ini",
+            "pp-where-box-smoke-{}.ini",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&db_ini);
@@ -94,91 +95,97 @@ fn main() {
         .expect("应当能离线造一个结果页签");
         pump(200);
 
-
-        // ---- 断言 1/2：条件条亮着、下拉有列 ----
-        let (where_sql, order_by, chips, order_col) =
+        // ---- 断言 1：条件条亮着、下拉有列、框是空的 ----
+        let (where_sql, order_by, order_col) =
             puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
         assert!(where_sql.is_empty(), "一开始不该有条件：{where_sql}");
         assert!(order_by.is_empty(), "一开始不该有排序：{order_by}");
-        assert!(chips.is_empty(), "一开始不该有 chip：{chips:?}");
         assert!(order_col.is_empty(), "一开始不该有排序列：{order_col}");
+        assert!(
+            puttyplus::panel::dbui::where_text_now(&panel.st, tidx).is_empty(),
+            "WHERE 框一开始该是空的"
+        );
         println!("条件条初始状态 ✓");
 
-        // ---- 断言 3：加一条条件（整数列 = 1）----
+        // ---- 断言 2：回车即查库 ----
+        //
+        // ⚠️ **走 `emit_activate`**（真正的回车路径），不是直接调内部函数。
+        assert!(
+            puttyplus::panel::dbui::where_enter_now(&panel.st, tidx, "id > 1"),
+            "WHERE 框回车没反应"
+        );
+        pump(200);
+        let (where_sql, _, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
+        println!("WHERE = {where_sql}");
+        assert_eq!(where_sql, "id > 1", "回车后生效的 WHERE 不对：{where_sql}");
+        // 框里的文字与生效的 WHERE 一致（用户看得见自己下发了什么）
+        assert_eq!(
+            puttyplus::panel::dbui::where_text_now(&panel.st, tidx),
+            "id > 1",
+            "框里的文字与生效的 WHERE 不一致"
+        );
+        println!("回车即查库 ✓");
+
+        // ---- 断言 3：条件助手「填入」按列类型转义 ----
+        //
+        // ⚠️ **整数列的值不能加引号**：加了 PG 会报类型错（integer = "1"）。
         assert!(
             puttyplus::panel::dbui::cond_bar_add_now(&panel.st, tidx, "id", "=", "1"),
-            "条件条没能加条件"
+            "条件助手没能填入"
         );
         pump(200);
-        let (where_sql, _, chips, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
-        println!("WHERE = {where_sql}");
-        println!("chip  = {chips:?}");
-        // ⚠️ **整数列的值不能加引号**：加了 PG 会报类型错（integer = "1"）
-        assert_eq!(where_sql, "\"id\" = 1", "WHERE 生成不对：{where_sql}");
-        assert_eq!(chips, vec!["id = 1"], "chip 不对：{chips:?}");
-        println!("加条件 ✓");
-
-        // ---- 断言 3b：文本列的值要加引号（类型不同，转义不同）----
+        let text = puttyplus::panel::dbui::where_text_now(&panel.st, tidx);
+        println!("填入后框里 = {text}");
+        assert!(
+            text.contains("\"id\" = 1"),
+            "整数列的值不该加引号：{text}"
+        );
+        // ⚠️ **「填入」不直接生效**：用户多半还要接着改，改完按回车才查。
+        let (where_sql, _, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
+        assert_eq!(
+            where_sql, "id > 1",
+            "「填入」不该当场生效（还没按回车）：{where_sql}"
+        );
+        // 文本列的值要加引号
         assert!(
             puttyplus::panel::dbui::cond_bar_add_now(&panel.st, tidx, "name", "=", "张三"),
-            "第二条条件加不进去"
+            "条件助手没能填第二条"
         );
         pump(200);
-        let (where_sql, _, chips, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
-        println!("WHERE = {where_sql}");
-        assert_eq!(
-            where_sql, "\"id\" = 1 AND \"name\" = '张三'",
-            "两条条件的 WHERE 不对：{where_sql}"
+        let text = puttyplus::panel::dbui::where_text_now(&panel.st, tidx);
+        println!("填两条后框里 = {text}");
+        assert!(
+            text.contains("\"name\" = '张三'"),
+            "文本列的值该加引号：{text}"
         );
-        assert_eq!(chips, vec!["id = 1", "name = 张三"], "chip 不对：{chips:?}");
-        println!("两条条件 ✓");
+        println!("条件助手 ✓");
 
-        // ---- 断言 3c：「或者」要真的生效 ----
-        //
-        // ⚠️ 这一条专门盯 `append(id, text)` 的顺序：写成
-        // `append("并且", "AND")` 的话，界面上显示的是 "AND"，
-        // 而 `active_id()` 回来的是"并且"——下面的 "OR" 判断永远不成立，
-        // 「或者」这个选项就形同虚设（看着能选，选了没反应）。
+        // ---- 断言 4：分号被拒 ----
         assert!(
-            puttyplus::panel::dbui::cond_bar_set_join_now(&panel.st, tidx, true),
-            "连接词挑不动"
-        );
-        assert!(
-            puttyplus::panel::dbui::cond_bar_add_now(&panel.st, tidx, "email", "=", "a@b.c"),
-            "第三条条件加不进去"
+            puttyplus::panel::dbui::where_enter_now(&panel.st, tidx, "id = 1; DROP TABLE t"),
+            "分号那条回车没反应"
         );
         pump(200);
-        let (where_sql, _, chips, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
-        println!("WHERE = {where_sql}");
+        let (where_sql, _, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
         assert_eq!(
-            where_sql, "\"id\" = 1 AND \"name\" = '张三' OR \"email\" = 'a@b.c'",
-            "「或者」没生效：{where_sql}"
+            where_sql, "id > 1",
+            "带分号的条件不该生效（一条查询只能一条语句）：{where_sql}"
         );
-        assert_eq!(
-            chips,
-            vec!["id = 1", "name = 张三", "email = a@b.c"],
-            "chip 不对：{chips:?}"
-        );
-        // 复位成「并且」，后面的断言好读
-        puttyplus::panel::dbui::cond_bar_set_join_now(&panel.st, tidx, false);
-        println!("「或者」✓");
+        println!("分号被拒 ✓");
 
-        // ---- 断言 4：排序 ----
+        // ---- 断言 5：排序 ----
         assert!(
             puttyplus::panel::dbui::cond_bar_order_now(&panel.st, tidx, "name", true),
             "排序挑不动"
         );
         pump(200);
-        let (where_sql, order_by, _, order_col) =
+        let (where_sql, order_by, order_col) =
             puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
         println!("ORDER BY = {order_by}");
         assert_eq!(order_col, "name", "排序列不对：{order_col}");
         assert_eq!(order_by, "ORDER BY \"name\" ASC", "ORDER BY 不对：{order_by}");
         // ⚠️ **加了排序不能让条件丢掉**（两条是并存的）
-        assert_eq!(
-            where_sql, "\"id\" = 1 AND \"name\" = '张三' OR \"email\" = 'a@b.c'",
-            "条件丢了：{where_sql}"
-        );
+        assert_eq!(where_sql, "id > 1", "条件丢了：{where_sql}");
 
         // 切方向 → DESC
         assert!(
@@ -186,49 +193,48 @@ fn main() {
             "方向切不动"
         );
         pump(200);
-        let (_, order_by, _, _) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
+        let (_, order_by, _,) = puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
         assert_eq!(order_by, "ORDER BY \"name\" DESC", "方向没切成 DESC：{order_by}");
         println!("排序 + 切方向 ✓");
 
-        // ---- 断言 5：清除 ----
+        // ---- 断言 6：清除 ----
         assert!(
             puttyplus::panel::dbui::cond_bar_clear_now(&panel.st, tidx),
             "清除点不动"
         );
         pump(200);
-        let (where_sql, order_by, chips, order_col) =
+        let (where_sql, order_by, order_col) =
             puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
         assert!(where_sql.is_empty(), "清除后还有条件：{where_sql}");
         assert!(order_by.is_empty(), "清除后还有排序：{order_by}");
-        assert!(chips.is_empty(), "清除后还有 chip：{chips:?}");
         assert!(order_col.is_empty(), "清除后还有排序列：{order_col}");
+        // ⚠️ **框里的文字也要清**：只清生效状态不清框 ⇒ 用户看着框里的条件
+        // 以为还在筛，其实没筛。
+        assert!(
+            puttyplus::panel::dbui::where_text_now(&panel.st, tidx).is_empty(),
+            "清除后 WHERE 框里还有字"
+        );
         println!("清除 ✓");
 
-        // ---- 截图：把条件条的样子留下来 ----
+        // ---- 截图：把 WHERE 框的样子留下来 ----
         {
-            // 再加两条，让截图里能看到 chip
-            puttyplus::panel::dbui::cond_bar_add_now(&panel.st, tidx, "id", ">=", "1");
-            pump(150);
-            puttyplus::panel::dbui::cond_bar_add_now(&panel.st, tidx, "age", "<", "40");
+            puttyplus::panel::dbui::where_enter_now(&panel.st, tidx, "id > 1 AND name IS NOT NULL");
             pump(150);
             puttyplus::panel::dbui::cond_bar_order_now(&panel.st, tidx, "id", true);
             pump(300);
-            let (where_sql, order_by, chips, _) =
-                puttyplus::panel::dbui::cond_bar_state(&panel.st, tidx);
-            println!("截图前的状态：WHERE={where_sql} ORDER={order_by} chips={chips:?}");
             // ⚠️ **截图要等主循环转起来**：窗口刚 present 时还没画过，
             // 截出来是一片黑（看着像"界面没出来"）。
             pump(800);
             // ⚠️ **先把旧图删掉**：scrot 不覆盖同名文件，会自动加 _000/_001
-            // 的后缀——下次再看 /tmp/cond_bar.png 看到的是**上一次**的图。
-            let _ = std::fs::remove_file("/tmp/cond_bar.png");
+            // 的后缀——下次再看 /tmp/where_box.png 看到的是**上一次**的图。
+            let _ = std::fs::remove_file("/tmp/where_box.png");
             let st = std::process::Command::new("/usr/bin/scrot")
-                .arg("/tmp/cond_bar.png")
+                .arg("/tmp/where_box.png")
                 .status();
-            println!("截图 /tmp/cond_bar.png：{st:?}");
+            println!("截图 /tmp/where_box.png：{st:?}");
         }
 
-        println!("cond_bar_smoke: OK");
+        println!("where_box_smoke: OK");
         app.quit();
     });
     app.run_with_args::<&str>(&[]);

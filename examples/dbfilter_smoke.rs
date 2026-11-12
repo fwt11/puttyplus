@@ -64,24 +64,24 @@ fn main() {
         });
         pump(200);
 
-        // ---- 断言 1/2/5：两个过滤的名字分清了 ----
+        // ---- 断言 1/2/5：两个筛选的名字分清了 ----
         let (ph, tip) = dbui::result_filter_ui_now(&panel.st, idx);
-        println!("筛选框提示：{ph} / 过滤按钮提示：{tip}");
+        println!("筛本页框提示：{ph} / WHERE 框提示：{tip}");
         assert_eq!(
-            ph, "筛选已加载行",
-            "快速筛选框的提示该是「筛选已加载行」（本地筛行）"
+            ph, "筛本页",
+            "本地筛行框的提示该是「筛本页」（只筛已取回的行）"
         );
         assert!(
-            tip.contains("数据库过滤条件"),
-            "过滤按钮的提示该说「数据库过滤条件」：{tip}"
+            tip.contains("WHERE"),
+            "WHERE 框的提示该说清它是服务端条件：{tip}"
         );
         assert!(
-            !ph.contains("过滤条件"),
-            "筛选框不该叫「过滤条件」（那是重新查库的那个）：{ph}"
+            !ph.contains("WHERE"),
+            "本地筛行框不该叫 WHERE（那是重新查库的那个）：{ph}"
         );
         assert!(
-            !tip.contains("筛选已加载行"),
-            "过滤按钮不该叫「筛选已加载行」（那是本地筛行的）：{tip}"
+            !tip.contains("筛本页"),
+            "WHERE 框不该叫「筛本页」（那是本地筛行的）：{tip}"
         );
         println!("过滤改名 ✓");
 

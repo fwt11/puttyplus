@@ -424,6 +424,60 @@ pub fn common_types(proto: DbProto) -> &'static [&'static str] {
     }
 }
 
+/// 校验用户在 WHERE 框里写的**自由文本**条件（阶段 84）。
+///
+/// **为什么要校验**：WHERE 框里是**用户自己写的 SQL 片段**——用户本来就有
+/// 完整的 SQL 编辑器，权限上没风险。但**一条查询语句里塞分号 = 多语句**
+/// ⇒ 服务器会把分号后面那句也执行了 ⇒ 用户以为自己在"筛一下"，结果库被改了。
+/// 宁可在这里拦下来，也不让一条筛选变成一条写语句。
+///
+/// **只拦分号**，别的（`OR 1=1` 之类）**不拦**——那是用户自己的条件，
+/// 他自己负责；我们的职责只有一条：**别把一条筛选变成一条写语句**。
+///
+/// **分号在字符串里不算**（`name = 'a;b'` 是合法的）⇒ 扫描时跳过引号内部。
+/// 引号按 SQL 的两种都认：单引号（字符串）与双引号（标识符）。
+pub fn check_free_where(text: &str) -> Result<String, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Ok(String::new());
+    }
+    if t.chars().count() > 4000 {
+        return Err(tr("条件太长了（最多 4000 个字符）").to_string());
+    }
+    let mut quote: Option<char> = None;
+    let mut semi: Option<usize> = None; // 第一个**在引号外**的分号（字节位置）
+    for (i, c) in t.char_indices() {
+        match quote {
+            // 在引号里：只有遇到**同一个**引号才出来
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                ';' => {
+                    if semi.is_none() {
+                        semi = Some(i);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    if let Some(i) = semi {
+        // ⚠️ **结尾那个分号放过**：用户从别处粘一段 `id = 1;` 过来很常见，
+        // 那个分号只是句号，不多执行任何东西 ⇒ 替他去掉。
+        // 中间的分号 = 多语句 ⇒ 拒绝。
+        let rest = t[i + 1..].trim();
+        if !rest.is_empty() {
+            return Err(tr("条件里不能有分号（一条查询只能带一条语句）").to_string());
+        }
+        return Ok(t[..i].trim().to_string());
+    }
+    Ok(t.to_string())
+}
+
 /// ORDER BY 片段（阶段 48：可视化条件条里的「排序」）。
 ///
 /// 空列名 → 空串（不拼 ORDER BY）。
@@ -4804,5 +4858,54 @@ mod tests {
             updated: String::new(),
         };
         assert_eq!(fmt_table_detail("视图", &st2), "视图 · ≈0 行");
+    }
+
+    /* ---------------- 自由文本 WHERE 的校验（阶段 84） ---------------- */
+
+    #[test]
+    fn 自由where空串等于不过滤() {
+        assert_eq!(check_free_where("").unwrap(), "");
+        assert_eq!(check_free_where("   \n ").unwrap(), "");
+    }
+
+    #[test]
+    fn 自由where原样返回并去掉首尾空白() {
+        assert_eq!(
+            check_free_where("  id > 3 AND name LIKE 'a%'  ").unwrap(),
+            "id > 3 AND name LIKE 'a%'"
+        );
+    }
+
+    #[test]
+    fn 自由where拒绝分号() {
+        let e = check_free_where("id = 1; DROP TABLE users").unwrap_err();
+        assert!(e.contains("分号"), "{e}");
+    }
+
+    #[test]
+    fn 自由where结尾的分号放过并去掉() {
+        // 用户从别处粘 `id = 1;` 过来很常见 ⇒ 那个分号只是句号
+        assert_eq!(check_free_where("id = 1;").unwrap(), "id = 1");
+        assert_eq!(check_free_where("id = 1;  ").unwrap(), "id = 1");
+    }
+
+    #[test]
+    fn 自由where字符串里的分号放行() {
+        // 分号在引号里是普通字符，不该被当成多语句
+        assert_eq!(
+            check_free_where("name = 'a;b'").unwrap(),
+            "name = 'a;b'"
+        );
+        assert_eq!(
+            check_free_where("name = \"a;b\"").unwrap(),
+            "name = \"a;b\""
+        );
+    }
+
+    #[test]
+    fn 自由where拒绝超长() {
+        let long = "a".repeat(4001);
+        let e = check_free_where(&long).unwrap_err();
+        assert!(e.contains("太长"), "{e}");
     }
 }

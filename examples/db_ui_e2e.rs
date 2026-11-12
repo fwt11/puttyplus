@@ -845,10 +845,17 @@ fn main() {
         assert_eq!(rows[0].1.len(), n0, "清除条件后行数没回来");
         println!("[3.7.5] 清除条件后 {} 行", rows[0].1.len());
 
-        // 条件编辑器长什么样（截图）
+        // WHERE 框长什么样（截图）
+        //
+        // ⚠️ **阶段 84**：条件编辑器弹窗退场了（改成常驻的 WHERE 输入框），
+        // 这里改成把 WHERE 框填上内容再截图。
         if args.iter().any(|a| a == "--shot-filter") {
-            assert!(dbui::open_filter_dialog_now(&st, 0), "过滤条件编辑器没打开");
-            shot("/tmp/filter_dialog.png");
+            assert!(
+                dbui::where_enter_now(&st, 0, "id > 1"),
+                "WHERE 框回车没反应"
+            );
+            pump(600);
+            shot("/tmp/where_box.png");
         }
     }
 
@@ -1100,9 +1107,9 @@ fn main() {
         }
     }
 
-    // ---- 阶段 48：可视化 WHERE / ORDER BY 条件条 ----
+    // ---- 阶段 84：常驻 WHERE 框 + 可视化 ORDER BY ----
     //
-    // 验：① 条件条能生成 WHERE（**按列类型转义**：整数列不加引号）；
+    // 验：① WHERE 条件能生效（**按列类型转义**：整数列不加引号）；
     //      ② 带条件真的**重查了库**（行数变少，且剩下的行都满足条件）；
     //      ③ 排序列能生成 ORDER BY；④ 「清除」恢复整张表。
     {
@@ -1114,10 +1121,11 @@ fn main() {
         let n_before = rows.len();
         println!("[3.13] 用 {col0} = {val0} 过滤（原来 {n_before} 行）");
 
-        // ① 加条件
+        // ① 下条件（**走 `apply_filter_now`**：它按列类型转义，整数列不加引号）
         assert!(
-            dbui::cond_bar_add_now(&st, 0, &col0, "=", &val0),
-            "条件条加不了条件"
+            dbui::apply_filter_now(&st, 0, &[(col0.clone(), "=".to_string(), val0.clone())])
+                .is_ok(),
+            "WHERE 条件下不了"
         );
         // ⚠️ **轮询等结果**：条件是服务端过滤，要等 worker 回包
         let mut n_after = n_before;
@@ -1129,11 +1137,16 @@ fn main() {
                 break;
             }
         }
-        let (w, ob, chips, ocol) = dbui::cond_bar_state(&st, 0);
+        let (w, ob, ocol) = dbui::cond_bar_state(&st, 0);
         println!("[3.13.1] WHERE = {w}（行数 {n_before} → {n_after}）");
-        assert!(!w.is_empty(), "条件条没生成 WHERE");
+        assert!(!w.is_empty(), "WHERE 条件没生成");
         assert!(w.contains(&col0), "WHERE 里没有那一列：{w}");
-        assert_eq!(chips.len(), 1, "条件条上应当只有一颗 chip：{chips:?}");
+        // ⚠️ **WHERE 框里的文字要跟生效的条件一致**：用户看得见自己下发了什么
+        assert_eq!(
+            dbui::where_text_now(&st, 0),
+            w,
+            "WHERE 框里的文字与生效的条件不一致"
+        );
         assert!(
             n_after < n_before,
             "带条件重查后行数没变（{n_before} → {n_after}）：条件没真的生效"
@@ -1151,7 +1164,7 @@ fn main() {
             "条件条挑不了排序列"
         );
         pump(500);
-        let (w2, ob2, _, ocol2) = dbui::cond_bar_state(&st, 0);
+        let (w2, ob2, ocol2) = dbui::cond_bar_state(&st, 0);
         println!("[3.13.2] ORDER BY = {ob2}");
         assert!(ob2.contains("DESC"), "排序方向没切成降序：{ob2}");
         assert_eq!(ocol2, col0, "排序列不对：{ocol2}");
@@ -1169,11 +1182,16 @@ fn main() {
                 break;
             }
         }
-        let (w3, ob3, chips3, _) = dbui::cond_bar_state(&st, 0);
+        let (w3, ob3, _) = dbui::cond_bar_state(&st, 0);
         println!("[3.13.3] 清除后行数 {n_back}，WHERE = {w3:?} ORDER = {ob3:?}");
         assert!(w3.is_empty(), "清除后还有条件：{w3}");
         assert!(ob3.is_empty(), "清除后还有排序：{ob3}");
-        assert!(chips3.is_empty(), "清除后还有 chip：{chips3:?}");
+        // ⚠️ **框里的文字也要清**：只清生效状态不清框 ⇒ 用户看着框里的条件
+        // 以为还在筛，其实没筛。
+        assert!(
+            dbui::where_text_now(&st, 0).is_empty(),
+            "清除后 WHERE 框里还有字"
+        );
         assert_eq!(n_back, n_before, "清除后行数没恢复：{n_back} != {n_before}");
         if args.iter().any(|a| a == "--shot-header") {
             shot("/tmp/db_condbar.png");

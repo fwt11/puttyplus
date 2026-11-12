@@ -606,8 +606,6 @@ struct ResultTab {
     btn_delete: gtk::Button,
     btn_save: gtk::Button,
     btn_discard: gtk::Button,
-    /// 过滤条件编辑器（9.5）：填 Where 条件，重新查库
-    btn_filter: gtk::Button,
     /// 这张表对应的对象（可编辑数据）；None = 普通查询结果（只读）
     target: RefCell<Option<TableTarget>>,
     /// 列显示设置的持久化目标（阶段 20）：`(连接标识, 模式, 表名)`。
@@ -626,9 +624,12 @@ struct ResultTab {
     /// 错位了——按位置取类型会把 int 列当成 text 列，条件里的值就转错
     /// （数字列多套一层引号 → 服务器报类型错）。
     col_names: RefCell<Vec<String>>,
-    /// 当前过滤条件（9.5；重新查库 / 翻页都带着它）
-    filter_conds: RefCell<Vec<dbmeta::FilterCond>>,
-    /// 由条件生成的 WHERE 文本（空串 = 不过滤）
+    /// 当前生效的 **WHERE 文本**（空串 = 不过滤）。
+    ///
+    /// ⚠️ **阶段 84 改成自由文本**：以前这里是由结构化条件
+    /// （列/运算符/值）拼出来的，界面上对应的是「挑列 → 挑运算符 → 填值 →
+    /// 点「+ 条件」」那一套。现在用户在 WHERE 框里直接写 SQL 布尔表达式，
+    /// **回车即查库** ⇒ 这里存的就是他写的那段文本（原样）。
     filter_where: RefCell<String>,
     /// 编辑模式中
     editing: Cell<bool>,
@@ -697,34 +698,42 @@ struct TableTarget {
     is_view: bool,
 }
 
-/// 条件条（阶段 48，对标 dbx 的 `WHERE ▾ | ORDER BY ▾` 条）。
+/// 条件条（阶段 84 改版，对标 dbx 的 `WHERE [输入框] ▾ ✕ | ORDER BY ▾`）。
 ///
-/// **为什么要有它**：原先过滤条件只能开一个**弹窗**手写（一行一条地拼），
-/// 排序更是**根本没有入口**。dbx / Navicat 的做法是**在结果页签上直接摆
-/// 一条**：挑列 → 挑运算符 → 填值 → 加条件，改完立刻重查。
+/// **为什么从「挑列 → 挑运算符 → 填值 → 点「+ 条件」」改成「一个框 + 回车」**：
+/// 原来那套要**四个动作**才加得上一条条件，中间还夹着一个「+ 条件」按钮——
+/// 填完了还得再点一下才知道生效没生效，点错了也不知道错在哪儿。dbx 的做法
+/// 是**一个宽输入框**：条件直接写成 SQL 布尔表达式，**回车即查库**。
+///
+/// **自由文本 = 用户自己写 SQL**：用户本来就有完整的 SQL 编辑器，权限上没
+/// 风险；但**分号要拦**（一条查询只能一条语句）——见 [`dbmeta::check_free_where`]。
+///
+/// **「▾」是列名助手**：不记得列名时点一下，列表里挑一个插到输入框里。
 ///
 /// **只在表浏览页签上有**：普通查询结果是用户手写的 SQL，往里拼 WHERE /
 /// ORDER BY 是越权（用户自己写 SQL，自己想加什么加什么）。
 struct CondBar {
-    /// 整条（竖排：上面是控件行，下面是已生效条件的 chip 行）
+    /// 整条（**横排一行**，跟工具条并排 ⇒ 网格因此多出一大截）
     root: gtk::Box,
-    /// 与上一条条件的连接词（并且 / 或者）
-    join: gtk::ComboBoxText,
-    /// 条件列
-    col: gtk::ComboBoxText,
-    /// 运算符
-    op: gtk::ComboBoxText,
-    /// 值
-    val: gtk::Entry,
-    /// 「+ 条件」按钮
-    btn_add: gtk::Button,
-    /// 已生效条件的 chip 行（每颗 chip 带一个 ✕）
-    chips: gtk::Box,
+    /// WHERE 输入框（**自由文本**：SQL 布尔表达式）
+    where_entry: gtk::Entry,
+    /// 条件助手的弹层（填完条件要把弹层收起来）
+    cols_pop: gtk::Popover,
+    /// 条件助手里的「列」下拉
+    pop_col: gtk::ComboBoxText,
+    /// 条件助手里的「运算符」下拉
+    pop_op: gtk::ComboBoxText,
+    /// 条件助手里的「值」输入框
+    pop_val: gtk::Entry,
+    /// 条件助手里的「填入」按钮
+    pop_btn: gtk::Button,
+    /// ✕ 清空 WHERE（**只清条件**，排序不动）
+    btn_where_clear: gtk::Button,
     /// 排序列
     order_col: gtk::ComboBoxText,
     /// 排序方向（升序 / 降序）
     btn_dir: gtk::Button,
-    /// 「清除」按钮
+    /// 「清除」按钮（条件 **和** 排序一起清）
     btn_clear: gtk::Button,
 }
 
@@ -754,49 +763,94 @@ pub fn order_dir_text(asc: bool) -> &'static str {
 fn build_cond_bar() -> Rc<CondBar> {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.add_css_class("pp-condbar");
+    // ⚠️ **这一条要能吃掉剩余宽度**：WHERE 输入框在它里面，外层不给扩展
+    // 空间的话输入框永远是自然宽（十几 px），根本没法用。
+    row.set_hexpand(true);
 
-    let lbl = gtk::Label::new(Some(tr("条件")));
-    lbl.add_css_class("dim-label");
-    row.append(&lbl);
+    // ---- WHERE ----
+    //
+    // ⚠️ **「WHERE」用蓝色粗体**：界面上有两个筛选（这个=服务端条件，
+    // 旁边那个「筛本页」=本地筛行），用户最常犯的错就是把两者当成一回事。
+    // 标签 + 颜色就是用来一眼分开的。
+    let lbl_where = gtk::Label::new(Some(tr("WHERE")));
+    lbl_where.add_css_class("pp-where-label");
+    row.append(&lbl_where);
 
-    let join = gtk::ComboBoxText::new();
-    // ⚠️ **`append(id, text)` 的顺序别搞反**：第一个参数是 id（程序里认的），
-    // 第二个是**显示给用户看的文字**。写成 `append("并且", "AND")` 的话，
-    // 界面上显示的是 "AND"，而且 `active_id()` 回来的是"并且"，
-    // 下面的 "OR" 判断永远不成立 → 「或者」这个选项形同虚设。
-    join.append(Some("AND"), tr("并且"));
-    join.append(Some("OR"), tr("或者"));
-    join.set_active_id(Some("AND"));
-    join.set_tooltip_text(Some(tr("与上一条条件的连接方式（第一条用不上）")));
-    // ⚠️ **限宽**：不定的话它会被挤成只剩一个下拉箭头，"并且 / 或者"
-    // 两个字都看不见（用户根本不知道这一格是干什么的）。
-    join.set_size_request(74, -1);
-    row.append(&join);
+    let where_entry = gtk::Entry::new();
+    where_entry.set_placeholder_text(Some(tr("条件（例：id > 3 AND name LIKE 'a%'）")));
+    where_entry.set_tooltip_text(Some(tr(
+        "在这里写 WHERE 条件，按回车重新查库（服务端过滤，不只筛当前这一页）",
+    )));
+    // ⚠️ **限宽 + 可扩展**：不限宽它会把右边的按钮挤出可视区；不扩展它就
+    // 永远只有十几个 px。两者一起给才对。
+    where_entry.set_width_chars(18);
+    where_entry.set_hexpand(true);
+    row.append(&where_entry);
 
-    let col = gtk::ComboBoxText::new();
-    col.set_tooltip_text(Some(tr("要加条件的列")));
-    // 列名可能是中文（四个字要 8 列宽），窄了会被截成「…」
-    col.set_size_request(108, -1);
-    row.append(&col);
-
-    let op = gtk::ComboBoxText::new();
-    for o in dbmeta::FilterOp::all() {
-        op.append(Some(o.label()), o.label());
+    // ▾ 条件助手
+    //
+    // **为什么是「列 + 运算符 + 值」而不是一个列名列表**：用户不记得列名是
+    // 常态，但不记得运算符/引号写法也是常态（`name = 张三` 少了引号直接
+    // 语法错）。这里**按列类型转义**（整数列不加引号，文本列加引号），
+    // 生成一段一定能跑的条件，用户再接着手改。
+    let btn_cols = gtk::MenuButton::new();
+    {
+        let img = gtk::Image::from_icon_name("view-list-symbolic");
+        img.set_pixel_size(14);
+        btn_cols.set_child(Some(&img));
     }
-    op.set_active_id(Some("="));
-    op.set_tooltip_text(Some(tr("比较方式")));
-    op.set_size_request(72, -1);
-    row.append(&op);
+    btn_cols.set_tooltip_text(Some(tr("条件助手：挑列 + 运算符 + 值，生成一段条件")));
+    btn_cols.add_css_class("pp-icon-btn");
+    // 弹层：**先建好、后面再填列名**（列信息是异步到的）。
+    // ⚠️ `set_popover` 会自己把弹层挂到按钮上，别再手动 `set_parent`。
+    let cols_pop = crate::menu::popover_detached();
+    btn_cols.set_popover(Some(&cols_pop));
+    row.append(&btn_cols);
 
-    let val = gtk::Entry::new();
-    val.set_placeholder_text(Some(tr("值")));
-    // 限宽：不设的话它会把右边的排序控件挤出可视区
-    val.set_width_chars(12);
-    row.append(&val);
+    // 弹层里的三个控件
+    let pop_col = gtk::ComboBoxText::new();
+    pop_col.set_tooltip_text(Some(tr("要加条件的列")));
+    pop_col.set_size_request(120, -1);
+    let pop_op = gtk::ComboBoxText::new();
+    for o in dbmeta::FilterOp::all() {
+        pop_op.append(Some(o.label()), o.label());
+    }
+    pop_op.set_active_id(Some("="));
+    pop_op.set_tooltip_text(Some(tr("比较方式")));
+    pop_op.set_size_request(84, -1);
+    let pop_val = gtk::Entry::new();
+    pop_val.set_placeholder_text(Some(tr("值")));
+    pop_val.set_hexpand(true);
 
-    let btn_add = gtk::Button::with_label(tr("+ 条件"));
-    btn_add.set_tooltip_text(Some(tr("把这个条件加进去，并按它重新查这张表")));
-    row.append(&btn_add);
+    let pop_btn = gtk::Button::with_label(tr("填入到 WHERE 框"));
+    pop_btn.add_css_class("suggested-action");
+    pop_btn.set_tooltip_text(Some(tr(
+        "按列类型转义生成条件，填进 WHERE 框（填完可以接着改，按回车查库）",
+    )));
+
+    {
+        // 「填入」单独一行（按钮文字长，跟三个控件挤一行会挤扁）
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        body.set_margin_start(8);
+        body.set_margin_end(8);
+        body.set_margin_top(8);
+        body.set_margin_bottom(8);
+        let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row2.append(&pop_col);
+        row2.append(&pop_op);
+        row2.append(&pop_val);
+        body.append(&row2);
+        pop_btn.set_halign(gtk::Align::End);
+        body.append(&pop_btn);
+        cols_pop.set_child(Some(&body));
+    }
+
+    // ✕ 只清 WHERE
+    let btn_where_clear = icon_button(
+        "window-close-symbolic",
+        tr("清空 WHERE 条件（排序不动）"),
+    );
+    row.append(&btn_where_clear);
 
     // ---- 排序那一段 ----
     row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
@@ -807,7 +861,7 @@ fn build_cond_bar() -> Rc<CondBar> {
 
     let order_col = gtk::ComboBoxText::new();
     order_col.set_tooltip_text(Some(tr("按哪一列排序（不选就不排序）")));
-    order_col.set_size_request(108, -1);
+    order_col.set_size_request(96, -1);
     row.append(&order_col);
 
     let btn_dir = gtk::Button::with_label(order_dir_text(true));
@@ -815,27 +869,21 @@ fn build_cond_bar() -> Rc<CondBar> {
     row.append(&btn_dir);
 
     let btn_clear = gtk::Button::with_label(tr("清除"));
-    btn_clear.set_tooltip_text(Some(tr("清掉全部条件与排序，恢复查整张表")));
+    btn_clear.set_tooltip_text(Some(tr("清掉 WHERE 条件与排序，恢复查整张表")));
     row.append(&btn_clear);
 
-    // 已生效条件的 chip 行（空的时候藏起来，别占一行高度）
-    let chips = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    chips.set_visible(false);
-
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    root.append(&row);
-    root.append(&chips);
-    // 整条默认藏着：只有**表浏览页签**才有条件条
-    root.set_visible(false);
+    // 整条默认藏着：只有**表浏览页签**有条件条
+    row.set_visible(false);
 
     Rc::new(CondBar {
-        root,
-        join,
-        col,
-        op,
-        val,
-        btn_add,
-        chips,
+        root: row,
+        where_entry,
+        cols_pop,
+        pop_col,
+        pop_op,
+        pop_val,
+        pop_btn,
+        btn_where_clear,
         order_col,
         btn_dir,
         btn_clear,
@@ -2451,11 +2499,14 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // 删字段要一条一条生成 ALTER）。
     grid.set_multi_select(true);
     let filter = gtk::Entry::new();
-    // ⚠️ **名字要和「数据库过滤条件」分清**（阶段 72 / 审计 P1-7、P2-10）：
-    // 这个框是**在已经取回的行里**按文字筛（不查库），那个按钮是**生成 WHERE
-    // 重新查库**。以前两个都叫"过滤"，用户点错了才发现不是一回事。
-    filter.set_placeholder_text(Some(tr("筛选已加载行")));
-    filter.set_tooltip_text(Some(tr("在已加载的行里按文字筛选（不区分大小写，不查库）")));
+    // ⚠️ **名字要和「WHERE 条件」分清**（阶段 72 / 审计 P1-7、P2-10；阶段 84
+    // 再收紧）：这个框是**在已经取回的行里**按文字筛（不查库），WHERE 框是
+    // **生成 SQL 重新查库**。以前两个都叫"过滤"，用户点错了才发现不是一回事。
+    // ⇒ 这个框改叫「筛本页」，一句话说清范围；服务端那个是蓝色「WHERE」。
+    filter.set_placeholder_text(Some(tr("筛本页")));
+    filter.set_tooltip_text(Some(tr(
+        "只在已取回的这一页里按文字筛（不查库）；服务端条件请写上面的 WHERE 框",
+    )));
     // ⚠️ **宽度按"显示列"算**：一个汉字占两列，「筛选已加载行」是 6 个汉字
     // ⇒ 12 列才放得下，宽度不够会被截成「筛选已加…」。
     filter.set_width_chars(14);
@@ -2512,13 +2563,6 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     btn_save.add_css_class("pp-primary");
     let btn_discard = icon_button("edit-undo-symbolic", tr("放弃修改：回滚事务，网格恢复原样"));
     btn_discard.set_sensitive(false);
-    // 数据库过滤条件（9.5，阶段 72 改名）：填 Where 条件后**重新查库**
-    // （服务端过滤，不是本地筛行）
-    let btn_filter = icon_button(
-        "view-filter-symbolic",
-        tr("数据库过滤条件：生成 WHERE 条件重新查库（不只筛当前这一页）"),
-    );
-    btn_filter.set_sensitive(false);
     // 「只读 / 可编辑」标志（阶段 72c）：先按"只读"造，开了表再改成"可编辑"
     let mode_chip = gtk::Label::new(Some(tr("只读")));
     mode_chip.add_css_class("pp-chip");
@@ -2528,9 +2572,12 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // ⚠️ **标志放最左边**：它是"这一页能不能改"的唯一说明，埋在工具栏中间
     // 等于没有。
     head.append(&mode_chip);
+    // ⚠️ **服务端条件的入口没了**（阶段 84）：以前是一颗「🔽 数据库过滤条件」
+    // 按钮，点了开弹窗填条件。现在**条件条上就有一个 WHERE 输入框**，
+    // 写完回车即查库 ⇒ 弹窗与那颗按钮一起退场（两个入口做同一件事，
+    // 用户只会记错其中一个）。
     head.append(&filter);
     head.append(&status);
-    head.append(&btn_filter);
     // ⚠️ **工具栏里没有「列显示设置」按钮**（阶段 72 / 审计 P1-7、P2-10）：
     // 列设置以前有两个入口（这颗按钮 + 列头的「⋮」菜单）⇒ 审计说"列设置
     // 只保留一个入口"。现在只留在列头菜单里（`DbGrid::set_col_setup_hook`）。
@@ -2640,13 +2687,11 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         btn_delete,
         btn_save,
         btn_discard,
-        btn_filter,
         target: RefCell::new(None),
         col_key: RefCell::new(None),
         types: RefCell::new(Vec::new()),
         pk: RefCell::new(Vec::new()),
         col_names: RefCell::new(Vec::new()),
-        filter_conds: RefCell::new(Vec::new()),
         filter_where: RefCell::new(String::new()),
         editing: Cell::new(false),
         in_tx: Cell::new(false),
@@ -2826,27 +2871,62 @@ fn wire_tab(tab: &Rc<ResultTab>) {
             grid.set_filter(&e.text());
         });
     }
-    // 过滤条件（9.5）
-    {
-        let tab2 = Rc::clone(tab);
-        tab.btn_filter.connect_clicked(move |_| {
-            let Some(st) = tab2.st.upgrade() else { return };
-            let slot = st.db_ui.borrow();
-            let Some(ui) = slot.as_ref() else { return };
-            open_filter_dialog(&st, ui, &tab2);
-        });
-    }
-    // 条件条（阶段 48）：加条件 / 改排序 / 清除
+    // ---- WHERE 框（阶段 84）：回车即查库 ----
     //
     // ⚠️ **抓弱引用**：条件条挂在页签上，回调若抓 `Rc<ResultTab>`，就是
     // `ResultTab → 条件条 → 回调 → ResultTab` 的环，页签永远释放不掉。
     {
         let weak_tab = Rc::downgrade(tab);
-        tab.cond_bar.btn_add.connect_clicked(move |_| {
+        tab.cond_bar.where_entry.connect_activate(move |e| {
             let Some(tab) = weak_tab.upgrade() else { return };
-            add_cond_from_bar(&tab);
+            let text = e.text().to_string();
+            match apply_where_text(&tab, &text) {
+                Ok(w) => {
+                    // ⚠️ **把框里的文字同步成规范化后的**：结尾分号被去掉了，
+                    // 框里还留着的话，用户下次按回车又会被去掉一次（看着像
+                    // "改了没反应"）。
+                    if w != text.trim() {
+                        e.set_text(&w);
+                    }
+                    if w.is_empty() {
+                        set_tab_status(&tab, tr("已清掉条件，查整张表"));
+                    } else {
+                        set_tab_status(&tab, &trf!("条件：{w}", w = w));
+                    }
+                }
+                Err(err) => set_tab_status_err(&tab, &err),
+            }
         });
     }
+    // ✕：只清 WHERE（排序不动）
+    {
+        let weak_tab = Rc::downgrade(tab);
+        tab.cond_bar.btn_where_clear.connect_clicked(move |_| {
+            let Some(tab) = weak_tab.upgrade() else { return };
+            tab.cond_bar.where_entry.set_text("");
+            if let Err(err) = apply_where_text(&tab, "") {
+                set_tab_status_err(&tab, &err);
+            }
+        });
+    }
+    // 条件助手的「填入」：按列类型转义生成一段条件，塞进 WHERE 框
+    {
+        let weak_tab = Rc::downgrade(tab);
+        tab.cond_bar.pop_btn.connect_clicked(move |_| {
+            let Some(tab) = weak_tab.upgrade() else { return };
+            match fill_where_from_helper(&tab) {
+                Ok(frag) => {
+                    // 弹层收起来 ⇒ 焦点能回到 WHERE 框上接着改
+                    tab.cond_bar.cols_pop.popdown();
+                    set_tab_status(&tab, &trf!("已填入：{f}（按回车查库）", f = frag));
+                    // 焦点回到 WHERE 框 ⇒ 用户可以接着改
+                    tab.cond_bar.where_entry.grab_focus();
+                }
+                Err(err) => set_tab_status_err(&tab, &err),
+            }
+        });
+    }
+    // 条件条：改排序 / 清除
     {
         let weak_tab = Rc::downgrade(tab);
         tab.cond_bar.order_col.connect_changed(move |cb| {
@@ -6318,6 +6398,23 @@ fn set_status(ui: &DbUi, text: &str, error: bool) {
     }
 }
 
+/// 页签自己的状态文字（工具条上那颗）。
+///
+/// **为什么不用全局的 [`set_status`]**：全局那行在窗口最上面，而页签的状态
+/// 是"**这个页签**刚才干了什么"——放在页签自己的工具条上，用户不用去别处找。
+fn set_tab_status(tab: &Rc<ResultTab>, text: &str) {
+    tab.status.set_text(text);
+    tab.status.remove_css_class("error");
+    tab.status.add_css_class("dim-label");
+}
+
+/// 页签状态文字（**出错**版）。
+fn set_tab_status_err(tab: &Rc<ResultTab>, text: &str) {
+    tab.status.set_text(text);
+    tab.status.add_css_class("error");
+    tab.status.remove_css_class("dim-label");
+}
+
 fn is_cancel(err: &str) -> bool {
     let low = err.to_ascii_lowercase();
     low.contains("canceling statement")
@@ -7251,8 +7348,6 @@ pub fn on_meta(
                         cols.iter().map(|c| c.name.clone()).collect();
                     // 列信息到手了 → 条件条可以用了（它要列清单）
                     fill_cond_bar(&tab);
-                    // 列信息到手了 → 过滤条件编辑器可以用了（它要列清单）
-                    tab.btn_filter.set_sensitive(true);
                     // 列显示设置也要列清单
                     // 列信息到手了，再查数据
                     let Some(target) = tab.target.borrow().clone() else {
@@ -7578,29 +7673,34 @@ fn refresh_table(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
     );
 }
 
-/* ---------------- 过滤条件（9.5） ---------------- */
+/* ---------------- WHERE 条件（阶段 84） ---------------- */
 
-/// 应用过滤条件：生成 WHERE → 存起来 → 重新查这张表。
+/// 应用 WHERE 条件：校验 → 存起来 → 重新查这张表。
 ///
-/// **为什么是服务端过滤**：本地筛选只对「已经取回的行」起作用（一页 200 行），
+/// **服务端过滤**：本地筛选只对「已经取回的行」起作用（一页 200 行），
 /// 表达不了 `id > 100 AND name LIKE …`——要按条件过滤就得让数据库查。
-/// 条件生成失败（值与列类型不符）在这里就报中文原因，不发半条语句。
-fn apply_filter(
-    st: &Rc<PanelState>,
-    ui: &DbUi,
-    tab: &Rc<ResultTab>,
-    conds: Vec<dbmeta::FilterCond>,
-) -> Result<String, String> {
-    let Some(target) = tab.target.borrow().clone() else {
-        return Err(tr("这不是表数据页签，用不了数据库过滤条件").to_string());
+///
+/// **阶段 84 改成自由文本**：用户在 WHERE 框里直接写 SQL 布尔表达式，
+/// **回车即查库**。校验只做一件事——**拦分号**（一条查询只能一条语句，
+/// 见 [`dbmeta::check_free_where`]）；值与列类型对不对得上由服务器说，
+/// 我们不替用户猜（用户本来就有完整的 SQL 编辑器）。
+fn apply_where_text(tab: &Rc<ResultTab>, text: &str) -> Result<String, String> {
+    let Some(st) = tab.st.upgrade() else {
+        return Err(tr("页面已经关了").to_string());
     };
-    let m = col_type_map(tab);
-    let where_sql = dbmeta::build_where(current_proto(ui), &conds, &m)?;
-    *tab.filter_conds.borrow_mut() = conds;
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return Err(tr("数据库窗口没开").to_string());
+    };
+    let Some(target) = tab.target.borrow().clone() else {
+        return Err(tr("这不是表数据页签，用不了 WHERE 条件").to_string());
+    };
+    let where_sql = dbmeta::check_free_where(text)?;
     *tab.filter_where.borrow_mut() = where_sql.clone();
-    // 条件条上的 chip 跟着更新（弹窗里改的条件也要看得见）
-    refresh_cond_chips(tab);
-    query_table(st, ui, tab, &target);
+    // 条件变了 → 回到第一页重查（否则第 3 页的偏移对不上新的结果集）
+    tab.page.set(1);
+    tab.offset.set(0);
+    query_table(&st, ui, tab, &target);
     Ok(where_sql)
 }
 
@@ -7656,7 +7756,7 @@ fn col_type_map(tab: &Rc<ResultTab>) -> HashMap<String, ColType> {
     out
 }
 
-/// 把列清单填进条件条的两个下拉（条件列 + 排序列）。
+/// 把列清单填进条件条的下拉（排序列 + 条件助手的「列」）。
 ///
 /// **一张表只填一次**：列信息是异步到的（`MetaForTable`），到了才知道
 /// 有哪些列可选。重复填会把下拉弄乱，所以用 `cond_filled` 挡一下。
@@ -7671,125 +7771,79 @@ fn fill_cond_bar(tab: &Rc<ResultTab>) {
     tab.cond_filled.set(true);
     let bar = &tab.cond_bar;
     for c in &cols {
-        bar.col.append(Some(c.as_str()), c);
+        bar.pop_col.append(Some(c.as_str()), c);
         bar.order_col.append(Some(c.as_str()), c);
     }
-    bar.col.set_active_id(Some(cols.first().map(|s| s.as_str()).unwrap_or("")));
+    bar.pop_col.set_active_id(Some(cols.first().map(|s| s.as_str()).unwrap_or("")));
     // 排序列**默认不选**：不选 = 不排序（选了会跟用户预期的"原样"不一样）
     bar.order_col.set_active_id(None);
     // 条件条亮出来（只有表浏览页签有）
     bar.root.set_visible(true);
 }
 
-/// 刷新条件条上的 chip 行（每颗 chip = 一个已生效条件 + ✕ 移除）。
-fn refresh_cond_chips(tab: &Rc<ResultTab>) {
-    while let Some(child) = tab.cond_bar.chips.first_child() {
-        tab.cond_bar.chips.remove(&child);
-    }
-    let conds = tab.filter_conds.borrow().clone();
-    if conds.is_empty() {
-        tab.cond_bar.chips.set_visible(false);
-        return;
-    }
-    tab.cond_bar.chips.set_visible(true);
-    for (i, c) in conds.iter().enumerate() {
-        let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        chip.add_css_class("pp-cond-chip");
-        let text = gtk::Label::new(Some(&cond_chip_text(c)));
-        text.set_max_width_chars(28);
-        text.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        chip.append(&text);
-        // 移除按钮：点掉这一颗 chip，条件就没了（立刻重查）
-        let del = crate::a11y::icon_button("window-close-symbolic");
-        del.add_css_class("flat");
-        {
-            let img = del.child().and_downcast::<gtk::Image>();
-            if let Some(img) = img {
-                img.set_pixel_size(12);
-            }
-        }
-        del.set_tooltip_text(Some(tr("去掉这个条件")));
-        {
-            // ⚠️ **抓弱引用**：chip 挂在页签上，回调若抓 `Rc<ResultTab>`
-            // 就是 `ResultTab → chip → 回调 → ResultTab` 的环，页签永远
-            // 释放不掉。
-            let weak_tab = Rc::downgrade(tab);
-            del.connect_clicked(move |_| {
-                let Some(tab) = weak_tab.upgrade() else { return };
-                remove_cond(&tab, i);
-            });
-        }
-        chip.append(&del);
-        tab.cond_bar.chips.append(&chip);
-    }
-}
-
-/// 条件条上「+ 条件」：把当前三块读成一个条件，加进去并重查。
-fn add_cond_from_bar(tab: &Rc<ResultTab>) {
-    let Some(st) = tab.st.upgrade() else { return };
-    let slot = st.db_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
+/// 条件助手的「填入」：按**列类型**转义生成一段条件，追加到 WHERE 框里。
+///
+/// **为什么值要按类型转义**：整数列的值不能加引号（`integer = '1'` 服务器
+/// 报类型错），文本列的值必须加引号（`text = 张三` 是语法错）。用户在框里
+/// 手写时得自己记住这件事，这里替他做掉。
+///
+/// **填进去之后不自动查库**：用户多半还要接着改（加 `AND …`、改运算符）。
+/// 改完按回车才查——所以「填入」**不**改当前的 WHERE 生效状态。
+fn fill_where_from_helper(tab: &Rc<ResultTab>) -> Result<String, String> {
     let bar = &tab.cond_bar;
-    let Some(column) = bar.col.active_id().map(|s| s.to_string()) else {
-        set_status(ui, tr("先选一列再加条件"), true);
-        return;
+    let Some(column) = bar.pop_col.active_id().map(|s| s.to_string()) else {
+        return Err(tr("先选一列").to_string());
     };
     if column.trim().is_empty() {
-        set_status(ui, tr("先选一列再加条件"), true);
-        return;
+        return Err(tr("先选一列").to_string());
     }
     let Some(op) = bar
-        .op
+        .pop_op
         .active_id()
         .and_then(|s| dbmeta::FilterOp::from_label(s.as_str()))
     else {
-        set_status(ui, tr("先选一个运算符"), true);
-        return;
+        return Err(tr("先选一个运算符").to_string());
     };
-    let value = bar.val.text().to_string();
-    let join = match bar.join.active_id().map(|s| s.to_string()).unwrap_or_default().as_str() {
-        "OR" => dbmeta::FilterJoin::Or,
-        _ => dbmeta::FilterJoin::And,
-    };
-    let mut conds = tab.filter_conds.borrow().clone();
-    conds.push(dbmeta::FilterCond {
-        join,
+    let value = bar.pop_val.text().to_string();
+    // 用与 `build_where` 同一套转义（`edit_literal`）——整数列不加引号。
+    let types = col_type_map(tab);
+    let ty = types.get(column.trim()).copied().unwrap_or(ColType::Text);
+    let cond = dbmeta::FilterCond {
+        join: dbmeta::FilterJoin::And,
         column: column.clone(),
         op,
         value: value.clone(),
-    });
-    match apply_filter(&st, ui, tab, conds) {
-        Ok(_) => {
-            bar.val.set_text("");
-            refresh_cond_chips(tab);
-            set_status(ui, &trf!("已加条件：{v0}", v0 = cond_chip_text(&dbmeta::FilterCond {
-                join,
-                column: column.clone(),
-                op,
-                value,
-            })), false);
-        }
-        Err(e) => set_status(ui, &e, true),
-    }
+    };
+    let one = dbmeta::build_where(current_proto_of(tab), std::slice::from_ref(&cond), &types)?;
+    // `build_where` 产出的是「列 运算符 字面量」这一段（不含 WHERE 关键字）。
+    let frag = if one.is_empty() {
+        cond_chip_text(&cond)
+    } else {
+        one
+    };
+    let _ = ty;
+    // 追加到 WHERE 框：已有内容就用 AND 接上。
+    let cur = bar.where_entry.text().to_string();
+    let next = if cur.trim().is_empty() {
+        frag.clone()
+    } else {
+        format!("{} AND {}", cur.trim(), frag)
+    };
+    bar.where_entry.set_text(&next);
+    bar.pop_val.set_text("");
+    Ok(frag)
 }
 
-/// 去掉第 `idx` 个条件（chip 上的 ✕）并重查。
-fn remove_cond(tab: &Rc<ResultTab>, idx: usize) {
-    let Some(st) = tab.st.upgrade() else { return };
+/// 取当前页签所在连接的方言（拿不到就按 PG 算——列名加引号两边都成）。
+fn current_proto_of(tab: &Rc<ResultTab>) -> DbProto {
+    let Some(st) = tab.st.upgrade() else {
+        return DbProto::Postgres;
+    };
     let slot = st.db_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    let mut conds = tab.filter_conds.borrow().clone();
-    if idx >= conds.len() {
-        return;
-    }
-    let gone = conds.remove(idx);
-    match apply_filter(&st, ui, tab, conds) {
-        Ok(_) => {
-            refresh_cond_chips(tab);
-            set_status(ui, &trf!("已去掉条件：{v0}", v0 = cond_chip_text(&gone)), false);
-        }
-        Err(e) => set_status(ui, &e, true),
-    }
+    let Some(ui) = slot.as_ref() else {
+        return DbProto::Postgres;
+    };
+    current_proto(ui)
 }
 
 /// 改排序（挑了排序列 / 点了方向按钮都走这里）。
@@ -7798,7 +7852,7 @@ fn set_order(tab: &Rc<ResultTab>, column: &str, asc: bool) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     let Some(target) = tab.target.borrow().clone() else {
-        set_status(ui, tr("这不是表数据页签，用不了排序"), true);
+        set_tab_status(tab, tr("这不是表数据页签，用不了排序"));
         return;
     };
     *tab.order_col.borrow_mut() = column.to_string();
@@ -7811,9 +7865,9 @@ fn set_order(tab: &Rc<ResultTab>, column: &str, asc: bool) {
     tab.offset.set(0);
     query_table(&st, ui, tab, &target);
     if ob.is_empty() {
-        set_status(ui, tr("已去掉排序"), false);
+        set_tab_status(tab, tr("已去掉排序"));
     } else {
-        set_status(ui, &trf!("排序：{ob}", ob = ob), false);
+        set_tab_status(tab, &trf!("排序：{ob}", ob = ob));
     }
 }
 
@@ -7823,22 +7877,22 @@ fn clear_conds(tab: &Rc<ResultTab>) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     let Some(target) = tab.target.borrow().clone() else {
-        set_status(ui, tr("这不是表数据页签"), true);
+        set_tab_status(tab, tr("这不是表数据页签"));
         return;
     };
-    *tab.filter_conds.borrow_mut() = Vec::new();
     *tab.filter_where.borrow_mut() = String::new();
     *tab.order_col.borrow_mut() = String::new();
     *tab.order_by.borrow_mut() = String::new();
     tab.order_asc.set(true);
     tab.cond_bar.order_col.set_active_id(None);
     tab.cond_bar.btn_dir.set_label(order_dir_text(true));
-    tab.cond_bar.val.set_text("");
-    refresh_cond_chips(tab);
+    // ⚠️ **WHERE 框里的文字也要清**：框里的内容是"用户以为生效的条件"，
+    // 只清生效状态不清框 ⇒ 用户看着框里的条件以为还在筛，其实没筛。
+    tab.cond_bar.where_entry.set_text("");
     tab.page.set(1);
     tab.offset.set(0);
     query_table(&st, ui, tab, &target);
-    set_status(ui, tr("已清掉全部条件与排序"), false);
+    set_tab_status(tab, tr("已清掉全部条件与排序"));
 }
 
 /// 跳到第 `page` 页（阶段 45）。
@@ -8193,239 +8247,6 @@ fn update_foot(_ui: &DbUi, tab: &Rc<ResultTab>) {
     let can_jump = tab.target.borrow().is_some();
     tab.btn_first.set_sensitive(can_jump && page > 1);
     tab.btn_prev.set_sensitive(can_jump && page > 1);
-}
-
-/// 过滤条件编辑器的一行。
-struct CondRow {
-    /// 与前一条的连接词（第一行用不上）
-    join: gtk::ComboBoxText,
-    col: gtk::ComboBoxText,
-    op: gtk::ComboBoxText,
-    val: gtk::Entry,
-}
-
-/// 打开过滤条件编辑器。
-///
-/// 一行一个条件：`[列] [并且/或者] [操作符] [值]`，底部「添加条件 / 应用 /
-/// 清除 / 取消」。跟 Navicat 的条件编辑器一个路数，但只做最常用的一层
-/// （不做嵌套分组——那玩意儿表达力强，但一行一条已经能覆盖绝大多数筛选）。
-fn open_filter_dialog(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>) {
-    let cols: Vec<String> = tab
-        .grid
-        .view
-        .columns()
-        .iter()
-        .map(|c| c.title().to_string())
-        .collect();
-    if cols.is_empty() {
-        set_status(ui, tr("这张表还没有列信息，过滤条件用不了"), true);
-        return;
-    }
-
-    let dlg = gtk::Window::builder()
-        .title(tr("数据库过滤条件"))
-        .transient_for(&tab.win)
-        .modal(true)
-        .default_width(620)
-        .default_height(320)
-        .build();
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    root.set_margin_start(12);
-    root.set_margin_end(12);
-    root.set_margin_top(10);
-    root.set_margin_bottom(10);
-
-    let hint = gtk::Label::new(Some(
-        tr("条件会拼进 WHERE 重新查库（服务端过滤，不只是筛当前这一页）。\n\
-         上面那个「筛选已加载行」框只筛已经取回的行，两者是两回事。"),
-    ));
-    hint.add_css_class("dim-label");
-    hint.set_xalign(0.0);
-    root.append(&hint);
-
-    let rows_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let sc = gtk::ScrolledWindow::new();
-    sc.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    sc.set_vexpand(true);
-    sc.set_child(Some(&rows_box));
-    root.append(&sc);
-
-    let err = gtk::Label::new(Some(""));
-    err.add_css_class("error");
-    err.set_xalign(0.0);
-    err.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    root.append(&err);
-
-    let rows: Rc<RefCell<Vec<CondRow>>> = Rc::new(RefCell::new(Vec::new()));
-
-    // 加一行条件
-    {
-        // 闭包自己抓一份 rows；外层还要用它给第一行置灰
-        let rows_in = Rc::clone(&rows);
-        let cols = cols.clone();
-        let rows_box = rows_box.clone();
-        let add_row = move |cur: Option<dbmeta::FilterCond>| {
-            let join = gtk::ComboBoxText::new();
-            join.append(Some("AND"), tr("并且"));
-            join.append(Some("OR"), tr("或者"));
-            join.set_active_id(Some("AND"));
-            join.set_tooltip_text(Some(tr("与上一条条件的连接方式")));
-            let col = gtk::ComboBoxText::new();
-            for c in &cols {
-                col.append(Some(c.as_str()), c);
-            }
-            let op = gtk::ComboBoxText::new();
-            for o in dbmeta::FilterOp::all() {
-                op.append(Some(o.label()), o.label());
-            }
-            op.set_active_id(Some("="));
-            let val = gtk::Entry::new();
-            val.set_hexpand(true);
-            val.set_placeholder_text(Some(tr("值")));
-
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            row.append(&join);
-            row.append(&col);
-            row.append(&op);
-            row.append(&val);
-
-            if let Some(c) = cur {
-                join.set_active_id(Some(match c.join {
-                    dbmeta::FilterJoin::And => "AND",
-                    dbmeta::FilterJoin::Or => "OR",
-                }));
-                col.set_active_id(Some(c.column.as_str()));
-                op.set_active_id(Some(c.op.label()));
-                val.set_text(&c.value);
-            } else {
-                col.set_active_id(Some(cols.first().map(|s| s.as_str()).unwrap_or("")));
-            }
-
-            rows_box.append(&row);
-            rows_in.borrow_mut().push(CondRow {
-                join,
-                col,
-                op,
-                val,
-            });
-        };
-        // 已有条件先摆出来（能改也能看）
-        for c in tab.filter_conds.borrow().iter() {
-            add_row(Some(c.clone()));
-        }
-        if tab.filter_conds.borrow().is_empty() {
-            add_row(None);
-        }
-        // 第一行的连接词没有意义（前面没条件可连）→ 置灰
-        if let Some(first) = rows.borrow().first() {
-            first.join.set_sensitive(false);
-        }
-        // 「+ 添加条件」
-        {
-            let add = gtk::Button::with_label(tr("+ 添加条件"));
-            // 不占满整行宽度
-            add.set_halign(gtk::Align::Start);
-            add.connect_clicked({
-                let add_row = add_row.clone();
-                move |_| add_row(None)
-            });
-            root.append(&add);
-        }
-    }
-
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    actions.set_halign(gtk::Align::End);
-    let btn_apply = gtk::Button::with_label(tr("应用"));
-    btn_apply.add_css_class("suggested-action");
-    let btn_clear = gtk::Button::with_label(tr("清除条件"));
-    let btn_cancel = gtk::Button::with_label(tr("取消"));
-    actions.append(&btn_clear);
-    actions.append(&btn_cancel);
-    actions.append(&btn_apply);
-    root.append(&actions);
-
-    dlg.set_child(Some(&root));
-
-    // 收集当前界面上的条件
-    let collect = {
-        let rows = Rc::clone(&rows);
-        move || -> Vec<dbmeta::FilterCond> {
-            rows.borrow()
-                .iter()
-                .filter_map(|r| {
-                    let column = r.col.active_id()?.to_string();
-                    if column.trim().is_empty() {
-                        return None;
-                    }
-                    let op = r
-                        .op
-                        .active_id()
-                        .and_then(|s| dbmeta::FilterOp::from_label(s.as_str()))?;
-                    let join = match r.join.active_id().map(|s| s.to_string()).unwrap_or_default().as_str() {
-                        "OR" => dbmeta::FilterJoin::Or,
-                        _ => dbmeta::FilterJoin::And,
-                    };
-                    Some(dbmeta::FilterCond {
-                        join,
-                        column,
-                        op,
-                        value: r.val.text().to_string(),
-                    })
-                })
-                .collect()
-        }
-    };
-
-    // 应用
-    {
-        let st2 = Rc::clone(st);
-        let tab2 = Rc::clone(tab);
-        let collect = collect.clone();
-        let err = err.clone();
-        let dlg2 = dlg.clone();
-        btn_apply.connect_clicked(move |_| {
-            let slot = st2.db_ui.borrow();
-            let Some(ui) = slot.as_ref() else { return };
-            let conds = collect();
-            match apply_filter(&st2, ui, &tab2, conds) {
-                Ok(w) => {
-                    err.set_text("");
-                    let msg = if w.is_empty() {
-                        tr("已清除数据库过滤条件").to_string()
-                    } else {
-                        trf!("已按条件重查：{w}", w = w)
-                    };
-                    set_status(ui, &msg, false);
-                    tab2.status.set_text(&msg);
-                    dlg2.close();
-                }
-                Err(e) => err.set_text(&e),
-            }
-        });
-    }
-    // 清除
-    {
-        let st2 = Rc::clone(st);
-        let tab2 = Rc::clone(tab);
-        let dlg2 = dlg.clone();
-        btn_clear.connect_clicked(move |_| {
-            let slot = st2.db_ui.borrow();
-            let Some(ui) = slot.as_ref() else { return };
-            match apply_filter(&st2, ui, &tab2, Vec::new()) {
-                Ok(_) => {
-                    set_status(ui, tr("已清除数据库过滤条件"), false);
-                    dlg2.close();
-                }
-                Err(e) => err.set_text(&e),
-            }
-        });
-    }
-    // 取消
-    {
-        let dlg = dlg.clone();
-        btn_cancel.connect_clicked(move |_| dlg.close());
-    }
-    dlg.present();
 }
 
 /* ---------------- 对象树上的 DDL（9.6：新建表 / 改名 / 删表） ---------------- */
@@ -8858,6 +8679,11 @@ pub fn connect_now(st: &Rc<PanelState>) {
 /// 冒烟测试用：给某个表页签设置过滤条件（走与 UI「应用」**同一条路径**）。
 ///
 /// 条件用 `(列, 操作符, 值)` 表示，操作符是显示文字（`=` / `>` / `LIKE` …）。
+///
+/// **阶段 84**：界面上改成了自由文本的 WHERE 框，但**这个钩子保留结构化
+/// 入口**——冒烟测试要的是"整数列的值不加引号"这种**类型感知**的行为，
+/// 自由文本框做不到（用户自己写）。这里先把结构化条件拼成 WHERE 文本，
+/// 再走 WHERE 框那条路（⇒ 界面上的框也会同步显示这段条件）。
 pub fn apply_filter_now(
     st: &Rc<PanelState>,
     tab_idx: usize,
@@ -8881,18 +8707,47 @@ pub fn apply_filter_now(
             })
         })
         .collect();
-    apply_filter(st, ui, &tab, list)
+    // 按列类型转义（整数列不加引号）
+    let types = col_type_map(&tab);
+    let where_sql = dbmeta::build_where(current_proto(ui), &list, &types)?;
+    // 空条件 = 清空（跟以前一样）
+    let where_sql = if list.is_empty() {
+        String::new()
+    } else {
+        where_sql
+    };
+    apply_where_text(&tab, &where_sql)?;
+    // 框里的文字同步成这段条件（用户看得见自己"下发了什么"）
+    tab.cond_bar.where_entry.set_text(&where_sql);
+    Ok(where_sql)
 }
 
-/// 冒烟测试用：打开过滤条件编辑器（截图用）。
-pub fn open_filter_dialog_now(st: &Rc<PanelState>, tab_idx: usize) -> bool {
+/// 冒烟测试用：在 WHERE 框里写一段条件并**回车**（走真实回调）。
+///
+/// **为什么单独留一个钩子**：界面上"回车即查库"是 `connect_activate`
+/// 触发的，冒烟要验的正是**这条路径**（而不是内部函数）——直接调内部
+/// 函数的话，回调断了都测不出来。
+pub fn where_enter_now(st: &Rc<PanelState>, tab_idx: usize, text: &str) -> bool {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
     let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
         return false;
     };
-    open_filter_dialog(st, ui, &tab);
+    let entry = tab.cond_bar.where_entry.clone();
+    entry.set_text(text);
+    entry.emit_activate();
     true
+}
+
+/// 冒烟测试用：读 WHERE 框里的文字。
+pub fn where_text_now(st: &Rc<PanelState>, tab_idx: usize) -> String {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    let tabs = ui.tabs.borrow();
+    let Some(tab) = tabs.get(tab_idx) else {
+        return String::new();
+    };
+    tab.cond_bar.where_entry.text().to_string()
 }
 
 /// 冒烟测试用：读某个表页签当前的 WHERE 文本。
@@ -10665,9 +10520,12 @@ pub fn result_grid_now(st: &Rc<PanelState>, tab_idx: usize) -> Option<Rc<dbgrid:
     ui.tabs.borrow().get(tab_idx).map(|t| Rc::clone(&t.grid))
 }
 
-/// 冒烟测试用：第 `tab_idx` 个结果页签的筛选框文案与过滤按钮提示。
+/// 冒烟测试用：第 `tab_idx` 个结果页签的**本地筛行框**文案与 **WHERE 框**提示。
 ///
-/// 返回 `(筛选框 placeholder, 过滤按钮 tooltip)`。
+/// 返回 `(本地筛行框 placeholder, WHERE 框 tooltip)`。
+///
+/// ⚠️ **阶段 84**：以前第二个是「数据库过滤条件」按钮的提示（那颗按钮退场了，
+/// 服务端条件改成 WHERE 输入框）⇒ 这里跟着换。
 pub fn result_filter_ui_now(st: &Rc<PanelState>, tab_idx: usize) -> (String, String) {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return (String::new(), String::new()) };
@@ -10675,7 +10533,12 @@ pub fn result_filter_ui_now(st: &Rc<PanelState>, tab_idx: usize) -> (String, Str
         return (String::new(), String::new());
     };
     let ph = tab.filter.placeholder_text().unwrap_or_default().to_string();
-    let tip = tab.btn_filter.tooltip_text().unwrap_or_default().to_string();
+    let tip = tab
+        .cond_bar
+        .where_entry
+        .tooltip_text()
+        .unwrap_or_default()
+        .to_string();
     (ph, tip)
 }
 
@@ -10776,35 +10639,31 @@ pub fn make_test_result_tab(
 
 /// 冒烟 / e2e 用：条件条的当前状态。
 ///
-/// 返回 `(WHERE 文本, ORDER BY 文本, 条件 chip 文字, 排序列)`。
-pub fn cond_bar_state(st: &Rc<PanelState>, tab_idx: usize) -> (String, String, Vec<String>, String) {
+/// 返回 `(WHERE 文本, ORDER BY 文本, 排序列)`。
+///
+/// ⚠️ **阶段 84 少了「条件 chip 那一项」**：chip 行退场了（WHERE 框本身就是
+/// 条件的唯一呈现），所以这个四元组变成三元组。
+pub fn cond_bar_state(st: &Rc<PanelState>, tab_idx: usize) -> (String, String, String) {
     let tab = {
         let slot = st.db_ui.borrow();
         let Some(ui) = slot.as_ref() else {
-            return (String::new(), String::new(), Vec::new(), String::new());
+            return (String::new(), String::new(), String::new());
         };
         let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
-            return (String::new(), String::new(), Vec::new(), String::new());
+            return (String::new(), String::new(), String::new());
         };
         tab
     };
-    let chips = tab
-        .filter_conds
-        .borrow()
-        .iter()
-        .map(cond_chip_text)
-        .collect::<Vec<_>>();
     (
         tab.filter_where.borrow().clone(),
         tab.order_by.borrow().clone(),
-        chips,
         tab.order_col.borrow().clone(),
     )
 }
 
-/// 冒烟 / e2e 用：在条件条上填一条条件并点「+ 条件」。
+/// 冒烟 / e2e 用：用**条件助手**填一条条件（挑列 + 运算符 + 值 → 「填入」）。
 ///
-/// 走的是**真实的按钮回调**（`btn_add.emit_clicked()`），跟用户点的路径
+/// 走的是**真实的按钮回调**（`pop_btn.emit_clicked()`），跟用户点的路径
 /// 一样——直接调内部函数的话，按钮灰了、回调断了都测不出来。
 pub fn cond_bar_add_now(
     st: &Rc<PanelState>,
@@ -10821,10 +10680,10 @@ pub fn cond_bar_add_now(
         };
         tab
     };
-    tab.cond_bar.col.set_active_id(Some(column));
-    tab.cond_bar.op.set_active_id(Some(op));
-    tab.cond_bar.val.set_text(value);
-    tab.cond_bar.btn_add.emit_clicked();
+    tab.cond_bar.pop_col.set_active_id(Some(column));
+    tab.cond_bar.pop_op.set_active_id(Some(op));
+    tab.cond_bar.pop_val.set_text(value);
+    tab.cond_bar.pop_btn.emit_clicked();
     true
 }
 
@@ -10842,23 +10701,6 @@ pub fn cond_bar_order_now(st: &Rc<PanelState>, tab_idx: usize, column: &str, asc
     if tab.order_asc.get() != asc {
         tab.cond_bar.btn_dir.emit_clicked();
     }
-    true
-}
-
-/// 冒烟 / e2e 用：挑条件的连接词（`true` = 或者）。
-///
-/// ⚠️ **单独一个钩子**：连接词只在**第二条**条件起才有意义，
-/// 混在「加条件」里容易忘了先设它再点。
-pub fn cond_bar_set_join_now(st: &Rc<PanelState>, tab_idx: usize, or: bool) -> bool {
-    let tab = {
-        let slot = st.db_ui.borrow();
-        let Some(ui) = slot.as_ref() else { return false };
-        let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
-            return false;
-        };
-        tab
-    };
-    tab.cond_bar.join.set_active_id(Some(if or { "OR" } else { "AND" }));
     true
 }
 
