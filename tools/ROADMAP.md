@@ -3894,7 +3894,7 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
      ⇒ 进程内那条路没有本地 ssh ⇒ 换后端就必挂 ⇒ 改看我们自己打的
      「== 会话已结束 ==」（`TermInner::on_session_ended` 喂的 ⇒ 两条路
      都有）。
-- **验收**：740 单测绿、契约 PASS=73 FAIL=0、release 119 个 example
+- **验收**：740 单测绿、契约 PASS=73 FAIL=0、release 128 个 example
   全过；vte_inproc_smoke / term_reconnect_smoke / term_cwd_restore_smoke /
   open_term_cd_smoke / state_agg_smoke / fwd_inproc_smoke / fwd_all_smoke /
   fileops_smoke / hub_shared_gui_smoke 全绿。
