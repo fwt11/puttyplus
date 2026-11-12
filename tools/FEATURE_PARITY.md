@@ -35,6 +35,7 @@
 | SFTP 每请求 300 秒超时 | russh-sftp 默认 10s 在慢链路+并发预取下必超时（实测 410KB/s 下载 58MB 首包即失败）；libssh 无此机制，300s 为防死锁兜底 |
 | 协议层内部错误措辞（握手/密钥交换等） | 分别来自 libssh / russh，网络层 errno 文案已用 strerror 同源对齐（如中文"拒绝连接"） |
 | GTK4 在无父窗口对话框场景多一行 stderr Gtk-Message | GTK3 无此提示，纯日志噪音 |
+| **回环目标的 spawn argv 多两条 `-o`**（`UserKnownHostsFile=/dev/null` + `GlobalKnownHostsFile=/dev/null`，**只在 host 是回环时加**） | 堡垒机在本地开**随机端口**、隧道**按访问轮换主机密钥** ⇒ OpenSSH 按 `[host]:port` 记的 known_hosts **必然对不上** ⇒ `REMOTE HOST IDENTIFICATION HAS CHANGED` + **硬失败（255）** ⇒ 用户报「在堡垒机上分屏失败」。⚠️ C 版（`sftp_backend.c`）与 Rust 的**进程内那条路**（`backend::conn::is_loopback`）**本来就跳过回环的主机密钥校验** ⇒ 只有 spawn 这条路漏了 ⇒ 现在三条路一致。**普通主机的 argv 一个字节都不变**（⇒ `compat_check.sh` 的对照用例要按 host 归一化这两条）。⚠️ `StrictHostKeyChecking=no` 不是解法（实测照样刷那句吓人的警告） |
 
 ## Rust-only 功能（Rust 版专属，不回移 C）
 

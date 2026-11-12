@@ -297,6 +297,12 @@ sudo dpkg -i puttyplus_<版本>-1_amd64.deb
    `sudo ln -s /usr/local/bin/puttyplus /usr/local/bin/putty`；
 3. 正常发起连接即可 —— 调用方传的参数不用改。
 
+⚠️ **连「本地隧道」出来的回环地址（`127.0.0.1:<端口>`）时不做主机密钥校验**：
+堡垒机常在本地开一个**随机端口**、并且隧道**按访问轮换密钥** ⇒ 按
+`[地址]:[端口]` 记的 `~/.ssh/known_hosts` 必然对不上 ⇒ 会被
+「REMOTE HOST IDENTIFICATION HAS CHANGED」**直接挡住**（分屏开不出来）。
+⇒ 这种目标**不查也不写** `known_hosts`（普通地址照旧校验）。
+
 ### 连接管理器
 
 无参数启动会打开连接管理器：左边是会话树（最近 / 自建 / `~/.ssh/config` 别名），

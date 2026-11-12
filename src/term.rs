@@ -129,6 +129,38 @@ fn forward_flags(o: &ConnOptions) -> Vec<(String, String)> {
         .collect()
 }
 
+/// **回环目标要不要绕开 known_hosts**（堡垒机的本地隧道）。
+///
+/// ⚠️ **为什么必须绕开**（用户 2026-11-11 报「在堡垒机上分屏失败」）：
+///    堡垒机在**本地开一个随机端口**，我们连的就是那个端口 ⇒ 目标恒是
+///    `127.0.0.1:<随机端口>`。而
+///    - OpenSSH 的 known_hosts 是按 **`[host]:port`** 记的；
+///    - 堡垒机的隧道**按访问轮换主机密钥**。
+///    ⇒ 同一个端口第二次连就是**另一把 key** ⇒ OpenSSH 直接**硬失败**
+///    （`REMOTE HOST IDENTIFICATION HAS CHANGED` + `Host key
+///    verification failed.`，退出码 255）⇒ **分屏开不出来**。
+///    ⇒ `StrictHostKeyChecking=no` **不行**：它照样会刷那句吓人的警告
+///    （实测），只是不失败而已。
+///    ⇒ 只有「**根本没有 known_hosts 可查**」才干净。
+///
+/// ⚠️ **与另外两条路保持一致**：
+///    - 进程内那条（russh）：`backend::conn::is_loopback` ⇒ 回环直接放行
+///      （`conn.rs` 的注释写的就是这个场景）；
+///    - C 版：`sftp_backend.c` 里也是回环就跳过校验。
+pub fn loopback_host_key_opts(host: &str) -> Vec<&'static str> {
+    if crate::backend::conn::is_loopback(host) {
+        vec![
+            // ⚠️ **两个都要给**：只置 `UserKnownHostsFile` 的话，
+            //    `/etc/ssh/ssh_known_hosts`（全局）里若有该主机的条目
+            //    仍会被查到 ⇒ 照样可能撞上「key 变了」。
+            "UserKnownHostsFile=/dev/null",
+            "GlobalKnownHostsFile=/dev/null",
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn build_ssh_argv(o: &ConnOptions) -> Option<Vec<String>> {
     let ssh = find_program_in_path_win("ssh")?;
     let mut av = vec![ssh.to_string_lossy().into_owned()];
@@ -163,6 +195,13 @@ pub fn build_ssh_argv(o: &ConnOptions) -> Option<Vec<String>> {
     }
     av.push("-o".into());
     av.push("StrictHostKeyChecking=accept-new".into());
+    // ⚠️ **回环目标（堡垒机的本地隧道）把 known_hosts 置空** ⇒ 见
+    //    `loopback_host_key_opts` 的注释（不置空 ⇒ 分屏必被
+    //    「REMOTE HOST IDENTIFICATION HAS CHANGED」硬失败）。
+    for opt in loopback_host_key_opts(&o.host) {
+        av.push("-o".into());
+        av.push(opt.into());
+    }
     // NAT/防火墙下的空闲保活（与 SFTP 侧 russh keepalive 对齐）
     av.push("-o".into());
     av.push("ServerAliveInterval=30".into());
@@ -3162,6 +3201,69 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **回环目标（堡垒机的本地隧道）必须绕开 known_hosts**。
+    ///
+    /// ⚠️ **为什么这条是硬要求**（用户 2026-11-11 报「在堡垒机上分屏失败」）：
+    ///    堡垒机本地开随机端口 + 按访问轮换主机密钥 ⇒ OpenSSH 按
+    ///    `[host]:port` 记的 known_hosts **必然对不上** ⇒ 硬失败。
+    ///
+    /// ⚠️ **断言要选「与实现无关」的外部量**：这里断言**要传给 ssh 的
+    ///    `-o` 选项**（那才是 OpenSSH 真正看到的东西）⇒ 改回旧行为
+    ///    （不置空 known_hosts）时立刻变红。
+    #[test]
+    fn 回环目标绕开known_hosts() {
+        use super::loopback_host_key_opts;
+        // 堡垒机的本地隧道 ⇒ 恒是回环
+        for h in ["127.0.0.1", "127.0.0.2", "localhost", "::1"] {
+            let opts = loopback_host_key_opts(h);
+            assert!(
+                opts.contains(&"UserKnownHostsFile=/dev/null"),
+                "{h} ⇒ 没把 UserKnownHostsFile 置空 ⇒ 分屏会被「key 变了」硬失败"
+            );
+            assert!(
+                opts.contains(&"GlobalKnownHostsFile=/dev/null"),
+                "{h} ⇒ 没把 GlobalKnownHostsFile 置空 ⇒ 全局 known_hosts 里若有条目仍会撞上"
+            );
+        }
+        // 普通主机 ⇒ **不动** known_hosts（主机密钥校验是 valuable 的）
+        for h in ["example.com", "10.0.0.9", "bastion.corp"] {
+            assert!(
+                loopback_host_key_opts(h).is_empty(),
+                "{h} 不是回环 ⇒ 不该绕开主机密钥校验"
+            );
+        }
+    }
+
+    /// **普通主机的 spawn argv 不能变**（对外契约）。
+    ///
+    /// ⚠️ 回环目标多两条 `-o` 是**有意差异**（见 `loopback_host_key_opts`），
+    ///    但**普通主机必须一个字节都不差** ⇒ 堡垒机那边调用方看到的
+    ///    ssh argv 跟以前一样。
+    #[test]
+    fn 普通主机的argv不受影响() {
+        use crate::args::ConnOptions;
+        use super::build_ssh_argv;
+        let o = ConnOptions {
+            proto: "ssh".into(),
+            host: "example.com".into(),
+            port: 22,
+            user: "ops".into(),
+            ..Default::default()
+        };
+        let Some(av) = build_ssh_argv(&o) else {
+            // 机器上没有 ssh ⇒ 这条测不了，跳过（不算失败）。
+            return;
+        };
+        assert!(
+            !av.iter().any(|a| a.contains("KnownHostsFile")),
+            "普通主机的 argv 里不该出现 KnownHostsFile：{av:?}"
+        );
+        assert!(
+            av.iter().any(|a| a == "StrictHostKeyChecking=accept-new"),
+            "StrictHostKeyChecking=accept-new 必须保留：{av:?}"
+        );
+    }
+
     /// **终端走哪条路**（2026-11-11 用户拍板：默认并入共享连接，
     /// 留一个开关切回 spawn）。
     #[test]

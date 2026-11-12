@@ -326,6 +326,67 @@ PP_TERM_SSH=inproc PP_TERM_BACKEND=ghostty \
 ```
 ⚠️ 两个冒烟都要**本机测试 sshd 在 127.0.0.1:2233**（公钥认证）。
 
+## 堡垒机场景：回环目标不查 known_hosts（2026-11-11 记）
+
+**症状**（用户 2026-11-11 报）：在堡垒机上**分屏失败** —— 分屏的那个终端报
+
+```
+WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+Offending ED25519 key in /home/fwt/.ssh/known_hosts:351
+  remove with: ssh-keygen -f '/home/fwt/.ssh/known_hosts' -R '[127.0.0.1]:38863'
+Host key for [127.0.0.1]:38863 has changed and you have requested strict checking.
+Host key verification failed.
+```
+
+⇒ 退出码 **255** ⇒ **分屏开不出来**。第一次开终端没事，分屏就报。
+
+### 根因
+
+- 堡垒机在**本地开一个随机端口**，我们连的就是那个端口 ⇒ 目标恒是
+  `127.0.0.1:<随机端口>`；
+- 堡垒机的隧道**按访问轮换主机密钥**；
+- OpenSSH 的 known_hosts 是按 **`[host]:port`** 记的。
+
+⇒ 同一个端口第二次连就是**另一把 key** ⇒ OpenSSH 直接**硬失败**。
+
+⚠️ **为什么「第一次开终端不报」**：那条端口在 known_hosts 里**还没有条目**
+⇒ `accept-new` 当成新主机收下（"Permanently added"）⇒ 连上了；分屏时
+条目已经在了 ⇒ 对不上 ⇒ 硬失败。
+
+⚠️ **为什么之前用 plink 不报**：PuTTY 的主机密钥缓存**只按主机名**
+（**不分端口**）⇒ 随机端口不影响它；而且 plink 是**询问**（y/n）不是
+**硬失败** ⇒ 用户答一次 y 就过去了。
+
+### 三条路本来就不一致（这才是真 bug）
+
+| 路 | 之前的做法 | 对不对 |
+|---|---|---|
+| SFTP / 进程内（russh） | `backend::conn::is_loopback` ⇒ **回环直接放行** | ✅ |
+| C 版 | `sftp_backend.c` 里也是**回环跳过** | ✅ |
+| **终端 spawn（OpenSSH）** | 一律 `StrictHostKeyChecking=accept-new` | ❌ **漏了** |
+
+⇒ 修法：spawn 那条路对**回环目标**也把 known_hosts 置空
+（`term::loopback_host_key_opts`）⇒ 三条路一致。
+
+### 实测（`examples/loopback_hostkey_smoke.rs`）
+
+| 方案 | 结果 |
+|---|---|
+| 现状（accept-new + 用户 known_hosts） | **硬失败 255** |
+| **`UserKnownHostsFile=/dev/null` + `GlobalKnownHostsFile=/dev/null`** | **连上 0**（只多一行 "Permanently added"，无害） |
+| `StrictHostKeyChecking=no` | 连上了，**但照样刷那句吓人的 CHANGED** ⇒ ❌ 不是解法 |
+
+⚠️ **两个 `/dev/null` 都要给**：只置 `UserKnownHostsFile` 的话，
+`/etc/ssh/ssh_known_hosts`（全局）里若有该主机的条目仍会被查到。
+
+⚠️ **别用 `$HOME` 定位 known_hosts 做测试**：OpenSSH 找 home 目录用的是
+`getpwuid()`（passwd 条目），**不看 `$HOME`** ⇒ 设了也没用（踩过一次：
+投毒文件根本没被读到，两步都绿 ⇒ 差点以为测对了）。
+
+⚠️ **插 `-o` 必须插在 `--` 之前**：`--` 之后全是**远程命令** ⇒ 插在后面
+ssh 根本不当选项看（拿它去跑远端命令 ⇒ 失败原因变成「远端命令出错」，
+**测的就不是主机密钥那件事了**）。也踩过一次。
+
 ## 上传时界面整体卡死：根因与修法（2026-11-11 记，做任何带进度/动画的活都得读）
 
 **症状**（用户 2026-11-11 深夜报）：堡垒机上上传 1GB 文件（8Mbps）⇒ 界面
@@ -584,6 +645,18 @@ forwards=<个数> remote_cmd=<set|->
   [-N][-t][-T][-4][-6][-C][-v] [-o BatchMode=yes] -o
   StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o
   ServerAliveCountMax=3 [-o ProxyCommand=<cmd>] -- <host> [remote_cmd]`
+  - ⚠️ **回环目标多两条 `-o`**（`UserKnownHostsFile=/dev/null` +
+    `GlobalKnownHostsFile=/dev/null`，插在 `StrictHostKeyChecking` 之后）：
+    **只在 host 是回环时加**（`backend::conn::is_loopback`）⇒ 普通主机的
+    argv **一个字节都不变**。
+    ⇒ **为什么**：堡垒机在本地开**随机端口**、隧道**按访问轮换主机密钥**
+    ⇒ OpenSSH 按 `[host]:port` 记的 known_hosts **必然对不上** ⇒
+    `REMOTE HOST IDENTIFICATION HAS CHANGED` + **硬失败（255）**
+    ⇒ 用户报「在堡垒机上分屏失败」。
+    ⇒ 与**进程内那条路**（russh，`conn.rs` 的 `is_loopback` ⇒ 回环直接
+    放行）和 **C 版**（`sftp_backend.c` 同样跳过）保持一致。
+    ⇒ ⚠️ **`StrictHostKeyChecking=no` 不是解法**：实测它照样刷那句吓人的
+    警告（只是不失败）⇒ 必须是「压根没有 known_hosts 可查」。
 - **plink**：`<plink> -<proto> -P <port> [-l <user>] [-pw <pw>] [-i <key>]
   [-L|-R|-D <spec>]… [-N][-t][-T][-4][-6][-C][-v][-batch] <host> [remote_cmd]`
 - ⚠️ **端口是 22 时不加 `-p`**（C 版 `if (o->port != 22)`）——别"顺手改成总是加"。
