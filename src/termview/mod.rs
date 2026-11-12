@@ -590,21 +590,36 @@ impl TermView {
         }
     }
 
-    /// 接上**进程内 SSH 通道**（阶段 C7：Windows 上不再 spawn `ssh.exe`）。
+    /// 接上**进程内 SSH 通道**（阶段 C7：Windows 上不再 spawn `ssh.exe`；
+    /// 阶段 B2：Linux 的 **VTE 后端**也能走这条了 —— 靠**假 pty**）。
     ///
-    /// ⚠️ **只有 ghostty 后端支持**：VTE 的输入必须经过一个 pty
-    /// （`vte::Pty`）⇒ 没有 pty 就没法把键盘送出去 ⇒ 返回 `false`，
-    /// 由调用方决定怎么办（Linux 主线本来就 spawn `ssh`，用不到这条）。
+    /// ## `on_exit`
+    ///
+    /// **会话结束时的回调**（退出码）。
+    ///
+    /// ⚠️ **只有 VTE 后端用得到它**：VTE 的「子进程退出」信号是给
+    ///    *真子进程*用的 ⇒ 进程内 SSH 没有子进程 ⇒ 只能由这条通路自己
+    ///    报（`ShellEvent::Exit`）。ghostty 后端**自己管退出**
+    ///    （`state.fire_exit`）⇒ 用不到这个参数。
     pub fn attach_shell(
         &self,
         chan: crate::backend::shell::ShellChannel,
         rx: async_channel::Receiver<crate::backend::shell::ShellEvent>,
+        on_exit: Box<dyn Fn(i32)>,
     ) -> bool {
         match self {
             #[cfg(target_os = "linux")]
-            TermView::Vte(_) => false,
+            TermView::Vte(t) => {
+                // ⚠️ 走**假 pty**：VTE 的键盘输入必须过一个 pty
+                //    （`vte_terminal_feed_child` 写进 pty 的 master）。
+                vte::attach_shell_fake(t, chan, rx, on_exit);
+                true
+            }
             #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
+                // ⚠️ ghostty 后端**自己管退出** ⇒ 这里的 `on_exit` 用不上
+                //    （显式丢掉，免得 Windows 上报「未使用」）。
+                let _ = on_exit;
                 v.attach_shell(chan, rx);
                 true
             }

@@ -515,6 +515,41 @@ impl TermInner {
             build_bridge_argv(o).unwrap_or_default()
         }
     }
+
+    /// **会话结束了**（ssh 子进程退了 / 进程内 SSH 的通道关了）。
+    ///
+    /// ⚠️ **两条路汇到这里**：
+    /// - spawn 那条：VTE 的「子进程退出」信号；
+    /// - 进程内那条（阶段 B2）：SSH 通道的 `Exit` 事件。
+    ///
+    /// ⇒ 收尾的活儿（停自动应答、记退出码、摆「会话已结束」条、报
+    ///   上层存活数）只有**一份** ⇒ 两边行为必然一致。
+    fn on_session_ended(&self, status: i32) {
+        self.autofeed_on.set(false);
+        self.child_alive.set(false);
+        // asciicast v3 的 `x` 事件：会话退出码（回放时看得出是正常退出还是出错退出）
+        if let Some(r) = self.rec.borrow_mut().as_mut() {
+            r.rec.exit(status as i64);
+        }
+        self.term.feed(
+            tr("\r\n\x1b[1;33m== 会话已结束（状态码见上）。点上方「重新连接」可重建会话 ==\x1b[0m\r\n")
+                .as_bytes(),
+        );
+        // 阶段 25：会话一断就把「重新连接」摆出来。
+        // 光在终端里打一行字，多数用户看不出"还能救"。
+        self.banner_re.set_visible(true);
+        self.sync_banner_visibility();
+        // 阶段 65：会话结束了 → 通知上层（标签状态点不再显示绿点）
+        //
+        // ⚠️ 只在**报过存活**时才报结束：没报过就不用减计数
+        //（否则面板的存活数会变成 -1，被 clamp 成 0，
+        //   「起过没有」这个事实也就丢了）。
+        if self.alive_reported.replace(false) {
+            if let Some(h) = self.alive_hook.borrow().as_ref() {
+                h(false);
+            }
+        }
+    }
 }
 
 impl TermPane {
@@ -1744,30 +1779,10 @@ fn connect_signals(inner: &Rc<TermInner>) {
     {
         let inner = Rc::clone(inner);
         term.connect_child_exited(move |status| {
-            inner.autofeed_on.set(false);
-            inner.child_alive.set(false);
-            // asciicast v3 的 `x` 事件：会话退出码（回放时看得出是正常退出还是出错退出）
-            if let Some(r) = inner.rec.borrow_mut().as_mut() {
-                r.rec.exit(status as i64);
-            }
-            inner.term.feed(
-                tr("\r\n\x1b[1;33m== 会话已结束（状态码见上）。点上方「重新连接」可重建会话 ==\x1b[0m\r\n")
-                    .as_bytes(),
-            );
-            // 阶段 25：会话一断就把「重新连接」摆出来。
-            // 光在终端里打一行字，多数用户看不出"还能救"。
-            inner.banner_re.set_visible(true);
-            inner.sync_banner_visibility();
-            // 阶段 65：会话结束了 → 通知上层（标签状态点不再显示绿点）
-            //
-            // ⚠️ 只在**报过存活**时才报结束：没报过就不用减计数
-            // （否则面板的存活数会变成 -1，被 clamp 成 0，
-            //   「起过没有」这个事实也就丢了）。
-            if inner.alive_reported.replace(false) {
-                if let Some(h) = inner.alive_hook.borrow().as_ref() {
-                    h(false);
-                }
-            }
+            // ⚠️ 收尾的活儿在 `TermInner::on_session_ended` 里 ⇒
+            //    spawn（子进程退出）与进程内 SSH（通道关闭）两条路
+            //    **行为完全一致**（阶段 B2）。
+            inner.on_session_ended(status);
         });
     }
 
@@ -2748,10 +2763,17 @@ fn spawn_term_inproc_ex(
     glib::MainContext::default().spawn_local(async move {
         match res_rx.recv().await {
             Ok(Ok(chan)) => {
-                if !inner_cb.term.attach_shell(chan, ev_rx) {
+                // ⚠️ **退出回调**（阶段 B2）：VTE 后端没有「子进程退出」
+                //    信号 ⇒ 进程内 SSH 的通道关闭时，由这条通路自己报。
+                let inner_exit = Rc::clone(&inner_cb);
+                if !inner_cb.term.attach_shell(
+                    chan,
+                    ev_rx,
+                    Box::new(move |code| inner_exit.on_session_ended(code)),
+                ) {
                     alert::<gtk::Window>(
                         None,
-                        tr("当前终端后端不支持进程内 SSH（VTE 需要本地 pty）。\n请用 PP_TERM_BACKEND=ghostty。"),
+                        tr("当前终端后端不支持进程内 SSH。"),
                     );
                     return;
                 }

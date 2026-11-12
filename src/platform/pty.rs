@@ -241,6 +241,229 @@ impl PtySession {
     }
 }
 
+/* ---------------- 假 pty（阶段 B2） ---------------- */
+
+/// **假 pty**（阶段 B2）：VTE 后端接**进程内 SSH**（russh）用。
+///
+/// ## 为什么需要它
+///
+/// VTE 的键盘输入**必须**经由一个 pty（`vte_terminal_feed_child` 把字节
+/// 写进 pty 的 **master**）⇒ 进程内 SSH 那条路**没有子进程**、也就没有
+/// pty ⇒ 键盘字节无处可去。
+///
+/// ⚠️ 这就是「**VTE 用不了进程内 SSH**」的根本原因（阶段 C7 留下的坑）：
+///    ghostty 后端不需要 pty（它自己管字节），VTE 需要。
+///
+/// ⇒ 自己开**一对** fd（`posix_openpt` + `grantpt` + `unlockpt` +
+/// `ptsname_r` + `open`）：
+///
+/// - **master 交给 VTE**（`vte4::Pty::foreign_sync`）⇒ 它往里写键盘
+///   字节、从里面读显示内容；
+/// - **slave 留给我们** ⇒ 从里面读出来的就是「用户敲的键」⇒ 转给 SSH。
+///
+/// ## 方向（别搞反）
+///
+/// - **键盘**：VTE 写 **master** ⇒ 行规程的**输入**处理 ⇒ 我们从
+///   **slave** 读出来；
+/// - **显示**：远程来的字节**直接**喂给 VTE（`vte_terminal_feed`），
+///   **不**走 slave ⇒ 也就不会有「OPOST 把 `\n` 变成 `\r\n`」的二次
+///   转换（真 ssh 也是这么干的：它把本地 tty 切成 raw）。
+///
+/// ## 行规程
+///
+/// slave 侧必须切成 **raw**（`cfmakeraw`），否则三个坑：
+///
+/// - `ICANON` 不关 ⇒ 敲一个键要等回车才送到远程；
+/// - `ECHO` 不关 ⇒ 本地回显一遍、远程再回显一遍 = **双回显**；
+/// - `ISIG` 不关 ⇒ Ctrl-C 变成本地信号（本地没有前台进程组，信号
+///   没人收 ⇒ 远程根本收不到中断）。
+///
+/// ⚠️ **只能建在 GTK 主线程**（`vte4::Pty::foreign_sync` 内部有
+///    `assert_initialized_main_thread!`）⇒ 别在单测里建（单测跑在
+///    工作线程上 ⇒ 会 panic）⇒ 用 `examples/vte_inproc_smoke.rs` 验。
+#[cfg(target_os = "linux")]
+pub struct FakePty {
+    /// VTE 接管的那一半（master）。
+    vte: vte4::Pty,
+    /// 我们这一半（slave）+ 停止标志（读线程用）。
+    inner: std::sync::Arc<FakeInner>,
+}
+
+/// 假 pty 的**可共享部分**（读线程拿一份 `Arc` ⇒ 主体被丢了也不影响它）。
+#[cfg(target_os = "linux")]
+struct FakeInner {
+    /// slave 端（读键盘字节）。
+    slave: std::os::fd::OwnedFd,
+    /// 让读线程收工（单独套一层 `Arc` ⇒ 别的线程也能拿一份）。
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl FakePty {
+    /// 开一对 pty，把 **master 交给 VTE**。
+    pub fn new() -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let (master, slave) = open_pty_pair()?;
+        set_raw_termios(slave.as_raw_fd())?;
+        // ⚠️ **master 交给 VTE 之后就不能再自己关它**（VTE finalize 时关）。
+        let vte = vte4::Pty::foreign_sync(master, None::<&gtk::gio::Cancellable>)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(Self {
+            vte,
+            inner: std::sync::Arc::new(FakeInner {
+                slave,
+                stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        })
+    }
+
+    /// VTE 那边要用的那个 `vte::Pty`（**master**）。
+    pub fn vte_pty(&self) -> &vte4::Pty {
+        &self.vte
+    }
+
+    /// 起一个线程读 **slave**（= VTE 写进来的键盘字节）⇒ 回调。
+    ///
+    /// ⚠️ 回调在**后台线程**里跑 ⇒ 别碰 GTK 的东西（要动就发事件回
+    ///    主线程）。
+    pub fn spawn_input_reader(
+        &self,
+        on_data: Box<dyn Fn(&[u8]) + Send + 'static>,
+    ) -> io::Result<()> {
+        let inner = std::sync::Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name("pp-fake-pty-in".into())
+            .spawn(move || {
+                use std::os::fd::AsRawFd;
+                let fd = inner.slave.as_raw_fd();
+                let mut buf = [0u8; 4096];
+                loop {
+                    if inner.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut pfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY：pfd 是栈上的结构；poll 只往 revents 写。
+                    let rc = unsafe { libc::poll(&mut pfd, 1, 200) };
+                    if rc < 0 {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        break;
+                    }
+                    if rc == 0 {
+                        // 超时 ⇒ 回去看 stop 标志（别在 poll 里死等）
+                        continue;
+                    }
+                    if pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                        continue;
+                    }
+                    // SAFETY：fd 由 `inner` 里的 OwnedFd 持有（线程活着它就
+                    // 活着）；buf 是栈上数组。
+                    let n =
+                        unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                    if n > 0 {
+                        on_data(&buf[..n as usize]);
+                        continue;
+                    }
+                    if n == 0 {
+                        // 对端关了 ⇒ 结束
+                        break;
+                    }
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted
+                        || err.kind() == io::ErrorKind::WouldBlock
+                    {
+                        continue;
+                    }
+                    // ⚠️ **master 关了 ⇒ 读 slave 得到 EIO**（不是 EOF）
+                    // —— 正常现象，当作结束即可。
+                    break;
+                }
+            })
+            .map(|_| ())
+    }
+
+    /// 让读线程收工（会话结束时调）。
+    ///
+    /// ⚠️ **不是立刻停**（读线程最多 200ms 才醒一次）⇒ 只是别再往下读。
+    pub fn stop(&self) {
+        self.inner
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 停止标志的**副本**（给别的定时器用：会话结束就别再轮询了）。
+    pub fn stop_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.inner.stop)
+    }
+}
+
+/// 开一对 pty（**master** + **slave**）。
+///
+/// ⚠️ **不用 `openpty`**：它在 **libutil** 里（老 glibc 要 `-lutil`，
+///    Rust 的 `libc` crate 不会自动加这个链接参数）⇒ 用 POSIX 那套
+///    （`posix_openpt` + `grantpt` + `unlockpt` + `ptsname_r` + `open`），
+///    全在 libc 本身里。
+#[cfg(target_os = "linux")]
+fn open_pty_pair() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY：只是打开 /dev/ptmx，返回的 fd 由我们自己接管。
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    if master < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY：master 是上面拿到的有效 fd。
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY：fd 有效。
+    if unsafe { libc::grantpt(master.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY：同上。
+    if unsafe { libc::unlockpt(master.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut name = [0 as libc::c_char; 256];
+    // SAFETY：name 是栈上数组；`ptsname_r` 按 buflen 写，不会越界。
+    let rc = unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc));
+    }
+    // SAFETY：ptsname_r 写的是 NUL 结尾的路径。
+    let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    // SAFETY：path 是有效的路径字符串（带 NUL）。
+    let slave = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    if slave < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY：slave 是上面拿到的有效 fd。
+    Ok((master, unsafe { OwnedFd::from_raw_fd(slave) }))
+}
+
+/// 把 fd 的行规程切成 **raw**（`cfmakeraw`）。
+///
+/// ⚠️ 切成 raw 之后：`ICANON`/`ECHO`/`ISIG`/`OPOST` 全关 ⇒
+///    「敲键即发、不回显、Ctrl-C 当字节送远程、远程字节原样显示」。
+#[cfg(target_os = "linux")]
+fn set_raw_termios(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let mut tio: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY：tio 是本函数栈上的零初始化结构；fd 有效；`tcgetattr` 只往里写。
+    if unsafe { libc::tcgetattr(fd, &mut tio) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY：tio 是刚取回来的有效 termios。
+    unsafe { libc::cfmakeraw(&mut tio) };
+    // SAFETY：同上。
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &tio) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 impl PtySession {
     /// 开一个新的 ConPTY 会话。

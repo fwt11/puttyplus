@@ -811,7 +811,7 @@ pub static EN: [(&str, &str); 1724] = [
     ("当前值", "Current value"),
     ("当前列表里没有规则。\n点「保存」等于把连接「{name}」里已存的转发规则「清空」\n（下次连接不再自动带上）。\n要清空吗？\n如果你是想保存规则：先在上面的列表里添加规则，\n列表有内容了再保存。", "There are no rules in the current list.\nPressing \"Save\" clears the forwarding rules already stored for connection \"{name}\"\n(they will not be carried over on the next connection).\nClear them?\nIf you meant to save rules: add them to the list above first,\nand save once the list has something in it."),
     ("当前没有会话，先新建一个连接", "There is no session yet, create a connection first"),
-    ("当前终端后端不支持进程内 SSH（VTE 需要本地 pty）。\n请用 PP_TERM_BACKEND=ghostty。", "The current terminal engine does not support in-process SSH (VTE needs a local pty).\nPlease use PP_TERM_BACKEND=ghostty."),
+    ("当前终端后端不支持进程内 SSH。", "The current terminal backend does not support in-process SSH."),
     ("当前连接：{v0}", "Current connection: {v0}"),
     ("录制", "Record"),
     ("录制会话", "Record session"),

@@ -116,6 +116,103 @@ pub fn search_set_pattern(term: &vte::Terminal, pattern: Option<&str>) {
     }
 }
 
+/// 接上**进程内 SSH 通道**（阶段 B2：VTE 后端走**假 pty**）。
+///
+/// ## 为什么 VTE 需要「假 pty」
+///
+/// VTE 的键盘输入必须经由一个 pty（`vte_terminal_feed_child` 把字节写进
+/// pty 的 master）⇒ 进程内 SSH（russh）那条路**没有子进程** ⇒ 键盘字节
+/// 无处可去 ⇒ 自己开一对 pty：**master 给 VTE**、**slave 给我们**
+/// （读出来的就是用户敲的键 ⇒ 转给 SSH 通道）。
+///
+/// 详见 [`crate::platform::pty::FakePty`]。
+///
+/// ## 显示方向**不走** pty
+///
+/// 远程来的字节**直接**喂给 VTE（`feed`）——不写进 slave ⇒ 也就没有
+/// 「OPOST 把 `\n` 变成 `\r\n`」的二次转换（真 ssh 也是这么干的：
+/// 它把本地 tty 切成 raw）。
+///
+/// ## 返回值
+///
+/// `false` = 接不上（假 pty 开不出来 / 读线程起不来）⇒ 调用方自己决定
+/// 怎么办（一般是弹个框说「这个后端不支持进程内 SSH」）。
+pub fn attach_shell_fake(
+    term: &vte::Terminal,
+    chan: crate::backend::shell::ShellChannel,
+    rx: async_channel::Receiver<crate::backend::shell::ShellEvent>,
+    on_exit: Box<dyn Fn(i32)>,
+) -> bool {
+    let fake = match crate::platform::pty::FakePty::new() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // ⚠️ **VTE 接管 master**：它往里写键盘字节；显示内容它也从里面读，
+    //    但我们**不往 slave 写** ⇒ 它读不到东西 ⇒ 显示走下面的 `feed`。
+    term.set_pty(Some(fake.vte_pty()));
+
+    // 尺寸先同步一次（远程 pty 是按**申请时**的尺寸建的 ⇒ 不发
+    // window-change 的话远程会一直按那个尺寸排版）。
+    let cols = term.column_count().max(1) as u16;
+    let rows = term.row_count().max(1) as u16;
+    chan.resize(cols, rows);
+
+    // 键盘：slave → SSH 通道。
+    //
+    // ⚠️ **读线程在后台** ⇒ `chan.send` 自己是线程安全的（它内部
+    //    `rt.spawn`）。
+    let ch = chan.clone();
+    if fake
+        .spawn_input_reader(Box::new(move |bytes| ch.send(bytes)))
+        .is_err()
+    {
+        return false;
+    }
+
+    // 输出：SSH → 终端；退出：回调（VTE 没有「子进程退出」信号 ⇒ 这条
+    // 通路自己报）。
+    //
+    // ⚠️ **停止标志要先拿一份**（`fake` 整个搬进异步块了）。
+    let stop3 = fake.stop_flag();
+    let term2 = term.clone();
+    gtk::glib::MainContext::default().spawn_local(async move {
+        while let Ok(ev) = rx.recv().await {
+            match ev {
+                crate::backend::shell::ShellEvent::Data(bytes) => term2.feed(&bytes),
+                crate::backend::shell::ShellEvent::Exit(code) => {
+                    fake.stop();
+                    on_exit(code);
+                    break;
+                }
+            }
+        }
+        fake.stop();
+    });
+
+    // 尺寸变化 → SSH 的 `window_change`。
+    //
+    // ⚠️ **VTE 没有「尺寸变了」信号**（ghostty 后端是自己算的）⇒ 轮询：
+    //    每 300ms 读两下行列数，变了才发 ⇒ 开销可以忽略。
+    let t3 = term.clone();
+    let ch3 = chan.clone();
+    let mut last = (cols, rows);
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+        use std::sync::atomic::Ordering;
+        if stop3.load(Ordering::Relaxed) {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let c = t3.column_count().max(1) as u16;
+        let r = t3.row_count().max(1) as u16;
+        if (c, r) != last {
+            last = (c, r);
+            ch3.resize(c, r);
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+
+    true
+}
+
 /// 把普通文本转义成正则源码（只保留字母数字与下划线）。
 fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
