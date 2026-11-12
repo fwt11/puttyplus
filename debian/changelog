@@ -1,3 +1,17 @@
+puttyplus (0.5.4-1) unstable; urgency=medium
+
+  * **修：在堡垒机上分屏失败**。分屏的那个终端会报
+    「WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!」+
+    「Host key verification failed.」，直接失败（退出码 255）⇒ 分屏
+    开不出来。根因：堡垒机在本地开一个随机端口、隧道按访问轮换主机
+    密钥 ⇒ 按 [地址]:[端口] 记的 ~/.ssh/known_hosts 必然对不上。
+    ⇒ 连 127.0.0.1 这类回环地址时**不查也不写** known_hosts
+      （普通地址照旧校验）。这与进程内那条路、以及旧版的行为一致。
+  * 上一版（0.5.3）的内容照旧：连接中枢（一个服务器一条 SSH 连接）、
+    修上传大文件时界面卡死、传输队列角标重做。
+
+ -- fwt11 <wutong.feng@qq.com>  Thu, 12 Nov 2026 12:30:00 +0800
+
 puttyplus (0.5.3-1) unstable; urgency=medium
 
   * **连接中枢：同一台服务器只开一条 SSH 连接**。SFTP 文件面板、端口映射、
