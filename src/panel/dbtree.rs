@@ -875,6 +875,8 @@ impl DbTree {
             DbMetaReq::ObjectStats { .. } => return,
             // 表统计：挂在模式节点上，失败只清它自己的槽位（重新展开会重发）
             DbMetaReq::TableStats { .. } => 11,
+            // 行数统计是底栏按钮发的，不挂在树上
+            DbMetaReq::RowCount { .. } => return,
         };
         self.nodes.borrow_mut()[node_id].loaded[slot] = false;
         // 把占位子节点的文字换成失败提示（行留着，展开箭头也留着）
@@ -1259,6 +1261,8 @@ impl DbTree {
             DbMetaPayload::SearchHits(_) => {}
             // 对象属性不进树：它在属性窗口里显示
             DbMetaPayload::ObjectStats(_) => {}
+            // 行数统计是底栏按钮发的（阶段 84），不进树
+            DbMetaPayload::RowCount(_) => {}
             // 外键不进对象树：它是表结构页签的内容
             DbMetaPayload::ForeignKeys(_) => {}
             DbMetaPayload::Indexes(list) => {
@@ -1324,6 +1328,8 @@ impl DbTree {
             DbMetaReq::Search { .. } => None,
             // 对象属性也不属于任何树节点（属性窗口里显示）
             DbMetaReq::ObjectStats { .. } => None,
+            // 行数统计是底栏按钮发的（阶段 84），不属于任何树节点
+            DbMetaReq::RowCount { .. } => None,
             // 表统计：挂在**模式**节点上（一次查完整个模式，阶段 51）
             DbMetaReq::TableStats { schema } => nodes
                 .iter()

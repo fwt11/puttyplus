@@ -1198,6 +1198,63 @@ fn main() {
         }
     }
 
+    // ---- 阶段 84：底栏（当前 SQL / 统计总行数）----
+    //
+    // 验：① 底栏中间**常驻显示程序发出去的 SQL**（用户最常问"你到底发了
+    // 什么 SQL"）；② 点「统计总行数」能数出**符合当前条件的行数**——
+    // 这是 `count(*)` 的**真值**，不是对象树里那个 `reltuples` 估算值。
+    {
+        // ① 底栏中间的当前 SQL
+        let sql = dbui::result_foot_sql_now(&st, 0);
+        println!("[3.14] 底栏当前 SQL = {sql}");
+        assert!(sql.contains("SELECT"), "底栏中间该显示当前 SQL：{sql}");
+        assert!(
+            sql.contains("demo_users"),
+            "底栏中间的 SQL 该是这张表的：{sql}"
+        );
+
+        // ② 统计总行数（真库 count(*)）
+        let btn = dbui::result_total_button_now(&st, 0).expect("该有「总行数」按钮");
+        assert!(btn.is_sensitive(), "表浏览页签该能统计总行数（知道表名）");
+        btn.emit_clicked();
+        // 等回包（远端 SSH + 真库，慢的时候要等一会儿）
+        let mut st_txt = String::new();
+        for _ in 0..150 {
+            pump(300);
+            st_txt = dbui::result_tab_status_now(&st, 0);
+            if st_txt.contains("行数") || st_txt.contains("失败") {
+                break;
+            }
+        }
+        println!("[3.14.1] 总行数状态 = {st_txt}");
+        assert!(st_txt.contains("行数"), "统计总行数没结果：{st_txt}");
+        assert!(!st_txt.contains("失败"), "统计总行数失败：{st_txt}");
+        // 把数出来的数字抠出来，跟网格里的行数对账
+        let num: String = st_txt
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let counted: u64 = num.parse().unwrap_or_else(|_| {
+            panic!("状态里抠不出行数：{st_txt}");
+        });
+        let (_, rows) = dbui::grid_rows(&st)[0].clone();
+        let shown = rows.len() as u64;
+        println!("[3.14.2] count(*) = {counted}，网格里 {shown} 行");
+        // ⚠️ **网格只显示一页**：表要是比一页还多，网格看到的是截断后的
+        // 那一页 ⇒ 这时 count(*) 更大才是对的。
+        assert!(
+            counted >= shown,
+            "统计出的行数比网格还少（{counted} < {shown}）：count(*) 明显不对"
+        );
+        if shown < 200 {
+            assert_eq!(
+                counted, shown,
+                "count(*) 与网格行数对不上：{counted} != {shown}"
+            );
+        }
+    }
+
     // ---- 真库验「数字列按数值排序」（阶段 64 的核心目标）----
     //
     // 选 `SELECT 2 AS n UNION ALL SELECT 10`：服务端回来的顺序是 2、10，

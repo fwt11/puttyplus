@@ -600,6 +600,21 @@ impl DbSession {
         Ok(dbmeta::parse_object_stats(&rows))
     }
 
+    /// 统计一张表**符合条件**的行数（阶段 84：底栏的「统计总行数」）。
+    ///
+    /// ⚠️ **这是 COUNT(\*) 的真值**，跟对象树「详细模式」里那个估算值
+    /// （`reltuples` / `TABLE_ROWS`）不是一回事——那个要 ANALYZE 才准。
+    pub async fn row_count(
+        &mut self,
+        schema: &str,
+        table: &str,
+        where_clause: &str,
+    ) -> BackendResult<Option<u64>> {
+        let sql = dbmeta::meta_row_count(self.proto(), schema, table, where_clause);
+        let rows = self.run_rows(&sql).await?;
+        Ok(dbmeta::parse_row_count(&rows))
+    }
+
     /// 一次查一个模式下**所有**表 / 视图的统计（阶段 51 的树「详细模式」）。
     ///
     /// **为什么不是逐个表查**：`object_stats` 一张表一条 SQL——一个模式下

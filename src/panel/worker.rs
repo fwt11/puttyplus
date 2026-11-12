@@ -293,6 +293,13 @@ pub enum DbMetaReq {
     ObjectStats { schema: String, table: String },
     /// 一次查一个模式下**所有**表 / 视图的统计（阶段 51 的树「详细模式」）
     TableStats { schema: String },
+    /// 统计一张表**符合条件**的行数（阶段 84：底栏的「统计总行数」）
+    RowCount {
+        schema: String,
+        table: String,
+        /// 当前生效的 WHERE（空串 = 整张表）
+        where_clause: String,
+    },
 }
 
 impl DbMetaReq {
@@ -317,6 +324,8 @@ impl DbMetaReq {
             Self::ObjectStats { .. } => 10,
             // 表统计是"整个模式一次查完"，挂在模式节点上（11）
             Self::TableStats { .. } => 11,
+            // 行数统计不属于任何树节点（底栏按钮），单独占一个槽位（12）
+            Self::RowCount { .. } => 12,
         }
     }
 }
@@ -344,6 +353,8 @@ pub enum DbMetaPayload {
     TableStats(Vec<crate::backend::dbmeta::TableStat>),
     /// 定义文本（例程 / 触发器）
     Def(String),
+    /// 符合条件的行数（`None` = 查不到）
+    RowCount(Option<u64>),
 }
 
 /// 事务动作。
@@ -1129,6 +1140,10 @@ pub fn spawn_worker(
                                                                         .object_stats(&schema, &table)
                                                                         .await
                                                                         .map(DbMetaPayload::ObjectStats),
+                                                                    DbMetaReq::RowCount { schema, table, where_clause } => sess
+                                                                        .row_count(&schema, &table, &where_clause)
+                                                                        .await
+                                                                        .map(DbMetaPayload::RowCount),
                                                                     DbMetaReq::TableStats { schema } => sess
                                                                         .table_stats(&schema)
                                                                         .await

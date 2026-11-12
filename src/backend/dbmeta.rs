@@ -478,6 +478,34 @@ pub fn check_free_where(text: &str) -> Result<String, String> {
     Ok(t.to_string())
 }
 
+/// 统计一张表**符合条件**的行数（阶段 84：底栏的「统计总行数」）。
+///
+/// ⚠️ **这是 COUNT(\*) 的真值**，跟对象树「详细模式」里那个**估算值**
+/// （PG 的 `reltuples` / MySQL 的 `TABLE_ROWS`）不是一回事——那个要
+/// ANALYZE 才准，这个是当场数出来的。界面上要把两者分清。
+///
+/// `where_clause` 为空 ⇒ 数整张表。
+pub fn meta_row_count(
+    proto: DbProto,
+    schema: &str,
+    table: &str,
+    where_clause: &str,
+) -> String {
+    let base = quote_qualified(proto, schema, table);
+    let w = where_clause.trim();
+    if w.is_empty() {
+        format!("SELECT count(*) FROM {base}")
+    } else {
+        format!("SELECT count(*) FROM {base} WHERE {w}")
+    }
+}
+
+/// 解析 `count(*)` 的结果（取第一行第一列）。
+pub fn parse_row_count(rows: &[Vec<Option<String>>]) -> Option<u64> {
+    let cell = rows.first()?.first()?.as_deref()?;
+    cell.trim().parse::<u64>().ok()
+}
+
 /// ORDER BY 片段（阶段 48：可视化条件条里的「排序」）。
 ///
 /// 空列名 → 空串（不拼 ORDER BY）。
@@ -4907,5 +4935,40 @@ mod tests {
         let long = "a".repeat(4001);
         let e = check_free_where(&long).unwrap_err();
         assert!(e.contains("太长"), "{e}");
+    }
+
+    /* ---------------- 统计总行数（阶段 84） ---------------- */
+
+    #[test]
+    fn 统计总行数无where时数整表() {
+        assert_eq!(
+            meta_row_count(DbProto::Postgres, "public", "demo_users", ""),
+            "SELECT count(*) FROM \"public\".\"demo_users\""
+        );
+        // MySQL 用反引号
+        assert_eq!(
+            meta_row_count(DbProto::MySql, "shop", "orders", "   "),
+            "SELECT count(*) FROM `shop`.`orders`"
+        );
+    }
+
+    #[test]
+    fn 统计总行数带上where() {
+        assert_eq!(
+            meta_row_count(DbProto::Postgres, "public", "demo_users", "id > 3"),
+            "SELECT count(*) FROM \"public\".\"demo_users\" WHERE id > 3"
+        );
+    }
+
+    #[test]
+    fn 解析行数取第一行第一列() {
+        let rows = vec![vec![Some("42".to_string())]];
+        assert_eq!(parse_row_count(&rows), Some(42));
+        // 空结果 / NULL / 非数字 ⇒ None（底栏就显示「算不出来」）
+        assert_eq!(parse_row_count(&[]), None);
+        assert_eq!(parse_row_count(&[vec![None]]), None);
+        assert_eq!(parse_row_count(&[vec![Some("abc".to_string())]]), None);
+        // 前后空白照样能解析（PG 有时带空格）
+        assert_eq!(parse_row_count(&[vec![Some(" 7 ".to_string())]]), Some(7));
     }
 }

@@ -409,6 +409,8 @@ enum PendingReq {
     Search,
     /// 对象属性（13.5）——要知道是哪个对象的，回包才知道往哪个窗口填
     ObjectStats { schema: String, table: String },
+    /// 统计符合条件的行数（阶段 84：底栏的「总行数」按钮）
+    RowCount { tab_id: u64 },
     /// 导入向导（阶段 18）：要目标表的列信息，回包才知道怎么映射
     ImportPrep {
         schema: String,
@@ -662,6 +664,15 @@ struct ResultTab {
     crumbs: gtk::Box,
     /// 底栏左半：行数 / 耗时 / 待保存项数（阶段 45，对标 dbx 的状态栏）
     foot_info: gtk::Label,
+    /// 底栏中间：**当前正在执行的 SQL**（阶段 84，对标 dbx 底栏那一段）
+    ///
+    /// **为什么常驻**：用户最常问"程序到底给我发了什么 SQL"——以前只能去
+    /// 日志里翻。dbx 把它摆在底栏中间，一眼能看见（完整内容在 tooltip 里）。
+    foot_sql: gtk::Label,
+    /// 底栏里的「总行数」按钮（阶段 84）：当场跑一次 count(*)
+    btn_total: gtk::Button,
+    /// 最近一次执行的 SQL 原文（底栏显示用）
+    last_sql: RefCell<String>,
     /// 底栏右半：页码（第 N 页）
     foot_page: gtk::Label,
     /// 底栏：首页 / 上一页 / 下一页 / 每页行数
@@ -777,13 +788,20 @@ fn build_cond_bar() -> Rc<CondBar> {
     row.append(&lbl_where);
 
     let where_entry = gtk::Entry::new();
-    where_entry.set_placeholder_text(Some(tr("条件（例：id > 3 AND name LIKE 'a%'）")));
+    // ⚠️ **placeholder 要短**：Entry 的自然宽跟着 placeholder 走 ⇒ 一句
+    // 例子（「条件（例：id > 3 AND name LIKE 'a%'）」）能把这一行的**最小
+    // 宽度**撑到 300 多 px，窗口一窄右边整排按钮就被切掉。例子放 tooltip。
+    where_entry.set_placeholder_text(Some(tr("条件…")));
     where_entry.set_tooltip_text(Some(tr(
-        "在这里写 WHERE 条件，按回车重新查库（服务端过滤，不只筛当前这一页）",
+        "在这里写 WHERE 条件，按回车重新查库（服务端过滤，不只筛当前这一页）。例：id > 3 AND name LIKE 'a%'",
     )));
     // ⚠️ **限宽 + 可扩展**：不限宽它会把右边的按钮挤出可视区；不扩展它就
     // 永远只有十几个 px。两者一起给才对。
-    where_entry.set_width_chars(18);
+    //
+    // ⚠️ **自然宽别给大**（阶段 84）：这一行上还有排序控件 + 本地筛行框 +
+    // 七颗动作按钮 ⇒ 自然宽给大了，窗口一窄**右边整排按钮被切掉**
+    // （"放弃"只剩半颗那种）。它会 hexpand 长大，自然宽只要能看清就行。
+    where_entry.set_width_chars(10);
     where_entry.set_hexpand(true);
     row.append(&where_entry);
 
@@ -861,7 +879,7 @@ fn build_cond_bar() -> Rc<CondBar> {
 
     let order_col = gtk::ComboBoxText::new();
     order_col.set_tooltip_text(Some(tr("按哪一列排序（不选就不排序）")));
-    order_col.set_size_request(96, -1);
+    order_col.set_size_request(80, -1);
     row.append(&order_col);
 
     let btn_dir = gtk::Button::with_label(order_dir_text(true));
@@ -2416,6 +2434,7 @@ fn do_run(st: &Rc<PanelState>, ui: &DbUi, only_sel: bool) {
             sql: sql.clone(),
         },
     );
+    set_last_sql(&tab, &sql);
     send_cmd(st, ui, WorkerCmd::DbQuery { id, sql, page_size: PAGE_SIZE });
 }
 
@@ -2509,10 +2528,10 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     )));
     // ⚠️ **宽度按"显示列"算**：一个汉字占两列，「筛选已加载行」是 6 个汉字
     // ⇒ 12 列才放得下，宽度不够会被截成「筛选已加…」。
-    filter.set_width_chars(14);
+    filter.set_width_chars(4);
     // **不许抢剩余空间**：筛选框一旦 hexpand，右侧的按钮就被挤出可视区
     // （截图里「放弃」只剩半颗）。限宽 + 不扩展，按钮才有位置。
-    filter.set_max_width_chars(16);
+    filter.set_max_width_chars(6);
     filter.set_hexpand(false);
     // 搜索图标：筛选框跟旁边一堆图标按钮挨着，加个图标才认得出是筛选
     filter.set_icon_from_icon_name(
@@ -2520,13 +2539,19 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         Some("system-search-symbolic"),
     );
 
-    let status = gtk::Label::new(Some(tr("就绪")));
+    // ⚠️ **初始是空的**：阶段 84 之后它在底栏左边，跟旁边的「N 行 · N ms」
+    // 并排 ⇒ 一上来就写「就绪」纯属噪声（没发生任何事的时候没话可说）。
+    let status = gtk::Label::new(Some(""));
     status.add_css_class("dim-label");
     status.set_xalign(0.0);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     // 状态文字会很长（「已标记 3 行删除，点保存修改才真正删」），限宽 + 省略号，
     // 完整内容放 tooltip 里——不能让它把工具栏挤没。
-    status.set_max_width_chars(18);
+    //
+    // ⚠️ **阶段 84：它搬到底栏去了**：它在工具条上占了 ~150px，而工具条
+    // 现在要塞下 WHERE 框 ⇒ 状态这种"事后消息"该待在底栏（dbx 也是把
+    // 状态放底栏）。
+    status.set_max_width_chars(22);
     // 文字一变就同步 tooltip：省得每处 set_text 都记得再设一遍
     status.connect_notify_local(Some("label"), |l, _| {
         let t = l.text();
@@ -2568,6 +2593,15 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     mode_chip.add_css_class("pp-chip");
     mode_chip.set_tooltip_text(Some(tr("这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）")));
 
+    // 条件条（阶段 84：**并进工具条这一行**，以前是单独一行）
+    //
+    // **为什么并**：dbx 的工具条就是一行（WHERE / ORDER BY / 一排动作按钮），
+    // 我们以前条件条独占一行 + 条件 chip 再占一行 ⇒ 网格被挤掉一大截。
+    // 并进来以后**网格多出整整两行**（有条件时）。
+    //
+    // 整条默认藏着，只有**表浏览页签**会把它亮出来。
+    let cond_bar = build_cond_bar();
+
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     // ⚠️ **标志放最左边**：它是"这一页能不能改"的唯一说明，埋在工具栏中间
     // 等于没有。
@@ -2576,8 +2610,8 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // 按钮，点了开弹窗填条件。现在**条件条上就有一个 WHERE 输入框**，
     // 写完回车即查库 ⇒ 弹窗与那颗按钮一起退场（两个入口做同一件事，
     // 用户只会记错其中一个）。
+    head.append(&cond_bar.root);
     head.append(&filter);
-    head.append(&status);
     // ⚠️ **工具栏里没有「列显示设置」按钮**（阶段 72 / 审计 P1-7、P2-10）：
     // 列设置以前有两个入口（这颗按钮 + 列头的「⋮」菜单）⇒ 审计说"列设置
     // 只保留一个入口"。现在只留在列头菜单里（`DbGrid::set_col_setup_hook`）。
@@ -2628,10 +2662,31 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // ⚠️ **底栏左侧不要抢剩余空间**：挤走的正是右边的分页控件（下拉框会被
     // 压成只剩一个箭头，文字全看不见）。改成"文字按内容宽 + 中间一个
     // hexpand 的空隙撑开"。
-    foot_info.set_max_width_chars(28);
-    // 中间的空隙：把分页控件推到最右
-    let foot_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    foot_spacer.set_hexpand(true);
+    foot_info.set_max_width_chars(26);
+
+    // ---- 当前正在执行的 SQL（阶段 84，对标 dbx 底栏中间那一段）----
+    //
+    // **为什么常驻**：用户最常问的是"程序到底给我发了什么 SQL"——以前
+    // 只能去日志里翻。dbx 把它摆在底栏中间，一眼能看见，点一下看全文。
+    let foot_sql = gtk::Label::new(Some(""));
+    foot_sql.add_css_class("dim-label");
+    // ⚠️ **居中**：它在中间那一格里，文字要在这格子里居中才像"底栏中间"
+    foot_sql.set_xalign(0.5);
+    foot_sql.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    foot_sql.set_hexpand(true);
+    // ⚠️ **限宽**：Label 的自然宽 = 全文宽 ⇒ 不限宽它把右边的分页控件
+    // 整个挤出窗口（窗口一窄就只剩一颗箭头）。
+    foot_sql.set_width_chars(16);
+    foot_sql.set_max_width_chars(40);
+    // 完整 SQL 放 tooltip 里（窄窗口下标签会被省略号截掉）
+    foot_sql.connect_notify_local(Some("label"), |l, _| {
+        let t = l.text();
+        l.set_tooltip_text(Some(t.as_str()));
+    });
+
+    // ⚠️ **中间的空隙由 `foot_sql` 顶替**（阶段 84）：它 hexpand ⇒
+    // 底栏中间那一格既能撑开当空隙，又能把当前 SQL 居中显示出来。
+    // 以前这里有个空的 `foot_spacer` 盒子，现在用不上了。
 
     let btn_first = icon_button("go-top-symbolic", tr("首页：回到第一页"));
     btn_first.set_sensitive(false);
@@ -2649,18 +2704,31 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // 限宽：不设的话它会被旁边的控件挤成只剩一个箭头，文字看不见
     btn_size.set_size_request(96, -1);
 
+    // ---- 「统计总行数」（阶段 84，对标 dbx 的「统计总行数」链接）----
+    //
+    // 网格只显示**一页**（200 行），用户看不到整张表有多少行 ⇒ 给一颗
+    // 按钮，当场跑一次 `count(*)`。这是**真值**，跟对象树「详细模式」里
+    // 那个估算值（≈）不是一回事。
+    let btn_total = gtk::Button::with_label(tr("总行数"));
+    btn_total.set_tooltip_text(Some(tr(
+        "统计这张表符合当前条件的行数（当场数一遍，可能慢）",
+    )));
+    btn_total.add_css_class("flat");
+    btn_total.set_sensitive(false);
+
     let foot = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    // 左：行数 / 耗时 / 待保存项数 + 页签自己的状态
     foot.append(&foot_info);
-    foot.append(&foot_spacer);
+    foot.append(&status);
+    // 中：当前 SQL（在中间那一格里居中）
+    foot.append(&foot_sql);
+    // 右：总行数 + 每页行数 + 分页
+    foot.append(&btn_total);
     foot.append(&btn_size);
     foot.append(&btn_first);
     foot.append(&btn_prev);
     foot.append(&foot_page);
     foot.append(&btn_next);
-
-    // 条件条（阶段 48）：挑列 / 挑运算符 / 填值 → 加条件；右边挑排序列与方向。
-    // 整条默认藏着，只有表浏览页签会把它亮出来。
-    let cond_bar = build_cond_bar();
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 4);
     // ⚠️ **要撑满**：阶段 72e 之后它多了一层（表文档的内层页签），不撑的话
@@ -2668,7 +2736,6 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     box_.set_vexpand(true);
     box_.append(&crumbs);
     box_.append(&head);
-    box_.append(&cond_bar.root);
     box_.append(&grid_stack);
     box_.append(&foot);
 
@@ -2699,6 +2766,9 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         pending_row_action: Cell::new(None),
         crumbs,
         foot_info,
+        foot_sql,
+        btn_total,
+        last_sql: RefCell::new(String::new()),
         foot_page,
         btn_first,
         btn_prev,
@@ -2957,6 +3027,14 @@ fn wire_tab(tab: &Rc<ResultTab>) {
         tab.cond_bar.btn_clear.connect_clicked(move |_| {
             let Some(tab) = weak_tab.upgrade() else { return };
             clear_conds(&tab);
+        });
+    }
+    // 「统计总行数」（阶段 84）：当场跑一次 count(*)
+    {
+        let weak_tab = Rc::downgrade(tab);
+        tab.btn_total.connect_clicked(move |_| {
+            let Some(tab) = weak_tab.upgrade() else { return };
+            request_row_count(&tab);
         });
     }
     // 下一页
@@ -7003,7 +7081,9 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
         msg.push_str(tr("（已达取数上限）"));
     }
     msg.push_str(&format!(" · {}", rows.elapsed_ms));
-    tab.status.set_text(&msg);
+    // ⚠️ **不再往页签状态里写这一句**（阶段 84）：页签状态搬到底栏后，
+    // 它跟底栏左边的「N 行 · N ms」是同一件事 ⇒ 同一句话显示两遍。
+    // 全局状态那边照旧写（「查询完成：…」），信息不丢。
     // 底栏（阶段 45）：行数 / 耗时 / 待保存项数 / 页码
     tab.last_rows.set(rows.rows.len());
     tab.last_elapsed.set(rows.elapsed_ms);
@@ -7153,6 +7233,14 @@ pub fn on_meta(
             Ok(_) => set_status(ui, tr("读表结构返回的格式不对"), true),
             Err(e) => set_status(ui, &trf!("读表结构失败：{e}", e = e), true),
         },
+        PendingReq::RowCount { tab_id } => {
+            let Some(tab) = find_tab(ui, tab_id) else { return };
+            match result {
+                Ok(DbMetaPayload::RowCount(n)) => on_row_count(&tab, Ok(n)),
+                Ok(_) => on_row_count(&tab, Err(tr("返回的格式不对").to_string())),
+                Err(e) => on_row_count(&tab, Err(e)),
+            }
+        }
         PendingReq::ObjectStats { schema, table } => match result {
             Ok(DbMetaPayload::ObjectStats(Some(stats))) => {
                 // ⚠️ **表文档里的「属性」视图有自己的一张网格**（阶段 72e）——
@@ -7722,6 +7810,9 @@ fn query_table(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>, target: &Tab
         &where_sql,
         &order_by,
     );
+    // ⚠️ **先记下这条 SQL**：底栏中间那一格要常驻显示"程序到底发了什么"
+    // （阶段 84）⇒ 记在发出去之前，回包失败时用户也能看到发了什么。
+    set_last_sql(tab, &sql);
     ui.busy.set(true);
     update_buttons(ui);
     let qid = next_id(ui);
@@ -7733,6 +7824,12 @@ fn query_table(st: &Rc<PanelState>, ui: &DbUi, tab: &Rc<ResultTab>, target: &Tab
         },
     );
     send_cmd(st, ui, WorkerCmd::DbQuery { id: qid, sql, page_size: PAGE_SIZE });
+}
+
+/// 记下「最近一次执行的 SQL」并刷到底栏中间那格（阶段 84）。
+fn set_last_sql(tab: &Rc<ResultTab>, sql: &str) {
+    *tab.last_sql.borrow_mut() = sql.to_string();
+    tab.foot_sql.set_text(sql);
 }
 
 /* ---------------- 条件条（阶段 48） ---------------- */
@@ -7779,6 +7876,9 @@ fn fill_cond_bar(tab: &Rc<ResultTab>) {
     bar.order_col.set_active_id(None);
     // 条件条亮出来（只有表浏览页签有）
     bar.root.set_visible(true);
+    // ⚠️ **「总行数」也只有表浏览页签有**：手写查询的"这张表多少行"
+    // 这个问题没有意义（表名都不知道）。
+    tab.btn_total.set_sensitive(true);
 }
 
 /// 条件助手的「填入」：按**列类型**转义生成一段条件，追加到 WHERE 框里。
@@ -8225,6 +8325,46 @@ fn open_batch_edit_dialog(
         d.close();
     });
     let _ = st;
+}
+
+/// 「统计总行数」：发一个 `count(*)` 请求（阶段 84）。
+///
+/// ⚠️ **只有表浏览页签能数**：普通查询结果是用户手写的 SQL，"这张表多少行"
+/// 这个问题对它没有意义（表名都不知道）。
+fn request_row_count(tab: &Rc<ResultTab>) {
+    let Some(st) = tab.st.upgrade() else { return };
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let Some(target) = tab.target.borrow().clone() else {
+        set_status(ui, tr("手写查询没法统计整表行数"), true);
+        return;
+    };
+    let id = next_id(ui);
+    ui.pending.borrow_mut().insert(id, PendingReq::RowCount { tab_id: tab.id });
+    send_cmd(
+        &st,
+        ui,
+        WorkerCmd::DbMeta {
+            id,
+            req: DbMetaReq::RowCount {
+                schema: target.schema,
+                table: target.table,
+                where_clause: tab.filter_where.borrow().clone(),
+            },
+        },
+    );
+    set_tab_status(tab, tr("正在统计总行数…"));
+}
+
+/// 「统计总行数」的回包（阶段 84）。
+fn on_row_count(tab: &Rc<ResultTab>, result: Result<Option<u64>, String>) {
+    match result {
+        Ok(Some(n)) => {
+            set_tab_status(tab, &trf!("符合条件的行数：{n}", n = n));
+        }
+        Ok(None) => set_tab_status_err(tab, tr("统计总行数失败：查不到这张表")),
+        Err(e) => set_tab_status_err(tab, &trf!("统计总行数失败：{e}", e = e)),
+    }
 }
 
 /// 刷新结果页签底栏（阶段 45）：行数 / 耗时 / 待保存项数 / 页码 / 翻页按钮。
@@ -8938,6 +9078,44 @@ pub fn result_foot_now(st: &Rc<PanelState>, tab_idx: usize) -> (String, String) 
         tab.foot_info.text().to_string(),
         tab.foot_page.text().to_string(),
     )
+}
+
+/// 冒烟测试用：底栏中间那一格显示的**当前 SQL**（阶段 84）。
+///
+/// ⚠️ **空串 = 还没查过**：底栏那一格是「最近一次发出去的 SQL」，
+/// 一开始没有查询 ⇒ 空。
+pub fn result_foot_sql_now(st: &Rc<PanelState>, tab_idx: usize) -> String {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
+        return String::new();
+    };
+    tab.foot_sql.text().to_string()
+}
+
+/// 冒烟测试用：页签自己的状态文字（阶段 84：搬到底栏左边了）。
+pub fn result_tab_status_now(st: &Rc<PanelState>, tab_idx: usize) -> String {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
+        return String::new();
+    };
+    tab.status.text().to_string()
+}
+
+/// 冒烟测试用：底栏里的「统计总行数」按钮（阶段 84）。
+///
+/// 返回 `None` = 这个页签没有底栏（不该发生）。
+///
+/// ⚠️ **按钮的可用性是有意义的**：表浏览页签能数（知道表名），
+/// 手写查询不能数（不知道是哪张表）⇒ `is_sensitive()` 要能区分。
+pub fn result_total_button_now(st: &Rc<PanelState>, tab_idx: usize) -> Option<gtk::Button> {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return None };
+    let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
+        return None;
+    };
+    Some(tab.btn_total.clone())
 }
 
 /// 冒烟测试用：跳到第 N 页（阶段 45）。
@@ -10616,6 +10794,7 @@ pub fn make_test_result_tab(
     let slot = st.db_ui.borrow();
     let ui = slot.as_ref()?;
     let tab = new_tab_with_title(st, ui, title);
+    let n_rows = rows.len();
     *tab.types.borrow_mut() = types.to_vec();
     *tab.pk.borrow_mut() = vec![0];
     // 列名也填上（**与 types 同序**）：条件条要靠它列选项，条件里的值要
@@ -10633,6 +10812,11 @@ pub fn make_test_result_tab(
         rows,
         pk: vec![0],
     });
+    // ⚠️ **底栏也要跟着灌**（阶段 84）：真库里是 `on_rows` 填的
+    // （"N 行 · N ms"）⇒ 离线 fixture 不刷的话，底栏永远是空的，
+    // 冒烟根本没法验底栏。
+    tab.last_rows.set(n_rows);
+    update_foot(ui, &tab);
     let idx = ui.tabs.borrow().len().saturating_sub(1);
     Some(idx)
 }
