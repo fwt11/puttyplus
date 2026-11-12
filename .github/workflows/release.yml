@@ -47,10 +47,18 @@ jobs:
             fontconfig fonts-dejavu-core fonts-noto-cjk \
             libgl1-mesa-dri \
             xvfb xauth debhelper dpkg-dev fakeroot \
+            xz-utils \
             python3 \
             jq
 
       - uses: actions/checkout@v4
+
+      - name: 版本号一致性校验（Cargo.toml ⟷ debian/changelog）
+        # ⚠️ **早失败**：版本号对不上就别编了（省下二十分钟）。
+        #    publish job 里还有一道带 tag 的校验（那边才是"发不发"的闸门）。
+        run: |
+          set -euo pipefail
+          python3 tools/check_version.py
 
       - name: 装 Rust（stable）
         run: |
@@ -73,6 +81,67 @@ jobs:
           # ⚠️ 键尾的 v2：见 ci.yml 里的说明（被取消的 run 会把半成品 target/
           #    存进缓存，下一轮恢复后跑的是坏掉的二进制）。
           key: cargo-${{ runner.os }}-${{ matrix.arch }}-v2-${{ hashFiles('Cargo.lock') }}
+
+      - name: 装 Zig 0.17（编译 libghostty-vt 要用）
+        # ⚠️ **这段是从 ci.yml 抄来的，修的就是「Release 发不出来」那件事**
+        #    （用户 2026-11-12：「今天早上的就没成功」）。
+        #    **根因**：`ghostty` 现在是**默认特性**（阶段 4）⇒ Linux 从源码
+        #    构建也要 Zig 0.17.x ⇒ 而 release.yml **只**装了 Rust、**没装
+        #    Zig** ⇒ 「编译（release）」这一步必然失败 ⇒ publish job 被跳过
+        #    ⇒ **Release 根本没建出来**（v0.5.3 / v0.5.4 两次都是这样空的）。
+        #    ⚠️ `ci.yml` 早就有这一步 ⇒ CI 全绿、Release 全红，很难联想到。
+        # ⚠️ **官方 tarball 的文件名格式**是 `zig-<arch>-linux-<ver>.tar.xz`
+        #    —— 也就是 `zig-x86_64-linux-0.17.1.tar.xz`，**不是**
+        #    `zig-linux-x86_64-0.17.1.tar.xz`（不少旧教程写的是后者 ⇒ 404）。
+        #    固定版本 + 校验 sha256 ⇒ 每轮拿到的 Zig 一模一样，可复现。
+        run: |
+          set -eux
+          ver=0.17.1
+          case "${{ matrix.arch }}" in
+            amd64)
+              arch=x86_64
+              sha=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
+              ;;
+            arm64)
+              arch=aarch64
+              sha=a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795
+              ;;
+            *) echo "未知架构 ${{ matrix.arch }}"; exit 1 ;;
+          esac
+          url="https://ziglang.org/download/$ver/zig-$arch-linux-$ver.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/zig.tar.xz
+          echo "$sha  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p /opt/zig
+          tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "ZIG=/opt/zig/zig" >> "$GITHUB_ENV"
+          /opt/zig/zig version
+
+      - name: 备好 Ghostty 源码（绕开 build.rs 自己的下载）
+        # ⚠️ **同上，这段也是从 ci.yml 抄的**（少了它 build.rs 会自己去
+        #    tip.files.ghostty.org 下载源码 ⇒ 网络抖一下整个编译就挂）。
+        # ⚠️ 兜底：官方 tarball 拿不到时改从 GitHub codeload 取同一个
+        #    commit 的整棵源码树（这条路不校验内容，只要有 build.zig 就行）。
+        run: |
+          set -eux
+          commit=83fb95624b0439ee660c2679b43b38c8b63769cd
+          sha=ed57ae9b95581c88f2614e976c1d3f146c02d443a3c26139200eb9de6e645eb4
+          url="https://tip.files.ghostty.org/$commit/libghostty-vt-source.tar.gz"
+          mkdir -p /opt/ghostty
+          if curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ghostty.tar.gz \
+             && echo "$sha  /tmp/ghostty.tar.gz" | sha256sum -c - ; then
+            tar -xzf /tmp/ghostty.tar.gz -C /opt/ghostty --strip-components=1
+          else
+            echo "::warning::官方 tarball 下载失败 ⇒ 改用 GitHub codeload"
+            curl -fsSL --retry 3 \
+              "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$commit" \
+              -o /tmp/ghostty-gh.tar.gz
+            tar -xzf /tmp/ghostty-gh.tar.gz -C /opt/ghostty --strip-components=1
+          fi
+          if [ ! -f /opt/ghostty/build.zig ]; then
+            echo "::error::Ghostty 源码里没有 build.zig（包结构变了？）"
+            exit 1
+          fi
+          echo "GHOSTTY_SOURCE_DIR=/opt/ghostty" >> "$GITHUB_ENV"
 
       - name: 编译（release）
         run: cargo build --release --locked
