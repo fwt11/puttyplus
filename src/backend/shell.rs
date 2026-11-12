@@ -30,12 +30,12 @@
 //!
 //! ## 与 Linux 主线的关系
 //!
-//! ⚠️ **Linux 主线仍然是 spawn 真 `ssh`**（AGENTS.md 的「主线零回归」
-//! 红线：终端里跑的是用户自己的 ssh ⇒ `~/.ssh/config`、agent、
-//! ProxyJump、known_hosts 的语义全都在，Windows 版做不到这个）。
-//! ⇒ 进程内这条通路**只在 Windows 上默认启用**；Linux 上可以用
-//!    `PP_TERM_SSH=inproc` 强制打开（**自测用**，且要配合 ghostty
-//!    后端——VTE 没有「无 pty」这条路）。
+//! ⚠️ **Linux 主线（2026-11-13，阶段 B2 之后）默认也走这条**：VTE
+//! 后端用**假 pty**（`platform::pty::FakePty`）也能把键盘字节送进
+//! 通道 ⇒ 终端与文件面板、端口映射、数据库工作台**共用同一条连接**。
+//! ⇒ **代价**：并入之后终端**不走用户自己的 ssh** ⇒ `~/.ssh/config`、
+//!    agent、ProxyJump 的语义**都不在** ⇒ 需要的话切回 spawn
+//!    （首选项 →「终端」页 →「终端连接方式」，或 `PP_TERM_SSH=spawn`）。
 
 use std::sync::Arc;
 

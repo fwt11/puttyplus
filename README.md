@@ -196,15 +196,17 @@ tar xf puttyplus-linux-x86_64.tar.gz         # 或 ...-aarch64.tar.gz
   ⇒ **跑起来不需要任何外部程序**（连 Git Bash 都不用，只有「跑 73 条契约」
   才需要）。
 
-⚠️ **与 Linux 版的已知差异**（Linux 主线**不变**，仍然是 spawn 用户自己的
-`ssh` ⇒ `~/.ssh/config`、agent、ProxyJump 的语义全都在）：
+⚠️ **与 Linux 版的已知差异**（**2026-11-13 起 Linux 默认也并入共享连接**
+⇒ 终端**默认**走进程内 ⇒ `~/.ssh/config`、agent、ProxyJump **同样不生效**
+⇒ 需要的话在**首选项 →「终端」页 →「终端连接方式」**切回 spawn）：
 
-- ⚠️ **只有走进程内那条路时**（系统里没有 `ssh.exe` / `plink.exe`），
-  Windows 版终端才**不读 `~/.ssh/config`**（别名展开由本程序自己做，
-  `HostName`/`Port`/`User`/`IdentityFile` 生效，但 **ProxyJump 等不支持**）
-  ⇒ **装了 OpenSSH 就没这个差异**；
+- ⚠️ **只有走进程内那条路时**（Linux 默认；Windows 上是系统里没有
+  `ssh.exe` / `plink.exe`），终端才**不读 `~/.ssh/config`**（别名展开由
+  本程序自己做，`HostName`/`Port`/`User`/`IdentityFile` 生效，但
+  **ProxyJump 等不支持**）⇒ **切回 spawn、或 Windows 上装了 OpenSSH，
+  就没这个差异**；
 - 走进程内那条路时，端口转发走本程序自己的进程内转发，不经 `ssh -L/-R/-D`
-  （走 spawn 那条路时转发进 ssh 的 argv，与 Linux 版一致）。
+  （走 spawn 那条路时转发进 ssh 的 argv）。
 
 **首版不做 / 未验证的**：
 

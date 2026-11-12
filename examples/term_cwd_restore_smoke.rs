@@ -157,10 +157,13 @@ fn main() {
     tabs.current_terminal()
         .expect("应有终端")
         .feed_child(b"exit\n");
-    let gone = wait_until(15_000, || {
-        let t = screen_text(&tabs);
-        t.contains("logout") || t.contains("closed")
-    });
+    // ⚠️ **判据必须与后端无关**：spawn 那条路能看到**本地 ssh** 打的
+    //    「Connection to ... closed.」⇒ 但**进程内那条路没有本地 ssh**
+    //    ⇒ 拿那个字样当判据，换了后端就必挂（阶段 B2 实测踩到）。
+    //    ⇒ 改看**我们自己**在会话结束时打的那行（「== 会话已结束 ==」，
+    //    由 `TermInner::on_session_ended` 喂 ⇒ spawn / 进程内**两条路
+    //    都有**）。
+    let gone = wait_until(15_000, || screen_text(&tabs).contains("会话已结束"));
     assert!(gone, "敲 exit 之后会话没结束\n屏幕内容：\n{}", screen_text(&tabs));
     println!("[3] 会话已结束");
 

@@ -2558,6 +2558,17 @@ fn new_term_backend() -> TermView {
     TermView::new()
 }
 
+/// 现在的**墙上时钟**（秒）——「这条会话起于何时」用它记。
+///
+/// ⚠️ 与 `chrono::Local::now().timestamp()` 是同一个东西（都是 Unix
+///    时间戳）⇒ 目录跟随轮询那边算「进程年龄」时才对得上。
+fn now_wall() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// 终端会话走哪条路（阶段 C7）。
 ///
 /// - `spawn`：起 `ssh` 子进程 + 本地 pty（**Linux 主线**，行为零变化）。
@@ -2573,10 +2584,15 @@ fn new_term_backend() -> TermView {
 ///   客户端程序」）⇒ 兜底走**进程内**（Windows 默认没装 OpenSSH，
 ///   很多机器根本没装）。
 ///
-/// ⚠️ **Linux 主线仍然是 spawn**（AGENTS.md 的零回归红线）。
+/// ⚠️ **Linux 主线（2026-11-13，阶段 B2 之后）**：**默认也并入共享
+///    连接**——VTE 后端用**假 pty**（`platform::pty::FakePty`）也能走
+///    进程内 SSH 了 ⇒ 终端与文件面板、端口映射、数据库工作台**共用
+///    同一条 SSH 连接**（用户 2026-11-11 的硬约束）。
 ///
-/// ⚠️ `inproc` **只有 ghostty 后端能用**（VTE 的输入必须过一个 pty）
-/// ⇒ Linux 上要自测这条通路，得配 `PP_TERM_BACKEND=ghostty`。
+/// ⚠️ **代价（用户知道并接受）**：并入之后终端**不走用户自己的 ssh**
+/// ⇒ `~/.ssh/config`（ProxyJump 等）、ssh-agent **都不生效**
+/// ⇒ 需要的话切回 spawn（首选项 →「终端」页 →「终端连接方式」，
+///    或 `PP_TERM_SSH=spawn`）。
 ///
 /// 环境变量 `PP_TERM_SSH=inproc|spawn` 可强制切换（自测用）。
 ///
@@ -2627,8 +2643,8 @@ pub enum TermSsh {
 ///
 /// ⚠️ **两个输入**：
 /// - `setting`：用户选的（`shared` / `spawn` / 没设 ⇒ `None`）；
-/// - `backend_ok`：**当前终端后端能不能用进程内 SSH**（ghostty 可以；
-///   VTE 的键盘输入必须过本地 pty ⇒ 阶段 B2 落地之前不行）。
+///   `backend_ok`：**当前终端后端能不能用进程内 SSH**（ghostty 可以；
+///   VTE 自阶段 B2 起也可以——靠**假 pty**把键盘字节送进 SSH 通道）。
 ///
 /// ⚠️ **默认 = 并入共享连接**（用户 2026-11-11 拍板：「对每个服务器的访问
 ///    只需要一个连接」）⇒ 终端也得上这条连接，否则「一个连接」做不到。
@@ -2650,13 +2666,17 @@ pub fn decide_term_ssh(setting: Option<&str>, backend_ok: bool) -> TermSsh {
 
 /// **当前终端后端能不能用进程内 SSH**（= 能不能并入共享连接）。
 ///
-/// ⚠️ **VTE 还不行**：VTE 的键盘输入必须过一个本地 pty ⇒ 阶段 B2
-///    （假 pty 接入）落地之前，Linux 默认后端只能用 spawn。
+/// ⚠️ **VTE 自阶段 B2 起也可以了**：它的键盘输入必须过一个本地 pty
+///    ⇒ 用**假 pty**（`platform::pty::FakePty`：master 交给 VTE、
+///    slave 留给我们桥接）把键盘字节送进 SSH 通道 ⇒ 终端也能跟
+///    文件面板、端口映射、数据库工作台共用同一条连接。
+///
+/// ⚠️ **Windows 上没有 VTE** ⇒ 那一项恒为 false（`cfg!` 编译期就定）。
 pub fn backend_supports_inproc() -> bool {
     match crate::settings::effective_term_backend() {
         crate::settings::BACKEND_GHOSTTY => cfg!(feature = "ghostty"),
-        // ⚠️ 阶段 B2 落地后这里改成 true。
-        crate::settings::BACKEND_VTE => false,
+        // ⚠️ **阶段 B2**：VTE 也能用进程内 SSH 了（假 pty 接入）。
+        crate::settings::BACKEND_VTE => cfg!(target_os = "linux"),
         _ => false,
     }
 }
@@ -2969,6 +2989,16 @@ fn spawn_term(inner: &Rc<TermInner>) {
     let o = &inner.opts;
     inner.child_alive.set(false);
 
+    // ⚠️ **记下「这条会话起于何时」**（两条路都要记）：
+    //    上层的**目录跟随轮询**靠它找远端那个 shell（远端 `ps` 里按
+    //    pts + 启动时间匹配）⇒ 不记 ⇒ 轮询**整个不跑**
+    //    （`follow_poll_cb` 见到 0 就跳过）⇒ 面板永远跟不上终端的目录。
+    //
+    // ⚠️ **必须在这里记，不能等会话真的起来**：进程内 SSH 是**异步**
+    //    建连的 ⇒ 等它建好时，上层早就把 `spawn_time()` 取走了（拿到 0）
+    //    ⇒ 面板那边的值永远是 0。
+    inner.spawn_wall.set(now_wall());
+
     // ⚠️ **Windows 上默认走 spawn**（2026-11-10，用户拍板）：**系统里有
     //    外部客户端（`ssh.exe` / `plink.exe`）就 spawn** ⇒ 终端里跑的是
     //    用户自己的 ssh ⇒ `~/.ssh/config` / agent / ProxyJump 的语义跟
@@ -2976,7 +3006,8 @@ fn spawn_term(inner: &Rc<TermInner>) {
     //    **一个都没有**（Windows 默认没装 OpenSSH）⇒ spawn 必然失败
     //    （用户 2026-11-08 报的「找不到可用的客户端程序」）⇒ 兜底走
     //    **进程内实现 SSH 客户端**。
-    //    ⚠️ **Linux 主线仍然是 spawn**（零回归红线）。
+    //    ⚠️ **Linux 主线（阶段 B2 之后）默认也走进程内**（VTE 用假
+    //    pty）⇒ 终端与面板、端口映射、数据库共用同一条连接。
     if o.is_ssh() && use_inproc_ssh() {
         spawn_term_inproc(inner, None);
         return;
@@ -3001,12 +3032,6 @@ fn spawn_term(inner: &Rc<TermInner>) {
             .as_deref(),
     );
     autofeed_start(inner);
-    inner.spawn_wall.set(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    );
 
     let cwd = glib::home_dir().to_string_lossy().into_owned();
     let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();

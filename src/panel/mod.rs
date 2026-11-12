@@ -456,8 +456,10 @@ impl SftpPanel {
         //    很多人装了），转发就被判给了一个**根本不会被 spawn** 的 ssh
         //    ⇒ 转发**静默失效**（界面上一点提示都没有）。
         //
-        // ⚠️ Linux 主线**零变化**：`use_inproc_ssh()` 在 Linux 上恒为 false
-        //    ⇒ 转发照旧进 ssh 的 argv。
+        // ⚠️ **判据只有一个**（`use_inproc_ssh()`）：终端走 spawn ⇒
+        //    转发进 ssh 的 argv；终端走进程内 ⇒ 转发由程序内的转发引擎
+        //    承接（阶段 B2 之后 **Linux 默认也是进程内** ⇒ 转发由程序内
+        //    承接，与终端同一条连接）。
         let worker_forwards = crate::backend::forward::inproc_rules(
             opts.is_ssh(),
             crate::term::use_inproc_ssh(),

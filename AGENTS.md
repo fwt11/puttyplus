@@ -182,8 +182,9 @@ OpenSSH 也说「找不到可用的客户端程序」**（用户 2026-11-08 报�
 ⚠️ **这条规则已被 2026-11-11 的「连接中枢」取代**：终端**默认并入共享
 连接**（一个服务器一条 SSH 连接），并**留了开关**切回 spawn ⇒ 见下面
 「⭐ 连接中枢」一节。
-⚠️ 进程内 SSH **只有 ghostty 后端能用**（VTE 的输入必须过本地 pty）⇒
-Linux 上自测要配 `PP_TERM_BACKEND=ghostty`；`PP_TERM_SSH=inproc|spawn`
+⚠️ **阶段 B2（2026-11-13）之后 VTE 也能用进程内 SSH**（**假 pty**
+接入：自己开一对 pty，master 交给 VTE、slave 留给我们桥接）⇒
+Linux 默认后端现在也能并入共享连接；`PP_TERM_SSH=inproc|spawn`
 → 可强制切换（首选项 →「终端」页 →「终端连接方式」也能切）。
 ⚠️ **ConPTY 双向都是 UTF-16LE** ⇒ 不转码就满屏乱码、中文打不进去 ⇒
 转码在 `src/platform/utf16.rs`（**不带平台门控** ⇒ Linux 上能单测：
@@ -312,10 +313,22 @@ spawn（首选项 →「终端」页 →「终端连接方式」，或环境变�
 `PP_TERM_SSH=inproc|spawn`）。
 ⚠️ **并入的代价**：终端**不走用户自己的 ssh** ⇒ `~/.ssh/config`
 （ProxyJump 等）不生效 ⇒ 需要的话切回 spawn。
-⚠️ **后端不支持 ⇒ 退回 spawn**（不是报错）：VTE 的键盘输入必须过本地 pty
-⇒ 阶段 B2（假 pty 接入）落地之前，Linux 默认后端只能用 spawn。
+⚠️ **后端不支持 ⇒ 退回 spawn**（不是报错）。
+✅ **阶段 B2（2026-11-13）之后**：VTE 也能用进程内 SSH（**假 pty**
+接入）⇒ **Linux 默认就是并入共享连接**（终端 + 文件面板 + 端口映射 +
+数据库工作台 = 一台服务器一条 SSH 连接）。
+⚠️ **代价**：并入后终端**不走用户自己的 ssh** ⇒ `~/.ssh/config`
+（ProxyJump 等）、ssh-agent **都不生效** ⇒ 需要的话切回 spawn
+（首选项 →「终端」页 →「终端连接方式」，或 `PP_TERM_SSH=spawn`）。
 ⚠️ **判定必须与「转发由谁承接」用同一个函数**（`term::use_inproc_ssh()`）⇒
 否则会出现「终端没 spawn ssh、转发却发给了 ssh」的空转。
+⚠️ **「会话起于何时」（`TermInner::spawn_wall`）两条路都要在
+`spawn_term` 开头就记**：面板的**目录跟随轮询**靠它找远端那个 shell
+（远端 `ps` 里按 pts + 启动时间匹配）⇒ 不记 ⇒ 轮询**整个不跑**
+（`follow_poll_cb` 见到 0 就跳过）⇒ 面板永远跟不上终端的目录。
+⚠️ **不能等会话真的起来再记**：进程内 SSH 是**异步**建连的 ⇒ 等它建好
+时上层早就把 `spawn_time()` 取走了（拿到 0）⇒ 面板那边的值永远是 0
+（阶段 B2 实测踩到；Windows 上一直有这个问题）。
 
 ### 怎么验
 
@@ -323,8 +336,9 @@ spawn（首选项 →「终端」页 →「终端连接方式」，或环境变�
 cargo run --example hub_share_smoke        # 中枢本体：复用 / 多通道 / 来源分组 / 引用计数
 PP_TERM_SSH=inproc PP_TERM_BACKEND=ghostty \
   xvfb-run -a cargo run --example hub_shared_gui_smoke   # 端到端：终端 + 面板 = 1 条连接
+xvfb-run -a cargo run --example vte_inproc_smoke        # 阶段 B2：VTE 后端 + 进程内 SSH
 ```
-⚠️ 两个冒烟都要**本机测试 sshd 在 127.0.0.1:2233**（公钥认证）。
+⚠️ 三个冒烟都要**本机测试 sshd 在 127.0.0.1:2233**（公钥认证）。
 
 ## 堡垒机场景：回环目标不查 known_hosts（2026-11-11 记）
 

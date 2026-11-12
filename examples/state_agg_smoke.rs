@@ -155,6 +155,9 @@ fn real_path_case() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     // SAFETY：本进程是单线程冒烟（还没起任何 worker），改 PATH 没有并发读。
     unsafe { std::env::set_var("PATH", format!("{}:{}", dir.display(), old_path)) };
+    // ⚠️ **必须显式走 spawn**（阶段 B2 之后终端**默认**是进程内 SSH）：
+    //    本例的**假 ssh** 是本地脚本 ⇒ 只有 spawn 那条路才会跑它。
+    unsafe { std::env::set_var("PP_TERM_SSH", "spawn") };
     // 假 ssh 活多久（秒）——由环境变量控制，两段用例要的时长不一样
     unsafe { std::env::set_var("PP_FAKE_SSH_SLEEP", "3") };
 

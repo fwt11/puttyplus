@@ -177,6 +177,11 @@ fn main() {
     // 设好（glib 初始化后再改环境变量会有数据竞争）。
     unsafe {
         std::env::set_var("PATH", &new_path);
+        // ⚠️ **必须显式走 spawn**（阶段 B2 之后终端**默认**是进程内 SSH）：
+        //    本例放的**假 ssh** 是个本地脚本 ⇒ 只有 spawn 那条路才会
+        //    把它跑起来 ⇒ 进程内那条（russh）压根不经过它 ⇒ 终端连不上。
+        //    本例测的正是 **spawn 路径**上「cd 什么时候发」的时机。
+        std::env::set_var("PP_TERM_SSH", "spawn");
         std::env::set_var("HOME", &home);
         std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
         std::env::set_var("PUTTYPLUS_SETTINGS_INI", tmp.join("settings.ini"));

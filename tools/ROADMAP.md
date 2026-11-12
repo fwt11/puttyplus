@@ -3828,8 +3828,76 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
     + 稳定期之后，断掉复用 ⇒ 冒烟当场失败（抓到 2 条连接）。
 - **验收**：720 单测绿、契约 PASS=73 FAIL=0、release 119 个 example 全过、
   hub_share_smoke / hub_shared_gui_smoke / fwd_* / db_* / 进程内终端冒烟全绿。
-- ⚠️ **阶段 B2 未做**：VTE 后端也能用进程内 SSH（假 pty 接入）⇒ 做了它，
-  Linux 默认后端才能真正并入（VTE 的键盘输入必须过本地 pty）。
+- ✅ **阶段 B2 已做**（见下一节）：VTE 后端也能用进程内 SSH（假 pty
+  接入）⇒ Linux 默认后端现在**真的并入**了。
+
+## 四之三、2026-11-13：阶段 B2 —— VTE 后端接进程内 SSH（假 pty 接入）
+
+- **问题**：Linux 默认的终端后端是 VTE，而 **VTE 的键盘输入必须过一个
+  本地 pty**（`vte_terminal_feed_child` 把字节写进 pty 的 master）⇒
+  进程内 SSH（russh）那条路**没有子进程**、也就没有 pty ⇒ VTE 以前
+  **只能用 spawn**（跑用户自己的 ssh）⇒ 「一台服务器一条 SSH 连接」
+  这条硬约束在 Linux 上一直是**破的**（终端一条、面板一条、转发一条）。
+- **做法**：新增 `src/platform/pty.rs` 的 **`FakePty`**——自己开**一对**
+  pty（`posix_openpt` + `grantpt` + `unlockpt` + `ptsname_r` + `open`；
+  ⚠️ **不用 `openpty`**：它在 libutil 里，老 glibc 要 `-lutil`，Rust 的
+  `libc` crate 不会自动加这个链接参数），**master 交给 VTE**
+  （`vte4::Pty::foreign_sync`）、**slave 留给我们**做桥接。
+  - **行规程切 raw**（`cfmakeraw`）：`ICANON` 关 ⇒ 敲键即发；`ECHO` 关
+    ⇒ 不双回显；`ISIG` 关 ⇒ Ctrl-C 作为一个**字节**送到远程（本地没有
+    前台进程组，信号没人收 ⇒ 远程才收得到中断）。
+  - **显示方向不走 pty**：远程字节**直接**喂 VTE（`feed`）⇒ 没有
+    OPOST 的「`\n` → `\r\n`」二次转换（真 ssh 也是这么干的：它把
+    本地 tty 切成 raw）。
+  - **尺寸**：VTE 没有「尺寸变了」信号 ⇒ 轮询（300ms）转成 SSH 的
+    `window_change`。
+  - **退出**：VTE 没有「子进程退出」信号 ⇒ 进程内通路的通道关闭时由
+    自己报；收尾的活儿抽成 `TermInner::on_session_ended` ⇒ spawn 与
+    进程内两条路**行为完全一致**。
+- **效果**：**Linux 默认（VTE）也能并入共享连接**了 ⇒ 终端 + 文件面板
+  + 端口映射 + 数据库工作台 = **一台服务器一条 SSH 连接**（密码只问
+  一次）。⚠️ **代价**：终端**不走用户自己的 ssh** ⇒ `~/.ssh/config`
+  （ProxyJump 等）、ssh-agent **都不生效** ⇒ 首选项 →「终端」页 →
+  「终端连接方式」或 `PP_TERM_SSH=spawn` 一键切回。
+- **防回归**：新增 `examples/vte_inproc_smoke.rs`（端到端）：连上本地
+  sshd ⇒ 断言**连接中枢里确实有 1 条共享连接**（证明走的是进程内而
+  不是 spawn）、敲命令能看到输出、**标记只出现 2 次**（钉住「无双回
+  显」）、敲 `exit` 后会话结束且「会话已结束」条出现。
+  ⚠️ **反向验证四组**：① 不把假 pty 交给 VTE ② 不把假 pty 切成 raw
+  ③ 不报会话退出 ④ 读线程不转发字节 —— **四组都当场失败**。
+  ⚠️ **反向验证踩的坑**：cargo 靠 **mtime** 判「源文件变了没」⇒ 改完
+  又还原（同一秒内）⇒ mtime 没变 ⇒ **拿旧二进制去跑** ⇒ **假通过**
+  （抓到一次）⇒ 现在每次改完都 `touch` 并检查构建输出里有
+  `Compiling puttyplus`。
+- **翻默认（同一个阶段的第二条提交）**：把
+  `term::backend_supports_inproc()` 的 VTE 分支改成 true ⇒ **Linux 默认
+  就是并入共享连接**（用户 2026-11-11 的决定终于在 Linux 上落地）。
+  ⚠️ **代价**：终端**不走用户自己的 ssh** ⇒ `~/.ssh/config`
+  （ProxyJump 等）、ssh-agent **都不生效** ⇒ 首选项 →「终端」页 →
+  「终端连接方式」或 `PP_TERM_SSH=spawn` 一键切回。
+- ⚠️ **翻默认暴露的两个真问题（都修了）**：
+  1. **目录跟随轮询整个不跑**：`panel::follow_poll_cb` 见到
+     `term_spawn_wall == 0` 就**跳过轮询** ⇒ 而**进程内 SSH 是异步建连
+     的** ⇒ 面板在建连完成前就把 `spawn_time()` 取走了（拿到 0）⇒
+     面板永远跟不上终端的目录（实测：`term_cwd_restore_smoke` 挂在
+     「面板没观察到终端的新目录」）。
+     ⇒ 修法：**「会话起于何时」两条路都在 `spawn_term` 开头就记**
+     （`inner.spawn_wall.set(now_wall())`）⇒ 不能等会话真的起来
+     （进程内那条是异步的 ⇒ 等起来时上层早就取走了）。
+     ⚠️ 这个坑**Windows 上一直存在**（那儿默认就是进程内）⇒ 顺带修了。
+  2. **两个「假 ssh」冒烟必挂**：它们放一个**本地脚本**当假 ssh ⇒ 只有
+     spawn 那条路才会跑它 ⇒ 默认翻转后压根不经过它 ⇒ 终端连不上。
+     ⇒ `open_term_cd_smoke` / `state_agg_smoke` 显式设
+     `PP_TERM_SSH=spawn`（它们测的**就是** spawn 路径的时机）。
+  3. ⚠️ 顺带把 `term_cwd_restore_smoke` 的「会话结束」判据改成**与后端
+     无关**的：原来找的是**本地 ssh** 打的「Connection to ... closed.」
+     ⇒ 进程内那条路没有本地 ssh ⇒ 换后端就必挂 ⇒ 改看我们自己打的
+     「== 会话已结束 ==」（`TermInner::on_session_ended` 喂的 ⇒ 两条路
+     都有）。
+- **验收**：740 单测绿、契约 PASS=73 FAIL=0、release 119 个 example
+  全过；vte_inproc_smoke / term_reconnect_smoke / term_cwd_restore_smoke /
+  open_term_cd_smoke / state_agg_smoke / fwd_inproc_smoke / fwd_all_smoke /
+  fileops_smoke / hub_shared_gui_smoke 全绿。
 
 ## 四之二、2026-11-11 晚：三个界面需求 +「选中态看不清」
 
