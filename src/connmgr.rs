@@ -2512,9 +2512,13 @@ mod tests {
         struct Reset(std::path::PathBuf);
         impl Drop for Reset {
             fn drop(&mut self) {
+                // ⚠️ **先锁、再摘环境变量**（顺序反了会出事）：
+                // 反过来的话，中间有个窗口——"库还开着、路径却已经切回
+                // 用户真实凭据库"——别的测试正好在这会儿存密码，就会
+                // **写进用户真实的凭据库**（明令禁止：测试不许碰用户配置）。
+                crate::vault::lock(); // 解锁态只属于本测试，别泄漏给别的测试
                 // SAFETY：同上。
                 unsafe { std::env::remove_var("PUTTYPLUS_VAULT") };
-                crate::vault::lock(); // 解锁态只属于本测试，别泄漏给别的测试
                 let _ = std::fs::remove_file(&self.0);
             }
         }
@@ -2599,7 +2603,16 @@ mod tests {
         assert_eq!(entries[0].host, "10.1.1.2");
         assert_eq!(entries[0].port, 22);
         assert_eq!(entries[0].user, None);
-        assert_eq!(entries[0].password, None);
+        // ⚠️ **密码看 ini 的内容**，别看 `entries[0].password`：
+        // 凭据库解锁时密码进的是**库**（不是 ini）⇒ `load_custom_from`
+        // 读到的密码取决于"库此刻解没解锁"——并行跑时另一个测试正巧
+        // 解锁了库，这个断言就翻车（实测 flaky，跑三挂一次）。
+        // ini 里的明文键**两种情况都会被清掉**⇒ 看 ini 才稳。
+        let data_pw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !data_pw.contains("password="),
+            "同名保存没把 ini 里的密码清掉：{data_pw}"
+        );
 
         // 新条目 → conn2
         assert!(save_entry_to(
