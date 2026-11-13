@@ -1684,6 +1684,12 @@ git add Cargo.toml Cargo.lock debian/changelog tools/check_version.py \
 git tag -a v0.3.0 -m "PuTTYPlus 0.3.0：…" && git push origin v0.3.0
 ```
 
+⚠️ **版本号现状（2026-11-13 用户拍板）**：`v0.6.0` **已经发布**（tag
+已推、Release 资产齐全）⇒ **不要动它**（**已推的 tag 不移动**）⇒
+**下一个版本是 `v0.7.0`**。
+（当时问卷里选过 v0.5.5，但那是在 v0.6.0 已经发出之后才到达的 ⇒ 删 tag
+重发会让 v0.6.0 的下载链接失效 ⇒ 保留 v0.6.0。）
+
 ⚠️ **deb 的包名与包版本来自 `debian/changelog`，不是 `Cargo.toml`** ⇒
 只改 `Cargo.toml` 是**不生效**的（v0.2.0 就是这么翻车的）。
 ⚠️ 程序的「关于」框显示 `CARGO_PKG_VERSION`（= `Cargo.toml` 的 version）
