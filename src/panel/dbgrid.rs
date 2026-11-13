@@ -79,6 +79,16 @@ pub enum GridMenuAction {
         /// 原始列下标
         col: usize,
     },
+    /// 「生成值…」：把这一格的值交给**数据库算**（序列 / UUID / 当前时间…）。
+    ///
+    /// 具体生成哪种、写成什么表达式，由上层（dbui）按**方言**决定——
+    /// 网格自己不知道连的是 PG 还是 MySQL。
+    GenerateValue {
+        /// 显示行号
+        row: usize,
+        /// 原始列下标
+        col: usize,
+    },
     /// 「转置查看」
     Transpose,
 }
@@ -865,6 +875,30 @@ impl DbGrid {
                 let Some(r) = rows.first().copied() else { return };
                 if grid.clone_row(r) {
                     grid.set_status(tr("已克隆为新行（改完点「保存修改」插入）"));
+                }
+            });
+            body.append(&b);
+        }
+        {
+            // 「生成值…」（阶段 85）：把这一格的值**交给数据库算**
+            // （序列 / UUID / 当前时间…）。
+            //
+            // ⚠️ **要点在具体某一列上**：右键点在行号那一侧（没有列）时
+            // 这一项是灰的——没有列就不知道往哪一格填。
+            let b = crate::menu::item("insert-object-symbolic", tr("生成值…"), None);
+            b.set_sensitive(editable && col.is_some());
+            if !editable {
+                b.set_tooltip_text(Some(tr("先点工具栏的「编辑」进入编辑模式")));
+            } else if col.is_none() {
+                b.set_tooltip_text(Some(tr("先点一个单元格")));
+            }
+            let weak = self.me.borrow().clone();
+            b.connect_clicked(move |_| {
+                let Some(grid) = weak.upgrade() else { return };
+                let Some(c) = col else { return };
+                let hook = grid.row_menu_hook.borrow().clone();
+                if let Some(h) = hook {
+                    h(GridMenuAction::GenerateValue { row, col: c });
                 }
             });
             body.append(&b);

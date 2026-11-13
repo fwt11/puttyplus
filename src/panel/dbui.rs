@@ -8284,6 +8284,9 @@ fn handle_grid_menu(
         dbgrid::GridMenuAction::ColDetail { col } => {
             open_grid_detail_window(st, ui, tab, tr("列详情"), &detail_col_rows(tab, col))
         }
+        dbgrid::GridMenuAction::GenerateValue { row, col } => {
+            open_gen_value_dialog(st, ui, tab, row, col)
+        }
         dbgrid::GridMenuAction::Transpose => open_transpose_window(st, ui, tab),
     }
 }
@@ -8536,6 +8539,119 @@ fn open_batch_edit_dialog(
             let text = val.text().to_string();
             let n = grid.set_edit_rows(&rows, c, &text);
             let msg = trf!("已修改 {n} 行，点「保存修改」才写库", n = n);
+            grid.set_status(&msg);
+        }
+        d.close();
+    });
+    let _ = st;
+}
+
+/// 「生成值…」（阶段 85，对标 dbx）：让**数据库**算一个值，填进这一格。
+///
+/// **为什么由数据库算**：
+/// - 序列值必须由数据库分配（客户端自己数会撞号）；
+/// - 「当前时间」要用**数据库的时钟**（客户端时钟可能跟库差几分钟，时区
+///   也可能不同——写进去的时间对不上，比没写还糟）。
+///
+/// 写进格子的是一条**表达式**（`=CURRENT_TIMESTAMP`）⇒ 保存时原样拼进
+/// SQL（`SET "created_at" = CURRENT_TIMESTAMP`）⇒ 库里存的是算出来的值。
+///
+/// ⚠️ **这里只是"记下来"**：跟别的编辑一样，点「保存修改」才写库。
+fn open_gen_value_dialog(
+    st: &Rc<PanelState>,
+    ui: &DbUi,
+    tab: &Rc<ResultTab>,
+    row: usize,
+    col: usize,
+) {
+    let proto = current_proto(ui);
+    let col_name = tab
+        .grid
+        .columns()
+        .get(col)
+        .cloned()
+        .unwrap_or_else(|| tr("这一列").to_string());
+    let dlg = gtk::Dialog::with_buttons(
+        Some(tr("生成值")),
+        Some(&ui.win),
+        gtk::DialogFlags::MODAL,
+        &[
+            (tr("取消"), gtk::ResponseType::Cancel),
+            (tr("写入"), gtk::ResponseType::Ok),
+        ],
+    );
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+    root.set_margin_top(10);
+    root.set_margin_bottom(10);
+    let hint = gtk::Label::new(Some(&trf!(
+        "把「{v0}」这一格的值交给数据库算（改完点「保存修改」才写库）。",
+        v0 = col_name
+    )));
+    hint.add_css_class("dim-label");
+    hint.set_xalign(0.0);
+    root.append(&hint);
+
+    // 选哪一种（顺序跟 `GenValue::all()` 一致）
+    let sel = gtk::ComboBoxText::new();
+    for k in dbmeta::GenValue::all() {
+        sel.append_text(k.label());
+    }
+    sel.set_active(Some(0));
+    sel.set_hexpand(true);
+    root.append(&sel);
+
+    // 这一项到底会写什么（随选择变）
+    let preview = gtk::Label::new(Some(""));
+    preview.add_css_class("dim-label");
+    preview.set_xalign(0.0);
+    preview.set_selectable(true);
+    root.append(&preview);
+
+    // 这一项的说明
+    let detail = gtk::Label::new(Some(""));
+    detail.add_css_class("dim-label");
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.set_max_width_chars(42);
+    root.append(&detail);
+
+    {
+        let sel2 = sel.clone();
+        let preview2 = preview.clone();
+        let detail2 = detail.clone();
+        sel.connect_changed(move |_| {
+            let k = dbmeta::GenValue::all()
+                .get(sel2.active().unwrap_or(0) as usize)
+                .copied()
+                .unwrap_or(dbmeta::GenValue::Sequence);
+            preview2.set_text(&trf!("将写入：={v0}", v0 = k.expr(proto)));
+            detail2.set_text(k.hint());
+        });
+    }
+    // `connect_changed` 只在"变了"的时候响 ⇒ 先手动填一次
+    {
+        let k = dbmeta::GenValue::Sequence;
+        preview.set_text(&trf!("将写入：={v0}", v0 = k.expr(proto)));
+        detail.set_text(k.hint());
+    }
+
+    dlg.content_area().append(&root);
+    dlg.present();
+
+    let grid = Rc::clone(&tab.grid);
+    dlg.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Ok {
+            let k = dbmeta::GenValue::all()
+                .get(sel.active().unwrap_or(0) as usize)
+                .copied()
+                .unwrap_or(dbmeta::GenValue::Sequence);
+            // ⚠️ **带 `=` 前缀**：`edit_value` 认这个前缀 ⇒ 表达式原样拼进
+            // SQL（不加引号）⇒ 库里存的是数据库算出来的值。
+            let text = format!("{}{}", dbmeta::EXPR_PREFIX, k.expr(proto));
+            grid.set_edit(row, col, &text);
+            let msg = trf!("已把该格设为 {v0}，点「保存修改」才写库", v0 = text);
             grid.set_status(&msg);
         }
         d.close();
@@ -11148,7 +11264,7 @@ pub fn cond_bar_clear_now(st: &Rc<PanelState>, tab_idx: usize) -> bool {    let 
 
 /// 冒烟 / e2e 用：触发结果网格右键菜单里的某个动作（阶段 47）。
 ///
-/// `which`：`cell` / `row` / `col` / `transpose` / `batch`。
+/// `which`：`cell` / `row` / `col` / `transpose` / `batch` / `genvalue`。
 ///
 /// ⚠️ 走的是**真实的菜单回调**（网格 → hook → dbui），不是直接调内部函数。
 pub fn grid_menu_action_now(st: &Rc<PanelState>, tab_idx: usize, which: &str) -> bool {
@@ -11165,6 +11281,9 @@ pub fn grid_menu_action_now(st: &Rc<PanelState>, tab_idx: usize, which: &str) ->
         "col" => dbgrid::GridMenuAction::ColDetail { col },
         "transpose" => dbgrid::GridMenuAction::Transpose,
         "batch" => dbgrid::GridMenuAction::BatchEdit { col },
+        // ⚠️ **用第 1 列**（不是第 0 列）：冒烟要能分清"写进的是哪一格"
+        // ⇒ 别跟主键列撞上。
+        "genvalue" => dbgrid::GridMenuAction::GenerateValue { row, col: 1 },
         _ => return false,
     };
     handle_grid_menu(st, ui, &tab, action);

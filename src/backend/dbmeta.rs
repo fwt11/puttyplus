@@ -185,11 +185,110 @@ pub fn edit_literal(proto: DbProto, ty: ColType, text: &str) -> Result<String, S
     }
 }
 
+/// 「这一格的值由数据库算出来」的前缀（阶段 85：生成值）。
+///
+/// 跟 DBeaver 一个路子：单元格里写 `=CURRENT_TIMESTAMP` ⇒ 存进库的是
+/// **数据库算出来的那个值**，不是字符串 `'CURRENT_TIMESTAMP'`。
+pub const EXPR_PREFIX: char = '=';
+
+/// 用户填的文本 → SQL 字面量（**编辑 / 插入**路径专用）。
+///
+/// 与 [`edit_literal`] 的**唯一区别**：认 `=` 开头的**表达式**（原样拼进
+/// SQL，不加引号 ⇒ 交给数据库算）。
+///
+/// ⚠️ **为什么另起一个函数**（而不是改 `edit_literal`）：
+/// `edit_literal` 还被**导入**（CSV 批量入库）与**导出脚本**共用——
+/// 那些地方的文本是**数据**，绝不能当 SQL 执行。只有"用户自己在格子里
+/// 敲的 / 程序明确要求生成的值"才可能是表达式。
+pub fn edit_value(proto: DbProto, ty: ColType, text: &str) -> Result<String, String> {
+    let t = text.trim();
+    if let Some(expr) = t.strip_prefix(EXPR_PREFIX) {
+        let e = expr.trim();
+        if e.is_empty() {
+            return Err(tr("表达式不能为空").to_string());
+        }
+        return Ok(e.to_string());
+    }
+    edit_literal(proto, ty, t)
+}
+
 /// 按方言把字符串值转成字面量（供写库时统一处理转义）。
 pub fn value_literal(proto: DbProto, value: Option<&str>) -> String {
     match value {
         None => "NULL".to_string(),
         Some(v) => quote_str(proto, v),
+    }
+}
+
+/// 「生成值」的种类（阶段 85：对标 dbx 的网格右键「生成值」）。
+///
+/// **为什么要由数据库算**：序列值必须由数据库分配（客户端自己数会撞号）；
+/// 「当前时间」要用**数据库的时钟**（客户端时钟可能跟库差几分钟，时区
+/// 也可能不同——写进去的时间对不上，比没有还糟）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenValue {
+    /// 序列 / 自增：用**列的默认值**
+    /// （PG 的 `serial` / `identity`、MySQL 的 `AUTO_INCREMENT` 都走这条）。
+    Sequence,
+    /// UUID
+    Uuid,
+    /// 当前时间（含时分秒）
+    Now,
+    /// 当前日期
+    Today,
+    /// 随机数
+    Random,
+}
+
+impl GenValue {
+    /// 菜单里显示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sequence => tr("序列 / 自增"),
+            Self::Uuid => tr("UUID"),
+            Self::Now => tr("当前时间"),
+            Self::Today => tr("当前日期"),
+            Self::Random => tr("随机数"),
+        }
+    }
+
+    /// 一行说明（对话框里跟着选项显示，解释这一项到底写什么）。
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Sequence => tr("用这一列的默认值（自增列要建的时候带默认值）"),
+            Self::Uuid => tr("随机生成一个 UUID"),
+            Self::Now => tr("数据库的当前时间"),
+            Self::Today => tr("数据库的当前日期"),
+            Self::Random => tr("数据库的随机数"),
+        }
+    }
+
+    /// 全部种类（菜单 / 对话框按这个顺序列）。
+    pub fn all() -> &'static [GenValue] {
+        &[
+            Self::Sequence,
+            Self::Uuid,
+            Self::Now,
+            Self::Today,
+            Self::Random,
+        ]
+    }
+
+    /// 按方言生成 **SQL 表达式**（原样拼进 SQL，不加引号 ⇒ 交给数据库算）。
+    ///
+    /// ⚠️ 「序列 / 自增」用 `DEFAULT`：**两家都认**
+    /// （`UPDATE t SET id = DEFAULT` / `INSERT INTO t (id) VALUES (DEFAULT)`）
+    /// ⇒ 不用知道序列叫什么名字，也不用为 PG / MySQL 各写一套。
+    pub fn expr(self, proto: DbProto) -> &'static str {
+        match (self, proto) {
+            (Self::Sequence, _) => "DEFAULT",
+            (Self::Uuid, DbProto::Postgres) => "gen_random_uuid()",
+            (Self::Uuid, DbProto::MySql) => "UUID()",
+            (Self::Now, _) => "CURRENT_TIMESTAMP",
+            (Self::Today, _) => "CURRENT_DATE",
+            (Self::Random, DbProto::Postgres) => "random()",
+            (Self::Random, DbProto::MySql) => "RAND()",
+        }
     }
 }
 
@@ -809,7 +908,9 @@ pub fn build_updates(
                 return Err(trf!("第 {v0} 行引用了不存在的列", v0 = row + 1));
             };
             let ty = types.get(c).copied().unwrap_or(ColType::Text);
-            let lit = edit_literal(proto, ty, text)
+            // ⚠️ 用 `edit_value`（不是 `edit_literal`）：`=` 开头的**表达式**
+            // 要原样拼进 SQL（阶段 85 的「生成值」就靠它）。
+            let lit = edit_value(proto, ty, text)
                 .map_err(|e| trf!("第 {v0} 行的「{name}」：{e}", name = name, e = e, v0 = row + 1))?;
             sets.push((name.clone(), lit));
         }
@@ -3033,7 +3134,9 @@ pub fn build_insert(
             continue;
         };
         let ty = types.get(i).copied().unwrap_or(ColType::Text);
-        let lit = edit_literal(proto, ty, text).map_err(|e| trf!("「{name}」：{e}", name = name, e = e))?;
+        // ⚠️ 用 `edit_value`（不是 `edit_literal`）：`=` 开头的**表达式**
+        // 要原样拼进 SQL（阶段 85 的「生成值」就靠它）。
+        let lit = edit_value(proto, ty, text).map_err(|e| trf!("「{name}」：{e}", name = name, e = e))?;
         cols.push(quote_ident(proto, name));
         vals.push(lit);
     }
@@ -3393,6 +3496,119 @@ mod tests {
         assert_eq!(edit_literal(DbProto::Postgres, ColType::Text, "<NULL>").unwrap(), "NULL");
         assert_eq!(edit_literal(DbProto::Postgres, ColType::Text, "null").unwrap(), "NULL");
         assert_eq!(edit_literal(DbProto::Postgres, ColType::Text, "a'b").unwrap(), "'a''b'");
+    }
+
+    #[test]
+    fn edit_value_takes_eq_prefix_as_expression() {
+        // `=` 开头 = 表达式 ⇒ 原样拼进 SQL（不加引号 ⇒ 数据库自己算）
+        assert_eq!(
+            edit_value(DbProto::Postgres, ColType::Text, "=CURRENT_TIMESTAMP").unwrap(),
+            "CURRENT_TIMESTAMP"
+        );
+        // ⚠️ **类型不拦**：表达式是数据库算的，列类型由数据库自己判
+        // （`gen_random_uuid()` 写进 uuid 列、`nextval()` 写进 int 列）
+        assert_eq!(
+            edit_value(DbProto::Postgres, ColType::Int, "=nextval('s')").unwrap(),
+            "nextval('s')"
+        );
+        // 空表达式要报错（不然 SQL 里会出现一个空的右值）
+        assert!(edit_value(DbProto::Postgres, ColType::Text, "=  ").is_err());
+        // 没有 `=` ⇒ 跟 `edit_literal` 一个样（普通文本照旧加引号）
+        assert_eq!(
+            edit_value(DbProto::Postgres, ColType::Text, "a'b").unwrap(),
+            "'a''b'"
+        );
+        assert_eq!(
+            edit_value(DbProto::Postgres, ColType::Int, "42").unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn gen_value_expr_is_dialect_specific() {
+        // 序列 / 自增：**两家都**用 `DEFAULT`（列的默认值）
+        assert_eq!(GenValue::Sequence.expr(DbProto::Postgres), "DEFAULT");
+        assert_eq!(GenValue::Sequence.expr(DbProto::MySql), "DEFAULT");
+        // UUID：PG 内置函数（13 起）/ MySQL 的 `UUID()`
+        assert_eq!(GenValue::Uuid.expr(DbProto::Postgres), "gen_random_uuid()");
+        assert_eq!(GenValue::Uuid.expr(DbProto::MySql), "UUID()");
+        // 当前时间 / 当前日期：两家通用
+        assert_eq!(GenValue::Now.expr(DbProto::Postgres), "CURRENT_TIMESTAMP");
+        assert_eq!(GenValue::Now.expr(DbProto::MySql), "CURRENT_TIMESTAMP");
+        assert_eq!(GenValue::Today.expr(DbProto::Postgres), "CURRENT_DATE");
+        assert_eq!(GenValue::Today.expr(DbProto::MySql), "CURRENT_DATE");
+        // 随机数：PG `random()` / MySQL `RAND()`
+        assert_eq!(GenValue::Random.expr(DbProto::Postgres), "random()");
+        assert_eq!(GenValue::Random.expr(DbProto::MySql), "RAND()");
+    }
+
+    #[test]
+    fn gen_value_covers_every_kind() {
+        // 五种都要有名字（菜单里列得出来）
+        assert_eq!(GenValue::all().len(), 5);
+        for k in GenValue::all() {
+            assert!(!k.label().is_empty(), "{k:?} 没有名字");
+            assert!(!k.hint().is_empty(), "{k:?} 没有说明");
+            assert!(!k.expr(DbProto::Postgres).is_empty(), "{k:?} 没有表达式");
+            assert!(!k.expr(DbProto::MySql).is_empty(), "{k:?} 没有表达式");
+        }
+    }
+
+    #[test]
+    fn update_with_expression_keeps_it_raw() {
+        // 「生成值」写进去的是 `=CURRENT_TIMESTAMP`
+        // ⇒ UPDATE 里**不能**加引号（加了就是存字符串 'CURRENT_TIMESTAMP'）
+        let columns = vec!["id".to_string(), "created_at".to_string()];
+        let types = vec![ColType::Int, ColType::Text];
+        let rows = vec![vec![Some("1".to_string()), Some("旧".to_string())]];
+        let mut edits: HashMap<usize, HashMap<usize, String>> = HashMap::new();
+        edits
+            .entry(0)
+            .or_default()
+            .insert(1, "=CURRENT_TIMESTAMP".to_string());
+        let sqls = build_updates(
+            DbProto::Postgres,
+            "public",
+            "users",
+            &columns,
+            &types,
+            &[0],
+            &rows,
+            &edits,
+        )
+        .unwrap();
+        assert_eq!(sqls.len(), 1);
+        assert!(
+            sqls[0].contains("SET \"created_at\" = CURRENT_TIMESTAMP"),
+            "表达式被加引号了：{}",
+            sqls[0]
+        );
+        assert!(
+            !sqls[0].contains("'CURRENT_TIMESTAMP'"),
+            "表达式被当字符串存了：{}",
+            sqls[0]
+        );
+    }
+
+    #[test]
+    fn insert_with_expression_keeps_it_raw() {
+        let columns = vec!["id".to_string(), "uid".to_string()];
+        let types = vec![ColType::Int, ColType::Text];
+        let vals = vec![Some("=gen_random_uuid()".to_string())];
+        let sql = build_insert(
+            DbProto::Postgres,
+            "public",
+            "users",
+            &columns,
+            &types,
+            &vals,
+        )
+        .unwrap();
+        assert!(
+            sql.contains("VALUES (gen_random_uuid())"),
+            "表达式被加引号了：{}",
+            sql
+        );
     }
 
     #[test]

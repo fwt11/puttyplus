@@ -58,6 +58,35 @@ fn pump(ms: u64) {
     }
 }
 
+/// 在一棵控件树里找第一个 `ComboBoxText`（阶段 85 的「生成值」对话框用）。
+fn find_combo(w: &gtk::Widget) -> Option<gtk::ComboBoxText> {
+    if let Some(c) = w.downcast_ref::<gtk::ComboBoxText>() {
+        return Some(c.clone());
+    }
+    let mut cur = w.first_child();
+    while let Some(c) = cur {
+        if let Some(f) = find_combo(&c) {
+            return Some(f);
+        }
+        cur = c.next_sibling();
+    }
+    None
+}
+
+/// 收集一棵控件树里所有 Label 的文字。
+fn find_labels(w: &gtk::Widget) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(l) = w.downcast_ref::<gtk::Label>() {
+        out.push(l.text().to_string());
+    }
+    let mut cur = w.first_child();
+    while let Some(c) = cur {
+        out.extend(find_labels(&c));
+        cur = c.next_sibling();
+    }
+    out
+}
+
 /// 退出时把临时 ini 删掉（别留垃圾）。
 struct IniGuard(std::path::PathBuf);
 
@@ -432,6 +461,165 @@ fn main() {
         assert!(
             puttyplus::panel::dbui::grid_menu_action_now(&panel.st, tidx, "batch"),
             "批量修改没触发"
+        );
+    }
+
+    eprintln!("P4.0.1 gen value begin");
+    /* ---- 阶段 85：生成值（序列 / UUID / 当前时间…，按方言分派）---- */
+    {
+        // ---- ① 菜单里有「生成值…」这一项，点它会抛出正确的动作 ----
+        //
+        // ⚠️ **网格必须在一个已显示的窗口里**：右键菜单是挂在 TreeView 上的
+        // 弹层，TreeView 没 realize（不在 toplevel 里）时一弹就崩。
+        let grid = dbgrid::DbGrid::new();
+        grid.set_editable(true);
+        grid.set_data(dbgrid::GridData {
+            columns: vec!["id".into(), "name".into(), "created_at".into()],
+            types: vec![ColType::Int, ColType::Text, ColType::Text],
+            rows: vec![
+                vec![
+                    Some("1".into()),
+                    Some("张三".into()),
+                    Some("2026-01-01".into()),
+                ],
+                vec![
+                    Some("2".into()),
+                    Some("李四".into()),
+                    Some("2026-01-02".into()),
+                ],
+            ],
+            pk: vec![0],
+        });
+        // 钩子只用来"记下动作"（真正的处理在 dbui 那边，见 ②）
+        let seen: Rc<std::cell::RefCell<Option<dbgrid::GridMenuAction>>> =
+            Rc::new(std::cell::RefCell::new(None));
+        {
+            let seen2 = seen.clone();
+            grid.set_row_menu_hook(Rc::new(move |a| {
+                *seen2.borrow_mut() = Some(a);
+            }));
+        }
+        let win = gtk::Window::new();
+        win.set_default_size(900, 300);
+        win.set_child(Some(&grid.view));
+        win.present();
+        pump(300);
+
+        assert!(grid.row_menu_popup_now(0, Some(1)), "行右键菜单没弹出来");
+        let titles = grid.row_menu_titles();
+        println!("行菜单：{titles:?}");
+        assert!(
+            titles.iter().any(|t| t == "生成值…"),
+            "菜单里没有「生成值…」：{titles:?}"
+        );
+        assert!(
+            grid.row_menu_click_item("生成值…"),
+            "「生成值…」点不动（灰的？）"
+        );
+        match *seen.borrow() {
+            Some(dbgrid::GridMenuAction::GenerateValue { row, col }) => {
+                assert_eq!(row, 0, "动作里的行号不对");
+                assert_eq!(col, 1, "动作里的列号不对");
+            }
+            other => panic!("菜单没抛出「生成值」动作：{other:?}"),
+        }
+        win.close();
+        pump(100);
+
+        // ---- ② 对话框：选一种 ⇒ 写进这一格 ⇒ UPDATE 里原样出现 ----
+        let tidx = puttyplus::panel::dbui::make_test_result_tab(
+            &panel.st,
+            "生成值测试",
+            &["id", "name", "created_at"],
+            &[ColType::Int, ColType::Text, ColType::Text],
+            vec![
+                vec![
+                    Some("1".into()),
+                    Some("张三".into()),
+                    Some("2026-01-01".into()),
+                ],
+                vec![
+                    Some("2".into()),
+                    Some("李四".into()),
+                    Some("2026-01-02".into()),
+                ],
+            ],
+        )
+        .expect("应当能离线造一个结果页签");
+        pump(200);
+        let grid = puttyplus::panel::dbui::result_grid_now(&panel.st, tidx).expect("拿不到网格");
+        grid.set_editable(true);
+        assert!(
+            puttyplus::panel::dbui::grid_menu_action_now(&panel.st, tidx, "genvalue"),
+            "生成值没触发"
+        );
+        pump(300);
+        let dlg = gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Dialog>().ok())
+            .find(|w| w.title().as_deref() == Some("生成值"))
+            .expect("「生成值」对话框没弹出来");
+
+        // 五种都要在；选「UUID」⇒ 预览要跟着变（=gen_random_uuid()）
+        let dw: &gtk::Widget = dlg.upcast_ref();
+        let combo = find_combo(dw).expect("对话框里没有类型下拉");
+        for (i, want) in ["序列 / 自增", "UUID", "当前时间", "当前日期", "随机数"]
+            .iter()
+            .enumerate()
+        {
+            combo.set_active(Some(i as u32));
+            pump(60);
+            assert_eq!(
+                combo.active_text().as_deref(),
+                Some(*want),
+                "类型下拉第 {i} 项不对"
+            );
+        }
+        combo.set_active(None);
+        assert!(
+            combo.active_text().is_none(),
+            "类型下拉里不止五项：{:?}",
+            combo.active_text()
+        );
+        combo.set_active(Some(1));
+        pump(150);
+        let labels = find_labels(dw);
+        println!("对话框文字：{labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains("=gen_random_uuid()")),
+            "预览没跟着选择变：{labels:?}"
+        );
+
+        // 确定 ⇒ 这一格变成一条**表达式**
+        dlg.response(gtk::ResponseType::Ok);
+        pump(200);
+        let cell = grid.cell_text(0, 1);
+        println!("写入后这一格：{cell}");
+        assert_eq!(cell, "=gen_random_uuid()", "生成值没写对：{cell}");
+
+        // 存进去的 UPDATE 里**不能**有引号（加了就是存字符串）
+        let sqls = dbmeta::build_updates(
+            puttyplus::backend::db::DbProto::Postgres,
+            "public",
+            "demo_users",
+            &grid.columns(),
+            &grid.types(),
+            &grid.pk(),
+            &grid.original_rows(),
+            &grid.pending_edits(),
+        )
+        .expect("拼 UPDATE 失败");
+        println!("UPDATE：{sqls:?}");
+        assert_eq!(sqls.len(), 1);
+        assert!(
+            sqls[0].contains("= gen_random_uuid()"),
+            "表达式没原样进 SQL：{}",
+            sqls[0]
+        );
+        assert!(
+            !sqls[0].contains("'gen_random_uuid()'"),
+            "表达式被当字符串存了：{}",
+            sqls[0]
         );
     }
 
