@@ -490,6 +490,44 @@ mod tests {
     /* ---------------- 配色 ---------------- */
 
     #[test]
+    fn 历史被裁掉之后绝对行号会重新编号() {
+        // ⚠️ 内核按**页**裁剪历史 ⇒ 裁掉之后绝对行号会**重新编号**
+        // （从「最早还留着的那行」起算）⇒ 行号**不再单调**，甚至会**倒退**
+        // （实测：scrollback=10 灌 2000 行 ⇒ 266；再灌 500 行 ⇒ 188）。
+        //
+        // VTE 那边是「从终端启动起算」，裁掉也不回头（同场景 row=2500）
+        // ⇒ 两个后端在这里**语义分叉**（只影响录制，不影响显示）。
+        //
+        // ⚠️ 这条**不是**「已经修好」的断言，是**把现状钉住**：内核不提供
+        // 裁剪事件、包装层也补不出稳定的绝对行号 ⇒ 哪天内核改了，这里会
+        // 红，提醒我们回去改文档与发布说明。
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.set_scrollback_lines(10);
+        let mut buf = String::new();
+        for i in 0..2000 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        let a = t.cursor_row();
+        let mut buf2 = String::new();
+        for i in 2000..2500 {
+            buf2.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf2.as_bytes());
+        let b = t.cursor_row();
+        println!("scrollback=10：灌 2000 行 ⇒ row={a}；再灌 500 行 ⇒ row={b}");
+        assert!(
+            a < 2000,
+            "灌了 2000 行，行号却是 {a} ⇒ 历史没被裁掉（内核行为变了？）"
+        );
+        assert!(
+            b < a + 500,
+            "再灌 500 行，行号却涨到 {b}（前一个 {a}）⇒ 行号是从启动起算的，\
+             与文档写的「重新编号」不符"
+        );
+    }
+
+    #[test]
     fn formatter给的是整个缓冲区不是视口() {
         let mut t = GhosttyTerm::new(80, 24).expect("建终端");
         let mut buf = String::new();
