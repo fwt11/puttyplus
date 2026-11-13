@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1743] = [
+pub static EN: [(&str, &str); 1745] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -834,6 +834,7 @@ pub static EN: [(&str, &str); 1743] = [
     ("忽略", "Ignore"),
     ("忽略规则，逗号分隔（改完要重新扫描）", "Ignore rules, comma separated (you have to rescan after changing them)"),
     ("总行数", "Total rows"),
+    ("恢复默认宽度", "Reset the column width"),
     ("成功", "Succeeded"),
     ("成功 {n}", "Succeeded {n}"),
     ("成功 {v0}", "Succeeded {v0}"),
@@ -1584,6 +1585,7 @@ pub static EN: [(&str, &str); 1743] = [
     ("还没连上数据库，没法导入", "Not connected to the database yet, so it cannot import"),
     ("还没连上数据库，没法导出", "Not connected to the database yet, so it cannot export"),
     ("这一列", "this column"),
+    ("这一列已恢复成按内容分配宽度", "This column is back to sizing itself by its content"),
     ("这一列的操作", "The actions of this column"),
     ("这一行还没有填任何值", "This row does not have any value yet"),
     ("这一页放的是「零散但确实得调」的设置：宽度、列、镜像规则。改完多半要新开窗口才看得出效果。", "This page holds the settings that are scattered but do need adjusting: widths, columns, mirror rules. You usually have to open a new window to see the effect."),

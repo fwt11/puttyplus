@@ -35,7 +35,7 @@ export ZIG=$HOME/.cache/puttyplus-zig/bin/zig
 
 ```bash
 cargo build --release && cargo test                # Rust（release 已带 strip/LTO/ring 配置）
-cargo build --release --examples          # ⚠️ **128 个冒烟都得能编**（见下）
+cargo build --release --examples          # ⚠️ **129 个冒烟都得能编**（见下）
 (cd c && make)                                      # C 版（已冻结，只作参照）
 bash tools/compat_check.sh                    # 两版外部行为对照（81 项，需 C 版二进制）
 PP_SSHD='127.0.0.1 2222 <user>' bash tools/compat_check.sh   # 含 selftest 全流程对照
@@ -74,11 +74,11 @@ cargo build --release && mkdir -p release && cp target/release/puttyplus release
   example ⇒ **本地全绿、CI 才红**。真踩过：`01efb43`（软链双击跟进去）改了
   那个签名却漏了 `examples/selfheal_smoke.rs` ⇒ CI 从第 50 轮起**连红
   10 轮**才被人看见（2026-11-11）。
-  ⇒ **每个阶段都要跑 `cargo build --release --examples`**（128 个 example 全
+  ⇒ **每个阶段都要跑 `cargo build --release --examples`**（129 个 example 全
   编一遍）⇒ 签名漂移本地就红。CI 里也已加同名一步（`.github/workflows/ci.yml`）。
 - ⚠️ **本地按 CI 那套跑 GUI 冒烟时，别乱改 `HOME`**（2026-11-11 踩过）：
   改了 `HOME` ⇒ cargo 找不到 rustup/cargo 的家 ⇒ **换了 rustc** ⇒ 依赖的
-  指纹全变 ⇒ **全量重编**（128 个 example 要 30 分钟，还可能去重新拉依赖）。
+  指纹全变 ⇒ **全量重编**（129 个 example 要 30 分钟，还可能去重新拉依赖）。
   ⇒ 跑之前把 `CARGO_HOME` / `RUSTUP_HOME` **显式指回去**：
   `export CARGO_HOME=/home/fwt/.cargo RUSTUP_HOME=/home/fwt/.rustup`。
   ⚠️ **CI 没这个问题**（那边 `RUSTUP_HOME=/opt/rust/rustup`、
@@ -542,6 +542,14 @@ sftp` 通道**（**同一条 SSH 连接** ⇒ 不多认证、不多 TCP ⇒ **�
     ⚠️ **只许改 `edit_value`，不许改 `edit_literal`**：后者还被**导入**
     （CSV 批量入库）与**导出脚本**共用 ⇒ 那些地方的文本是**数据**，
     绝不能当 SQL 执行（改了就是导入漏洞）。
+13. **⚠️ 别把 GTK 的 "Deprecated" 当成"功能没了"**（阶段 85 踩过）：
+    `TreeViewColumn::set_resizable` 标着 "Deprecated: 4.10"，台账里一度
+    读成「GTK4 里没有交互式调宽」⇒ **差点白写一整套 GestureDrag 手势**。
+    实际：那个 deprecation 说的是 **TreeView / TreeViewColumn 整个过时**
+    （该换 `GtkColumnView`），**拖列宽照样能用**（抓住列按钮的外边缘）。
+    ⇒ **写「某功能 GTK 没有」之前，先用实验证一下**（把它关掉，看行为在不
+    在变）——本机 `/home/fwt/workspace/gtk` 有 GTK 源码可查
+    （⚠️ `gtk/gtktreeviewcolumn.c` 在 **`gtk/deprecated/`** 下面）。
 
 ## 命令行参数契约（C 版基线，2026-11-01 冻结）
 

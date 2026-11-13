@@ -219,6 +219,56 @@ pub fn alloc_widths(nat: &[i32], avail: i32) -> Vec<i32> {
     scaled
 }
 
+/// 分配列宽：**有几列的宽已经被用户钉死了**（拖拽柄拖过）。
+///
+/// `nat` 是每列的自然宽（按显示顺序）；`avail` 是可用宽度；
+/// `fixed` 是「**显示位置** → 宽」（键是显示位置，不是原始列下标——
+/// 纯函数不该知道显示顺序的事，映射由调用方做）。
+///
+/// **规则**：
+/// ① 钉死的列**原样保留**（不低于 [`MIN_COL`]）；
+/// ② 剩下的宽度按自然宽的**比例**分给没钉死的列（复用 [`alloc_widths`]）；
+/// ③ 钉死的列加起来已经超过可用宽 ⇒ 没钉死的列拿 [`MIN_COL`]，
+///    多出来的部分让**横向滚动条**出场（用户拖宽一列就该看到滚动条）。
+///
+/// ⚠️ **为什么要有它**：`apply_column_widths` 每次都按"可用宽度"重排所有列
+/// ⇒ 用户拖过的宽度会被覆盖掉（拖了跟没拖一样）。
+pub fn alloc_widths_with_fixed(
+    nat: &[i32],
+    avail: i32,
+    fixed: &HashMap<usize, i32>,
+) -> Vec<i32> {
+    if nat.is_empty() {
+        return nat.to_vec();
+    }
+    let mut out = vec![0i32; nat.len()];
+    let mut free_nat: Vec<i32> = Vec::new();
+    let mut free_pos: Vec<usize> = Vec::new();
+    let mut fixed_total = 0i32;
+    for (i, n) in nat.iter().enumerate() {
+        match fixed.get(&i) {
+            Some(&w) => {
+                out[i] = w.max(MIN_COL);
+                fixed_total += out[i];
+            }
+            None => {
+                free_pos.push(i);
+                free_nat.push(*n);
+            }
+        }
+    }
+    if free_pos.is_empty() {
+        // 全都钉死了 ⇒ 就这么宽（横向滚动条出场）
+        return out;
+    }
+    // 剩下的空间分给没钉死的列（分不动时 `alloc_widths` 自己退回自然宽）
+    let widths = alloc_widths(&free_nat, avail - fixed_total);
+    for (k, &i) in free_pos.iter().enumerate() {
+        out[i] = widths[k];
+    }
+    out
+}
+
 /// 结果表控件（用 `Rc` 包一层：列头点击、单元格编辑的回调要指回自己）。
 pub struct DbGrid {
     pub view: gtk::TreeView,
@@ -247,6 +297,12 @@ pub struct DbGrid {
     /// 的列头是做得出来的。
     /// （早先记的"`set_widget` 会把整列换掉"是误判，此处更正。）
     col_menu: RefCell<Option<gtk::Popover>>,
+    /// 当前列菜单是给**哪一列**开的（**原始列下标**）——测试钩子。
+    ///
+    /// ⚠️ **为什么记它**：列菜单的操作全按**原始列下标**走（复制这一列 /
+    /// 隐藏这一列 / 排序…）⇒ 藏过列之后"显示位置"跟原始下标会错位 ⇒
+    /// 光看菜单弹在哪儿看不出来它到底作用在哪一列。
+    col_menu_col: Cell<Option<usize>>,
     /// 列头要不要显示**类型小字**（dbx 的 `TEXT` 那种小字）。
     ///
     /// 结果网格要（用户得知道这列是数字还是文本）；**表结构页签的字段表不要**
@@ -259,6 +315,15 @@ pub struct DbGrid {
     nat_widths: RefCell<Vec<i32>>,
     /// 上次真正设上去的列宽（用来避免反复 `set_fixed_width` 触发重排）。
     applied_widths: RefCell<Vec<i32>>,
+    /// **用户手动拖过的列宽**（**原始列下标** → 像素）。
+    ///
+    /// ⚠️ **为什么单独存**：`apply_column_widths` 每次都按"可用宽度"重排
+    /// 所有列 ⇒ 用户拖过的宽度会被覆盖掉（拖了跟没拖一样）。
+    /// 存下来，分配算法把它们当"钉死的"，其余列分剩下的空间
+    /// （[`alloc_widths_with_fixed`]）。
+    ///
+    /// **键是原始列下标**：隐藏 / 显示列会让"显示位置"变，原始下标才稳。
+    user_widths: RefCell<HashMap<usize, i32>>,
     /// 「隐藏此列」的回调（阶段 46）：参数是**原始列下标**。
     ///
     /// 网格自己落不了盘（列显示设置存在 `columns.ini`，按连接+表分区），
@@ -384,10 +449,12 @@ impl DbGrid {
                 filter: RefCell::new(String::new()),
                 editable: Cell::new(false),
                 col_menu: RefCell::new(Some(col_menu)),
+                col_menu_col: Cell::new(None),
                 header_types: Cell::new(true),
                 hide_col_hook: RefCell::new(None),
                 nat_widths: RefCell::new(Vec::new()),
                 applied_widths: RefCell::new(Vec::new()),
+                user_widths: RefCell::new(HashMap::new()),
                 col_setup_hook: RefCell::new(None),
                 tri_pressed: Cell::new(false),
                 col_tris: RefCell::new(Vec::new()),
@@ -443,8 +510,10 @@ impl DbGrid {
                         }
                         // 点在**列头**上 → 列菜单（阶段 46）
                         _ => {
-                            let Some(i) = disp_col else { return };
-                            grid.show_col_menu(&view2, i, x, y);
+                            // ⚠️ **显示位置 → 原始列下标**的换算在
+                            // `on_header_right_click` 里面（菜单里的操作全按
+                            // 原始下标走 ⇒ 藏过列之后两者会错位）。
+                            grid.on_header_right_click(x, y);
                         }
                     }
                 });
@@ -509,6 +578,11 @@ impl DbGrid {
             let Some(grid) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            // ⚠️ **先记用户拖过的宽度**：GTK 拖完就把列宽改了，但我们
+            // "打算给的"还是旧的 ⇒ 这一轮就能看出差别 ⇒ 记下来。
+            // 顺序很重要：先记再重排，反过来的话这一轮的重排会把用户
+            // 刚拖出来的宽度冲掉。
+            grid.sync_user_widths();
             let w = grid.view.allocated_width();
             if w != last2.get() {
                 last2.set(w);
@@ -588,7 +662,17 @@ impl DbGrid {
         if nat.is_empty() || nat.len() != ncols {
             return;
         }
-        let widths = alloc_widths(&nat, avail);
+        // ⚠️ **用户拖过的列 = 钉死的**：其余列分剩下的空间。
+        // `user_widths` 的键是**原始列下标**，这里换成**显示位置**
+        // （`alloc_widths_with_fixed` 只认显示位置）。
+        let order = self.visible_order();
+        let fixed: HashMap<usize, i32> = self
+            .user_widths
+            .borrow()
+            .iter()
+            .filter_map(|(orig, w)| order.iter().position(|o| o == orig).map(|p| (p, *w)))
+            .collect();
+        let widths = alloc_widths_with_fixed(&nat, avail, &fixed);
         // ⚠️ **宽度没变就别再设**：反复 `set_fixed_width` 会触发重排，
         // 重排又可能改宽度 ⇒ 来回抖。
         if *self.applied_widths.borrow() == widths {
@@ -607,6 +691,8 @@ impl DbGrid {
     /// 点「⋮」时是那个按钮的位置）。
     fn show_col_menu(&self, view: &gtk::TreeView, col: usize, x: f64, y: f64) {
         let Some(vb) = self.build_col_menu(view, col) else { return };
+        // 记下这次菜单是给哪一列开的（测试钩子；菜单里的操作全按它走）
+        self.col_menu_col.set(Some(col));
         let mut slot = self.col_menu.borrow_mut();
         let Some(pop) = slot.as_ref() else { return };
         pop.set_child(Some(&vb));
@@ -614,6 +700,28 @@ impl DbGrid {
         let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
         pop.set_pointing_to(Some(&rect));
         pop.popup();
+    }
+
+    /// 列头被右键：弹那一列的操作菜单（阶段 46）。
+    ///
+    /// `x` 是**相对 TreeView** 的坐标。
+    ///
+    /// ⚠️ **显示位置 → 原始列下标**：菜单里的操作（复制这一列 / 隐藏这一列 /
+    /// 排序 / 恢复默认宽度）全都按**原始下标**走 ⇒ 藏过列之后两者会错位
+    /// ⇒ 不换算的话，右键第 2 列可能作用到第 3 列上。
+    fn on_header_right_click(&self, x: f64, y: f64) {
+        let cols: Vec<(i32, i32)> = self
+            .view
+            .columns()
+            .iter()
+            .map(|c| (c.x_offset(), c.width()))
+            .collect();
+        let xi = x as i32;
+        let Some(disp) = cols.iter().position(|(ox, w)| xi >= *ox && xi < *ox + *w) else {
+            return;
+        };
+        let Some(orig) = self.orig_col(disp) else { return };
+        self.show_col_menu(&self.view, orig, x, y);
     }
 
     /// 算出来的列宽（像素，按显示顺序）——测试钩子。
@@ -721,6 +829,20 @@ impl DbGrid {
             let b = crate::menu::item("view-conceal-symbolic", tr("隐藏这一列"), None);
             b.connect_clicked(move |_| {
                 hook(col);
+            });
+            vb.append(&b);
+        }
+        // 「恢复默认宽度」（阶段 85）：把这一列还回"按内容自动分配"。
+        //
+        // ⚠️ **只有拖过才出现**：没拖过的列没有"恢复"可言。
+        if self.user_widths.borrow().contains_key(&col) {
+            let b = crate::menu::item("edit-undo-symbolic", tr("恢复默认宽度"), None);
+            let weak = self.me.borrow().clone();
+            b.connect_clicked(move |_| {
+                if let Some(grid) = weak.upgrade() {
+                    grid.clear_user_width(col);
+                    grid.set_status(tr("这一列已恢复成按内容分配宽度"));
+                }
             });
             vb.append(&b);
         }
@@ -1303,6 +1425,10 @@ impl DbGrid {
         self.deletes.borrow_mut().clear();
         self.sort.set(None);
         self.filter.borrow_mut().clear();
+        // ⚠️ **换了结果集 ⇒ 用户拖过的列宽也清掉**：那些宽度是按**上一份
+        // 结果集**的列拖的，按原始下标套到新列上会错位（把 A 表第 2 列的
+        // 宽度套到 B 表第 2 列上）。
+        self.user_widths.borrow_mut().clear();
         self.rebuild_columns();
         self.rebuild_rows();
         // 列宽按内容分（阶段 72c）：数据换了 ⇒ 自然宽换了 ⇒ 重算 + 重分
@@ -1372,6 +1498,12 @@ impl DbGrid {
                 });
             }
             let col = gtk::TreeViewColumn::new();
+            // ⚠️ **`set_resizable` 虽被标记过时，但功能还在**（2026-11-14 实测：
+            // 关掉它就真的拖不动列宽了）。GTK 的说明写得很清楚：
+            // 「resizable 为 TRUE 时，用户可以抓住列按钮的**外边缘**自己调宽」。
+            // 那个 "Deprecated: 4.10" 说的是 **TreeView / TreeViewColumn 整个
+            // 过时**（该换 GtkColumnView），**不是**"不能拖了"——
+            // 早先把它读成"GTK4 里没有交互式调宽"是错的（差点白写一套手势）。
             col.set_resizable(true);
             col.set_expand(true);
             // 下限跟 `apply_column_widths` 的 `MIN_COL` 一致：
@@ -1477,6 +1609,21 @@ impl DbGrid {
         // 记下这个三角（测试钩子要用：要知道它在哪，才能真去点它）
         self.col_tris.borrow_mut().push(tri.clone());
         hb.append(&tri);
+        // ---- 列宽拖拽柄（阶段 85）----
+        //
+        // ⚠️ **不用自己实现手势**：GTK **自己就能拖列宽**
+        // （`set_resizable(true)` ⇒ 抓住列按钮的**外边缘**就能拖，
+        // 2026-11-14 实测：把它关掉就真的拖不动了；那个 "Deprecated: 4.10"
+        // 说的是 TreeView 整个过时，不是"不能拖"）。
+        //
+        // ⇒ 这里要做的是**记住**用户拖出来的宽度：`apply_column_widths`
+        // 每次都按"可用宽度"重排所有列 ⇒ 不记住的话，拖完一松手就被改回去
+        // （用户看到的就是"拖不动"）。
+        //
+        // **怎么记住**：GTK 没有暴露"用户拖了"的信号 ⇒ 只能**比**——
+        // 比列的 `fixed_width` 跟我们"打算给的"宽度（GTK 在用户拖拽时**也会改**
+        // `fixed_width`，而我们自己设的值一设就准）⇒ 不一样就是用户拖的。
+        // 详见 [`DbGrid::sync_user_widths`]。
         hb
     }
 
@@ -1512,6 +1659,46 @@ impl DbGrid {
             cur = c.next_sibling();
         }
         out
+    }
+
+    /// 当前列菜单是给**哪一列**开的（**原始列下标**）——测试钩子。
+    pub fn column_menu_col(&self) -> Option<usize> {
+        self.col_menu_col.get()
+    }
+
+    /// 点列操作菜单里的某一项（按文字，测试钩子）。
+    ///
+    /// 返回 false = 没这一项。
+    pub fn click_col_menu_item(&self, title: &str) -> bool {
+        let slot = self.col_menu.borrow();
+        let Some(pop) = slot.as_ref() else { return false };
+        let Some(child) = pop.child() else { return false };
+        let mut cur = child.first_child();
+        while let Some(c) = cur {
+            if let Some(b) = c.downcast_ref::<gtk::Button>() {
+                if crate::menu::item_label(b).as_deref() == Some(title) {
+                    if !b.is_sensitive() {
+                        return false;
+                    }
+                    b.emit_clicked();
+                    return true;
+                }
+            }
+            cur = c.next_sibling();
+        }
+        false
+    }
+
+    /// 程序化右键某一列的列头（**显示位置**，测试钩子）。
+    ///
+    /// 走的是**真实的右键路径**（`on_header_right_click`）⇒ 能验
+    /// "显示位置 → 原始列下标"的换算对不对。
+    pub fn col_menu_popup_now(&self, disp_col: usize) -> bool {
+        let cols = self.view.columns();
+        let Some(c) = cols.get(disp_col) else { return false };
+        let x = (c.x_offset() + c.width() / 2) as f64;
+        self.on_header_right_click(x, 5.0);
+        self.column_menu_is_open()
     }
 
     /// 同步列头的排序箭头（dbx 的列头有排序箭头）。
@@ -1585,6 +1772,111 @@ impl DbGrid {
         resolve_visible(&self.col_layout.borrow(), ncols)
     }
 
+    /// 可见列的顺序（**原始列下标**，按显示顺序）。
+    ///
+    /// 与 [`DbGrid::visible_columns`] 一样，只是名字短一点、内部用得多。
+    fn visible_order(&self) -> Vec<usize> {
+        self.visible_columns()
+    }
+
+    /* ---------------- 列宽拖拽柄（阶段 85） ---------------- */
+
+    /// 把**用户拖出来的列宽**记下来（钉住），其余列重新分剩下的空间。
+    ///
+    /// ⚠️ **看 `fixed_width` 而不是 `width`**（这是本轮最关键的一处）：
+    /// - `width` 是 GTK **实际分配**的宽度 ⇒ 我们刚 `set_fixed_width` 的
+    ///   新值要等布局跑完才反映到它上面 ⇒ 在那之前拿它跟"打算给的"比，
+    ///   会把**每一列**都误判成"用户拖过"（实测：四列全被钉死 ⇒ 自动
+    ///   分配整个废掉）；
+    /// - `fixed_width` 是**我们自己设的那个值** ⇒ 一设就准；
+    ///   而 GTK 在**用户拖拽调宽**时**也会改它**（GTK 源码
+    ///   `gtk_tree_view_column_drag_gesture_update`：
+    ///   `gtk_tree_view_column_set_fixed_width (column, new_width)`）
+    ///   ⇒ 两边一比，就知道用户拖没拖。
+    ///
+    /// ⚠️ **为什么非得记住**：`apply_column_widths` 每次都按"可用宽度"重排
+    /// 所有列 ⇒ 不记住的话，拖完一松手、面板一窄宽度就被改回去
+    /// （用户看到的就是"拖不动"）。
+    fn sync_user_widths(&self) {
+        let applied = self.applied_widths.borrow().clone();
+        if applied.is_empty() {
+            return;
+        }
+        let order = self.visible_order();
+        let mut changed = false;
+        for (disp, col) in self.view.columns().iter().enumerate() {
+            let Some(orig) = order.get(disp).copied() else {
+                continue;
+            };
+            let fw = col.fixed_width();
+            if fw <= 0 {
+                continue; // 没设过（-1）⇒ 不是我们管的
+            }
+            let want = applied.get(disp).copied().unwrap_or(0);
+            if fw == want {
+                continue; // 跟我们设的一样 ⇒ 不是用户拖的
+            }
+            let already = self.user_widths.borrow().get(&orig).copied();
+            if already == Some(fw) {
+                continue;
+            }
+            self.user_widths.borrow_mut().insert(orig, fw);
+            changed = true;
+        }
+        if changed {
+            // 钉住的那几列不动 ⇒ 其余列按自然宽重新分剩下的空间
+            self.apply_column_widths();
+        }
+    }
+
+    /// 用户把某一列（**原始下标**）拖成了多宽。
+    ///
+    /// 拖拽柄拖一下就调它 ⇒ 分配算法把这一列当"钉死的"，其余列分剩下的
+    /// 空间（[`alloc_widths_with_fixed`]）。
+    ///
+    /// ⚠️ **宽不低于 [`MIN_COL`]**：再窄就只剩省略号了。
+    pub fn set_user_width(&self, orig_col: usize, width: i32) {
+        let w = width.max(MIN_COL);
+        {
+            let mut uw = self.user_widths.borrow_mut();
+            if uw.get(&orig_col) == Some(&w) {
+                return;
+            }
+            uw.insert(orig_col, w);
+        }
+        self.apply_column_widths();
+    }
+
+    /// 某一列（**原始下标**）的用户宽度（没拖过 = None）。
+    pub fn user_width(&self, orig_col: usize) -> Option<i32> {
+        self.user_widths.borrow().get(&orig_col).copied()
+    }
+
+    /// 全部用户宽度（`原始列下标 → 宽`）——测试钩子。
+    pub fn user_widths(&self) -> HashMap<usize, i32> {
+        self.user_widths.borrow().clone()
+    }
+
+    /// 某一列（**原始下标**）恢复成"按内容自动分配"。
+    ///
+    /// 返回 false = 这一列本来就没拖过（不用重排）。
+    pub fn clear_user_width(&self, orig_col: usize) -> bool {
+        let had = self.user_widths.borrow_mut().remove(&orig_col).is_some();
+        if had {
+            self.apply_column_widths();
+        }
+        had
+    }
+
+    /// 全部列恢复成"按内容自动分配"。
+    pub fn clear_all_user_widths(&self) {
+        if self.user_widths.borrow_mut().is_empty() {
+            return;
+        }
+        self.user_widths.borrow_mut().clear();
+        self.apply_column_widths();
+    }
+
     /// 表格清空（换连接、换查询时）。
     pub fn clear(&self) {
         *self.data.borrow_mut() = GridData::default();
@@ -1592,6 +1884,8 @@ impl DbGrid {
         self.inserts.borrow_mut().clear();
         self.deletes.borrow_mut().clear();
         self.visible.borrow_mut().clear();
+        // 表格都空了 ⇒ 用户拖过的列宽也没意义了（见 `set_data` 的说明）
+        self.user_widths.borrow_mut().clear();
         // 模型也换回单列（列数与数据列数必须一致，见 set_data 的说明）
         let model = gtk::ListStore::new(&[glib::Type::STRING]);
         self.view.set_model(Some(&model));
@@ -2368,6 +2662,72 @@ mod tests {
         for x in &w {
             assert!(*x >= MIN_COL, "有列缩到 {x} < {MIN_COL}：{w:?}");
         }
+    }
+
+    /// **钉死一列**（用户拖过）：它保持原宽，其余列分剩下的空间。
+    #[test]
+    fn 钉死的列保持原宽其余分剩下的() {
+        let nat = vec![100, 200, 300];
+        let mut fixed = HashMap::new();
+        fixed.insert(1usize, 250i32);
+        let w = alloc_widths_with_fixed(&nat, 700, &fixed);
+        assert_eq!(w[1], 250, "钉死的列宽被改了：{w:?}");
+        // 其余两列分剩下的 450。
+        // ⚠️ **允许差 1~2px**：`alloc_widths` 分富余时是整除
+        // （`extra * n / total`）⇒ 零头会丢（这是它原有的行为，不是新引入的）。
+        let rest = w[0] + w[2];
+        assert!(
+            (rest - 450).abs() <= 2,
+            "其余列没分到剩下的空间：{w:?}（分到 {rest}，应当 450）"
+        );
+        assert!(
+            (w.iter().sum::<i32>() - 700).abs() <= 2,
+            "总宽不对：{w:?}"
+        );
+    }
+
+    /// **没钉死任何列** ⇒ 与 [`alloc_widths`] 完全一样。
+    #[test]
+    fn 没钉死的列跟原来一样() {
+        let nat = vec![122, 140, 203, 203, 329];
+        let w = alloc_widths_with_fixed(&nat, 300, &HashMap::new());
+        assert_eq!(w, alloc_widths(&nat, 300));
+    }
+
+    /// **全都钉死** ⇒ 就是那些宽（多出来的让横向滚动条出场）。
+    #[test]
+    fn 全钉死就是那些宽() {
+        let nat = vec![100, 200, 300];
+        let mut fixed = HashMap::new();
+        fixed.insert(0usize, 111i32);
+        fixed.insert(1usize, 222i32);
+        fixed.insert(2usize, 333i32);
+        let w = alloc_widths_with_fixed(&nat, 700, &fixed);
+        assert_eq!(w, vec![111, 222, 333]);
+    }
+
+    /// **钉死的加起来超过可用宽** ⇒ 其余列拿 [`MIN_COL`]，不把钉死的压回去。
+    ///
+    /// ⚠️ 用户拖宽一列就是想看更多 ⇒ 钉死的**不能**被压回去
+    /// ⇒ 宁可让横向滚动条出场。
+    #[test]
+    fn 钉死的超宽时其余拿最小宽() {
+        let nat = vec![100, 200, 300];
+        let mut fixed = HashMap::new();
+        fixed.insert(0usize, 900i32);
+        let w = alloc_widths_with_fixed(&nat, 700, &fixed);
+        assert_eq!(w[0], 900, "钉死的列被压回去了：{w:?}");
+        assert!(w[1] >= MIN_COL && w[2] >= MIN_COL, "其余列低于最小宽：{w:?}");
+    }
+
+    /// **钉死的宽度低于最小宽** ⇒ 抬到 [`MIN_COL`]（再窄只剩省略号）。
+    #[test]
+    fn 钉死的太窄要抬到最小宽() {
+        let nat = vec![100, 200];
+        let mut fixed = HashMap::new();
+        fixed.insert(0usize, 5i32);
+        let w = alloc_widths_with_fixed(&nat, 700, &fixed);
+        assert_eq!(w[0], MIN_COL, "没抬到最小宽：{w:?}");
     }
 
     /// **够宽时按自然宽的比例把富余分掉**（右侧不留空白）。
