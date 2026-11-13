@@ -571,6 +571,15 @@ impl GhosttyView {
         (t.total_rows() - t.row_count()).max(0)
     }
 
+    /// 设置回滚缓冲的**行数上限**。
+    ///
+    /// ⚠️ 内核两个限制（字节 / 行数）先到先算 ⇒ 这里把字节上限一起
+    /// 放宽（见 [`GhosttyTerm::set_scrollback_lines`]），否则行数上限
+    /// 会被内核默认的 10MB 字节上限架空。
+    pub fn set_scrollback_lines(&self, n: i64) {
+        self.state.term.borrow_mut().set_scrollback_lines(n);
+    }
+
     /// 带样式的屏幕行（每行一段 ANSI）。
     ///
     /// ⚠️ **行号是视口内的**（0 起）——ghostty 的 Formatter 只能格式化

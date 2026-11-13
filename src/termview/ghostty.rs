@@ -101,6 +101,37 @@ impl GhosttyTerm {
         let _ = self.term.set_default_cursor_blink(v);
     }
 
+    /* ---------------- 回滚缓冲 ---------------- */
+
+    /// 设置回滚缓冲的**行数上限**（与 VTE 后端的 `set_scrollback_lines`
+    /// 语义对齐）。
+    ///
+    /// ## 为什么不能只设行数
+    ///
+    /// 内核**同时有字节上限与行数上限**，**先到先算** ⇒ 只设行数的话，
+    /// 内核默认的字节上限（10MB）可能先到 ⇒ 用户设的 10000 行形同虚设
+    /// （几百 KB 的输出就把历史挤掉了）。
+    ///
+    /// ⇒ 这里把**字节上限按行数放大**（每行 4096 字节是很宽松的上界：
+    /// 80 列 × 宽字符 + UTF-8 也到不了），让**行数**成为真正管事的那个
+    /// 限制；字节上限仍留 10MB 地板（与内核默认一致）。
+    ///
+    /// ## 行数 0 = 不要回滚缓冲
+    ///
+    /// ⚠️ 行数上限**关不掉**回滚缓冲（内核的最小值是「一页的行数」）⇒
+    /// 真要关，得把**字节上限设成 0**（内核据此关掉回滚缓冲并清空历史）。
+    pub fn set_scrollback_lines(&mut self, n: i64) {
+        let lines = n.max(0) as usize;
+        if lines == 0 {
+            let _ = self.term.set_scrollback_max_bytes(Some(0));
+            let _ = self.term.set_scrollback_max_lines(Some(0));
+            return;
+        }
+        let bytes = lines.saturating_mul(4096).max(10 * 1024 * 1024);
+        let _ = self.term.set_scrollback_max_bytes(Some(bytes));
+        let _ = self.term.set_scrollback_max_lines(Some(lines));
+    }
+
     /* ---------------- 光标 ---------------- */
 
     /// 光标在**视口内**的行号（0 起）。
@@ -313,11 +344,70 @@ mod tests {
         assert!(text.contains("def"), "实际：{text:?}");
     }
 
+    /* ---------------- 回滚缓冲 ---------------- */
+
+    #[test]
+    fn 回滚缓冲按行数限() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.set_scrollback_lines(200);
+        let mut buf = String::new();
+        for i in 0..5000 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        let sb = t.scrollback_rows();
+        println!("限 200 行后，回滚缓冲实际留了 {sb} 行");
+        // ⚠️ 内核按**页**裁剪（不是精确到行）⇒ 实际留的会比上限多一截
+        // （实测 200 ⇒ 353）⇒ 断言给个带宽，别写死。
+        assert!(
+            (200..=600).contains(&sb),
+            "限了 200 行却留着 {sb} 行 ⇒ 行数上限没生效"
+        );
+    }
+
+    #[test]
+    fn 行数上限才是管事的那个限制() {
+        // ⚠️ 内核**两个限制先到先算** ⇒ 只设行数不够：字节上限（内核默认
+        // 10MB）可能先到 ⇒ 用户设的行数形同虚设。
+        // ⇒ 断言「字节上限被放宽到 ≥ 行数 × 每行 4096 字节」。
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.set_scrollback_lines(100_000);
+        let bytes = t
+            .term
+            .scrollback_max_bytes()
+            .expect("读字节上限")
+            .expect("字节上限应是 Some");
+        let lines = t
+            .term
+            .scrollback_max_lines()
+            .expect("读行数上限")
+            .expect("行数上限应是 Some");
+        println!("字节上限 {bytes}、行数上限 {lines}");
+        assert_eq!(lines, 100_000, "行数上限没设上");
+        assert!(
+            bytes >= 100_000usize * 4096,
+            "字节上限 {bytes} 太小 ⇒ 会先于行数上限触发 ⇒ 行数上限形同虚设"
+        );
+    }
+
+    #[test]
+    fn 行数零就是不要回滚缓冲() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.set_scrollback_lines(0);
+        let mut buf = String::new();
+        for i in 0..500 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        let sb = t.scrollback_rows();
+        println!("设 0 行后，滚回缓冲留了 {sb} 行");
+        assert_eq!(sb, 0, "设 0 行还留着 {sb} 行历史");
+    }
+
     /* ---------------- 按键编码 ---------------- */
 
     #[test]
-    fn 回车键编成回车() {
-        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+    fn 回车键编成回车() {        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
         let b = t.encode_key(Action::Press, Key::Enter, Mods::empty(), None);
         assert_eq!(b, b"\r");
     }

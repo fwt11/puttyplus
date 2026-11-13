@@ -303,10 +303,11 @@ impl TermView {
             TermView::Vte(t) => t.set_scrollback_lines(n),
             #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
-                // ⚠️ ghostty 的回滚缓冲是**按字节**限的（内核 Options
-                // 里的 max_scrollback），不是按行 ⇒ 这里只能忽略。
-                let _ = n;
-                v.queue_draw();
+                // ⚠️ ghostty 内核**同时**有字节上限与行数上限，先到先算
+                // ⇒ 只设行数会被内核默认的 10MB 字节上限架空（历史照样
+                // 被挤掉）⇒ `GhosttyTerm::set_scrollback_lines` 把字节上限
+                // 一并放宽，让**行数**成为真正管事的那个限制。
+                v.set_scrollback_lines(n);
             }
         }
     }
