@@ -24,9 +24,25 @@
 use ghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use ghostty_vt::key::{Action, Encoder, Key, Mods};
 use ghostty_vt::search::Search;
+use ghostty_vt::style::{Palette as GtPalette, RgbColor};
 use ghostty_vt::terminal::{Event, Options, Terminal};
 
 pub use ghostty_vt::key::{Action as KeyAction, Key as KeyCode, Mods as KeyMods};
+
+/// `#rrggbb` ⇒ RGB（解析不了就给 `None`）。
+///
+/// ⚠️ **自己写**（不借 GTK 的 `gdk::RGBA`）：这一层是**纯内核封装**，
+/// 不该拖上 GTK 依赖（Linux 上没有 GTK 时也要能用）。
+fn parse_hex_rgb(hex: &str) -> Option<RgbColor> {
+    let h = hex.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(RgbColor { r, g, b })
+}
 
 /// ghostty 终端内核的句柄。
 pub struct GhosttyTerm {
@@ -251,6 +267,38 @@ impl GhosttyTerm {
         self.search.total_matches().unwrap_or(0)
     }
 
+    /* ---------------- 配色 ---------------- */
+
+    /// 按配色方案刷终端配色（前景 / 背景 / 16 色 ANSI）。
+    ///
+    /// ⚠️ 用的是内核的 **`default_*`** 接口 ⇒ **OSC 改色仍然压得过它**
+    /// （OSC 10/11 改前景背景、OSC 4 改调色板 ⇒ 那是「有效色」，
+    /// 这里设的是「默认色」）。两个是**分开**的，不是二选一。
+    ///
+    /// ⚠️ 256 色表只改**前 16 格**（ANSI 色），16~255 留着内核自己那张
+    /// （xterm 的 6×6×6 色立方 + 灰阶）⇒ 与 VTE 后端的行为一致。
+    pub fn apply_palette(&mut self, p: crate::theme::Palette) {
+        let (fgs, bgs, hex) = p.colors();
+        if let Some(c) = parse_hex_rgb(fgs) {
+            let _ = self.term.set_default_fg_color(Some(c));
+        }
+        if let Some(c) = parse_hex_rgb(bgs) {
+            let _ = self.term.set_default_bg_color(Some(c));
+        }
+        // 拿当前**默认**调色板当底（第一次调用时是内核自带的），
+        // 把前 16 格换成我们的 ANSI 色。
+        let mut pal = self
+            .term
+            .default_color_palette()
+            .unwrap_or_else(|_| GtPalette::default());
+        for (i, h) in hex.iter().enumerate() {
+            if let Some(c) = parse_hex_rgb(h) {
+                pal.0[i] = c;
+            }
+        }
+        let _ = self.term.set_default_color_palette(Some(pal));
+    }
+
     /* ---------------- 复位 ---------------- */
 
     /// 全复位（RIS）：模式、回滚缓冲、滚动区、屏幕内容全回到初始状态。
@@ -402,6 +450,56 @@ mod tests {
         let sb = t.scrollback_rows();
         println!("设 0 行后，滚回缓冲留了 {sb} 行");
         assert_eq!(sb, 0, "设 0 行还留着 {sb} 行历史");
+    }
+
+    /* ---------------- 配色 ---------------- */
+
+    #[test]
+    fn 自定义配色刷到内核里() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.apply_palette(crate::theme::Palette::Solarized);
+        // 前景 / 背景（Solarized：#93a1a1 / #002b36）
+        let fg = t.term.default_fg_color().expect("读前景").expect("前景应是 Some");
+        assert_eq!((fg.r, fg.g, fg.b), (0x93, 0xa1, 0xa1), "前景没刷上");
+        let bg = t.term.default_bg_color().expect("读背景").expect("背景应是 Some");
+        assert_eq!((bg.r, bg.g, bg.b), (0x00, 0x2b, 0x36), "背景没刷上");
+        // 16 色 ANSI 的第 1 格（红）= #dc322f
+        let pal = t.term.default_color_palette().expect("读调色板");
+        assert_eq!(
+            (pal.0[1].r, pal.0[1].g, pal.0[1].b),
+            (0xdc, 0x32, 0x2f),
+            "ANSI 红没刷上"
+        );
+        // 16~255 留给内核自己那张（xterm 色立方 + 灰阶）⇒ 不能被清掉
+        let pal2 = t.term.default_color_palette().expect("读调色板");
+        assert_eq!(pal2.0[200], pal.0[200], "256 色表的后半截被动过了");
+    }
+
+    #[test]
+    fn osc改色仍然压过自定义配色() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.apply_palette(crate::theme::Palette::Dark);
+        // OSC 10 = 改前景色（#ff0000）；OSC 11 = 改背景色
+        t.feed(b"\x1b]10;#ff0000\x07\x1b]11;#0000ff\x07");
+        let fg = t.term.fg_color().expect("读有效前景").expect("前景应是 Some");
+        assert_eq!((fg.r, fg.g, fg.b), (255, 0, 0), "OSC 10 没压过自定义配色");
+        let bg = t.term.bg_color().expect("读有效背景").expect("背景应是 Some");
+        assert_eq!((bg.r, bg.g, bg.b), (0, 0, 255), "OSC 11 没压过自定义配色");
+    }
+
+    #[test]
+    fn hex解析认得六位色() {
+        assert_eq!(
+            parse_hex_rgb("#ffffff"),
+            Some(RgbColor { r: 255, g: 255, b: 255 })
+        );
+        assert_eq!(
+            parse_hex_rgb("#1c1f21"),
+            Some(RgbColor { r: 0x1c, g: 0x1f, b: 0x21 })
+        );
+        assert_eq!(parse_hex_rgb("1c1f21"), None, "少了 # 不该认");
+        assert_eq!(parse_hex_rgb("#fff"), None, "三位不该认");
+        assert_eq!(parse_hex_rgb("#gggggg"), None, "非十六进制不该认");
     }
 
     /* ---------------- 按键编码 ---------------- */

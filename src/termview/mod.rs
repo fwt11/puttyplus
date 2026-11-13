@@ -262,9 +262,10 @@ impl TermView {
             TermView::Vte(t) => vte::apply_colors(t),
             #[cfg(feature = "ghostty")]
             TermView::Ghostty(v) => {
-                // ⚠️ ghostty 自绘用的是**内核自己那套配色**（OSC 改色
-                // 也要生效）⇒ 这里不刷界面主题的配色。
-                v.queue_draw();
+                // ⚠️ ghostty 自绘用**内核自己那套配色** ⇒ 但配色方案仍然
+                // 要刷进去：用的是内核的 `default_*` 接口 ⇒ **OSC 改色
+                // 仍然压得过它**（远程程序自己改色 ⇒ 以远程为准）。
+                v.set_palette(crate::theme::palette());
             }
         }
     }
@@ -275,10 +276,7 @@ impl TermView {
             #[cfg(target_os = "linux")]
             TermView::Vte(t) => vte::apply_palette(t, p),
             #[cfg(feature = "ghostty")]
-            TermView::Ghostty(v) => {
-                let _ = p;
-                v.queue_draw();
-            }
+            TermView::Ghostty(v) => v.set_palette(p),
         }
     }
 

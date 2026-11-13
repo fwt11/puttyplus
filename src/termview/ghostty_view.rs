@@ -580,6 +580,15 @@ impl GhosttyView {
         self.state.term.borrow_mut().set_scrollback_lines(n);
     }
 
+    /// 按配色方案刷终端配色（前景 / 背景 / 16 色 ANSI）。
+    ///
+    /// ⚠️ 用的是内核的 **default** 颜色 ⇒ **OSC 改色仍然压得过它**
+    /// （远程程序自己改色 ⇒ 以远程为准）。
+    pub fn set_palette(&self, p: crate::theme::Palette) {
+        self.state.term.borrow_mut().apply_palette(p);
+        self.area.queue_draw();
+    }
+
     /// 带样式的屏幕行（每行一段 ANSI）。
     ///
     /// ⚠️ **行号是视口内的**（0 起）——ghostty 的 Formatter 只能格式化
@@ -1021,19 +1030,20 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
         }
     }
 
-    // 4. 背景
-    let (fg_default, bg_default) = default_colors();
-    cr.set_source_rgb(bg_default.0, bg_default.1, bg_default.2);
-    cr.rectangle(0.0, 0.0, width, height);
-    cr.fill();
-
-    // 5. 网格
+    // 4. 快照 + 背景
+    //
+    // ⚠️ **背景色也来自快照**（内核的默认背景色）⇒ 配色方案改了背景
+    //    才会真的变。之前这里用的是**写死**的深灰 ⇒ 换浅色配色方案时
+    //    屏幕底色纹丝不动（只有字色变了）⇒ 用户看着像"配色没生效"。
     let mut term = state.term.borrow_mut();
     let mut render = state.render.borrow_mut();
     let Ok(snapshot) = term.update_render(&mut render) else {
+        // 拿不到快照 ⇒ 至少把背景涂掉（否则残留上一帧的鬼影）。
+        paint_bg(cr, &default_bg(), width, height);
         return;
     };
     let Ok(defaults) = snapshot.colors() else {
+        paint_bg(cr, &default_bg(), width, height);
         return;
     };
     let fg_default = (
@@ -1046,7 +1056,9 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
         defaults.background.g as f64 / 255.0,
         defaults.background.b as f64 / 255.0,
     );
+    paint_bg(cr, &bg_default, width, height);
 
+    // 5. 网格
     let mut cursor_pos: Option<(f64, f64)> = None;
     let mut rows_iter = state.rows.borrow_mut();
     let mut cells_iter = state.cells.borrow_mut();
@@ -1339,9 +1351,18 @@ fn measure_cell(font: &gtk::pango::FontDescription) -> (f64, f64, f64) {
     (w as f64, (h2 / 2).max(1) as f64, baseline.max(1.0))
 }
 
-/// 默认的前景色/背景色（内核没给的时候用）。
-fn default_colors() -> ((f64, f64, f64), (f64, f64, f64)) {
-    ((0.85, 0.85, 0.85), (0.10, 0.10, 0.12))
+/// 兜底的背景色（内核没给颜色时用）。
+///
+/// ⚠️ **只是兜底**：正常路径的背景色来自内核快照（跟着配色方案走）。
+fn default_bg() -> (f64, f64, f64) {
+    (0.10, 0.10, 0.12)
+}
+
+/// 铺满背景。
+fn paint_bg(cr: &gtk::cairo::Context, rgb: &(f64, f64, f64), width: f64, height: f64) {
+    cr.set_source_rgb(rgb.0, rgb.1, rgb.2);
+    cr.rectangle(0.0, 0.0, width, height);
+    cr.fill();
 }
 
 /* ---------------- 按键处理 ---------------- */

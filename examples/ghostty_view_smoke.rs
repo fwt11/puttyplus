@@ -443,6 +443,75 @@ fn main() {
         println!("[ok] 焦点可见：聚焦=实心、失焦=空心、点回终端即恢复");
     }
 
+    /* ---------------- 8. 自定义配色：背景色真的变了 ---------------- */
+    //
+    // ⚠️ 这一条钉的是「ghostty 后端**没接**自定义配色」这个缺口：
+    // 以前 `apply_palette` 在 ghostty 分支里是空转（只 queue_draw）⇒
+    // 用户在首选项里换配色方案，Windows 上终端**纹丝不动**。
+    //
+    // 判定用**像素**：渲到内存 surface，取右下角（那儿必然没画东西）
+    // 的颜色当背景色 ⇒ 深色方案 vs 浅色方案 ⇒ 亮度必须反号。
+    //
+    // ⚠️ 顺带钉住一件容易漏的事：背景色**来自内核快照**（跟着配色走），
+    // 不是写死的深灰 ⇒ 以前浅色方案连底色都不会变。
+    {
+        // ⚠️ **走应用真正用的那条路**：`TermView::apply_palette`
+        // （`src/term.rs` 的 `TermPane::apply_palette` 与首选项的
+        // 「换配色方案」都走它）⇒ 只测 `GhosttyView::set_palette` 直调
+        // 是**测不到**真 bug 的（分层之间可能断掉）。
+        let tv = puttyplus::termview::TermView::new_ghostty();
+        tv.feed(b"hello");
+        let view3 = match &tv {
+            puttyplus::termview::TermView::Ghostty(g) => g.clone(),
+            _ => panic!("new_ghostty 应当给出 ghostty 后端"),
+        };
+        let win = gtk::Window::new();
+        win.set_default_size(320, 140);
+        win.set_child(Some(tv.widget()));
+        win.present();
+        pump(300);
+
+        let bg_of = |view: &GhosttyView| -> (i32, i32, i32) {
+            let (w, h) = (320i32, 140i32);
+            let mut surf = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h)
+                .expect("建内存 surface");
+            {
+                let cr = gtk::cairo::Context::new(&surf).expect("建 cairo 上下文");
+                view.render_to(&cr, w as f64, h as f64);
+            }
+            surf.flush();
+            let stride = surf.stride() as usize;
+            let data = surf.data().expect("读 surface 像素");
+            let o = (h as usize - 1) * stride + (w as usize - 1) * 4;
+            (data[o + 2] as i32, data[o + 1] as i32, data[o] as i32)
+        };
+
+        tv.apply_palette(puttyplus::theme::Palette::Dark);
+        pump(150);
+        let dark = bg_of(&view3);
+        tv.apply_palette(puttyplus::theme::Palette::Light);
+        pump(150);
+        let light = bg_of(&view3);
+        println!("[ok] 深色方案背景 {dark:?} → 浅色方案背景 {light:?}");
+
+        let lum = |c: (i32, i32, i32)| -> f64 {
+            0.2126 * c.0 as f64 + 0.7152 * c.1 as f64 + 0.0722 * c.2 as f64
+        };
+        assert!(
+            lum(dark) < 80.0,
+            "深色方案的背景不该是亮的：{dark:?}"
+        );
+        assert!(
+            lum(light) > 180.0,
+            "浅色方案的背景该是亮的（配色没生效？）：{light:?}"
+        );
+        assert!(
+            dark != light,
+            "换配色方案后背景色没变：{dark:?} == {light:?}"
+        );
+        println!("[ok] 自定义配色：背景色跟着方案变（深 {dark:?} → 浅 {light:?}）");
+    }
+
     /* ---------------- 截图（人工看画面） ---------------- */
     let _ = std::process::Command::new("/usr/bin/scrot")
         .arg("-o")
