@@ -150,13 +150,42 @@ impl GhosttyTerm {
 
     /* ---------------- 光标 ---------------- */
 
-    /// 光标在**视口内**的行号（0 起）。
+    /// 光标在**活动区**里的行号（0 起）。
     ///
     /// ⚠️ **不是绝对行号**（VTE 的 `cursor_position().1` 才是）——
-    /// 视口滚下去之后这里就变了。要绝对行号得自己拿
-    /// [`GhosttyTerm::scrollback_rows`] 换算。
-    pub fn cursor_row(&self) -> i64 {
+    /// 它是「活动区（屏幕）」内的行号，要绝对行号得加上回滚缓冲的行数
+    /// （见 [`GhosttyTerm::cursor_row`]）。
+    ///
+    /// ⚠️ 视口滚上去**不会**改它（光标一直在活动区里）——这一点
+    /// 2026-11-14 用探针实测过（滚 3 行后仍是 23）。
+    pub fn cursor_row_in_screen(&self) -> i64 {
         self.term.cursor_y().unwrap_or(0) as i64
+    }
+
+    /// 光标的**绝对行号**（与 VTE 后端的 `cursor_position().1` 语义对齐）。
+    ///
+    /// ## 怎么算的
+    ///
+    /// 绝对行号 = **回滚缓冲的行数** + 光标在活动区里的行号。
+    ///
+    /// ⚠️ 「回滚缓冲的行数」= `total_rows - 视口行数` ⇒ 这个行号是从
+    /// **最早还留着的那行**起算的：内核裁掉历史之后，行号会**整体前移、
+    /// 甚至倒退**（实测：scrollback=10 灌 2000 行 ⇒ cursor_row=266；
+    /// 再灌 500 行 ⇒ **188**——内核按页裁剪，行号随之重新编号）。
+    /// VTE 那边是「从终端启动起算」，裁掉也不回头（同场景实测 row=2500）。
+    ///
+    /// ⇒ 没越过回滚上限时两边语义一致（录制没问题）；**越过后录制会
+    /// 丢行**——内核不提供裁剪事件 ⇒ 包装层没法补一个稳定的绝对行号
+    /// （拿行内容对齐是启发式，不能当实现），等上游支持了再补。
+    ///
+    /// ## 为什么不用内核的坐标换算
+    ///
+    /// 内核也能换算（`grid_ref(Active)` → `point_from_grid_ref(Screen)`），
+    /// 实测两者**完全一致**（探针：都是 30）⇒ 用算术这条更直白的路，
+    /// 省掉一次页表遍历。
+    pub fn cursor_row(&self) -> i64 {
+        let history = self.term.scrollback_rows().unwrap_or(0);
+        history as i64 + self.cursor_row_in_screen()
     }
 
     /// 光标的列号（0 起）。
@@ -191,23 +220,29 @@ impl GhosttyTerm {
 
     /// 视口的带样式文本**按行切开**（每行一段 ANSI）。
     ///
-    /// ⚠️ 这就是 [`crate::termview::TermView::ansi_rows`] 想要的东西，
-    /// 但 ghostty 侧**只能给视口**（给不了绝对行号区间）——
-    /// 阶段 C3 之前先用它验证内核。
+    /// ⚠️ **内核的 Formatter 给的是「整个缓冲区」**（回滚缓冲 + 屏幕），
+    /// **从最顶上那行开始**——不是「当前视口」！
+    /// （2026-11-14 实测：灌 30 行进 24 行的屏幕，Formatter 给的是
+    /// 第 0 行 = "line 0"（在回滚缓冲里），共 30 行；滚视口也不变。）
     ///
-    /// ⚠️ **行数补齐到视口高度**：Formatter 会把**末尾的空行裁掉**
-    /// （实测 24 行的视口只给 3 行）⇒ 不补齐的话，**行号会与屏幕
-    /// 错位**（第 2 行明明有内容，返回的却是第 0 行）。补齐用空串，
-    /// 下标才对得上屏幕行。
+    /// ⇒ 下标就是**缓冲区行号**（= 本程序说的绝对行号，基准是
+    /// **最早还留着的那行**）。
+    ///
+    /// ⚠️ **行数补齐到缓冲区总行数**（不是视口高度）：Formatter 会把
+    /// **末尾的空行裁掉**（实测 31 行的缓冲区只给 30 行）⇒ 不补齐的
+    /// 话，**行号会与屏幕错位**。
+    ///
+    /// ⚠️ 以前这里补齐到的是**视口高度** ⇒ 把**最新的那几行砍掉了**
+    /// （录出来的是最老的几行，与屏幕对不上——真 bug）。
     pub fn ansi_rows(&self) -> Vec<String> {
         let mut rows: Vec<String> = self
             .screen_ansi()
             .split('\n')
             .map(|s| s.trim_end_matches('\r').to_string())
             .collect();
-        let height = self.row_count().max(0) as usize;
-        rows.truncate(height);
-        while rows.len() < height {
+        let total = self.total_rows().max(0) as usize;
+        rows.truncate(total);
+        while rows.len() < total {
             rows.push(String::new());
         }
         rows
@@ -453,6 +488,76 @@ mod tests {
     }
 
     /* ---------------- 配色 ---------------- */
+
+    #[test]
+    fn formatter给的是整个缓冲区不是视口() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let mut buf = String::new();
+        for i in 0..30 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        let rows = t.ansi_rows();
+        // ⚠️ 内核的 Formatter 给的是**整个缓冲区**（回滚缓冲 + 屏幕），
+        //    从最顶上那行开始 ⇒ 补齐后的行数 = 缓冲区总行数（31），
+        //    **不是**视口高度（24）。
+        assert_eq!(
+            rows.len(),
+            31,
+            "补齐后应覆盖整个缓冲区（31 行），实际 {} 行",
+            rows.len()
+        );
+        assert!(rows[0].contains("line 0"), "第 0 行应是历史里那行：{:?}", rows[0]);
+        assert!(rows[7].contains("line 7"), "第 7 行不对：{:?}", rows[7]);
+        assert!(
+            rows[29].contains("line 29"),
+            "第 29 行（最新的有内容那行）不对：{:?}",
+            rows[29]
+        );
+        assert_eq!(rows[30], "", "最后一行（光标那行）是空的");
+        // 滚视口不影响（Formatter 不看视口）
+        t.term
+            .scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(-3));
+        let rows2 = t.ansi_rows();
+        assert_eq!(rows2[0], rows[0], "滚视口不该改变 Formatter 的输出");
+    }
+
+    #[test]
+    fn 光标行号是绝对的不是视口内的() {
+        use ghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        let mut buf = String::new();
+        for i in 0..30 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        // 30 行灌进 24 行的屏幕 ⇒ 7 行进了回滚缓冲
+        assert_eq!(t.scrollback_rows(), 7, "回滚缓冲行数不对");
+        // 绝对行号 = 回滚缓冲行数 + 光标在活动区里的行号
+        assert_eq!(t.cursor_row(), 30, "光标绝对行号不对");
+        // 与内核自己的坐标换算**完全一致**（Active → Screen）
+        let gr = t
+            .term
+            .grid_ref(Point::Active(PointCoordinate {
+                x: t.term.cursor_x().unwrap(),
+                y: t.term.cursor_y().unwrap() as u32,
+            }))
+            .expect("拿光标那格");
+        let scr = t
+            .term
+            .point_from_grid_ref(&gr, PointSpace::Screen)
+            .expect("换算 Screen 坐标")
+            .expect("应该有坐标");
+        assert_eq!(
+            t.cursor_row(),
+            scr.y as i64,
+            "算出来的绝对行号与内核换算对不上"
+        );
+        // 视口滚上去也不影响（光标一直在活动区里）
+        t.term
+            .scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(-3));
+        assert_eq!(t.cursor_row(), 30, "滚视口不该改光标的绝对行号");
+    }
 
     #[test]
     fn 自定义配色刷到内核里() {

@@ -557,10 +557,11 @@ impl GhosttyView {
         self.area.queue_draw();
     }
 
-    /// 光标行号。
+    /// 光标的**绝对行号**（从最早还留着的那行起算）。
     ///
-    /// ⚠️ **视口内**的行号（内核的 `cursor_y()`）——VTE 那边给的是
-    /// **绝对**行号 ⇒ 两个后端这里语义不同，录制那边要注意。
+    /// ⚠️ 没越过回滚上限时与 VTE 语义一致；内核**裁掉历史之后**行号会
+    /// 随之重新编号（前移甚至倒退，VTE 不回头）⇒ 只影响「越过后」的
+    /// 录制（详见 [`GhosttyTerm::cursor_row`]），不影响显示。
     pub fn cursor_row(&self) -> i64 {
         self.state.term.borrow().cursor_row()
     }
@@ -591,8 +592,13 @@ impl GhosttyView {
 
     /// 带样式的屏幕行（每行一段 ANSI）。
     ///
-    /// ⚠️ **行号是视口内的**（0 起）——ghostty 的 Formatter 只能格式化
-    /// 当前视口，给不了绝对行号区间。
+    /// ⚠️ **行号是绝对行号**（与 VTE 后端对齐）⇒ 下标直接就是缓冲区
+    /// 行号（内核的 Formatter 给的是**整个缓冲区**：回滚缓冲 + 屏幕，
+    /// 从最顶上那行开始）。
+    ///
+    /// ⚠️ 基准是**最早还留着的那行** ⇒ 内核裁掉历史之后，行号会随之
+    /// 重新编号（VTE 从终端启动起算、不回头）⇒ 只影响「越过回滚上限
+    /// 之后」的录制，不影响显示。
     pub fn ansi_rows(&self, start: i64, end: i64) -> Vec<String> {
         let rows = self.state.term.borrow().ansi_rows();
         let mut out = Vec::new();

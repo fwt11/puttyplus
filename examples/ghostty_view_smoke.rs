@@ -512,6 +512,47 @@ fn main() {
         println!("[ok] 自定义配色：背景色跟着方案变（深 {dark:?} → 浅 {light:?}）");
     }
 
+    /* ---------------- 9. 绝对行号 + ansi_rows 按绝对行号取 ---------------- */
+    //
+    // ⚠️ 这一条钉的是「ghostty 后端的 `cursor_row()` 是**视口内**行号」
+    // 这个缺口：录制（asciicast）靠绝对行号去取行 ⇒ 行号语义不一致 ⇒
+    // 录出来的东西对不上。
+    //
+    // 现在：绝对行号 = 回滚缓冲行数 + 活动区行号（内核自己的坐标换算与
+    // 这个算式实测一致）；`ansi_rows` 按绝对行号取整个缓冲区
+    // （⚠️ 内核的 Formatter 给的是**整个缓冲区**，不是视口——以前我们
+    // 按视口高度截断 ⇒ **把最新的那几行砍掉了**，录出来是最老的几行）。
+    {
+        let tv = puttyplus::termview::TermView::new_ghostty();
+        let mut buf = String::new();
+        for i in 0..30 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        tv.feed(buf.as_bytes());
+        let cur = tv.cursor_row();
+        println!("[ok] 30 行之后，光标绝对行号 = {cur}");
+        assert_eq!(cur, 30, "光标绝对行号不对（30 行进去就该是 30）");
+
+        // 用**绝对行号**去取行 ⇒ 取到的是那一行的内容（不是空串，
+        // 也不是别的行）
+        for (abs, want) in [(0_i64, "line 0"), (7, "line 7"), (29, "line 29")] {
+            let got = tv.ansi_rows(abs, abs);
+            let text = got.first().cloned().unwrap_or_default();
+            assert!(
+                text.contains(want),
+                "按绝对行号取第 {abs} 行，取到的不是 {want:?}：{text:?}"
+            );
+        }
+        // 超出缓冲区的行号 ⇒ 空串（那部分是真没了）
+        let beyond = tv.ansi_rows(999, 999);
+        assert!(
+            beyond.first().map(|s| s.is_empty()).unwrap_or(true),
+            "越界的行号应该取不到（空串）：{:?}",
+            beyond.first()
+        );
+        println!("[ok] 绝对行号取行：第 0/7/29 行都对，越界取空串");
+    }
+
     /* ---------------- 截图（人工看画面） ---------------- */
     let _ = std::process::Command::new("/usr/bin/scrot")
         .arg("-o")
