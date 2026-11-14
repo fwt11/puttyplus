@@ -183,7 +183,10 @@ struct State {
     sel_anchor: Cell<Option<(u16, u16)>>,
     /// 选区当前端（视口坐标）——鼠标现在指着的那格。
     sel_end: Cell<Option<(u16, u16)>>,
-    /// 拖选过程中的鼠标位置（像素）——内核只给增量，得自己累加。
+    /// 拖选**起点**（像素，控件局部坐标）——鼠标按下的那一点。
+    ///
+    /// ⚠️ **`drag-update` 给的 dx/dy 是「相对这个点」的总位移**
+    /// ⇒ 绝对位置 = 起点 + 位移（**别自己累加**，见 `install_selection`）。
     sel_px: Cell<(f64, f64)>,
     /// 正在拖选（按下但还没抬手）。
     sel_dragging: Cell<bool>,
@@ -1018,10 +1021,20 @@ impl GhosttyView {
                 if !state.sel_dragging.get() {
                     return;
                 }
-                let (px, py) = state.sel_px.get();
-                let (nx, ny) = (px + dx, py + dy);
-                state.sel_px.set((nx, ny));
-                let Some(cell) = cell_at(&state, nx, ny) else {
+                // ⚠️⚠️ **dx/dy 是「相对拖动起点」的总位移，不是增量**
+                // （GDK 文档原文：relative to the position at the start of
+                // the drag gesture）⇒ 绝对位置 = 起点 + 总位移。
+                //
+                // ⚠️ **千万别自己累加**（2026-11-14 修，用户报的 bug）：
+                // 当成增量累加 ⇒ 每来一次更新就多加一遍**总位移** ⇒ 位置
+                // 越拖越偏（拖 4 步就到第 26 格）⇒ 用户看到的现象是
+                // 「拖选的范围和鼠标移动的范围不一致，鼠标稍微移动拖选的
+                // 范围就很大」。
+                //
+                // ⚠️ 以前 `State::sel_px` 的注释就写着「内核只给增量，得自己
+                // 累加」——**当年就搞反了 GTK 的语义**。
+                let (bx, by) = state.sel_px.get();
+                let Some(cell) = cell_at(&state, bx + dx, by + dy) else {
                     return;
                 };
                 state.sel_end.set(Some(cell));
@@ -1473,6 +1486,12 @@ fn draw_cursor(
 }
 
 /// 量一个单元格有多大（像素），顺带量出**主字体的基线**。
+///
+/// ⚠️ **`pixel_size()` 给的是逻辑像素**（2026-11-14 实测：`GDK_SCALE=1` 与
+/// `GDK_SCALE=2` 都是 8）⇒ 它跟 cairo 的绘制坐标、GTK 的事件坐标**同一
+/// 套** ⇒ 画的位置与命中的位置自洽。
+/// ⚠️ **别把它当设备像素**（我一度以为缩放时会翻倍 ⇒ 白改了一版；
+/// 实测 `pixel_size() == size() / PANGO_SCALE`）。
 fn measure_cell(font: &gtk::pango::FontDescription) -> (f64, f64, f64) {
     let ctx = pangocairo::context();
     let layout = gtk::pango::Layout::new(ctx);

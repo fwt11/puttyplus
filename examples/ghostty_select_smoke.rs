@@ -48,6 +48,18 @@ fn xdo(args: &[&str]) {
     let _ = std::process::Command::new("xdotool").args(args).status();
 }
 
+/// 窗口的**缩放倍率**（GDK_SCALE=2 / Windows 的 150% ⇒ 2）。
+///
+/// ⚠️ **xdotool 的坐标是物理像素，GTK 的坐标是逻辑像素** ⇒ 缩放 ≠ 1 时
+/// 必须把逻辑坐标乘上倍率，否则**鼠标走的路只有看起来的一半**
+/// ⇒ 拖选断言会以「选区只有一半」的形式假红（2026-11-14 踩过）。
+fn surface_scale(w: &gtk::Widget) -> f64 {
+    w.native()
+        .and_then(|n| n.surface())
+        .map(|s| s.scale())
+        .unwrap_or(1.0)
+}
+
 fn main() {
     gtk::init().expect("gtk init");
 
@@ -75,6 +87,8 @@ fn main() {
     assert!(cw > 1.0 && ch > 1.0, "格子尺寸不对：({cw}, {ch})");
     let winid = win_id("阶段 86-④ ghostty 拖选冒烟");
     assert!(!winid.is_empty(), "找不到窗口 id（xdotool search 没结果）");
+    let scale = surface_scale(view.widget());
+    println!("窗口缩放倍率 = {scale}");
     let (vx, vy) = view
         .widget()
         .translate_coordinates(&win, 0.0, 0.0)
@@ -85,7 +99,13 @@ fn main() {
     let x1 = vx + cw * 10.0 + cw / 2.0;
     println!("拖选：({x0:.0}, {y0:.0}) → ({x1:.0}, {y0:.0})，格子 {cw:.1}×{ch:.1}");
 
-    xdo(&["mousemove", "--window", &winid, &format!("{x0:.0}"), &format!("{y0:.0}")]);
+    xdo(&[
+        "mousemove",
+        "--window",
+        &winid,
+        &format!("{:.0}", x0 * scale),
+        &format!("{:.0}", y0 * scale),
+    ]);
     pump(150);
     xdo(&["mousedown", "1"]);
     pump(80);
@@ -96,8 +116,8 @@ fn main() {
             "mousemove",
             "--window",
             &winid,
-            &format!("{x:.0}"),
-            &format!("{y0:.0}"),
+            &format!("{:.0}", x * scale),
+            &format!("{:.0}", y0 * scale),
         ]);
         pump(80);
     }
@@ -200,8 +220,8 @@ fn main() {
         "mousemove",
         "--window",
         &winid,
-        &format!("{:.0}", vx + cw * 20.0),
-        &format!("{:.0}", vy + ch * 3.5),
+        &format!("{:.0}", (vx + cw * 20.0) * scale),
+        &format!("{:.0}", (vy + ch * 3.5) * scale),
     ]);
     pump(150);
     xdo(&["click", "1"]);
@@ -212,6 +232,72 @@ fn main() {
         view.selection_text()
     );
     println!("[ok] 单击别处 ⇒ 选区清掉");
+
+    /* ---------------- ⑦ 选区范围必须跟得上鼠标（阶段 89） ---------------- */
+    //
+    // ⚠️ **为什么单开一段**：上面只断言「选出来的**文本**对」⇒ 选区终点
+    // 比鼠标远得多也可能看不出来（后面是空格子，`trim` 之后一样）⇒
+    // 这个 bug 漏了很久（用户 2026-11-14 报：「拖选的范围和鼠标移动的
+    // 范围不一致，鼠标稍微移动拖选的范围就很大」）。
+    //
+    // ⇒ 这里用一串**可区分**的字符，断言「拖到第 N 格 ⇒ 选区就止于第 N 格」。
+    {
+        let view2 = GhosttyView::new();
+        view2.feed(b"0123456789\r\n");
+        let win2 = gtk::Window::new();
+        win2.set_title(Some("阶段 89 ghostty 拖选范围冒烟"));
+        win2.set_default_size(420, 160);
+        win2.set_child(Some(view2.widget()));
+        win2.present();
+        pump(700);
+
+        let (cw, ch) = view2.cell_size();
+        assert!(cw > 1.0 && ch > 1.0, "格子尺寸不对：({cw}, {ch})");
+        let winid2 = win_id("阶段 89 ghostty 拖选范围冒烟");
+        assert!(!winid2.is_empty(), "找不到窗口 id（xdotool search 没结果）");
+        let scale2 = surface_scale(view2.widget());
+        let (vx, vy) = view2
+            .widget()
+            .translate_coordinates(&win2, 0.0, 0.0)
+            .expect("换算坐标失败");
+        let x0 = vx + 1.0;
+        let y0 = vy + ch / 2.0;
+        // 终点：第 4 格的**中部** ⇒ 选区应当是第 0..=4 格（5 个字符）
+        let x1 = vx + cw * 4.5;
+        println!("拖选范围：({x0:.0}, {y0:.0}) → ({x1:.0}, {y0:.0})，格子 {cw:.1}");
+
+        xdo(&[
+            "mousemove",
+            "--window",
+            &winid2,
+            &format!("{:.0}", x0 * scale2),
+            &format!("{:.0}", y0 * scale2),
+        ]);
+        pump(150);
+        xdo(&["mousedown", "1"]);
+        pump(80);
+        for step in 1..=4 {
+            let x = x0 + (x1 - x0) * (step as f64 / 4.0);
+            xdo(&[
+                "mousemove",
+                "--window",
+                &winid2,
+                &format!("{:.0}", x * scale2),
+                &format!("{:.0}", y0 * scale2),
+            ]);
+            pump(80);
+        }
+        xdo(&["mouseup", "1"]);
+        pump(400);
+
+        let text = view2.selection_text().expect("拖完了应该有选区");
+        println!("[ok] 拖到第 5 格 ⇒ 选区文本 = {text:?}");
+        assert_eq!(
+            text.trim(),
+            "01234",
+            "选区范围跟不上了：鼠标停在第 5 格，选区却盖到了 {text:?}"
+        );
+    }
 
     println!("\nghostty_select_smoke: 全部通过");
 }
