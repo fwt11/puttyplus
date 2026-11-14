@@ -134,6 +134,66 @@ fn main() {
             "字段表的右键菜单应当是关掉的"
         );
 
+        /* ================================================================
+         * 阶段 88：行内操作菜单里的「上移一行 / 下移一行」
+         * ================================================================ */
+
+        // ---- 断言 6：菜单里有上移 / 下移 ----
+        let ops = puttyplus::panel::dbui::struct_field_ops_labels(&panel.st, sidx);
+        println!("行内操作菜单：{ops:?}");
+        assert!(
+            ops.iter().any(|x| x.contains("上移")),
+            "行内操作菜单里没有「上移一行」：{ops:?}"
+        );
+        assert!(
+            ops.iter().any(|x| x.contains("下移")),
+            "行内操作菜单里没有「下移一行」：{ops:?}"
+        );
+
+        // ---- 断言 7：真能挪行（换个干净的页签：前面那几条断言改过字段了）----
+        let sidx2 = puttyplus::panel::dbui::make_test_struct_tab(&panel.st, "public", "demo_users")
+            .expect("应当能再离线造一个结构页签");
+        pump(300);
+        let before = puttyplus::panel::dbui::struct_field_rows(&panel.st, sidx2);
+        println!("挪之前：{before:?}");
+        assert_eq!(before.len(), 2, "测试字段表应当有两行");
+        assert_eq!(before[0][0], "id", "第 1 行应当是 id");
+        assert_eq!(before[1][0], "name", "第 2 行应当是 name");
+
+        assert!(
+            puttyplus::panel::dbui::struct_move_field(&panel.st, sidx2, 1, true),
+            "第 2 行上移失败"
+        );
+        pump(300);
+        let after = puttyplus::panel::dbui::struct_field_rows(&panel.st, sidx2);
+        println!("挪之后：{after:?}");
+        assert_eq!(after[0][0], "name", "第 2 行没上移到最前面：{after:?}");
+        assert_eq!(after[1][0], "id", "第 1 行没被挤到后面：{after:?}");
+
+        // ---- 断言 8：预览说清楚「只有顺序变了」----
+        // （已有列的物理顺序数据库改不了 ⇒ 不能让用户以为白改了）
+        let preview = puttyplus::panel::dbui::struct_preview_text(&panel.st, sidx2);
+        println!("挪之后的预览：{preview}");
+        assert!(
+            preview.contains("顺序"),
+            "挪了行之后预览应当说清楚顺序的事：{preview}"
+        );
+
+        // ---- 断言 9：已经在最上面时再上移 ⇒ 挪不动（别装成成功了）----
+        assert!(
+            !puttyplus::panel::dbui::struct_move_field(&panel.st, sidx2, 0, true),
+            "最上面那一行不该还能上移"
+        );
+        // 往下移到底也不该再能移
+        // （此时顺序是 [name, id] ⇒ 下标 1 已在最下面 ⇒ 下移应当失败）
+        assert!(
+            !puttyplus::panel::dbui::struct_move_field(&panel.st, sidx2, 1, false),
+            "移到底之后不该还能下移"
+        );
+        let still = puttyplus::panel::dbui::struct_field_rows(&panel.st, sidx2);
+        assert_eq!(still[0][0], "name", "挪不动时顺序不该变：{still:?}");
+        assert_eq!(still[1][0], "id", "挪不动时顺序不该变：{still:?}");
+
         // ---- 截图 ----
         {
             let _ = std::fs::remove_file("/tmp/struct_field.png");

@@ -4121,14 +4121,65 @@ fn refresh_struct_ddl(ui: &DbUi, tab: &Rc<StructTab>) {
 /// 字段表的**行内操作菜单**（阶段 50）：点「操作」那一格弹出来。
 ///
 /// 条目：
+/// - **上移一行 / 下移一行**（阶段 88）：调整这一行在字段表里的位置；
 /// - **复制这一行**：把这一行的内容复制成一行待插入的新字段；
 /// - **删除这一行**：删掉这一行（**只是标记**，点「保存修改」才真删）。
 ///
-/// ⚠️ **没做上移 / 下移**：网格的行序是由 `rebuild_rows` 按数据顺序重建的，
-/// 要支持"把新加的列插到指定位置"得给网格加一层**显式行序**（改动面大，
-/// 而且结果网格共用同一套代码，风险高）——本阶段先不做。
+/// ⚠️ **上移 / 下移到底改了什么**（别让用户以为数据库的列序变了）：
+/// - **新加的字段**：按字段表里的顺序发 `ADD COLUMN` ⇒ 新列之间的先后
+///   就是表里这几行的先后（**真效果**）；
+/// - **已有的列**：PG / MySQL 的 `ALTER TABLE` **改不了已有列的物理顺序**
+///   （要改得重建表）⇒ 挪了只改**字段表里的顺序**与下面的预览。
+///   预览会明说这件事（见 [`refresh_field_preview`]）。
+///
+/// ⚠️ 网格加了**显式行序**（`dbgrid::DbGrid` 的 `order`）：以前显示顺序
+/// 完全由数据顺序推出来（`rebuild_rows` 每次重建）⇒ 用户根本挪不动行。
 fn show_field_ops_menu(tab: &Rc<StructTab>, row: usize, x: f64, y: f64) {
+    let body = build_field_ops_body(tab, row);
+    // 弹在鼠标位置（相对字段表的 TreeView）
+    let pop = crate::menu::popover(&tab.fields.view);
+    pop.set_child(Some(&body));
+    let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+    pop.set_pointing_to(Some(&rect));
+    pop.popup();
+}
+
+/// 字段表行内操作菜单的**内容**（**UI 与冒烟共用这一份**）。
+///
+/// ⚠️ 为什么要共用：冒烟要验「菜单里有上移/下移」⇒ 如果菜单在界面里另写
+/// 一份，冒烟就可能验着一份、界面上跑着另一份（测了个寂寞）。
+fn build_field_ops_body(tab: &Rc<StructTab>, row: usize) -> gtk::Box {
     let body = crate::menu::body();
+    {
+        let tab2 = Rc::clone(tab);
+        let b = crate::menu::item("go-up-symbolic", tr("上移一行"), None);
+        b.set_tooltip_text(Some(tr(
+            "把这一行往上挪一位：新加的字段会按这个顺序加进表里\
+             （已有列的物理顺序数据库改不了，要改得重建表）",
+        )));
+        b.connect_clicked(move |_| {
+            let Some(st) = tab2.st.upgrade() else { return };
+            let slot = st.db_ui.borrow();
+            let Some(ui) = slot.as_ref() else { return };
+            move_field_row(ui, &tab2, row, true);
+        });
+        body.append(&b);
+    }
+    {
+        let tab2 = Rc::clone(tab);
+        let b = crate::menu::item("go-down-symbolic", tr("下移一行"), None);
+        b.set_tooltip_text(Some(tr(
+            "把这一行往下挪一位：新加的字段会按这个顺序加进表里\
+             （已有列的物理顺序数据库改不了，要改得重建表）",
+        )));
+        b.connect_clicked(move |_| {
+            let Some(st) = tab2.st.upgrade() else { return };
+            let slot = st.db_ui.borrow();
+            let Some(ui) = slot.as_ref() else { return };
+            move_field_row(ui, &tab2, row, false);
+        });
+        body.append(&b);
+    }
     {
         let tab2 = Rc::clone(tab);
         let b = crate::menu::item("edit-copy-symbolic", tr("复制这一行"), None);
@@ -4159,12 +4210,59 @@ fn show_field_ops_menu(tab: &Rc<StructTab>, row: usize, x: f64, y: f64) {
         });
         body.append(&b);
     }
-    // 弹在鼠标位置（相对字段表的 TreeView）
-    let pop = crate::menu::popover(&tab.fields.view);
-    pop.set_child(Some(&body));
-    let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-    pop.set_pointing_to(Some(&rect));
-    pop.popup();
+    body
+}
+
+/// 字段表：把某一行上移 / 下移（**真实路径**：菜单项与冒烟钩子都走它）。
+///
+/// 返回 true = 挪动了。挪不动（已经在最上/最下）时给用户一句话说明，
+/// 别让他以为程序没反应。
+fn move_field_row(ui: &DbUi, tab: &Rc<StructTab>, row: usize, up: bool) -> bool {
+    let moved = if up {
+        tab.fields.move_row_up(row)
+    } else {
+        tab.fields.move_row_down(row)
+    };
+    if !moved {
+        let msg = if up {
+            tr("已经在最上面了，挪不动")
+        } else {
+            tr("已经在最下面了，挪不动")
+        };
+        tab.status.set_text(msg);
+        set_status(ui, msg, true);
+        return false;
+    }
+    // 顺序变了 ⇒ 预览（`ALTER TABLE`）要跟着重算
+    refresh_field_preview(ui, tab);
+    let msg = if up {
+        trf!("已把第 {v0} 行上移", v0 = row + 1)
+    } else {
+        trf!("已把第 {v0} 行下移", v0 = row + 1)
+    };
+    tab.status.set_text(&msg);
+    set_status(ui, &msg, false);
+    true
+}
+
+/// 字段的**顺序**跟原来不一样吗（用户用「上移 / 下移」挪过）。
+///
+/// 判据：已有列的**原下标**序列必须**递增**；一旦出现「后面的列跑到前面」
+/// 就说明顺序被改过了（**纯函数** ⇒ 能单测）。
+fn field_order_changed(target: &[dbmeta::ColumnSpec]) -> bool {
+    let mut last: Option<usize> = None;
+    for t in target {
+        let Some(i) = t.orig_index else {
+            continue; // 新加的列没有原下标，不参与判断
+        };
+        if let Some(l) = last {
+            if i < l {
+                return true;
+            }
+        }
+        last = Some(i);
+    }
+    false
 }
 
 /// 刷新字段改动的**实时预览**（阶段 50）。
@@ -4188,11 +4286,29 @@ fn refresh_field_preview(ui: &DbUi, tab: &Rc<StructTab>) {
         &cols,
         &target,
     ) {
-        Ok(None) => (
-            tr("（字段没有改动）").to_string(),
-            tr("— 无改动").to_string(),
-            false,
-        ),
+        Ok(None) => {
+            // ⚠️ **只有顺序变了**（用户挪了行，但字段内容没动）：数据库的
+            // `ALTER TABLE` 改不了**已有列的物理顺序**（PG / MySQL 都要重建表）
+            // ⇒ 语句是空的。得说清楚，不然用户挪完看见「没有改动」会以为
+            // 程序没反应（**新加**的字段仍按这个顺序添加，那部分是真效果）。
+            if field_order_changed(&target) {
+                (
+                    tr(
+                        "（字段内容没有改动，但列的顺序改了：数据库的 ALTER 改不了\
+                         已有列的物理顺序，要改得重建表——新加的字段仍按这个顺序添加）",
+                    )
+                    .to_string(),
+                    tr("— 只有顺序变了").to_string(),
+                    false,
+                )
+            } else {
+                (
+                    tr("（字段没有改动）").to_string(),
+                    tr("— 无改动").to_string(),
+                    false,
+                )
+            }
+        }
         Ok(Some(plan)) => {
             let mark = if plan.risks.is_empty() {
                 tr("✓ 可执行").to_string()
@@ -10293,6 +10409,43 @@ pub fn struct_select_field(st: &Rc<PanelState>, tab_idx: usize, row: usize) -> b
     tab.fields.select_display_row(row)
 }
 
+/// 冒烟测试用：把字段表第 `row` 行上移 / 下移（走**真实路径**）。
+///
+/// ⚠️ 走的是菜单项用的同一个函数（[`move_field_row`]）⇒ 冒烟验的是
+/// 「用户点菜单里的上移/下移」这件事，不是另写一份逻辑。
+pub fn struct_move_field(st: &Rc<PanelState>, tab_idx: usize, row: usize, up: bool) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(tab) = ui.struct_tabs.borrow().get(tab_idx).cloned() else {
+        return false;
+    };
+    move_field_row(ui, &tab, row, up)
+}
+
+/// 冒烟测试用：字段表行内操作菜单的**条目文字**。
+///
+/// ⚠️ 菜单内容是 UI 与冒烟**共用**的一份（[`build_field_ops_body`]）⇒
+/// 这里验到的就是界面上真会弹出来的那几项。
+pub fn struct_field_ops_labels(st: &Rc<PanelState>, tab_idx: usize) -> Vec<String> {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let Some(tab) = ui.struct_tabs.borrow().get(tab_idx).cloned() else {
+        return Vec::new();
+    };
+    let body = build_field_ops_body(&tab, 0);
+    let mut out = Vec::new();
+    let mut cur = body.first_child();
+    while let Some(c) = cur {
+        if let Some(b) = c.downcast_ref::<gtk::Button>() {
+            if let Some(label) = crate::menu::item_label(b) {
+                out.push(label);
+            }
+        }
+        cur = c.next_sibling();
+    }
+    out
+}
+
 /// 冒烟测试用：挑一个类型并「应用」到选中行。
 pub fn struct_apply_type(st: &Rc<PanelState>, tab_idx: usize, ty: &str) -> bool {
     let slot = st.db_ui.borrow();
@@ -11455,6 +11608,49 @@ pub fn open_column_dialog_now(st: &Rc<PanelState>, tab_idx: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------------- 字段顺序（上移 / 下移，阶段 88） ---------------- */
+
+    fn spec(orig: Option<usize>, name: &str) -> dbmeta::ColumnSpec {
+        dbmeta::ColumnSpec {
+            orig_index: orig,
+            name: name.into(),
+            ty: "integer".into(),
+            nullable: true,
+            is_pk: false,
+            default_value: None,
+        }
+    }
+
+    /// 顺序**没动** ⇒ 不是「顺序变了」。
+    #[test]
+    fn 字段顺序没动时不算变了() {
+        let t = vec![spec(Some(0), "id"), spec(Some(1), "name"), spec(Some(2), "age")];
+        assert!(!field_order_changed(&t));
+    }
+
+    /// **已有列被挪了位置** ⇒ 顺序变了。
+    ///
+    /// ⚠️ 判据是「原下标序列不再递增」：第 2 列跑到第 1 列前面了。
+    #[test]
+    fn 已有列被挪位置时顺序变了() {
+        let t = vec![spec(Some(1), "name"), spec(Some(0), "id"), spec(Some(2), "age")];
+        assert!(field_order_changed(&t));
+    }
+
+    /// **只加了新列**（新列没有原下标）⇒ 顺序**没变**。
+    ///
+    /// ⚠️ 新列排在末尾是设计如此（`rebuild_rows` 里新行固定最后）⇒
+    /// 不该被当成「用户挪过」。
+    #[test]
+    fn 只加新列不算顺序变了() {
+        let t = vec![
+            spec(Some(0), "id"),
+            spec(Some(1), "name"),
+            spec(None, "new_col"),
+        ];
+        assert!(!field_order_changed(&t));
+    }
 
     fn profile() -> DbProfile {
         DbProfile {

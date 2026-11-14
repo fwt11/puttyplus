@@ -40,12 +40,27 @@ pub struct GridData {
 ///
 /// 原来只有一种（原始行），加了插入/删除之后就有了两种：
 /// 已有行可能被标记删除（不再显示），末尾还可能挂着待插入的新行。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RowRef {
     /// 原始数据行（源行号）
     Src(usize),
     /// 待插入的新行（第几个新行）
     Ins(usize),
+}
+
+/// 按**显式行序**重排（**纯函数** ⇒ 能单测）。
+///
+/// - 行序里**有的**行：按行序排；
+/// - 行序里**没有**的行（刚插入的新行、筛选后又冒出来的）：**追加在后面**，
+///   彼此之间保持原来的相对顺序（`sort_by_key` 是稳定排序）。
+fn apply_row_order(order: &[RowRef], derived: Vec<RowRef>) -> Vec<RowRef> {
+    if order.is_empty() {
+        return derived;
+    }
+    let pos: HashMap<RowRef, usize> = order.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+    let mut out = derived;
+    out.sort_by_key(|r| pos.get(r).copied().unwrap_or(usize::MAX));
+    out
 }
 
 /// 网格右键菜单里需要**上层**（dbui）去做的事（阶段 47）。
@@ -283,6 +298,18 @@ pub struct DbGrid {
     deletes: RefCell<HashSet<usize>>,
     /// 显示顺序：显示行号 → 数据来源
     visible: RefCell<Vec<RowRef>>,
+    /// **显式行序**（用户「上移 / 下移」后固定下来的顺序）。
+    ///
+    /// `None` = 按数据顺序（老行为）。`Some(…)` = 按这个 `RowRef` 顺序显示。
+    ///
+    /// ⚠️ **为什么需要它**：显示顺序以前**完全由数据顺序推出来**
+    /// （`rebuild_rows` 每次重建）⇒ 用户没法把某一行挪到别的前面。
+    /// 表设计器的字段表尤其需要：那儿的行就是**表的列**，顺序有含义。
+    ///
+    /// ⚠️ **只在没有排序时生效**：用户主动点了列头排序 ⇒ 排序优先
+    /// （他点的就是"我要这个顺序"）。表结构页签的字段表**关掉了排序**
+    /// （`set_sortable(false)`）⇒ 那边永远按显式行序走。
+    order: RefCell<Option<Vec<RowRef>>>,
     /// 排序：列号 + 是否升序
     sort: Cell<Option<(usize, bool)>>,
     /// 筛选关键字（小写）
@@ -445,6 +472,7 @@ impl DbGrid {
                 inserts: RefCell::new(Vec::new()),
                 deletes: RefCell::new(HashSet::new()),
                 visible: RefCell::new(Vec::new()),
+                order: RefCell::new(None),
                 sort: Cell::new(None),
                 filter: RefCell::new(String::new()),
                 editable: Cell::new(false),
@@ -1425,6 +1453,9 @@ impl DbGrid {
         self.deletes.borrow_mut().clear();
         self.sort.set(None);
         self.filter.borrow_mut().clear();
+        // ⚠️ **换了结果集 ⇒ 显式行序也清掉**：那是按**上一份**结果集的行排的，
+        // 套到新结果集上会错位（把 A 表第 2 行排到 B 表第 2 行前面去了）。
+        self.order.borrow_mut().take();
         // ⚠️ **换了结果集 ⇒ 用户拖过的列宽也清掉**：那些宽度是按**上一份
         // 结果集**的列拖的，按原始下标套到新列上会错位（把 A 表第 2 列的
         // 宽度套到 B 表第 2 列上）。
@@ -1917,6 +1948,67 @@ impl DbGrid {
         self.sync_sort_indicators();
     }
 
+    /* ---------------- 上移 / 下移（显式行序，阶段 88） ---------------- */
+
+    /// 把显示行**往上**挪一行。
+    ///
+    /// 返回 false = 挪不动（已经在最上面 / 网格在排序 / 行号越界）。
+    pub fn move_row_up(&self, display_row: usize) -> bool {
+        self.move_row(display_row, -1)
+    }
+
+    /// 把显示行**往下**挪一行。
+    ///
+    /// 返回 false = 挪不动（已经在最下面 / 网格在排序 / 行号越界）。
+    pub fn move_row_down(&self, display_row: usize) -> bool {
+        self.move_row(display_row, 1)
+    }
+
+    /// 挪一行的实现（`delta` = -1 往上 / +1 往下）。
+    fn move_row(&self, display_row: usize, delta: isize) -> bool {
+        // ⚠️ 排序状态下不许手动挪：用户点了列头排序 = 他要的顺序就是排序结果，
+        // 手动挪会跟排序打架（而且下次重建又会被排序盖回去）。
+        if self.sort.get().is_some() {
+            return false;
+        }
+        let mut vis = self.visible.borrow().clone();
+        if display_row >= vis.len() {
+            return false;
+        }
+        let target = display_row as isize + delta;
+        if target < 0 || target >= vis.len() as isize {
+            return false;
+        }
+        vis.swap(display_row, target as usize);
+        // 记成**显式行序**：以后每次 rebuild 都按它排（数据顺序不再管显示顺序）。
+        *self.order.borrow_mut() = Some(vis);
+        self.rebuild_rows();
+        true
+    }
+
+    /// 用户**手动排过**行序吗（冒烟断言用）。
+    pub fn has_explicit_order(&self) -> bool {
+        self.order.borrow().is_some()
+    }
+
+    /// 新行被删掉时，**显式行序**里的新行编号要跟着往前挪。
+    ///
+    /// 新行是按它在「待插入」里的位置编号的（`Ins(i)`）⇒ 删掉第 i 个之后，
+    /// 后面的新行编号都往前挪一位 ⇒ 行序里记的编号也得跟着挪，否则会指到
+    /// 别的行上（"删了第一个新行，第二个新行忽然跑到最前面"）。
+    fn remap_order_after_insert_removed(&self, removed: usize) {
+        let mut ord = self.order.borrow_mut();
+        let Some(list) = ord.as_mut() else { return };
+        list.retain(|r| !matches!(r, RowRef::Ins(j) if *j == removed));
+        for r in list.iter_mut() {
+            if let RowRef::Ins(j) = r {
+                if *j > removed {
+                    *j -= 1;
+                }
+            }
+        }
+    }
+
     pub fn set_filter(&self, text: &str) {
         *self.filter.borrow_mut() = text.trim().to_lowercase();
         self.rebuild_rows();
@@ -1967,6 +2059,17 @@ impl DbGrid {
         for i in 0..self.inserts.borrow().len() {
             refs.push(RowRef::Ins(i));
         }
+        // ⚠️ **显式行序**（用户「上移 / 下移」定下来的）：排序优先 ⇒ 不用它。
+        let refs: Vec<RowRef> = match self.order.borrow().clone() {
+            None => refs,
+            Some(o) => {
+                if self.sort.get().is_some() {
+                    refs
+                } else {
+                    apply_row_order(&o, refs)
+                }
+            }
+        };
         *self.visible.borrow_mut() = refs;
 
         let edits = self.edits.borrow();
@@ -2194,6 +2297,8 @@ impl DbGrid {
                     inserts.remove(i);
                 }
                 drop(inserts);
+                // ⚠️ 后面的新行编号往前挪了 ⇒ 显式行序里的编号也得跟着挪
+                self.remap_order_after_insert_removed(i);
                 self.rebuild_rows();
                 self.fire_change();
                 true
@@ -2220,6 +2325,9 @@ impl DbGrid {
                 if i < inserts.len() {
                     inserts.remove(i);
                 }
+                drop(inserts);
+                // ⚠️ 后面的新行编号往前挪了 ⇒ 显式行序里的编号也得跟着挪
+                self.remap_order_after_insert_removed(i);
                 continue;
             }
             if let RowRef::Src(src) = r {
@@ -2916,5 +3024,63 @@ mod tests {
         assert_eq!(filter_deleted(&[0, 1, 2, 3, 4], &deleted), vec![0, 2, 4]);
         // 一个都没标记 → 原样
         assert_eq!(filter_deleted(&[0, 1], &HashSet::new()), vec![0, 1]);
+    }
+
+    /* ---------------- 显式行序（上移 / 下移，阶段 88） ---------------- */
+
+    /// 行序为空 ⇒ 原样返回（没排过就是数据顺序）。
+    #[test]
+    fn 空行序等于原顺序() {
+        let d = vec![RowRef::Src(0), RowRef::Src(1), RowRef::Src(2)];
+        assert_eq!(apply_row_order(&[], d.clone()), d);
+    }
+
+    /// **按行序排**：用户把第 3 行挪到最前面 ⇒ 它排到头。
+    #[test]
+    fn 按显式行序排() {
+        let order = vec![RowRef::Src(2), RowRef::Src(0), RowRef::Src(1)];
+        let derived = vec![RowRef::Src(0), RowRef::Src(1), RowRef::Src(2)];
+        assert_eq!(
+            apply_row_order(&order, derived),
+            vec![RowRef::Src(2), RowRef::Src(0), RowRef::Src(1)]
+        );
+    }
+
+    /// **行序里没有的行排到后面**（刚插入的新行、筛选后又冒出来的）。
+    ///
+    /// ⚠️ 顺序要**稳定**：两个没在行序里的行之间保持原来的先后
+    /// （`sort_by_key` 是稳定排序 ⇒ 不在行序里的行按 `usize::MAX` 排，
+    /// 彼此的相对顺序不变）。
+    #[test]
+    fn 行序里没有的行排到后面() {
+        let order = vec![RowRef::Src(1), RowRef::Src(0)];
+        let derived = vec![
+            RowRef::Src(0),
+            RowRef::Src(1),
+            RowRef::Ins(0),
+            RowRef::Ins(1),
+        ];
+        assert_eq!(
+            apply_row_order(&order, derived),
+            vec![
+                RowRef::Src(1),
+                RowRef::Src(0),
+                RowRef::Ins(0),
+                RowRef::Ins(1),
+            ]
+        );
+    }
+
+    /// **行序里有、但这一轮没显示的行**（被筛掉 / 被删了）要**跳过**，
+    /// 不能凭空冒出来。
+    #[test]
+    fn 行序里有但没显示的行要跳过() {
+        let order = vec![RowRef::Src(2), RowRef::Src(0), RowRef::Src(1)];
+        // 第 1 行被筛掉了 / 删了
+        let derived = vec![RowRef::Src(0), RowRef::Src(2)];
+        assert_eq!(
+            apply_row_order(&order, derived),
+            vec![RowRef::Src(2), RowRef::Src(0)]
+        );
     }
 }
