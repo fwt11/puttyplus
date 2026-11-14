@@ -166,6 +166,40 @@ pub fn dialog(
     gtk::Dialog::with_buttons(Some(title), p.as_ref(), gtk::DialogFlags::MODAL, buttons)
 }
 
+/// 建一个**文件选择对话框**：**模态** + 必定挂上父窗口。
+///
+/// ⚠️ **为什么文件选择器必须模态**（用户 2026-11-14 报的 bug）：
+/// GTK4 里模态对话框会**抓走输入**（grab）。这时再打开一个**非模态**
+/// 窗口，它虽然能显示出来，却**收不到任何点击** ⇒ 用户看到的是
+/// 「文件选择器弹出来了，可点文件列表没反应、也选不了」。
+/// 探针实测（`/tmp/gtk_file_probe.c`）：同样两个窗口，
+/// 选择器非模态 ⇒ `SEL=<none>`；选择器模态 ⇒ 选中成功。
+///
+/// ⇒ 铁律：**最后打开的对话框必须是模态的**（要么自己 `modal`，
+/// 要么挂在模态父窗口下面——两者都行，但**不能两个都不是**）。
+///
+/// ⚠️ **别再各处手搓 `gtk::FileChooserDialog`**（漏了 `.modal(true)`
+/// 就会出上面那个问题）——全项目统一走这里。
+pub fn file_chooser_dialog(
+    title: &str,
+    parent: Option<&gtk::Window>,
+    action: gtk::FileChooserAction,
+) -> gtk::FileChooserDialog {
+    let p = parent_of(parent);
+    if p.is_none() {
+        DIALOGS_WITHOUT_PARENT.with(|d| d.borrow_mut().push(title.to_string()));
+    }
+    let mut b = gtk::FileChooserDialog::builder()
+        .title(title)
+        .action(action)
+        // ⚠️ 这一行是本函数存在的理由（漏了 ⇒ 对话框点不动）
+        .modal(true);
+    if let Some(p) = p.as_ref() {
+        b = b.transient_for(p);
+    }
+    b.build()
+}
+
 /// 建过的**没有父窗口**的对话框（冒烟断言用）。
 pub fn dialogs_without_parent() -> Vec<String> {
     DIALOGS_WITHOUT_PARENT.with(|d| d.borrow().clone())

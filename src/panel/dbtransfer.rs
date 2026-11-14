@@ -221,7 +221,12 @@ pub fn open_export(
     path_entry.set_hexpand(true);
     let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     path_row.append(&path_entry);
-    path_row.append(&file_pick_button(parent, &path_entry));
+    // ⚠️ 父窗口给**向导自己**（不是主窗口）：向导是模态的，选择器挂在它
+    // 下面才会一起模态（否则可能被向导的 grab 挡住）。
+    path_row.append(&file_pick_button(
+        Some(dlg.upcast_ref::<gtk::Window>()),
+        &path_entry,
+    ));
     box_.append(&dialogs::form_row(tr("文件"), &path_row));
 
     // ---- 提示 ----
@@ -379,9 +384,13 @@ pub fn open_import(
         // 导入用**带过滤器**的选择器（只放行 CSV / 文本）——跟老向导一样。
         let pick = gtk::Button::with_label(tr("选择…"));
         let entry = path_entry.clone();
-        let parent2 = parent.cloned();
+        // ⚠️ 父窗口传**导入向导自己**（不是主窗口）：向导是模态的，
+        // 文件选择器挂在它下面才会一起模态（否则文件选择器点不动——
+        // 用户 2026-11-14 报的 bug）。用**弱引用**免得把对话框吊住。
+        let parent2 = dlg.upcast_ref::<gtk::Window>().downgrade();
         pick.connect_clicked(move |_| {
-            dbimport::pick_csv_into(parent2.as_ref(), &entry);
+            let p = parent2.upgrade();
+            dbimport::pick_csv_into(p.as_ref(), &entry);
         });
         path_row.append(&pick);
     }
@@ -400,7 +409,6 @@ pub fn open_import(
     // ---- 「开始」 ----
     {
         let st2 = Rc::clone(st);
-        let parent2 = parent.cloned();
         let obj = obj.clone();
         let path_entry = path_entry.clone();
         dlg.connect_response(move |d, r| {
@@ -408,9 +416,12 @@ pub fn open_import(
                 d.close();
                 return;
             }
+            // ⚠️ 错误框的父窗口给**向导自己**（不是主窗口）：向导是模态的，
+            // 错误框挂在它下面才会跟它一起模态、也才会盖在它上面。
+            let here = Some(d.upcast_ref::<gtk::Window>());
             if objects_empty {
                 dialogs::show_error(
-                    parent2.as_ref(),
+                    here,
                     tr("导入数据（CSV）…"),
                     tr("左边对象树里还没有表。\n先展开一个模式，选中要导入的表再来。"),
                 );
@@ -418,7 +429,7 @@ pub fn open_import(
             }
             let Some(id) = obj.active_id() else {
                 dialogs::show_error(
-                    parent2.as_ref(),
+                    here,
                     tr("导入数据（CSV）…"),
                     tr("先选一个要导入到的表。"),
                 );
@@ -428,14 +439,17 @@ pub fn open_import(
             let path = path_entry.text().trim().to_string();
             if path.is_empty() {
                 dialogs::show_error(
-                    parent2.as_ref(),
+                    here,
                     tr("导入数据（CSV）…"),
                     tr("先选一个要导入的文件（点「选择…」）。"),
                 );
                 return;
             }
-            dbui::on_import_csv_path(&st2, &schema, &table, &PathBuf::from(path));
+            // ⚠️ **先关向导再进映射对话框**：两个模态框叠着时，后开的那个
+            // 拿走输入（正常），但关掉映射框后 grab 会还给向导——而向导这
+            // 时已经没用了。关掉更干净。
             d.close();
+            dbui::on_import_csv_path(&st2, &schema, &table, &PathBuf::from(path));
         });
     }
 
@@ -476,16 +490,21 @@ pub fn open_import(
 fn file_pick_button(parent: Option<&gtk::Window>, entry: &gtk::Entry) -> gtk::Button {
     let pick = gtk::Button::with_label(tr("选择…"));
     let path_entry = entry.clone();
-    let parent2 = parent.cloned();
+    // ⚠️ 父窗口用**弱引用**：向导关掉以后别把它吊住。
+    let parent2 = parent.map(|p| p.downgrade());
     pick.connect_clicked(move |_| {
         let ch = gtk::FileChooserNative::builder()
             .title(tr("选择要写出的文件"))
             .action(gtk::FileChooserAction::Save)
             .accept_label(tr("选定"))
             .cancel_label(tr("取消"))
+            // ⚠️ 必须模态：向导本身是模态的（已经抓走输入），选择器要是
+            // 非模态就会**点不动**（用户 2026-11-14 报的 bug 同款）。
             .modal(true)
             .build();
-        ch.set_transient_for(parent2.as_ref());
+        if let Some(p) = parent2.as_ref().and_then(|w| w.upgrade()) {
+            ch.set_transient_for(Some(&p));
+        }
         let entry = path_entry.clone();
         ch.connect_response(move |c, r| {
             if r == gtk::ResponseType::Accept {

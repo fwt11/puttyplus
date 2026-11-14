@@ -879,15 +879,11 @@ pub struct ExportReport {
 pub fn ui_import_putty(parent: Option<&gtk::Window>) {
     // ⚠️ 兜底到主窗口（阶段 67）：不给父窗口时也得挂一个
     let parent = parent_of(parent);
-    let dlg = {
-        let mut b = gtk::FileChooserDialog::builder()
-            .title(tr("选择 PuTTY 会话目录"))
-            .action(gtk::FileChooserAction::SelectFolder);
-        if let Some(p) = parent.as_ref() {
-            b = b.transient_for(p);
-        }
-        b.build()
-    };
+    let dlg = crate::windows::file_chooser_dialog(
+        tr("选择 PuTTY 会话目录"),
+        parent.as_ref(),
+        gtk::FileChooserAction::SelectFolder,
+    );
     dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
     dlg.add_button(tr("导入"), gtk::ResponseType::Accept);
     dlg.set_default_response(gtk::ResponseType::Accept);
@@ -927,15 +923,11 @@ pub fn ui_export_putty(parent: Option<&gtk::Window>, names: Vec<String>) {
     }
     // ⚠️ 兜底到主窗口（阶段 67）
     let parent = parent_of(parent);
-    let dlg = {
-        let mut b = gtk::FileChooserDialog::builder()
-            .title(tr("导出 PuTTY 会话到目录"))
-            .action(gtk::FileChooserAction::SelectFolder);
-        if let Some(p) = parent.as_ref() {
-            b = b.transient_for(p);
-        }
-        b.build()
-    };
+    let dlg = crate::windows::file_chooser_dialog(
+        tr("导出 PuTTY 会话到目录"),
+        parent.as_ref(),
+        gtk::FileChooserAction::SelectFolder,
+    );
     dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
     dlg.add_button(tr("导出"), gtk::ResponseType::Accept);
     dlg.set_default_response(gtk::ResponseType::Accept);
@@ -1321,13 +1313,11 @@ fn auth_page(parent: Option<&gtk::Window>, init: Option<&ConnEntry>) -> AuthPage
             let parent = b
                 .root()
                 .and_then(|r| r.downcast::<gtk::Window>().ok());
-            let mut dlg = gtk::FileChooserDialog::builder()
-                .title(tr("选择私钥文件"))
-                .action(gtk::FileChooserAction::Open);
-            if let Some(p) = parent.as_ref() {
-                dlg = dlg.transient_for(p);
-            }
-            let dlg = dlg.build();
+            let dlg = crate::windows::file_chooser_dialog(
+                tr("选择私钥文件"),
+                parent.as_ref(),
+                gtk::FileChooserAction::Open,
+            );
             dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
             dlg.add_button(tr("选定"), gtk::ResponseType::Accept);
             dlg.set_default_response(gtk::ResponseType::Accept);

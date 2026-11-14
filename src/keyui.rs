@@ -284,12 +284,13 @@ fn pick_file<F>(parent: &gtk::Window, done: F)
 where
     F: FnOnce(std::path::PathBuf) + 'static,
 {
-    let dlg = gtk::FileChooserDialog::builder()
-        .title(tr("选择私钥文件"))
-        .transient_for(parent)
-        .modal(true)
-        .action(gtk::FileChooserAction::Open)
-        .build();
+    // ⚠️ 走 `windows::file_chooser_dialog`：统一 **modal + 有父窗口**
+    // （非模态的选择器在模态框开着时会**点不动**——用户 2026-11-14 报的 bug）。
+    let dlg = crate::windows::file_chooser_dialog(
+        tr("选择私钥文件"),
+        Some(parent),
+        gtk::FileChooserAction::Open,
+    );
     dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
     dlg.add_button(tr("选择"), gtk::ResponseType::Accept);
     let filter = gtk::FileFilter::new();

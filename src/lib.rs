@@ -524,4 +524,90 @@ mod lint_tests {
             bad.join("\n")
         );
     }
+
+    /// ⚠️ **回归钉**：**所有**对话框 / 文件选择器都必须是**模态**的。
+    ///
+    /// 用户 2026-11-14 报：「导入数据库表」弹出的文件选择对话框**不能点击、
+    /// 选不了文件**（它明明显示出来了，旁边的「导入数据（CSV）…」却能点）。
+    ///
+    /// 根因（GTK4 实测，独立探针 `/tmp/gtk_file_probe.c`）：
+    /// 模态对话框会**抓走输入**（grab）⇒ 模态框开着的时候，后开的
+    /// **非模态**窗口显示得出来，却**收不到任何点击**。
+    /// 探针对照：选择器非模态 ⇒ 选不中（`SEL=<none>`）；模态 ⇒ 选得中。
+    ///
+    /// ⇒ 铁律：**最后打开的对话框必须是模态的**（要么自己 `modal`，
+    /// 要么挂在模态父窗口下面——两个都不是就点不动）。
+    ///
+    /// 这条 lint 把「模态」钉死，别再靠人记：
+    /// - 文件选择对话框只允许出现在 `windows.rs`（唯一工厂，强制 modal）；
+    /// - 其余对话框构造必须带 `.modal(true)` / `DialogFlags::MODAL`。
+    #[test]
+    fn 对话框与文件选择器都必须是模态的() {
+        // ⚠️ 名字**拼出来**：直接写会把自己扫出来
+        let fc_dialog = format!("gtk::FileChooser{}::builder()", "Dialog");
+        let fc_native = format!("gtk::FileChooser{}::builder()", "Native");
+        let dlg_builder = format!("gtk::{}::builder()", "Dialog");
+        let alert_builder = format!("gtk::Alert{}::builder()", "Dialog");
+        let with_buttons = format!("gtk::{}::with_buttons(", "Dialog");
+        let modal_mark = format!(".modal({})", "true");
+        let flags_mark = format!("DialogFlags::{}", "MODAL");
+        /// 构造器与「模态标记」之间最多隔几行（builder 链就那么几行）。
+        const LOOKAHEAD: usize = 12;
+
+        let mut files = Vec::new();
+        rust_files(&src_dir(), &mut files);
+        let mut bad = Vec::new();
+        for f in files {
+            let Ok(src) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            // 文件选择对话框的**唯一工厂**（windows.rs）
+            let is_factory = f.ends_with("windows.rs");
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                // 只看代码行：注释里提到构造器不算
+                if t.starts_with("//") {
+                    continue;
+                }
+                // 这个构造器要什么「模态标记」
+                let need: Option<&str> = if line.contains(&fc_dialog) {
+                    if !is_factory {
+                        bad.push(format!(
+                            "{}:{}: {}",
+                            f.display(),
+                            i + 1,
+                            line.trim()
+                        ));
+                        continue;
+                    }
+                    Some(&modal_mark)
+                } else if line.contains(&fc_native)
+                    || line.contains(&dlg_builder)
+                    || line.contains(&alert_builder)
+                {
+                    Some(&modal_mark)
+                } else if line.contains(&with_buttons) {
+                    Some(&flags_mark)
+                } else {
+                    None
+                };
+                let Some(need) = need else { continue };
+                //往后找标记
+                let hit = lines[i..]
+                    .iter()
+                    .take(LOOKAHEAD + 1)
+                    .any(|l| l.contains(need));
+                if !hit {
+                    bad.push(format!("{}:{}: {}", f.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "所有对话框 / 文件选择器都必须模态（模态框会抓走输入，\
+             非模态的后开窗口就点不动）：\n{}",
+            bad.join("\n")
+        );
+    }
 }

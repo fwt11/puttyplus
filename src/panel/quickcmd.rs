@@ -388,10 +388,14 @@ pub fn open_manager(st: &Rc<PanelState>) {
     {
         let items = Rc::clone(&items);
         let fill = fill.clone();
+        // ⚠️ **弱引用**：闭包要是抓住对话框的强引用 ⇒ 窗口和按钮互相引用，
+        // 永远回收不掉。
+        let dlg_weak = dlg.downgrade();
         b_new.connect_clicked(move |_| {
             let items = Rc::clone(&items);
             let fill = fill.clone();
-            edit_dialog(None, move |opt| {
+            let Some(dlg) = dlg_weak.upgrade() else { return };
+            edit_dialog(Some(dlg.upcast_ref::<gtk::Window>()), None, move |opt| {
                 items.borrow_mut().push(opt.clone());
                 let v = items.borrow().clone();
                 settings::set_quick_commands(&v);
@@ -403,12 +407,14 @@ pub fn open_manager(st: &Rc<PanelState>) {
         let items = Rc::clone(&items);
         let list2 = list.clone();
         let fill = fill.clone();
+        let dlg_weak = dlg.downgrade();
         b_edit.connect_clicked(move |_| {
             let Some(i) = selected(&items, &list2) else { return };
             let cur = items.borrow()[i].clone();
             let items2 = Rc::clone(&items);
             let fill2 = fill.clone();
-            edit_dialog(Some(&cur), move |opt| {
+            let Some(dlg) = dlg_weak.upgrade() else { return };
+            edit_dialog(Some(dlg.upcast_ref::<gtk::Window>()), Some(&cur), move |opt| {
                 items2.borrow_mut()[i] = opt.clone();
                 let v = items2.borrow().clone();
                 settings::set_quick_commands(&v);
@@ -435,7 +441,14 @@ pub fn open_manager(st: &Rc<PanelState>) {
 }
 
 /// 新建/编辑一条命令。`cur` 为 None 是新建。
-fn edit_dialog<F: Fn(QuickCmd) + 'static>(cur: Option<&QuickCmd>, done: F) {
+///
+/// ⚠️ `parent` 传**管理对话框自己**（不是主窗口）：编辑框是从管理框里
+/// 弹出来的，挂在它下面才会跟它一起模态、也才会盖在它上面。
+fn edit_dialog<F: Fn(QuickCmd) + 'static>(
+    parent: Option<&gtk::Window>,
+    cur: Option<&QuickCmd>,
+    done: F,
+) {
     // ⚠️ 走 `windows::dialog`：必定挂上父窗口（阶段 67 / 审计 P2-16）
     let dlg = crate::windows::dialog(
         if cur.is_some() {
@@ -443,7 +456,7 @@ fn edit_dialog<F: Fn(QuickCmd) + 'static>(cur: Option<&QuickCmd>, done: F) {
         } else {
             tr("新建快速命令")
         },
-        None::<&gtk::Window>,
+        parent,
         &[
             (tr("取消"), gtk::ResponseType::Cancel),
             (tr("保存"), gtk::ResponseType::Ok),

@@ -59,14 +59,19 @@ pub struct ImportMapping {
 ///
 /// GTK4 的 `FileChooserDialog` 是非阻塞的（没有 `run()`），选完要等用户点
 /// 「打开」才知道选了哪个文件——所以只能回调。
+///
+/// ⚠️ **必须模态**（用户 2026-11-14 报的 bug）：导入向导自己就是**模态**
+/// 对话框，它已经**抓走了输入**；这时再弹一个**非模态**的文件选择器，
+/// 它显示得出来却**收不到点击**（点文件列表没反应、选不了文件）。
+/// ⇒ 走 [`crate::windows::file_chooser_dialog`]（统一 modal + 有父窗口）。
+/// ⚠️ `parent` 要传**真正的那一层窗口**（导入向导），别传主窗口——
+/// 挂对了它才会跟向导一起模态。
 pub fn pick_csv_into(parent: Option<&gtk::Window>, entry: &gtk::Entry) {
-    let mut b = gtk::FileChooserDialog::builder()
-        .title(tr("选择要导入的 CSV 文件"))
-        .action(gtk::FileChooserAction::Open);
-    if let Some(p) = parent {
-        b = b.transient_for(p);
-    }
-    let dlg = b.build();
+    let dlg = crate::windows::file_chooser_dialog(
+        tr("选择要导入的 CSV 文件"),
+        parent,
+        gtk::FileChooserAction::Open,
+    );
     dlg.add_button(tr("取消"), gtk::ResponseType::Cancel);
     dlg.add_button(tr("打开"), gtk::ResponseType::Accept);
     dlg.set_default_response(gtk::ResponseType::Accept);
