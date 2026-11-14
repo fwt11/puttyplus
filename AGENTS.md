@@ -35,7 +35,7 @@ export ZIG=$HOME/.cache/puttyplus-zig/bin/zig
 
 ```bash
 cargo build --release && cargo test                # Rust（release 已带 strip/LTO/ring 配置）
-cargo build --release --examples          # ⚠️ **130 个冒烟都得能编**（见下）
+cargo check --examples                       # ⚠️ **131 个冒烟都得能编**（见下；⭐ 19 秒）
 (cd c && make)                                      # C 版（已冻结，只作参照）
 bash tools/compat_check.sh                    # 两版外部行为对照（81 项，需 C 版二进制）
 PP_SSHD='127.0.0.1 2222 <user>' bash tools/compat_check.sh   # 含 selftest 全流程对照
@@ -74,11 +74,22 @@ cargo build --release && mkdir -p release && cp target/release/puttyplus release
   example ⇒ **本地全绿、CI 才红**。真踩过：`01efb43`（软链双击跟进去）改了
   那个签名却漏了 `examples/selfheal_smoke.rs` ⇒ CI 从第 50 轮起**连红
   10 轮**才被人看见（2026-11-11）。
-  ⇒ **每个阶段都要跑 `cargo build --release --examples`**（130 个 example 全
-  编一遍）⇒ 签名漂移本地就红。CI 里也已加同名一步（`.github/workflows/ci.yml`）。
+  ⇒ **每个阶段都要跑 `cargo check --examples`**（131 个 example 全查一遍）
+  ⇒ 签名漂移本地就红。CI 里也是同名一步（`.github/workflows/ci.yml`）。
+- ⭐⭐ **别用 `cargo build --release --examples` 做这件事**（2026-11-14 实测）：
+  | 命令 | 耗时 | 说明 |
+  |---|---|---|
+  | `cargo check --examples` | **19 秒** | ✅ **日常用这个**：只验「能不能编过」，不做 codegen / 链接 |
+  | `cargo build --examples`（dev） | 3 分 | 真编 + 真链接（不含 LTO） |
+  | `cargo build --release --examples` | **40 分 27 秒** | ❌ **fat LTO × 131 次链接** |
+  ⇒ 慢的根因是 release profile 的 **`lto = "fat"` + `codegen-units = 1`**：
+  每个 example 都要做一次**全程序 LTO 链接** ⇒ 131 次全量 LTO。
+  ⇒ **守门用 `check`**（签名漂移是**类型**问题 ⇒ check 抓得住；
+  链接期才暴露的问题在本项目里没出现过）；**要真产物时**再单独 release 编
+  （发版前、或者要跑某个 example 时 `cargo run --release --example X`）。
 - ⚠️ **本地按 CI 那套跑 GUI 冒烟时，别乱改 `HOME`**（2026-11-11 踩过）：
   改了 `HOME` ⇒ cargo 找不到 rustup/cargo 的家 ⇒ **换了 rustc** ⇒ 依赖的
-  指纹全变 ⇒ **全量重编**（130 个 example 要 30 分钟，还可能去重新拉依赖）。
+  指纹全变 ⇒ **全量重编**（131 个 example 要 40 分钟，还可能去重新拉依赖）。
   ⇒ 跑之前把 `CARGO_HOME` / `RUSTUP_HOME` **显式指回去**：
   `export CARGO_HOME=/home/fwt/.cargo RUSTUP_HOME=/home/fwt/.rustup`。
   ⚠️ **CI 没这个问题**（那边 `RUSTUP_HOME=/opt/rust/rustup`、
@@ -1699,6 +1710,45 @@ std 会走回退路径），只是加载器每次启动打一行
   下生成的 ⇒ HOME 不在这个形状下，73 条里那两条带 `~` 的全 DIFF
   （实测 `HOME=/tmp/xxx` ⇒ PASS=71 FAIL=2）。⇒ CI 里跑契约前
   `export HOME="/home/$(id -un)"`。
+
+### 发布说明的写法（2026-11-14 用户定的格式，参考 deepseek harness）
+
+**格式**：**分类 + 每条一句话** + `@贡献者` —— 一句话说完一件**用户能感知**
+的事；不写文件名、不写函数名、不写 commit 号、不写「改了什么代码」。
+
+```markdown
+## PuTTYPlus {{VERSION}}
+
+PuTTY 兼容的 SSH 终端 + 图形化 SFTP + 数据库工作台（Linux / GTK4）。
+
+**下载**
+- `puttyplus_{{VERSION}}-1_amd64.deb` —— x86-64 的 Debian / Ubuntu 等发行版安装包
+- …（其余资产：arm64 deb / 免安装 tar.gz / Windows zip；校验和见 `SHA256SUMS`）
+
+**新增功能**
+- 一句话说明新增了什么。 @fwt11
+
+**体验优化**
+- 一句话说明体验变好了哪。 @fwt11
+
+**修复**
+- 一句话说明原来哪里坏了、现在好了。 @fwt11
+
+**Windows 版的已知差异**
+- 一句话一条（用户必须知道的行为差别）。
+
+**特性**
+- 一行总览（终端 + SFTP 双栏同窗口 · 数据库工作台 · …）。
+```
+
+- ⚠️ **分类只用这几个**：`新增功能` / `体验优化` / `修复`（外加固定的
+  `下载`、`Windows 版的已知差异`、`特性` 三段）。
+  **修复**段写「原来…现在…」⇒ 用户一眼看出差别。
+- ⚠️ **每版只写本版的变化**：**不要**再写「上一版内容照旧」的回顾 ⇒
+  GitHub Releases 页面自己就是完整历史（以前的版本号说明里有大段回顾，
+  越滚越长 ⇒ 换格式时删掉）。
+- ⚠️ **`@贡献者` 可选**：本仓库的条目基本都由用户提出 ⇒ 署 `@fwt11`。
+- ⚠️ **模板**：`docs/发布说明/_模板.md`（照它抄，别每次现想结构）。
 
 ### 发版（打 tag → GitHub Actions 出 Release）
 
