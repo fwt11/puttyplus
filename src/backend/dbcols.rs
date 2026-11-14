@@ -1,15 +1,18 @@
 //! 列显示设置的持久化（阶段 20）：`~/.config/puttyplus/columns.ini`。
 //!
-//! **存什么**：某张表在某个连接下，用户挑了要显示哪些列、把它们排成什么顺序。
+//! **存什么**：某张表在某个连接下，用户挑了要显示哪些列、把它们排成什么顺序、
+//! 以及用户手动拖成多宽（阶段 89 加的 `widths`）。
 //! Navicat / DBeaver 都是这个路子——"这张表我永远只关心这几列"。
 //!
 //! ```ini
 //! [pg/postgres@127.0.0.1:5432/postgres/本地 PG/public.demo_users]
 //! cols=id:1,email:1,name:0,created_at:1
+//! widths=email:220,id:96
 //! ```
 //!
 //! **为什么按列名存、不按下标**：结果集的列下标跟着 SELECT 列表变，
 //! 下标存下来下次就对不上号了。按名字存才稳——表加了列、换了列顺序都能对上。
+//! **宽度也按列名存**（同一个道理）⇒ 藏过列、换了列顺序都不会错位。
 //!
 //! **为什么单独一个文件**：`databases.ini` 的组名是 `<会话键>/<连接名>`，
 //! 往里塞别的组会被当成"多了一条连接"（组名前缀一样）。列设置另开一个
@@ -26,6 +29,18 @@ use super::dbstore::DbProfile;
 
 /// 一列的显示设置：`(列名, 是否显示)`。
 pub type ColSpec = (String, bool);
+
+/// 一列的**用户宽度**（阶段 89）：`(列名, 像素)`。
+///
+/// ⚠️ **只存用户拖过的那几列**：没拖过的列是「按内容自动分配」的，
+/// 存下来反而会把它钉死（窗口一变窄，那列就卡在那儿不动了）。
+pub type WidthSpec = (String, i32);
+
+/// 宽度上限（像素）——存进来的值超过这个就当没存。
+///
+/// ⚠️ **为什么要卡**：文件是用户可改的 ⇒ 手滑写个 999999 也得能扛住
+/// （不然那一列宽到屏幕外，横向滚动条拉不到头）。
+const MAX_WIDTH: i32 = 10_000;
 
 fn ini_path() -> PathBuf {
     // 环境变量可覆盖：测试与调试时想看/改别的文件，不必动真实配置。
@@ -136,6 +151,50 @@ fn dec_one(s: &str) -> String {
     out
 }
 
+/* ---------------- 宽度的编解码（阶段 89） ---------------- */
+
+/// 把用户宽度编成一行文本：`列名:像素,列名2:像素`。
+///
+/// **转义跟列名一样**（`%` `,` `:`）——列名里可能有这些字符。
+fn encode_widths(widths: &[WidthSpec]) -> String {
+    let mut out = String::new();
+    for (i, (name, w)) in widths.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&enc_one(name));
+        out.push(':');
+        out.push_str(&w.to_string());
+    }
+    out
+}
+
+/// 解一行文本回用户宽度（`encode_widths` 的逆）。
+///
+/// ⚠️ **非法值直接丢掉**（宽度 ≤ 0 或解析不出来）⇒ 手改坏的文件不该
+/// 让界面炸掉，只当那一列没设过。
+fn decode_widths(s: &str) -> Vec<WidthSpec> {
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        if part.is_empty() {
+            continue;
+        }
+        // 名字里可能有 `:`（转义过的），所以只按**最后一个**冒号切
+        let Some(pos) = part.rfind(':') else {
+            continue;
+        };
+        let name = dec_one(&part[..pos]);
+        let Ok(w) = part[pos + 1..].parse::<i32>() else {
+            continue;
+        };
+        if w <= 0 || w > MAX_WIDTH {
+            continue;
+        }
+        out.push((name, w));
+    }
+    out
+}
+
 /* ---------------- 纯逻辑 ---------------- */
 
 /// 把存下来的布局套到当前结果集的列上 → `(原始列下标, 是否显示)`。
@@ -168,6 +227,36 @@ pub fn apply(cols: &[String], stored: &[ColSpec]) -> Vec<(usize, bool)> {
     for (i, _) in cols.iter().enumerate() {
         if !used[i] {
             out.push((i, true));
+        }
+    }
+    out
+}
+
+/// 把存下来的宽度套到当前结果集的列上 → `(原始列下标, 宽)`。
+///
+/// **规则**（跟 [`apply`] 一个口径）：
+/// - 按**名字**找回原始列下标（藏过列、换了列顺序都不会错位）；
+/// - 存过、但现在没了的列（表后来删了列）：直接丢掉；
+/// - 没存过的列：**不在结果里** ⇒ 那列走「按内容自动分配」。
+///
+/// ⚠️ **为什么键是原始列下标**：网格里的用户宽度就是按原始下标存的
+/// （`DbGrid::user_widths`）⇒ 这里转过去就能直接灌进网格。
+pub fn apply_widths(cols: &[String], stored: &[WidthSpec]) -> Vec<(usize, i32)> {
+    let mut out: Vec<(usize, i32)> = Vec::with_capacity(stored.len());
+    let mut used = vec![false; cols.len()];
+    for (name, w) in stored {
+        if *w <= 0 || *w > MAX_WIDTH {
+            continue;
+        }
+        // 同名列取第一个还没占用的（`SELECT a, a` 这种少见但别崩）
+        if let Some(i) = cols
+            .iter()
+            .enumerate()
+            .find(|(i, c)| **c == *name && !used[*i])
+            .map(|(i, _)| i)
+        {
+            used[i] = true;
+            out.push((i, *w));
         }
     }
     out
@@ -213,6 +302,92 @@ fn save_to(
     let _ = kf.load_from_file(path, glib::KeyFileFlags::NONE);
     let g = group(conn, schema, table);
     kf.set_string(&g, "cols", &encode(cols));
+    write_kf(path, &kf)
+}
+
+/* ---------------- 宽度的读写（阶段 89） ---------------- */
+
+/// 读某张表的用户宽度（`列名 → 像素`）。
+pub fn load_widths(conn: &str, schema: &str, table: &str) -> Vec<WidthSpec> {
+    load_widths_from(&ini_path(), conn, schema, table)
+}
+
+fn load_widths_from(
+    path: &std::path::Path,
+    conn: &str,
+    schema: &str,
+    table: &str,
+) -> Vec<WidthSpec> {
+    let kf = KeyFile::new();
+    if kf.load_from_file(path, glib::KeyFileFlags::NONE).is_err() {
+        return Vec::new();
+    }
+    let g = group(conn, schema, table);
+    let Ok(s) = kf.string(&g, "widths") else {
+        return Vec::new();
+    };
+    decode_widths(&s)
+}
+
+/// 存某张表的用户宽度。
+///
+/// ⚠️ **与 `cols` 同一个分组、不同键** ⇒ 两边各存各的，谁也不覆盖谁
+/// （`save_to` / `save_widths_to` 都是「读整个文件 → 改一个键 → 写回」）。
+pub fn save_widths(conn: &str, schema: &str, table: &str, widths: &[WidthSpec]) {
+    let _ = save_widths_to(&ini_path(), conn, schema, table, widths);
+}
+
+fn save_widths_to(
+    path: &std::path::Path,
+    conn: &str,
+    schema: &str,
+    table: &str,
+    widths: &[WidthSpec],
+) -> bool {
+    if widths.is_empty() {
+        return false;
+    }
+    let kf = KeyFile::new();
+    let _ = kf.load_from_file(path, glib::KeyFileFlags::NONE);
+    let g = group(conn, schema, table);
+    kf.set_string(&g, "widths", &encode_widths(widths));
+    write_kf(path, &kf)
+}
+
+/// **删掉**某张表存着的用户宽度（用户把宽度全恢复默认了）。
+///
+/// ⚠️ **为什么必须真的删掉**：宽度是「**整体覆盖**」写的 ⇒ 用户恢复默认后
+/// 存的那份里已经没这一列了，但**旧的 `widths` 键还在文件里** ⇒ 下次打开
+/// 又把旧宽度套上 ⇒ 用户看到「恢复了默认，下次打开又变回那样」。
+///
+/// ⚠️ **只删 `widths` 键**：同组的 `cols`（列显示设置）不能碰。
+pub fn clear_widths(conn: &str, schema: &str, table: &str) {
+    let _ = clear_widths_to(&ini_path(), conn, schema, table);
+}
+
+fn clear_widths_to(
+    path: &std::path::Path,
+    conn: &str,
+    schema: &str,
+    table: &str,
+) -> bool {
+    let kf = KeyFile::new();
+    if kf.load_from_file(path, glib::KeyFileFlags::NONE).is_err() {
+        return false;
+    }
+    let g = group(conn, schema, table);
+    // ⚠️ gtk-rs 的 `has_key` / `keys` 返回 `Result`（组不存在就是 Err）
+    match kf.has_key(&g, "widths") {
+        Ok(true) => {}
+        _ => return false,
+    }
+    kf.remove_key(&g, "widths");
+    // 整组空了 ⇒ 把它也去掉，免得文件里留一堆空组
+    // （⚠️ 判的是**键**为空，不是组为空 —— `groups()` 列的是所有组名）
+    let empty = kf.keys(&g).map(|k| k.is_empty()).unwrap_or(true);
+    if empty {
+        let _ = kf.remove_group(&g);
+    }
     write_kf(path, &kf)
 }
 
@@ -362,5 +537,77 @@ mod tests {
     fn 组名里的方括号要转掉() {
         let g = group("c[1]", "s]", "t\nx");
         assert!(!g.contains('[') && !g.contains(']') && !g.contains('\n'));
+    }
+
+    /* ---------------- 宽度（阶段 89） ---------------- */
+
+    #[test]
+    fn 宽度能往返() {
+        let orig = vec![
+            ("id".to_string(), 96),
+            ("名字".to_string(), 220),
+            ("a,b".to_string(), 80),
+            ("c:d".to_string(), 61),
+            ("100%".to_string(), 123),
+        ];
+        assert_eq!(decode_widths(&encode_widths(&orig)), orig);
+    }
+
+    #[test]
+    fn 非法宽度直接丢掉() {
+        let got = decode_widths("id:0,name:-5,x:abc,y:99999");
+        assert!(got.is_empty(), "非法值不该进结果：{got:?}");
+    }
+
+    #[test]
+    fn 宽度按名字找回下标() {
+        let c = cols(&["id", "name", "email"]);
+        let stored = vec![("email".to_string(), 220), ("id".to_string(), 96)];
+        assert_eq!(
+            apply_widths(&c, &stored),
+            vec![(2, 220), (0, 96)],
+            "按名字找回原始下标（藏过列也不会错位）"
+        );
+    }
+
+    #[test]
+    fn 宽度里没有的列不出现() {
+        let c = cols(&["id", "name"]);
+        let stored = vec![("gone".to_string(), 100)];
+        assert!(apply_widths(&c, &stored).is_empty());
+    }
+
+    #[test]
+    fn 宽度与列布局共存在一个分组() {
+        let path = tmp_path("rw");
+        let _ = std::fs::remove_file(&path);
+        let cols_spec = vec![("id".to_string(), true), ("name".to_string(), false)];
+        let widths = vec![("id".to_string(), 96)];
+        assert!(save_to(&path, "pg/conn", "public", "t", &cols_spec));
+        assert!(save_widths_to(&path, "pg/conn", "public", "t", &widths));
+        // 两边都还在
+        assert_eq!(load_from(&path, "pg/conn", "public", "t"), cols_spec);
+        assert_eq!(load_widths_from(&path, "pg/conn", "public", "t"), widths);
+        // 宽度单独写也不会把列布局冲掉
+        assert!(save_widths_to(&path, "pg/conn", "public", "t", &widths));
+        assert_eq!(load_from(&path, "pg/conn", "public", "t"), cols_spec);
+        // 别的表不受影响
+        assert!(load_widths_from(&path, "pg/conn", "public", "other").is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 恢复默认宽度要把存的那份删掉() {
+        let path = tmp_path("clear");
+        let _ = std::fs::remove_file(&path);
+        let cols_spec = vec![("id".to_string(), true)];
+        let widths = vec![("id".to_string(), 96)];
+        assert!(save_to(&path, "pg/conn", "public", "t", &cols_spec));
+        assert!(save_widths_to(&path, "pg/conn", "public", "t", &widths));
+        assert!(clear_widths_to(&path, "pg/conn", "public", "t"));
+        // 宽度没了，列显示设置还在
+        assert!(load_widths_from(&path, "pg/conn", "public", "t").is_empty());
+        assert_eq!(load_from(&path, "pg/conn", "public", "t"), cols_spec);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -632,6 +632,12 @@ struct ResultTab {
     /// （SELECT 列表换了就是另一批列），存下来没意义。表浏览才是
     /// "这张表我一直只关心这几列"。打开表时填好（那时连接已经定了）。
     col_key: RefCell<Option<(String, String, String)>>,
+    /// 「列宽要落盘了」的**去抖定时器**（阶段 89）。
+    ///
+    /// ⚠️ **为什么要去抖**：网格那边每 100ms 比一次列宽（拖拽过程中宽度
+    /// 一直在变）⇒ 不去抖就是**每 100ms 写一次 `columns.ini`**（拖一次列
+    /// 能写几百次）⇒ 拖完 1.5 秒才写一次就够了。
+    width_save_timer: RefCell<Option<glib::SourceId>>,
     /// 列类型与主键（打开表时从元数据来）
     types: RefCell<Vec<ColType>>,
     pk: RefCell<Vec<usize>>,
@@ -2772,6 +2778,7 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         btn_discard,
         target: RefCell::new(None),
         col_key: RefCell::new(None),
+        width_save_timer: RefCell::new(None),
         types: RefCell::new(Vec::new()),
         pk: RefCell::new(Vec::new()),
         col_names: RefCell::new(Vec::new()),
@@ -2853,6 +2860,19 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
             let slot = st.db_ui.borrow();
             let Some(ui) = slot.as_ref() else { return };
             set_status(ui, msg, false);
+        }));
+    }
+
+    // 「用户拖过的列宽变了」→ 去抖落盘（阶段 89）
+    //
+    // ⚠️ **必须抓弱引用**：网格归 `ResultTab` 所有，抓强引用就成环。
+    // ⚠️ **必须去抖**：网格那边每 100ms 比一次 ⇒ 不去抖就是每 100ms 写
+    // 一次文件（见 `schedule_width_save`）。
+    {
+        let weak_tab = Rc::downgrade(&tab);
+        tab.grid.set_widths_changed_hook(Rc::new(move || {
+            let Some(tab) = weak_tab.upgrade() else { return };
+            schedule_width_save(&tab);
         }));
     }
 
@@ -7346,18 +7366,8 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
         }
         data.rows = rows.rows.clone();
         tab.grid.set_data(data);
-        // 套上用户之前定好的列显示设置（阶段 20）：表浏览页签重开时，
-        // 那几列还藏着的、顺序也还在。**按列名对**——表加了列也不会错位。
-        {
-            let ck = tab.col_key.borrow().clone();
-            if let Some((conn, schema, table_name)) = ck {
-                let stored = dbcols::load(&conn, &schema, &table_name);
-                if !stored.is_empty() {
-                    let layout = dbcols::apply(&rows.columns, &stored);
-                    tab.grid.set_column_layout(layout);
-                }
-            }
-        }
+        // 套上用户之前定好的**列显示设置**（阶段 20）与**列宽**（阶段 89）。
+        apply_stored_layout(&tab, &rows.columns);
     } else {
         tab.grid.append_rows(rows.rows.clone());
     }
@@ -8378,6 +8388,90 @@ fn hide_result_column(tab: &Rc<ResultTab>, orig: usize) {
         dbcols::save(&conn, &schema, &table, &specs);
     }
     let _ = tab;
+}
+
+/// 列宽落盘（阶段 89）：用户拖过列宽 ⇒ 存进 `columns.ini`（跟列显示设置
+/// 同一个文件、同一个分组，不同的键）。
+///
+/// ⚠️ **去抖**：网格那边每 100ms 比一次列宽（拖拽过程中宽度一直在变）
+/// ⇒ 不去抖就是**每 100ms 写一次文件**（拖一次能写几百次）⇒ 每次变化
+/// 都重置定时器 ⇒ 拖完 1.5 秒才真写一次。
+fn schedule_width_save(tab: &Rc<ResultTab>) {
+    if let Some(id) = tab.width_save_timer.borrow_mut().take() {
+        // ⚠️ `SourceId::remove` **移除一个已经结束的 source 会 panic**
+        // （GLib 那边叫 "programmer error"）⇒ 只有还没触发的定时器才 remove。
+        // 触发过的那个在回调里已经把 id 清成 None 了 ⇒ 不会走到这里。
+        id.remove();
+    }
+    let weak = Rc::downgrade(tab);
+    let id = glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+        let Some(tab) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        // ⚠️ 定时器已经触发 ⇒ 把 id 清掉（不然下次 `source_remove` 一个
+        // 已经没了的 id ⇒ GTK 会打一句警告）
+        *tab.width_save_timer.borrow_mut() = None;
+        save_grid_widths(&tab);
+        glib::ControlFlow::Break
+    });
+    *tab.width_save_timer.borrow_mut() = Some(id);
+}
+
+/// 真把当前网格的用户宽度写进 `columns.ini`。
+///
+/// ⚠️ **只有表浏览页签才存**（`col_key` 有值）：普通查询结果的列每次都
+/// 不一样（SELECT 列表换了就是另一批列），存下来没意义——跟列显示设置
+/// 一个口径。
+fn save_grid_widths(tab: &Rc<ResultTab>) {
+    let Some((conn, schema, table)) = tab.col_key.borrow().clone() else {
+        return;
+    };
+    let uw = tab.grid.user_widths();
+    if uw.is_empty() {
+        // 全恢复默认了 ⇒ **把存的那份删掉**：宽度是「整体覆盖」写的，
+        // 不删的话旧的 `widths` 键还留在文件里 ⇒ 下次打开又套上旧宽度
+        // ⇒ 用户看到「恢复了默认，下次打开又变回那样」。
+        dbcols::clear_widths(&conn, &schema, &table);
+        return;
+    }
+    let names = tab.grid.columns();
+    let specs: Vec<dbcols::WidthSpec> = uw
+        .iter()
+        .filter_map(|(orig, w)| names.get(*orig).map(|n| (n.clone(), *w)))
+        .collect();
+    if specs.is_empty() {
+        return;
+    }
+    dbcols::save_widths(&conn, &schema, &table, &specs);
+}
+
+/// 把存好的**列显示设置**（阶段 20）与**列宽**（阶段 89）套到刚灌进来的
+/// 结果集上。
+///
+/// ⚠️ **必须在 `set_data` 之后调**：`set_data` 会**清空**用户宽度
+/// （换了一批数据 ⇒ 旧宽度没意义）⇒ 先灌后清就没了。
+///
+/// ⚠️ **按列名对**：藏过列、换了列顺序、表加了列，都不会错位。
+///
+/// ⚠️ **只有表浏览页签有**（`col_key` 有值）：普通查询结果的列每次都不一样
+/// （SELECT 列表换了就是另一批列），存下来没意义。
+fn apply_stored_layout(tab: &Rc<ResultTab>, columns: &[String]) {
+    let Some((conn, schema, table_name)) = tab.col_key.borrow().clone() else {
+        return;
+    };
+    // 列显示设置：藏了哪几列、顺序怎么排
+    let stored = dbcols::load(&conn, &schema, &table_name);
+    if !stored.is_empty() {
+        let layout = dbcols::apply(columns, &stored);
+        tab.grid.set_column_layout(layout);
+    }
+    // 列宽（阶段 89）：用户拖成多宽的那几列
+    let widths = dbcols::load_widths(&conn, &schema, &table_name);
+    if !widths.is_empty() {
+        let applied = dbcols::apply_widths(columns, &widths);
+        let map: std::collections::HashMap<usize, i32> = applied.into_iter().collect();
+        tab.grid.set_user_widths(&map);
+    }
 }
 
 /// 网格右键菜单的动作分派（阶段 47）。
@@ -10191,6 +10285,105 @@ pub fn struct_save_now(st: &Rc<PanelState>, tab_idx: usize) {
     let Some(ui) = slot.as_ref() else { return };
     let Some(tab) = ui.struct_tabs.borrow().get(tab_idx).cloned() else { return };
     save_structure(st, ui, &tab, true);
+}
+
+/// 冒烟测试用：造一个**表浏览结果页签**（带 `col_key` ⇒ 列宽会落盘）。
+///
+/// **为什么要有这个钩子**：列宽只对**表浏览页签**落盘（普通查询结果的列
+/// 每次都不一样，存了没意义）⇒ 冒烟要验落盘，就得要有一个**带 `col_key`**
+/// 的结果页签 ⇒ 光造 `DbGrid` 不够（网格自己不知道连接/表是谁）。
+///
+/// 阶段 89 用。
+pub fn make_test_table_result_tab(st: &Rc<PanelState>, schema: &str, table: &str) -> Option<usize> {
+    let slot = st.db_ui.borrow();
+    let ui = slot.as_ref()?;
+    let tab = build_result_tab(st, ui, &format!("{schema}.{table}"));
+    // 持久化目标：跟真打开一张表时一样（连接标识 + 模式 + 表名）
+    let ck = conn_key(ui);
+    *tab.col_key.borrow_mut() = Some((ck, schema.to_string(), table.to_string()));
+    // 灌几行假数据（不连库）
+    tab.grid.set_data(dbgrid::GridData {
+        columns: vec!["id".into(), "name".into(), "email".into()],
+        types: vec![ColType::Int, ColType::Text, ColType::Text],
+        rows: vec![
+            vec![
+                Some("1".into()),
+                Some("张三".into()),
+                Some("zhang@example.com".into()),
+            ],
+            vec![
+                Some("2".into()),
+                Some("李四".into()),
+                Some("li@example.com".into()),
+            ],
+        ],
+        pk: vec![0],
+    });
+    // **挂到界面上**：不挂 ⇒ 网格不在屏上 ⇒ xdotool 拖不到它
+    mount_result_tab(ui, &tab);
+    Some(ui.tabs.borrow().len().saturating_sub(1))
+}
+
+/// 冒烟测试用：某个结果页签的**宿主窗口**（拖拽算坐标要用）。
+pub fn test_result_tab_window(st: &Rc<PanelState>, tab_idx: usize) -> Option<gtk::Window> {
+    let slot = st.db_ui.borrow();
+    let ui = slot.as_ref()?;
+    let tab = ui.tabs.borrow().get(tab_idx).cloned()?;
+    Some(tab.win.clone())
+}
+
+/// 冒烟测试用：某个结果页签**存着的**用户宽度（`列名 → 像素`）。
+pub fn test_result_tab_stored_widths(
+    st: &Rc<PanelState>,
+    tab_idx: usize,
+) -> Vec<(String, i32)> {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
+        return Vec::new();
+    };
+    let Some((conn, schema, table)) = tab.col_key.borrow().clone() else {
+        return Vec::new();
+    };
+    dbcols::load_widths(&conn, &schema, &table)
+}
+
+/// 冒烟测试用：取某个结果页签的网格（阶段 89）。
+pub fn test_result_tab_grid(
+    st: &Rc<PanelState>,
+    tab_idx: usize,
+) -> Option<Rc<dbgrid::DbGrid>> {
+    let slot = st.db_ui.borrow();
+    let ui = slot.as_ref()?;
+    let tab = ui.tabs.borrow().get(tab_idx).cloned()?;
+    Some(tab.grid.clone())
+}
+
+/// 冒烟测试用：把某个结果页签**重新灌一遍数据**（模拟「关掉页签又打开」）。
+///
+/// ⚠️ **走的是真路径**：灌完数据后调 [`apply_stored_layout`] ⇒ 存好的
+/// 列显示设置与列宽会被套上（与真打开一张表时完全一样）。
+///
+/// 阶段 89 用。
+pub fn test_result_tab_reload(st: &Rc<PanelState>, tab_idx: usize) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(tab) = ui.tabs.borrow().get(tab_idx).cloned() else {
+        return false;
+    };
+    let columns = vec!["id".to_string(), "name".to_string(), "email".to_string()];
+    tab.grid.set_data(dbgrid::GridData {
+        columns: columns.clone(),
+        types: vec![ColType::Int, ColType::Text, ColType::Text],
+        rows: vec![vec![
+            Some("1".into()),
+            Some("张三".into()),
+            Some("zhang@example.com".into()),
+        ]],
+        pk: vec![0],
+    });
+    apply_stored_layout(&tab, &columns);
+    true
 }
 
 /// 冒烟测试用：结构页签里字段表的内容（每行 5 格）。

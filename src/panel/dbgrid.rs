@@ -351,6 +351,16 @@ pub struct DbGrid {
     ///
     /// **键是原始列下标**：隐藏 / 显示列会让"显示位置"变，原始下标才稳。
     user_widths: RefCell<HashMap<usize, i32>>,
+    /// 「**用户拖过的列宽变了**」的回调（阶段 89）。
+    ///
+    /// **为什么要抛给上层**：网格自己落不了盘（列宽要存在 `columns.ini`，
+    /// 按连接 + 表分区，网格不知道这些）⇒ 跟 [`hide_col_hook`] 一个口径。
+    ///
+    /// ⚠️ **回调只能抓弱引用**：网格归 `ResultTab` 所有，抓强引用就成环。
+    ///
+    /// ⚠️ **触发得比较频繁**：`sync_user_widths` 每 100ms 比一次
+    /// （拖拽过程中宽度一直在变）⇒ 上层**必须去抖**，别每 100ms 写一次文件。
+    widths_changed_hook: RefCell<Option<Rc<dyn Fn()>>>,
     /// 「隐藏此列」的回调（阶段 46）：参数是**原始列下标**。
     ///
     /// 网格自己落不了盘（列显示设置存在 `columns.ini`，按连接+表分区），
@@ -483,6 +493,7 @@ impl DbGrid {
                 nat_widths: RefCell::new(Vec::new()),
                 applied_widths: RefCell::new(Vec::new()),
                 user_widths: RefCell::new(HashMap::new()),
+                widths_changed_hook: RefCell::new(None),
                 col_setup_hook: RefCell::new(None),
                 tri_pressed: Cell::new(false),
                 col_tris: RefCell::new(Vec::new()),
@@ -1857,6 +1868,11 @@ impl DbGrid {
         if changed {
             // 钉住的那几列不动 ⇒ 其余列按自然宽重新分剩下的空间
             self.apply_column_widths();
+            // ⚠️ **通知上层去落盘**（阶段 89）：网格自己写不了 `columns.ini`。
+            // 上层**要去抖**——这里每 100ms 就可能触发一次（拖拽过程中）。
+            if let Some(hook) = self.widths_changed_hook.borrow().clone() {
+                hook();
+            }
         }
     }
 
@@ -1876,6 +1892,10 @@ impl DbGrid {
             uw.insert(orig_col, w);
         }
         self.apply_column_widths();
+        // ⚠️ **宽度变了就该落盘**（阶段 89）：用户拖宽走的是
+        // `sync_user_widths`（那里会通知），但程序化设宽（恢复默认、
+        // 读回存档）同样要落盘 ⇒ 统一在这里通知一次。
+        self.notify_widths_changed();
     }
 
     /// 某一列（**原始下标**）的用户宽度（没拖过 = None）。
@@ -1895,6 +1915,9 @@ impl DbGrid {
         let had = self.user_widths.borrow_mut().remove(&orig_col).is_some();
         if had {
             self.apply_column_widths();
+            // ⚠️ **也要落盘**（阶段 89）：恢复了默认宽度 ⇒ 存的那份也得改，
+            // 否则下次打开还是那个宽度（用户会以为"恢复没生效"）。
+            self.notify_widths_changed();
         }
         had
     }
@@ -1906,6 +1929,41 @@ impl DbGrid {
         }
         self.user_widths.borrow_mut().clear();
         self.apply_column_widths();
+        self.notify_widths_changed();
+    }
+
+    /// 通知上层「用户宽度变了」（阶段 89）。
+    fn notify_widths_changed(&self) {
+        if let Some(hook) = self.widths_changed_hook.borrow().clone() {
+            hook();
+        }
+    }
+
+    /// 灌入一批**用户宽度**（**原始列下标 → 像素**）——阶段 89 落盘读回来时用。
+    ///
+    /// ⚠️ **必须在 `set_data` 之后调**：`set_data` 会**清空**用户宽度
+    /// （换了一批数据 ⇒ 旧宽度没意义）⇒ 先灌后清就没了。
+    ///
+    /// 返回 false = 一条都没灌进去（存的宽度跟现在的列对不上）。
+    pub fn set_user_widths(&self, widths: &HashMap<usize, i32>) -> bool {
+        if widths.is_empty() {
+            return false;
+        }
+        {
+            let mut uw = self.user_widths.borrow_mut();
+            for (orig, w) in widths {
+                if *w > 0 {
+                    uw.insert(*orig, *w);
+                }
+            }
+        }
+        self.apply_column_widths();
+        true
+    }
+
+    /// 「用户拖过的列宽变了」的回调（阶段 89）。
+    pub fn set_widths_changed_hook(&self, hook: Rc<dyn Fn()>) {
+        *self.widths_changed_hook.borrow_mut() = Some(hook);
     }
 
     /// 表格清空（换连接、换查询时）。
