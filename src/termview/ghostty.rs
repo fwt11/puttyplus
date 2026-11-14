@@ -24,8 +24,9 @@
 use ghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use ghostty_vt::key::{Action, Encoder, Key, Mods};
 use ghostty_vt::search::Search;
+use ghostty_vt::selection::{FormatOptions, Selection};
 use ghostty_vt::style::{Palette as GtPalette, RgbColor};
-use ghostty_vt::terminal::{Event, Options, Terminal};
+use ghostty_vt::terminal::{Event, Options, Point, PointCoordinate, Terminal};
 
 pub use ghostty_vt::key::{Action as KeyAction, Key as KeyCode, Mods as KeyMods};
 
@@ -42,6 +43,14 @@ fn parse_hex_rgb(hex: &str) -> Option<RgbColor> {
     let g = u8::from_str_radix(&h[2..4], 16).ok()?;
     let b = u8::from_str_radix(&h[4..6], 16).ok()?;
     Some(RgbColor { r, g, b })
+}
+
+/// 视口坐标 `(列, 行)` ⇒ 内核的 [`Point`]。
+fn point(cell: (u16, u16)) -> Point {
+    Point::Viewport(PointCoordinate {
+        x: cell.0,
+        y: cell.1 as u32,
+    })
 }
 
 /// ghostty 终端内核的句柄。
@@ -332,6 +341,49 @@ impl GhosttyTerm {
             }
         }
         let _ = self.term.set_default_color_palette(Some(pal));
+    }
+
+    /* ---------------- 选区 ---------------- */
+
+    /// 设置选区（两端都是**视口坐标**：`(列, 行)`，0 起）。
+    ///
+    /// ⚠️ 用的是**视口**坐标 ⇒ 只能选「当前看得见」的那些行（我们的界面
+    /// 还不支持滚视口 ⇒ 视口就是屏幕底部那几行）。
+    ///
+    /// ⚠️ 两端**含头含尾**（内核的约定）；方向随意（从下往上拖也行），
+    /// 内核会自己按终端顺序排。
+    ///
+    /// 返回是否真的设上了（拿不到格子就是没设成）。
+    pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16)) -> bool {
+        let Ok(a) = self.term.grid_ref(point(start)) else {
+            return false;
+        };
+        let Ok(b) = self.term.grid_ref(point(end)) else {
+            return false;
+        };
+        let sel = Selection::new(a, b, false);
+        self.term.set_selection(Some(&sel)).is_ok()
+    }
+
+    /// 清掉选区（单击别处时用）。
+    pub fn clear_selection(&mut self) {
+        let _ = self.term.set_selection(None);
+    }
+
+    /// 取当前选区的**纯文本**（没有选区 ⇒ `None`）。
+    ///
+    /// ⚠️ 格式与 Ghostty 自己的复制一致：纯文本 + **拆开软换行** + 去尾
+    /// 空白（VTE 那边复制的是 `Format::Text`，观感相同）。
+    pub fn selection_text(&self) -> Option<String> {
+        let opts = FormatOptions::new()
+            .with_emit_format(Format::Plain)
+            .with_unwrap(true)
+            .with_trim(true);
+        let bytes = self.term.format_selection_alloc(opts).ok().flatten()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /* ---------------- 复位 ---------------- */
@@ -643,6 +695,55 @@ mod tests {
         assert_eq!(parse_hex_rgb("1c1f21"), None, "少了 # 不该认");
         assert_eq!(parse_hex_rgb("#fff"), None, "三位不该认");
         assert_eq!(parse_hex_rgb("#gggggg"), None, "非十六进制不该认");
+    }
+
+    /* ---------------- 选区 ---------------- */
+
+    #[test]
+    fn 选区能取到纯文本() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.feed(b"hello world\r\nsecond line\r\n");
+        // 选第 0 行的前 5 个字符（hello）
+        assert!(
+            t.set_selection((0, 0), (4, 0)),
+            "选区没设上"
+        );
+        let text = t.selection_text().expect("选区应有文本");
+        println!("选区文本 = {text:?}");
+        assert_eq!(text, "hello", "选区文本不对");
+    }
+
+    #[test]
+    fn 选区能跨行() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.feed(b"hello world\r\nsecond line\r\n");
+        // 从第 0 行第 6 列拖到第 1 行第 5 列 ⇒ 跨行
+        t.set_selection((6, 0), (5, 1));
+        let text = t.selection_text().expect("选区应有文本");
+        println!("跨行选区文本 = {text:?}");
+        assert!(
+            text.starts_with("world"),
+            "跨行选区应从 world 开始：{text:?}"
+        );
+        assert!(
+            text.contains("second"),
+            "跨行选区应含第二行：{text:?}"
+        );
+    }
+
+    #[test]
+    fn 没有选区就没有文本() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.feed(b"hello\r\n");
+        assert!(t.selection_text().is_none(), "没选区却取到了文本");
+        // 设了再清 ⇒ 也没了
+        t.set_selection((0, 0), (2, 0));
+        assert!(t.selection_text().is_some(), "刚设的选区该有文本");
+        t.clear_selection();
+        assert!(
+            t.selection_text().is_none(),
+            "清掉选区后不该还有文本"
+        );
     }
 
     /* ---------------- 按键编码 ---------------- */

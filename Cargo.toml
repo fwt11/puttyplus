@@ -98,3 +98,8 @@ required-features = ["ghostty"]
 [[example]]
 name = "ghostty_session_smoke"
 required-features = ["ghostty"]
+
+# ghostty 自绘终端的拖选复制冒烟（阶段 86-④）：需要 `ghostty` 特性
+[[example]]
+name = "ghostty_select_smoke"
+required-features = ["ghostty"]

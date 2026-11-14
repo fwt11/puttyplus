@@ -179,6 +179,14 @@ struct State {
     cwd_cb: RefCell<Vec<Box<dyn Fn(&str)>>>,
     /// 子进程退出的回调。
     exit_cb: RefCell<Option<Box<dyn Fn(i32)>>>,
+    /// 选区锚点（视口坐标：`(列, 行)`）——鼠标按下的那格。
+    sel_anchor: Cell<Option<(u16, u16)>>,
+    /// 选区当前端（视口坐标）——鼠标现在指着的那格。
+    sel_end: Cell<Option<(u16, u16)>>,
+    /// 拖选过程中的鼠标位置（像素）——内核只给增量，得自己累加。
+    sel_px: Cell<(f64, f64)>,
+    /// 正在拖选（按下但还没抬手）。
+    sel_dragging: Cell<bool>,
 }
 
 impl State {
@@ -445,6 +453,10 @@ impl GhosttyView {
             title_cb: RefCell::new(Vec::new()),
             cwd_cb: RefCell::new(Vec::new()),
             exit_cb: RefCell::new(None),
+            sel_anchor: Cell::new(None),
+            sel_end: Cell::new(None),
+            sel_px: Cell::new((0.0, 0.0)),
+            sel_dragging: Cell::new(false),
         });
         // 控件上挂一份 State ⇒ 能从控件反查回后端句柄
         // （`TermView::from_widget` 要用）。
@@ -462,6 +474,7 @@ impl GhosttyView {
         let view = GhosttyView { area, state };
         view.install_draw();
         view.install_click_focus();
+        view.install_selection();
         view.install_keys();
         view.install_ime();
         view
@@ -643,11 +656,35 @@ impl GhosttyView {
 
     /* ---------------- 剪贴板 ---------------- */
 
-    /// 复制选区到剪贴板。
+    /// 复制选区到剪贴板（纯文本）。
     ///
-    /// ⚠️ **还没做鼠标选区**（内核有 selection 模块，我们没接拖选）
-    /// ⇒ 现在复制的是空选区。
-    pub fn copy_selection(&self) {}
+    /// ⚠️ 选区是**鼠标拖出来的**（`install_selection`）⇒ 文本由内核的
+    /// selection 模块给出（跟 Ghostty 自己复制的一致）。
+    ///
+    /// ⚠️ 没有选区就**什么都不做**（不写空串进剪贴板——那会把用户
+    /// 剪贴板里原有的内容冲掉）。
+    pub fn copy_selection(&self) {
+        let text = self.state.term.borrow().selection_text();
+        let Some(text) = text else {
+            return;
+        };
+        crate::platform::clipboard::write_text(&text);
+    }
+
+    /// 当前选区的**纯文本**（没有选区 ⇒ `None`）。
+    ///
+    /// ⚠️ 主要是给**冒烟/测试**用的（用户侧走「复制」动作）。
+    pub fn selection_text(&self) -> Option<String> {
+        self.state.term.borrow().selection_text()
+    }
+
+    /// 一个单元格的像素尺寸（宽, 高）。
+    ///
+    /// ⚠️ 主要是给**冒烟/测试**用的（要把「第几格」换算成像素坐标才能
+    /// 用 xdotool 真拖）。没绘制过时是 (0,0)。
+    pub fn cell_size(&self) -> (f64, f64) {
+        *self.state.cell.borrow()
+    }
 
     /// 从剪贴板粘贴。
     ///
@@ -928,13 +965,76 @@ impl GhosttyView {
         // 0 = 任意键（左/中/右都算「点终端」）；右键菜单不受影响——
         // 菜单由别的控制器处理，这里只负责聚焦。
         g.set_button(0);
-        g.connect_pressed(move |_g, _n, _x, _y| {
+        g.connect_pressed(move |g, _n, _x, _y| {
+            // ⚠️ **左键单击清掉选区**（VTE / PuTTY 的行为）：不这样的话，
+            // 拖选过一次之后选区会一直挂着，用户看着像"取消不掉"。
+            //
+            // ⚠️ 只清**左键**：右键要弹菜单（清掉选区会让用户正在复制的东西
+            // 莫名其妙没了），中键是粘贴。
+            //
+            // ⚠️ GTK 的按键编号：1 = 主键（左）、2 = 次键（右）、3 = 中键。
+            //
+            // ⚠️ **正在拖选中就别清**：GTK 的两个手势谁先谁后不保证（实测
+            // `drag-begin` 比 `click pressed` 先到）⇒ 不看这个标志的话，
+            // 拖完选区会被这一下清掉 ⇒ 表现为"拖了没反应"。
+            if g.current_button() == 1 && !state.sel_dragging.get() {
+                clear_selection(&state);
+            }
             if !area.has_focus() {
                 area.grab_focus();
                 state.reset_blink();
             }
         });
         self.area.add_controller(g);
+    }
+
+    /// 装**鼠标拖选**（左键按下拖动 ⇒ 选中一段文字）。
+    ///
+    /// ⚠️ 用 `GestureDrag` 而不是自己写手势：GTK 管命中、拖动阈值、
+    /// 按键过滤（这里只吃左键）——自己写容易和点击抢焦点抢到手势。
+    ///
+    /// ⚠️ 拖动的回调只给**增量**（dx/dy）⇒ 自己累加出绝对位置。
+    fn install_selection(&self) {
+        let state = self.state.clone();
+        let drag = gtk::GestureDrag::new();
+        // 只用左键：右键留给菜单，中键留给粘贴
+        drag.set_button(1);
+        drag.connect_drag_begin({
+            let state = state.clone();
+            move |_g, x, y| {
+                state.sel_px.set((x, y));
+                let Some(cell) = cell_at(&state, x, y) else {
+                    return;
+                };
+                state.sel_anchor.set(Some(cell));
+                state.sel_end.set(Some(cell));
+                state.sel_dragging.set(true);
+                apply_selection(&state);
+            }
+        });
+        drag.connect_drag_update({
+            let state = state.clone();
+            move |_g, dx, dy| {
+                if !state.sel_dragging.get() {
+                    return;
+                }
+                let (px, py) = state.sel_px.get();
+                let (nx, ny) = (px + dx, py + dy);
+                state.sel_px.set((nx, ny));
+                let Some(cell) = cell_at(&state, nx, ny) else {
+                    return;
+                };
+                state.sel_end.set(Some(cell));
+                apply_selection(&state);
+            }
+        });
+        drag.connect_drag_end({
+            let state = state.clone();
+            move |_g, _dx, _dy| {
+                state.sel_dragging.set(false);
+            }
+        });
+        self.area.add_controller(drag);
     }
 
     /* ---------------- 按键 ---------------- */
@@ -1119,7 +1219,17 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
                     || run.underline != underline
                     || run.selected != selected)
             {
-                draw_run(state, cr, &run, col as f64 * cell_w - run.cols as f64 * cell_w, y, cell_w, cell_h, fg_default);
+                draw_run(
+                    state,
+                    cr,
+                    &run,
+                    col as f64 * cell_w - run.cols as f64 * cell_w,
+                    y,
+                    cell_w,
+                    cell_h,
+                    fg_default,
+                    bg_default,
+                );
                 run = Run::default();
             }
             run.fg = fg;
@@ -1140,6 +1250,7 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
                 cell_w,
                 cell_h,
                 fg_default,
+                bg_default,
             );
         }
     }
@@ -1191,6 +1302,7 @@ fn render_frame(state: &Rc<State>, cr: &gtk::cairo::Context, width: f64, height:
 }
 
 /// 画一段（样式相同的一串单元格）。
+#[allow(clippy::too_many_arguments)]
 fn draw_run(
     state: &Rc<State>,
     cr: &gtk::cairo::Context,
@@ -1200,6 +1312,7 @@ fn draw_run(
     cell_w: f64,
     cell_h: f64,
     fg_default: (f64, f64, f64),
+    bg_default: (f64, f64, f64),
 ) {
     // 背景色
     if let Some(bg) = run.bg {
@@ -1216,11 +1329,26 @@ fn draw_run(
     if run.text().trim().is_empty() {
         return;
     }
-    let fg = run.fg.unwrap_or(RgbColor {
-        r: (fg_default.0 * 255.0) as u8,
-        g: (fg_default.1 * 255.0) as u8,
-        b: (fg_default.2 * 255.0) as u8,
-    });
+    // ⚠️⚠️ **选中时文字也要反色**（用背景色）——只反底色是不够的！
+    //
+    // 以前只反底色 ⇒ 默认色的文字就是「**白底白字**」⇒ **选中的内容
+    // 根本看不见**（2026-11-14 用户问「选中的部分应该变色」时用像素探针
+    // 查出来的：选中区域的颜色**只有一种**（255,255,255））。
+    //
+    // ⇒ 真反白（VTE 同款）：底色 ← 前景色，文字 ← 背景色。
+    let fg = if run.selected {
+        RgbColor {
+            r: (bg_default.0 * 255.0) as u8,
+            g: (bg_default.1 * 255.0) as u8,
+            b: (bg_default.2 * 255.0) as u8,
+        }
+    } else {
+        run.fg.unwrap_or(RgbColor {
+            r: (fg_default.0 * 255.0) as u8,
+            g: (fg_default.1 * 255.0) as u8,
+            b: (fg_default.2 * 255.0) as u8,
+        })
+    };
     let color = (fg.r as f64 / 255.0, fg.g as f64 / 255.0, fg.b as f64 / 255.0);
     // ⚠️ **按段画**：空格段也要往前挪（否则行首缩进会丢）。
     let mut seg_x = x;
@@ -1369,6 +1497,61 @@ fn paint_bg(cr: &gtk::cairo::Context, rgb: &(f64, f64, f64), width: f64, height:
     cr.set_source_rgb(rgb.0, rgb.1, rgb.2);
     cr.rectangle(0.0, 0.0, width, height);
     cr.fill();
+}
+
+/* ---------------- 选区 ---------------- */
+
+/// 像素坐标 ⇒ 单元格（`(列, 行)`，**视口坐标**）。
+///
+/// ⚠️ 格子大小用**上一次绘制时量出来的**（`state.cell`）——绘制时量过
+/// 一次就存着，拖动时直接用（拖动事件很密，别每次都去问 Pango 量一遍）。
+/// 万一还没绘制过（`cell` 是 0）⇒ 当场量一次。
+fn cell_at(state: &Rc<State>, x: f64, y: f64) -> Option<(u16, u16)> {
+    let (mut cw, mut ch) = *state.cell.borrow();
+    if cw <= 0.0 || ch <= 0.0 {
+        let font = state.font.borrow().clone();
+        let (w, h, _) = measure_cell(&font);
+        cw = w;
+        ch = h;
+    }
+    if cw <= 0.0 || ch <= 0.0 {
+        return None;
+    }
+    let (cols, rows) = {
+        let t = state.term.borrow();
+        (t.column_count().max(1) as usize, t.row_count().max(1) as usize)
+    };
+    let cx = (x / cw).floor().max(0.0) as usize;
+    let cy = (y / ch).floor().max(0.0) as usize;
+    // ⚠️ 拖到终端**外面**（比如右边留白、下边）⇒ 不选（返回 None）
+    if cx >= cols || cy >= rows {
+        return None;
+    }
+    Some((cx as u16, cy as u16))
+}
+
+/// 把当前锚点/端点交给内核（内核那边会自己排顺序、反向拖也行）。
+fn apply_selection(state: &Rc<State>) {
+    let (Some(a), Some(b)) = (state.sel_anchor.get(), state.sel_end.get()) else {
+        return;
+    };
+    {
+        let mut term = state.term.borrow_mut();
+        let _ = term.set_selection(a, b);
+    }
+    // 选区变了 ⇒ 重画（高亮是内核给的 `is_selected` ⇒ 画的时候自动反白）
+    state.queue_draw_self();
+}
+
+/// 清掉选区（单击别处时用）。
+fn clear_selection(state: &Rc<State>) {
+    state.sel_anchor.set(None);
+    state.sel_end.set(None);
+    {
+        let mut term = state.term.borrow_mut();
+        term.clear_selection();
+    }
+    state.queue_draw_self();
 }
 
 /* ---------------- 按键处理 ---------------- */
