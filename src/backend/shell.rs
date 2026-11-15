@@ -93,13 +93,13 @@ impl ShellChannel {
         let chan = session
             .channel_open_session()
             .await
-            .map_err(|e| BackendError(format!("打开 SSH 通道失败: {e}")))?;
+            .map_err(|e| BackendError(crate::trf!("打开 SSH 通道失败: {e}", e = e)))?;
         if pty {
             Self::setup(&chan, cols, rows).await?;
         }
         chan.request_shell(true)
             .await
-            .map_err(|e| BackendError(format!("启动远程 shell 失败: {e}")))?;
+            .map_err(|e| BackendError(crate::trf!("启动远程 shell 失败: {e}", e = e)))?;
         Ok(Self::from_channel(chan))
     }
 
@@ -114,13 +114,13 @@ impl ShellChannel {
         let chan = session
             .channel_open_session()
             .await
-            .map_err(|e| BackendError(format!("打开 SSH 通道失败: {e}")))?;
+            .map_err(|e| BackendError(crate::trf!("打开 SSH 通道失败: {e}", e = e)))?;
         if pty {
             Self::setup(&chan, cols, rows).await?;
         }
         chan.exec(true, cmd)
             .await
-            .map_err(|e| BackendError(format!("执行远程命令失败: {e}")))?;
+            .map_err(|e| BackendError(crate::trf!("执行远程命令失败: {e}", e = e)))?;
         Ok(Self::from_channel(chan))
     }
 
@@ -132,7 +132,7 @@ impl ShellChannel {
         let chan = session
             .channel_open_session()
             .await
-            .map_err(|e| BackendError(format!("打开 SSH 通道失败: {e}")))?;
+            .map_err(|e| BackendError(crate::trf!("打开 SSH 通道失败: {e}", e = e)))?;
         Ok(Self::from_channel(chan))
     }
 
@@ -140,7 +140,7 @@ impl ShellChannel {
     async fn setup(chan: &Channel<Msg>, cols: u16, rows: u16) -> BackendResult<()> {
         chan.request_pty(true, TERM_TYPE, u32::from(cols), u32::from(rows), 0, 0, &[])
             .await
-            .map_err(|e| BackendError(format!("申请远程 pty 失败: {e}")))
+            .map_err(|e| BackendError(crate::trf!("申请远程 pty 失败: {e}", e = e)))
     }
 
     /// 把通道拆成读写两半。

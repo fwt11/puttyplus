@@ -56,6 +56,8 @@ use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
+use crate::i18n::tr;
+
 use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, HANDLE, DUPLICATE_SAME_ACCESS,
 };
@@ -140,7 +142,8 @@ impl ConPty {
             // ⚠️ CreatePseudoConsole 返回的是 **HRESULT**（不是 GetLastError），
             // 所以错误码在 hr 里，不能用 last_error()。
             return Err(io::Error::other(format!(
-                "创建 ConPTY 失败（HRESULT 0x{hr:08x}）"
+                "{} (HRESULT 0x{hr:08x})",
+                tr("创建 ConPTY 失败")
             )));
         }
 
@@ -177,17 +180,17 @@ impl ConPty {
     /// 形式的列表（**完整**的环境，不是增量）。
     pub fn spawn(&self, cwd: &str, argv: &[&str], env: &[&str]) -> io::Result<u32> {
         if argv.is_empty() {
-            return Err(io::Error::other("argv 为空，没法起子进程"));
+            return Err(io::Error::other(tr("argv 为空，没法起子进程")));
         }
         let hpc = {
             let g = self.lock();
             if g.process != 0 {
-                return Err(io::Error::other("这个 ConPTY 已经有子进程了"));
+                return Err(io::Error::other(tr("这个 ConPTY 已经有子进程了")));
             }
             g.hpc
         };
         if hpc == 0 {
-            return Err(io::Error::other("ConPTY 已关闭"));
+            return Err(io::Error::other(tr("ConPTY 已关闭")));
         }
 
         // Windows 收的是**一整条命令行**，不是 argv 数组 ⇒ 自己拼。
@@ -206,7 +209,7 @@ impl ConPty {
             InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
         }
         if attr_size == 0 {
-            return Err(io::Error::other("拿不到进程属性列表的大小"));
+            return Err(io::Error::other(tr("拿不到进程属性列表的大小")));
         }
         // 属性列表要求 8 字节对齐 ⇒ 用 `u64` 撑（`Vec<u8>` 只有 1 字节对齐）。
         let mut attr_buf = vec![0u64; attr_size.div_ceil(8)];
@@ -214,7 +217,7 @@ impl ConPty {
         // SAFETY: `attr_buf` 至少 `attr_size` 字节且 8 字节对齐（`Vec<u64>`）。
         let ok = unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) };
         if ok == 0 {
-            return Err(last_error("初始化进程属性列表"));
+            return Err(last_error(tr("初始化进程属性列表")));
         }
         // ⚠️ **`lpValue` 传的是「指向 HPCON 的指针」**，不是 HPCON 本身；
         // 传错 ⇒ 进程能起来，但**没挂在伪终端上**（没有 TTY ⇒ 交互式登录失败）。
@@ -233,7 +236,7 @@ impl ConPty {
         if ok == 0 {
             // SAFETY: 属性列表已初始化成功，删掉即可。
             unsafe { DeleteProcThreadAttributeList(attr_list) };
-            return Err(last_error("设置伪终端属性"));
+            return Err(last_error(tr("设置伪终端属性")));
         }
 
         // ---- 起进程 ----
@@ -269,7 +272,7 @@ impl ConPty {
         // SAFETY: `attr_list` 是上面初始化成功的那一个。
         unsafe { DeleteProcThreadAttributeList(attr_list) };
         if ok == 0 {
-            return Err(last_error("创建子进程"));
+            return Err(last_error(tr("创建子进程")));
         }
 
         // 线程句柄用不上 ⇒ 立刻关掉（只留进程句柄）。
@@ -305,7 +308,7 @@ impl ConPty {
         };
         let out = match out {
             Some(f) => f,
-            None => return Err(io::Error::other("ConPTY 已关闭")),
+            None => return Err(io::Error::other(tr("ConPTY 已关闭"))),
         };
         let mut r: &File = &out;
         // ⚠️ **只锁 pipe 那把锁**（不锁 `inner`）⇒ 阻塞读不会堵住敲键。
@@ -332,7 +335,7 @@ impl ConPty {
         };
         let inp = match inp {
             Some(f) => f,
-            None => return Err(io::Error::other("ConPTY 已关闭")),
+            None => return Err(io::Error::other(tr("ConPTY 已关闭"))),
         };
         let mut w: &File = &inp;
         w.write_all(&enc)
@@ -348,7 +351,7 @@ impl ConPty {
             g.hpc
         };
         if hpc == 0 {
-            return Err(io::Error::other("ConPTY 已关闭"));
+            return Err(io::Error::other(tr("ConPTY 已关闭")));
         }
         // SAFETY: `hpc` 是本会话的伪终端句柄（还没关）。
         let hr = unsafe { ResizePseudoConsole(hpc, coord(cols, rows)) };
@@ -356,7 +359,8 @@ impl ConPty {
             // ResizePseudoConsole 返回 **HRESULT**（不是 GetLastError）⇒ 错误码
             // 在 hr 里。
             return Err(io::Error::other(format!(
-                "调整伪终端大小失败（HRESULT 0x{hr:08x}）"
+                "{} (HRESULT 0x{hr:08x})",
+                tr("调整伪终端大小失败")
             )));
         }
         Ok(())
@@ -478,7 +482,7 @@ fn create_pipe() -> io::Result<(HANDLE, HANDLE)> {
     // **不可继承**（子进程不需要继承它们：ConPTY 那边是内核复制过去的）。
     let ok = unsafe { CreatePipe(&mut rd, &mut wr, std::ptr::null(), 0) };
     if ok == 0 {
-        return Err(last_error("创建管道"));
+        return Err(last_error(tr("创建管道")));
     }
     Ok((rd, wr))
 }
@@ -502,7 +506,12 @@ fn last_error(what: &str) -> io::Error {
     let raw = io::Error::from_raw_os_error(code);
     io::Error::new(
         raw.kind(),
-        format!("{what} 失败：{raw}（Win32 错误码 {code}）"),
+        crate::trf!(
+            "{what} 失败：{raw}（Win32 错误码 {code}）",
+            what = what,
+            raw = raw,
+            code = code
+        ),
     )
 }
 

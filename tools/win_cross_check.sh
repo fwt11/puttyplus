@@ -19,6 +19,10 @@
 # - `src/platform/utf16.rs`（ConPTY 的 UTF-16LE ⇄ UTF-8，**无平台门控**）
 # - `src/platform/conpty.rs`（ConPTY 本体；文件头是 `#![cfg(target_os="windows")]`
 #   ⇒ 只在 Windows 目标下才有内容 ⇒ 需要 `windows-sys`）
+# - `src/i18n.rs` + `src/i18n_en.rs`（**真实实现**，不是桩）⇒ 因为
+#   `conpty.rs` 的错误信息要 `tr()` / `trf!()` ⇒ 桩 crate 里也得有这两个
+#   ⚠️ 桩与主线不同步的话，这个检查就白做了（例：阶段 120 加 `trf!` 时，
+#   桩 crate 没跟上 ⇒ 交叉检查直接报「找不到 trf」）
 #
 # ⚠️ **conpty.rs 是 Windows 专属代码**（Linux 上根本不编译）⇒ 改错了只能等
 #    Windows CI 才暴露 ⇒ 这里把它也拉进来，让 Linux 上就能验。
@@ -77,6 +81,18 @@ cat > "$TMP/src/lib.rs" <<EOF
 //! 隔离交叉检查用：只放**不依赖 GTK** 的平台层文件。
 #![allow(dead_code)]
 #![allow(rustdoc::broken_intra_doc_links)]
+
+/// i18n（**真实实现**）—— conpty.rs 的错误信息要 tr() / trf!()。
+///
+/// ⚠️ **不能用桩**：桩与主线不同步 ⇒ 交叉检查就白做了
+///    （阶段 120 就是因为桩里没有 trf! 而报错）。
+/// ⚠️ **别在注释里写反引号**：这段 heredoc 没加引号 ⇒ 里面的反引号会被
+///    shell 当成命令替换 ⇒ 脚本自己会报「未找到命令」。
+#[path = "$REPO/src/i18n.rs"]
+pub mod i18n;
+
+#[path = "$REPO/src/i18n_en.rs"]
+pub mod i18n_en;
 
 pub mod platform {
     #[path = "$REPO/src/platform/localpath.rs"]
