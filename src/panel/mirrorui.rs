@@ -301,7 +301,14 @@ fn col(title: &str, id: i32, expand: bool) -> gtk::TreeViewColumn {
     c.set_title(title);
     c.set_expand(expand);
     c.set_resizable(true);
-    c.add_attribute(&gtk::CellRendererText::new(), "text", id);
+    // ⚠️ **渲染器必须 pack 进列**，而且要**显式绑定 "text"**：
+    //    GTK4 的 `pack_start` 只把渲染器塞进列（不绑属性 = 一片空白），
+    //    `add_attribute` 只登记映射（渲染器不在列里 = 什么也不画）。
+    //    少任何一步 ⇒ 整列空白（列头还在，看着像「没数据」）。
+    //    与 `panel/dbgrid.rs` / `panel/dbtree.rs` 同一个坑。
+    let r = gtk::CellRendererText::new();
+    c.pack_start(&r, true);
+    c.add_attribute(&r, "text", id);
     c
 }
 

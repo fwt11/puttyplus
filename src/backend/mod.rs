@@ -13,6 +13,7 @@ pub mod ermodel;
 pub mod dbhist;
 pub mod dbmeta;
 pub mod dbstore;
+pub mod docker;
 pub mod forward;
 pub mod hub;
 pub mod known_hosts;

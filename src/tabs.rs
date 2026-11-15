@@ -879,6 +879,21 @@ impl Tabs {
             });
         }
         {
+            // 「容器…」：显示远程服务器上的容器运行情况（阶段 109）。
+            //
+            // 跟「数据库…」一样是**连接级**的（复用同一条 SSH 连接）。
+            let b = mk("package-x-generic-symbolic", tr("容器…"));
+            let pg = page.clone();
+            b.connect_clicked(move |_| {
+                if let Some(st) = TABS
+                    .with(|w| w.borrow().clone())
+                    .and_then(|t| t.panel_state_for(&pg))
+                {
+                    panel::on_open_docker(&st);
+                }
+            });
+        }
+        {
             // 「新建数据库连接…」：给**当前会话**建一条数据库连接。
             //
             // 阶段 24：会话不一定在列表里（堡垒机场景），列表里没有它就

@@ -340,6 +340,15 @@ pub fn app_menubar(
             crate::panel::on_open_db(&st);
         }
     });
+    // 容器页（阶段 109）：显示远程服务器上的容器运行情况。
+    //
+    // ⚠️ 跟「数据库…」一样是**连接级**的（复用那条 SSH 连接开 exec 通道）
+    //    ⇒ 不新增连接。
+    act!("docker", || {
+        if let Some(st) = crate::tabs::current_panel_state() {
+            crate::panel::on_open_docker(&st);
+        }
+    });
     act!("sessopt", || {
         if let Some(st) = crate::tabs::current_panel_state() {
             crate::panel::on_open_session_opts(&st);

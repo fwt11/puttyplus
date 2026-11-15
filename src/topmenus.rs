@@ -158,6 +158,18 @@ pub const TOP_MENUS: &[(&str, &[MenuEntry])] = &[
                 enabled: Some(crate::tabs::has_session),
             },
             MenuEntry::Item {
+                // ⚠️ **容器页**（阶段 109）：显示远程服务器上的容器运行情况。
+                //
+                // 跟「数据库…」一样是**连接级**的（作用在这条 SSH 连接上）
+                // ⇒ 归「连接」菜单。
+                icon: "package-x-generic-symbolic",
+                label: "容器…",
+                action: "docker",
+                danger: false,
+                shortcut: None,
+                enabled: Some(crate::tabs::has_session),
+            },
+            MenuEntry::Item {
                 // ⚠️ 传输队列以前**只有 SFTP 文件面板工具栏上的一个图标**
                 // 能进（`pane.rs`）⇒ 错过一次桌面通知、想回看传过什么，
                 // 就找不到门了（审计 P1-9 / P2-18）。现在它也在主菜单里。

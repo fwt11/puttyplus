@@ -14,6 +14,7 @@ pub mod dbtransfer;
 pub mod erview;
 pub mod dbtree;
 pub mod dbui;
+pub mod dockerui;
 pub mod closeguard;
 pub mod clipfiles;
 pub mod dialogs;
@@ -199,6 +200,13 @@ pub struct PanelState {
 
     /// 数据库窗口（7.2，懒创建，hide-on-close）
     pub db_ui: RefCell<Option<dbui::DbUi>>,
+    /// **容器页**（阶段 109：显示远程服务器上的容器运行情况）。
+    ///
+    /// ⚠️ **只建一次**：页签关掉再打开还是这一份（跟 `db_ui` 一个规矩）。
+    ///
+    /// ⚠️ 存的是 **`Rc`**：界面回调要抓**弱引用**（AGENTS.md 引用环红线）
+    ///    ⇒ 弱引用只能从 `Rc` 来。
+    pub docker_ui: RefCell<Option<Rc<dockerui::DockerUi>>>,
 
     /// **还活着的终端个数**（阶段 65 / 审计 P0-4）。
     ///
@@ -409,6 +417,7 @@ impl SftpPanel {
             fwd_views: RefCell::new(Vec::new()),
             fwd_ui: RefCell::new(None),
             db_ui: RefCell::new(None),
+            docker_ui: RefCell::new(None),
             term_alive_count: Cell::new(0),
             term_ever_alive: Cell::new(false),
             db_active: RefCell::new(None),
@@ -2316,6 +2325,24 @@ fn check_db_channel(st: &Rc<PanelState>) -> bool {
         tr("数据库通道只支持 SSH 会话：当前协议没有可复用的 SSH 连接。"),
     );
     false
+}
+
+/// **容器页**入口（连接菜单 / 标签右键菜单）：显示远程服务器上的容器。
+///
+/// ⚠️ **只读**（阶段 109）：只能看，不能启停/进 shell ⇒ 后面几个阶段再做。
+///
+/// ⚠️ **不新增 SSH 连接**：容器视图复用**共享连接**（见
+///    [`crate::backend::hub`]）⇒ 一台服务器仍然只有一条连接。
+pub fn on_open_docker(st: &Rc<PanelState>) {
+    if !st.opts.is_ssh() {
+        dialogs::show_error(
+            st.topwin().as_ref(),
+            tr("容器"),
+            tr("容器列表只支持 SSH 会话：当前协议没有可复用的 SSH 连接。"),
+        );
+        return;
+    }
+    dockerui::mount(st);
 }
 
 /// 会话选项入口（会话菜单 / 标签右键菜单）：保活/字号/响铃的会话级覆盖。
