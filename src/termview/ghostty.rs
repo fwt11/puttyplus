@@ -23,10 +23,13 @@
 
 use ghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use ghostty_vt::key::{Action, Encoder, Key, Mods};
+use ghostty_vt::screen::TrackedGridRef;
 use ghostty_vt::search::Search;
 use ghostty_vt::selection::{FormatOptions, Selection};
 use ghostty_vt::style::{Palette as GtPalette, RgbColor};
-use ghostty_vt::terminal::{Event, Options, Point, PointCoordinate, ScrollViewport, Terminal};
+use ghostty_vt::terminal::{
+    Event, Options, Point, PointCoordinate, PointSpace, ScrollViewport, Terminal,
+};
 
 pub use ghostty_vt::key::{Action as KeyAction, Key as KeyCode, Mods as KeyMods};
 
@@ -55,6 +58,17 @@ fn point(cell: (u16, u16)) -> Point {
 
 /// ghostty 终端内核的句柄。
 pub struct GhosttyTerm {
+    /// 拖选的**锚点**（阶段 122）：钉在**内容**上的追踪引用。
+    ///
+    /// ⚠️ **为什么不能只存「视口坐标」**：视口坐标是「现在看得见的第几行」
+    ///    ⇒ 视口一滚（边缘自动滚动就会滚），同一个坐标指的是**另一行内容**
+    ///    ⇒ 选区的起点会跟着跑（选出来的东西在乱跳）。
+    ///    追踪引用钉的是**内容本身** ⇒ 视口怎么滚它都不动。
+    ///
+    /// ⚠️ **必须排在 `term` 前面**：Rust 的字段是**按声明顺序析构**的，
+    ///    而释放追踪引用要**碰内核的页表**（`ghostty_tracked_grid_ref_free`
+    ///    会 untrack pin）⇒ 必须先于内核释放。
+    sel_anchor: Option<TrackedGridRef>,
     term: Terminal,
     search: Search,
     encoder: Encoder,
@@ -73,6 +87,7 @@ impl GhosttyTerm {
         let search = Search::new(&term)?;
         let encoder = Encoder::new()?;
         Ok(GhosttyTerm {
+            sel_anchor: None,
             term,
             search,
             encoder,
@@ -389,6 +404,50 @@ impl GhosttyTerm {
     /// 清掉选区（单击别处时用）。
     pub fn clear_selection(&mut self) {
         let _ = self.term.set_selection(None);
+        // ⚠️ 锚点也要放：留着它只是白占着内核的页表（追踪引用会让那一行
+        //    不能被回收）。
+        self.sel_anchor = None;
+    }
+
+    /* ---------------- 拖选（阶段 122：锚点钉在内容上） ---------------- */
+
+    /// 开始一次拖选：把**锚点**钉在 `cell` 那一格**内容**上。
+    ///
+    /// ⚠️ **为什么要有这个**：边缘自动滚动会**滚视口** ⇒ 视口坐标会变
+    ///    ⇒ 只存「视口坐标」的锚点会跟着跑（选区起点在乱跳）。
+    ///    追踪引用（`TrackedGridRef`）钉的是**内容**⇒ 视口怎么滚都不动。
+    ///
+    /// ⚠️ 每次**新的拖选**都要重新调（旧的锚点会被换掉）。
+    ///
+    /// 返回是否钉上了（拿不到格子就是没钉上）。
+    pub fn begin_selection(&mut self, cell: (u16, u16)) -> bool {
+        let Ok(tracked) = self.term.track_grid_ref(point(cell)) else {
+            return false;
+        };
+        self.sel_anchor = Some(tracked);
+        true
+    }
+
+    /// 拖选进行中：把选区的**末端**挪到 `cell`（视口坐标）。
+    ///
+    /// ⚠️ 起点用**追踪锚点**（跟着内容走），末端用**当前视口坐标**
+    ///    （跟着鼠标走）⇒ 边缘自动滚动时：视口往上滚一行 ⇒ 末端落到
+    ///    更早的那一行 ⇒ **选区持续扩大**（用户 2026-11-15 要的就是这个）。
+    ///
+    /// 返回是否真的设上了。
+    pub fn set_selection_end(&mut self, cell: (u16, u16)) -> bool {
+        let Some(anchor) = self.sel_anchor.as_ref() else {
+            return false;
+        };
+        // ⚠️ 追踪引用的快照要**现取**（网格引用只在下次改动内核前有效）。
+        let Ok(Some(a)) = anchor.snapshot(&self.term) else {
+            return false;
+        };
+        let Ok(b) = self.term.grid_ref(point(cell)) else {
+            return false;
+        };
+        let sel = Selection::new(a, b, false);
+        self.term.set_selection(Some(&sel)).is_ok()
     }
 
     /// 取当前选区的**纯文本**（没有选区 ⇒ `None`）。
@@ -749,6 +808,56 @@ mod tests {
         assert!(
             text.contains("second"),
             "跨行选区应含第二行：{text:?}"
+        );
+    }
+
+    #[test]
+    fn 追踪锚点能设上选区() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.feed(b"hello world\r\nsecond line\r\n");
+        assert!(t.begin_selection((0, 0)), "锚点没钉上");
+        assert!(t.set_selection_end((4, 0)), "选区没设上");
+        let text = t.selection_text().expect("选区应有文本");
+        println!("追踪锚点选区文本 = {text:?}");
+        assert_eq!(text, "hello", "选区文本不对");
+    }
+
+    #[test]
+    fn 视口滚动后锚点还钉在同一行() {
+        // 阶段 122：边缘自动滚动会**滚视口** ⇒ 锚点不能跟着跑
+        // （否则选区会从中间裂开、变成好几行不相干的内容）。
+        let mut t = GhosttyTerm::new(80, 26).expect("建终端");
+        let mut buf = String::new();
+        for i in 0..100 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        t.scroll_viewport(-6);
+        assert!(t.begin_selection((0, 0)), "锚点没钉上");
+        assert!(t.set_selection_end((9, 0)), "选区没设上");
+        // 锚点与末端必须是**同一行**（视口坐标都是第 0 行）。
+        let anchor = t.sel_anchor.as_ref().expect("锚点");
+        let a = anchor
+            .snapshot(&t.term)
+            .expect("锚点快照")
+            .expect("锚点有值");
+        let b = t.term.grid_ref(point((9, 0))).expect("末端");
+        let ay = t
+            .term
+            .point_from_grid_ref(&a, PointSpace::Viewport)
+            .expect("锚点行号")
+            .expect("锚点有行");
+        let by = t
+            .term
+            .point_from_grid_ref(&b, PointSpace::Viewport)
+            .expect("末端行号")
+            .expect("末端有行");
+        assert_eq!(ay.y, by.y, "锚点与末端不在同一行 ⇒ 选区会裂开");
+        let text = t.selection_text().expect("选区应有文本");
+        println!("滚过视口后的选区文本 = {text:?}");
+        assert!(
+            text.starts_with("line"),
+            "选区文本不对（应当是视口第一行）：{text:?}"
         );
     }
 

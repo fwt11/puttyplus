@@ -4478,6 +4478,40 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
   CLI 契约 **PASS=73 FAIL=0**；冒烟 `fileedit_panel_smoke`（含 xdotool 真拖拽）
   全绿。
 
+## 四之十五、2026-11-15：阶段 122 —— ghostty 拖选到边缘 ⇒ 自动滚动 + 选区扩大
+
+- **起因（用户 2026-11-15）**：
+  > 「libvte 中，如果选中文字，然后鼠标一直向上或者向下，屏幕会跟着滚动，
+  > 选择范围会一直扩大。但 ghostty 中还不行」
+- **要做的三件事（缺一不可）**：
+  1. **边缘自动滚动**：拖选时指针停在终端**上下边缘外** ⇒ 视口持续滚动；
+  2. **滚动由定时器驱动**（指针停住不动时 GTK 不再发 `drag-update`）；
+  3. **选区锚点钉在内容上**（视口坐标会随滚动漂移 ⇒ 选区会从中间裂开）。
+- **实现**：
+  - `src/termview/ghostty.rs`：`GhosttyTerm` 加 `sel_anchor: Option<TrackedGridRef>`
+    （**内核的追踪引用**）；`begin_selection` / `set_selection_end` /
+    `clear_selection`。
+    ⚠️ **字段必须排在 `term` 前面**（Rust 按声明顺序析构；释放追踪引用要碰
+    内核的页表）。
+  - `src/termview/ghostty_view.rs`：`State.sel_cur`（指针最新位置）+
+    `State.sel_timer`；`start_autoscroll`（40ms 一拍）判方向 ⇒ 滚一行 ⇒
+    `cell_at_clamped` 重算末端 ⇒ 选区扩大。
+- ⚠️ **踩的坑**：
+  - **边缘缓冲必须取 0**（不是 ghostty 的 1px）：我们的控件**就是网格本身**
+    ⇒ 1px 缓冲会把「指针落在第一行上」误判成「出界」⇒ 一按下就滚。
+  - **冒烟脚本自己的坐标 bug**：`real_drag` 里 `m((from.0, from.1))` 取的是
+    `.0` ⇒ **y 被写成了 x** ⇒ 按下点跑到第一行上 ⇒ 看着像「拖选没选中」。
+  - **冒烟要在终端上方留空隙**（指针必须能出界）；指针跑出**窗口**不行
+    （X 会把指针夹回屏幕边缘）。
+  - **GDK 指针位置那几条路全是坑**（`area.native()` 不是 `gdk::Surface`、
+    `GestureExt::device` 歧义、GTK4 没有 `gtk_widget_device_position`）
+    ⇒ **不用它**：GTK 手势坐标本来就是控件局部且不夹取 ⇒ 出界时 y 就是负数。
+- **验证**：单测 **810 passed / 0 failed**（+2：追踪锚点 / 滚视口后锚点还在
+  同一行）；`cargo check --locked --examples` 通过；CLI 契约 **PASS=73 FAIL=0**；
+  Windows 交叉检查零错误；冒烟 `ghostty_scroll_smoke` 新增 ③b 段（按住不放拖到
+  控件上方 ⇒ 首行 69 → 54 + 选区 1 → 137 字符）绿；**反向验证**（关掉自动
+  滚动 ⇒ 退出码 101）成立。
+
 ## 四之十二、2026-11-15：阶段 109 —— 远程容器列表（只读，树形）
 
 - **起因（用户 2026-11-15）**：

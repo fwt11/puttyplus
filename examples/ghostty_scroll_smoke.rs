@@ -98,8 +98,7 @@ fn snapshot_png(view: &GhosttyView, w: i32, h: i32, out: Option<&str>) {
 }
 
 /// 把视图渲到内存 surface，返回像素（用来比对「画面变了没」）。
-fn snapshot_pixels(view: &GhosttyView, w: i32, h: i32) -> Vec<u8> {
-    let mut surf = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h)
+fn snapshot_pixels(view: &GhosttyView, w: i32, h: i32) -> Vec<u8> {    let mut surf = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h)
         .expect("建内存 surface");
     {
         let cr = gtk::cairo::Context::new(&surf).expect("建 cairo 上下文");
@@ -122,21 +121,42 @@ fn snapshot_pixels(view: &GhosttyView, w: i32, h: i32) -> Vec<u8> {
 /// **真的**拖一次（按下 → 拖 → 抬起）。
 ///
 /// ⚠️ 坐标是**窗口内**的（xdotool 的 `--window`）⇒ 要乘缩放倍率。
+///
+/// ⚠️⚠️ **别把 y 写成 x**（2026-11-15 踩过）：`m(from)` 取的是 `.0`（x），
+///    所以 y 必须显式用 `from.1` —— 一开始写成 `m((from.0, from.1))`
+///    ⇒ 指针被放到 `(x, x)` ⇒ 按下点跑到第一行上 ⇒ 看着像「拖选没选中」。
 fn real_drag(winid: &str, from: (f64, f64), to: (f64, f64), scale: f64) {
-    let m = |p: (f64, f64)| format!("{:.0}", p.0 * scale);
-    xdo(&["mousemove", "--window", winid, &m(from), &m((from.0, from.1))]);
+    let mx = |v: f64| format!("{:.0}", v * scale);
+    xdo(&[
+        "mousemove",
+        "--window",
+        winid,
+        &mx(from.0),
+        &mx(from.1),
+    ]);
     pump(120);
     xdo(&["mousedown", "1"]);
     pump(120);
     for i in 1..=6 {
         let x = from.0 + (to.0 - from.0) * i as f64 / 6.0;
         let y = from.1 + (to.1 - from.1) * i as f64 / 6.0;
-        xdo(&["mousemove", "--window", winid, &format!("{:.0}", x * scale), &format!("{:.0}", y * scale)]);
+        xdo(&[
+            "mousemove",
+            "--window",
+            winid,
+            &mx(x),
+            &mx(y),
+        ]);
         pump(40);
     }
     pump(150);
     xdo(&["mouseup", "1"]);
     pump(200);
+}
+
+/// 「line 42」⇒ 42（用来判滚动方向）。
+fn line_no(row: &str) -> Option<i64> {
+    row.trim().strip_prefix("line ")?.trim().parse().ok()
 }
 
 fn main() {
@@ -160,8 +180,17 @@ fn main() {
 
     let win = gtk::Window::new();
     win.set_title(Some("阶段 118 ghostty 滚动冒烟"));
-    win.set_default_size(800, 400);
-    win.set_child(Some(view.widget()));
+    win.set_default_size(800, 440);
+    // ⚠️ **终端上方要留一条空隙**：阶段 122 要验「指针拖到**控件外面**」
+    //    ⇒ 指针必须能跑到终端控件的上方，而**又还在窗口里**
+    //    （xdotool 的坐标是窗口内的；跑到窗口外会被 X 服务器夹回屏幕边缘
+    //    ⇒ 指针根本到不了「控件上方」）。
+    //    有了这条空隙，指针停在空隙里 = 停在终端控件**外面** ✓。
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let header = gtk::Label::new(Some("↑ 这一条是终端上方的空隙（阶段 122 要用）"));
+    root.append(&header);
+    root.append(view.widget());
+    win.set_child(Some(&root));
     win.present();
     pump(800);
 
@@ -234,6 +263,81 @@ fn main() {
         "选到的应当是**历史里**那一行（内容是 line NN），实际：{text:?}"
     );
     println!("[ok] 滚上去之后能选中历史里的字：{text:?}");
+
+    /* ---------------- ③b) 拖选到**边缘外** ⇒ 自动滚动 + 选区扩大（阶段 122） ------ */
+    //
+    // 用户 2026-11-15：「libvte 中，如果选中文字，然后鼠标一直向上或者向下，
+    // 屏幕会跟着滚动，选择范围会一直扩大。但 ghostty 中还不行」。
+    //
+    // ⚠️ **必须按住不放**（`mousedown` → `mousemove` → **不 `mouseup`**）：
+    //    真实拖拽会抬手 ⇒ 拖选结束 ⇒ 自动滚动就停了 ⇒ 那样验不到「持续
+    //    滚动」这个行为。
+    //
+    // ⚠️ 指针要停在**终端控件上方的那条空隙里**（窗口顶部那条 Label）
+    //    ⇒ 相对终端控件就是「出界」⇒ 边缘自动滚动该接手了。
+    let x0 = vx + cw * 2.0;
+    let y0 = vy + ch * 2.0;
+    let y_up = vy - 30.0; // ⚠️ **控件上方之外**（相对控件 y 为负 ⇒ 往上滚）
+    xdo(&[
+        "mousemove",
+        "--window",
+        &winid,
+        &format!("{:.0}", x0 * scale),
+        &format!("{:.0}", y0 * scale),
+    ]);
+    pump(120);
+    xdo(&["mousedown", "1"]);
+    pump(150);
+    let sel_before = view.selection_text().unwrap_or_default();
+    let rows_before = view.screen_rows();
+    // ⚠️ 拖到**控件上方之外** ⇒ 边缘自动滚动该接手了。
+    xdo(&[
+        "mousemove",
+        "--window",
+        &winid,
+        &format!("{:.0}", x0 * scale),
+        &format!("{:.0}", y_up * scale),
+    ]);
+    pump(700); // 自动滚动的节拍是 40ms ⇒ 700ms 能滚十几行
+    let sel_after = view.selection_text().unwrap_or_default();
+    let rows_after = view.screen_rows();
+    // 留张图（人能直接看「滚上去了 + 选区扩大了」）。
+    snapshot_png(
+        &view,
+        w,
+        h,
+        std::env::var("PP_GHOSTTY_SHOT_AUTOSCROLL")
+            .ok()
+            .as_deref(),
+    );
+    xdo(&["mouseup", "1"]);
+    pump(150);
+    assert_ne!(
+        rows_before.first(),
+        rows_after.first(),
+        "指针停在控件上方不动 ⇒ 屏幕**没有继续滚**（阶段 122 的边缘自动滚动没接上）"
+    );
+    // ⚠️ 方向也要对：指针在**上方** ⇒ 往**更早**的内容滚 ⇒ 首行的行号
+    //    必须**变小**（滚反了的话这里会红）。
+    let no_before = line_no(rows_before.first().map(|s| s.as_str()).unwrap_or(""));
+    let no_after = line_no(rows_after.first().map(|s| s.as_str()).unwrap_or(""));
+    assert!(
+        no_before.is_some() && no_after.is_some() && no_after < no_before,
+        "往上滚的方向不对：滚之前首行是 {rows_before:?}，滚之后是 {rows_after:?}"
+    );
+    assert!(
+        sel_after.len() > sel_before.len(),
+        "选区**没有扩大**：拖之前 {:?}，拖之后 {:?}",
+        sel_before,
+        sel_after
+    );
+    println!(
+        "[ok] 拖到边缘外 ⇒ 屏幕继续滚（首行 {} → {}）+ 选区扩大（{b} → {a} 字符）",
+        no_before.unwrap_or(-1),
+        no_after.unwrap_or(-1),
+        b = sel_before.len(),
+        a = sel_after.len()
+    );
 
     /* ---------------- ④ Shift+PageUp/PageDown 也能滚，且不发远端 ------------ */
     out.borrow_mut().clear();

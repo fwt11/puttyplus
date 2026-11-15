@@ -184,9 +184,11 @@ struct State {
     cwd_cb: RefCell<Vec<Box<dyn Fn(&str)>>>,
     /// 子进程退出的回调。
     exit_cb: RefCell<Option<Box<dyn Fn(i32)>>>,
-    /// 选区锚点（视口坐标：`(列, 行)`）——鼠标按下的那格。
-    sel_anchor: Cell<Option<(u16, u16)>>,
     /// 选区当前端（视口坐标）——鼠标现在指着的那格。
+    ///
+    /// ⚠️ **起点不在这里**：锚点钉在**内容**上（内核的追踪引用，见
+    ///    `ghostty::GhosttyTerm::begin_selection`）⇒ 边缘自动滚动时
+    ///    视口坐标会变，锚点不能跟着变。
     sel_end: Cell<Option<(u16, u16)>>,
     /// 拖选**起点**（像素，控件局部坐标）——鼠标按下的那一点。
     ///
@@ -195,6 +197,13 @@ struct State {
     sel_px: Cell<(f64, f64)>,
     /// 正在拖选（按下但还没抬手）。
     sel_dragging: Cell<bool>,
+    /// 拖选时指针的**最新位置**（像素，控件局部坐标）。
+    ///
+    /// ⚠️ **出界时是负数 / 超过控件高度**（这正是「拖到边缘自动滚动」要
+    ///    用的信号：VTE 里鼠标停在终端上方/下方 ⇒ 屏幕一直滚）。
+    sel_cur: Cell<(f64, f64)>,
+    /// 拖选期间的**自动滚动定时器**（阶段 122）。
+    sel_timer: RefCell<Option<glib::SourceId>>,
 }
 
 impl State {
@@ -461,10 +470,11 @@ impl GhosttyView {
             title_cb: RefCell::new(Vec::new()),
             cwd_cb: RefCell::new(Vec::new()),
             exit_cb: RefCell::new(None),
-            sel_anchor: Cell::new(None),
             sel_end: Cell::new(None),
             sel_px: Cell::new((0.0, 0.0)),
             sel_dragging: Cell::new(false),
+            sel_cur: Cell::new((0.0, 0.0)),
+            sel_timer: RefCell::new(None),
         });
         // 控件上挂一份 State ⇒ 能从控件反查回后端句柄
         // （`TermView::from_widget` 要用）。
@@ -1027,13 +1037,23 @@ impl GhosttyView {
             let state = state.clone();
             move |_g, x, y| {
                 state.sel_px.set((x, y));
+                state.sel_cur.set((x, y));
                 let Some(cell) = cell_at(&state, x, y) else {
                     return;
                 };
-                state.sel_anchor.set(Some(cell));
+                // ⚠️ **锚点钉在内容上**（不是「视口第几行」）⇒ 边缘自动
+                //    滚动把视口滚走时，选区的起点不会跑掉（阶段 122）。
+                {
+                    let mut term = state.term.borrow_mut();
+                    if !term.begin_selection(cell) {
+                        return;
+                    }
+                }
                 state.sel_end.set(Some(cell));
                 state.sel_dragging.set(true);
                 apply_selection(&state);
+                // 阶段 122：开始**边缘自动滚动**（指针停在上下边缘外就滚）。
+                start_autoscroll(&state);
             }
         });
         drag.connect_drag_update({
@@ -1055,7 +1075,14 @@ impl GhosttyView {
                 // ⚠️ 以前 `State::sel_px` 的注释就写着「内核只给增量，得自己
                 // 累加」——**当年就搞反了 GTK 的语义**。
                 let (bx, by) = state.sel_px.get();
-                let Some(cell) = cell_at(&state, bx + dx, by + dy) else {
+                let cur = (bx + dx, by + dy);
+                // ⚠️ **出界时 y 是负数 / 超过控件高度**（GTK 的手势坐标是
+                //    「相对控件分配区」的，**不夹取**）⇒ 这正是「鼠标在
+                //    终端上方 / 下方」的信号（阶段 122 的自动滚动靠它）。
+                // ⚠️ **最新位置要记下来**：指针停在边缘外**不动**时 GTK 不再
+                //    发 `drag-update` ⇒ 自动滚动定时器只能靠这个值（阶段 122）。
+                state.sel_cur.set(cur);
+                let Some(cell) = cell_at(&state, cur.0, cur.1) else {
                     return;
                 };
                 state.sel_end.set(Some(cell));
@@ -1066,6 +1093,7 @@ impl GhosttyView {
             let state = state.clone();
             move |_g, _dx, _dy| {
                 state.sel_dragging.set(false);
+                stop_autoscroll(&state);
             }
         });
         self.area.add_controller(drag);
@@ -1599,14 +1627,42 @@ fn cell_at(state: &Rc<State>, x: f64, y: f64) -> Option<(u16, u16)> {
     Some((cx as u16, cy as u16))
 }
 
-/// 把当前锚点/端点交给内核（内核那边会自己排顺序、反向拖也行）。
+/// `cell_at` 的**夹取**版本：越界时夹到边界（**不**返回 None）。
+///
+/// ⚠️ 只给「边缘自动滚动」用：指针在控件外时，普通 `cell_at` 返回 None
+///    （「拖到终端外面不选」的旧规矩）⇒ 选区就没法扩大了。
+fn cell_at_clamped(state: &Rc<State>, x: f64, y: f64) -> Option<(u16, u16)> {
+    let (mut cw, mut ch) = *state.cell.borrow();
+    if cw <= 0.0 || ch <= 0.0 {
+        let font = state.font.borrow().clone();
+        let (w, h, _) = measure_cell(&font);
+        cw = w;
+        ch = h;
+    }
+    if cw <= 0.0 || ch <= 0.0 {
+        return None;
+    }
+    let (cols, rows) = {
+        let t = state.term.borrow();
+        (t.column_count().max(1) as usize, t.row_count().max(1) as usize)
+    };
+    let cx = (x / cw).floor().max(0.0) as usize;
+    let cy = (y / ch).floor().max(0.0) as usize;
+    Some((cx.min(cols - 1) as u16, cy.min(rows - 1) as u16))
+}
+
+/// 把当前端点交给内核（起点用**追踪锚点**，内核那边会自己排顺序、
+/// 反向拖也行）。
+///
+/// ⚠️ 起点不在我们这儿：锚点钉在**内容**上（`begin_selection`）⇒ 视口
+///    被自动滚动滚走时，选区起点不跑。
 fn apply_selection(state: &Rc<State>) {
-    let (Some(a), Some(b)) = (state.sel_anchor.get(), state.sel_end.get()) else {
+    let Some(end) = state.sel_end.get() else {
         return;
     };
     {
         let mut term = state.term.borrow_mut();
-        let _ = term.set_selection(a, b);
+        let _ = term.set_selection_end(end);
     }
     // 选区变了 ⇒ 重画（高亮是内核给的 `is_selected` ⇒ 画的时候自动反白）
     state.queue_draw_self();
@@ -1614,13 +1670,101 @@ fn apply_selection(state: &Rc<State>) {
 
 /// 清掉选区（单击别处时用）。
 fn clear_selection(state: &Rc<State>) {
-    state.sel_anchor.set(None);
     state.sel_end.set(None);
     {
         let mut term = state.term.borrow_mut();
         term.clear_selection();
     }
     state.queue_draw_self();
+}
+
+/* ---------------- 拖选时的边缘自动滚动（阶段 122） ---------------- */
+
+/// 自动滚动的节拍（毫秒）。
+///
+/// ⚠️ ghostty 自己是 15ms；我们 40ms ⇒ 慢一点 ⇒ **一次滚一行**看着更稳
+///    （太快会让人眼花，而且每滚一行都要重算一次选区）。
+const AUTOSCROLL_INTERVAL_MS: u64 = 40;
+
+/// 边缘的**缓冲带**（像素）：指针离控件边缘这么近就算「出界了」。
+///
+/// ⚠️ **取 0**：只在指针**真的跑到控件外面**（y < 0 或 y > 控件高度）时
+///    才自动滚动。
+///    ⚠️ **别学 ghostty 用 1px 缓冲**：ghostty 的 surface 上面有内边距，
+///    1px 缓冲是为了「贴着第一行也能滚」；而我们的控件**就是网格本身**
+///    ⇒ 1px 缓冲会把「指针落在第一行上」误判成「出界」⇒ 一按下就滚
+///    （2026-11-15 实测踩过：指针明明在第一行，屏幕却自己往上滚，
+///    选区被撑成好几行）。
+const AUTOSCROLL_EDGE_PX: f64 = 0.0;
+
+/// 拖选时：指针停在**上下边缘外** ⇒ 屏幕持续滚动（阶段 122）。
+///
+/// 干什么用（用户 2026-11-15）：「libvte 中，如果选中文字，然后鼠标一直向上
+/// 或者向下，屏幕会跟着滚动，选择范围会一直扩大。但 ghostty 中还不行」。
+///
+/// ⚠️ **为什么必须有定时器**：指针停在边缘外**不动**时，GTK 不再发
+///    `drag-update` ⇒ 只靠拖动回调没法「一直滚」⇒ 得自己按节拍滚。
+///
+/// ⚠️ **指针位置从哪来**：用拖动回调记下的**最后一次位置**
+///    （`State::sel_cur`）。GTK 的手势坐标是「相对控件分配区」的、
+///    **不夹取** ⇒ 指针出界时 y 就是负数 / 超过控件高度 ⇒ 正好当
+///    「出界了」的信号。
+///    ⚠️ 指针停住不动时不会再有 `drag-update` ⇒ 但**最后那个位置已经
+///    是出界的位置**了 ⇒ 照样能滚（这正是要的）。
+///
+/// ⚠️ **滚动后要重算选区端点**：视口一动 ⇒ 同一个指针位置对应**不同的行**
+///    ⇒ 选区端点跟着走 ⇒ **选择范围持续扩大**（用户要的正是这个）。
+///
+/// ⚠️ 方向：`scroll_lines` 的**负数＝往回看**（更早的内容）⇒ 指针在**上方**
+///    ⇒ 往回看；指针在**下方** ⇒ 往下看。
+fn start_autoscroll(state: &Rc<State>) {
+    stop_autoscroll(state);
+    // ⚠️ 定时器闭包只抓**弱引用**：强引用会把 State 吊住（控件销毁了定时器
+    //    还在跑）⇒ 照 `reset_blink` 的规矩来。
+    let weak = Rc::downgrade(state);
+    let id = glib::timeout_add_local(
+        std::time::Duration::from_millis(AUTOSCROLL_INTERVAL_MS),
+        move || {
+            let Some(s) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if !s.sel_dragging.get() {
+                return glib::ControlFlow::Break;
+            }
+            // 控件没了（标签关了）⇒ 收摊。
+            let Some(area) = s.area.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let (x, y) = s.sel_cur.get();
+            let h = area.height() as f64;
+            let step = if y < AUTOSCROLL_EDGE_PX {
+                -1 // 指针在**上方** ⇒ 往回看（更早的内容）
+            } else if y > h + AUTOSCROLL_EDGE_PX {
+                1 // 指针在**下方** ⇒ 往下看
+            } else {
+                0
+            };
+            if step != 0 {
+                scroll_lines(&s, step);
+                // ⚠️ **指针在控件外** ⇒ `cell_at` 会返回 None（那是「拖到
+                //    终端外面不选」的旧规矩）⇒ 这里要用**夹取**版本 ⇒ 选到
+                //    边缘那一行 ⇒ **选区跟着扩大**。
+                if let Some(cell) = cell_at_clamped(&s, x, y) {
+                    s.sel_end.set(Some(cell));
+                    apply_selection(&s);
+                }
+            }
+            glib::ControlFlow::Continue
+        },
+    );
+    *state.sel_timer.borrow_mut() = Some(id);
+}
+
+/// 停掉自动滚动（拖选结束）。
+fn stop_autoscroll(state: &Rc<State>) {
+    if let Some(id) = state.sel_timer.borrow_mut().take() {
+        id.remove();
+    }
 }
 
 /* ---------------- 视口滚动 ---------------- */
