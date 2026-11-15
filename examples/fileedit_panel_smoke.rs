@@ -1,23 +1,26 @@
-//! **文本编辑页也带上文件面板**的冒烟（阶段 98）。
+//! **终端与文件编辑器同窗同时显示 + 编辑器可拖动停靠**的冒烟（阶段 107/108）。
 //!
-//! **背景**：阶段 97 把文件面板搬进了终端子页签（切页签时页签头不再跳位）。
-//! 阶段 98 让**文本编辑页**也变成「文件面板｜编辑器」的结构 —— 用户编辑
-//! 远程文件时，左边照样能浏览目录、点别的文件换着编辑，不用来回切页签。
+//! **背景**：
+//! - 用户 2026-11-14：「终端和文件编辑可以放在同一个窗口中，同时显示」；
+//! - 用户 2026-11-15：「我是希望文本编辑器和 term 的宽度一样，就是不要
+//!   占用文件列表的空间。而且我希望也可以拖动它的 tab，把它拖动到原来
+//!   修改之前的位置，这样更灵活些。」
 //!
-//! **文件面板是会话级的一个 widget**，跟着「当前页」走：切到编辑页就搬进
-//! 编辑页，切回终端页就搬回终端页。**数据库工作台页不托管它**（那一页
-//! 要整页宽度）。
+//! 阶段 107 把编辑区放在**连接页底部**（横跨整页 ⇒ 压在文件列表上方）。
+//! 阶段 108 改成：编辑区住在**终端列**里（终端子页里那个竖向 Paned 的下半）
+//! ⇒ **与终端同宽**、**不占文件列表的空间**；而且编辑器能在
+//! 「编辑区 ⇄ 子标签栏」之间**拖动**（拖回子标签栏 = 变回子页签，
+//! 跟阶段 107 之前一样）。
 //!
 //! **断言**：
-//! 1. 终端页：文件面板在终端页的 Paned 里（340px）；
-//! 2. 打开一个本地文件 ⇒ 编辑器页出现 ⇒ 文件面板**搬进编辑页**（宽度仍是 340）；
-//! 3. 切回终端页 ⇒ 文件面板搬回终端页（编辑页的左格空着）；
-//! 4. 切回编辑页 ⇒ 又搬进去；
-//! 5. 切到数据库页 ⇒ 文件面板**留在编辑页里**（数据库页不抢它的位置）；
-//! 6. **关掉编辑页签**（此刻文件面板正托管在里面）⇒ 文件面板**没被销毁**
-//!    （GTK4 里容器被销毁会把它子控件一起 destroy ⇒ 宿主 Paned 必须有人
-//!    强引用护着，见 `PanelState::file_host`）；
-//! 7. 切到终端页 ⇒ 文件面板回来了、可见、宽度还是 340。
+//! 1. 布局：终端子页 = 横向 Paned（左＝文件面板，右＝**终端列**），
+//!    终端列 = 竖向 Paned（上＝终端，下＝**编辑区**）；
+//! 2. 打开文件 ⇒ 编辑区在**终端列**里，**与终端等宽**、**左边缘对齐**、
+//!    **不压到文件列表**，且**终端仍然可见**（阶段 107 的核心）；
+//! 3. 拖放零件真的装上了（编辑器标签有拖拽源、页签栏与终端列有接收器）；
+//! 4. 「拖回子标签栏」⇒ 编辑器变成一个子页签（页签数 +1、编辑区藏起来）；
+//!    「拖回来」⇒ 又变回编辑区里的编辑器（页签数复原、编辑区露出来）；
+//! 5. 改内容 ⇒ 标题带「●」脏标记；全关 ⇒ 编辑区藏起来。
 //!
 //! ```text
 //! xvfb-run -a cargo run --example fileedit_panel_smoke
@@ -38,13 +41,6 @@ impl Drop for TempFiles {
     }
 }
 
-/// 两个 Paned 是不是同一个（GTK 控件按 GObject 指针比）。
-fn same(a: &gtk::Paned, b: &gtk::Paned) -> bool {
-    // ⚠️ 用 `==`（gtk::Widget 的 PartialEq 比的是 GObject 指针），
-    // 别用 `std::ptr::eq` 比 upcast 出来的引用——那比的是引用本身的地址。
-    a.upcast_ref::<gtk::Widget>() == b.upcast_ref::<gtk::Widget>()
-}
-
 fn pump(ms: u64) {
     let ctx = gtk::glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -56,12 +52,209 @@ fn pump(ms: u64) {
     }
 }
 
-/// 文件面板现在的宿主（它左边那个 Paned）。
+/// 文件面板现在的宿主（它左边那个 Paned = 终端子页）。
 fn host_of(st: &puttyplus::panel::PanelState) -> gtk::Paned {
     st.root
         .parent()
         .and_downcast::<gtk::Paned>()
         .expect("文件面板应当挂在某个 Paned 的左格里")
+}
+
+/// 终端控件（阶段 107 的核心断言：编辑器开着的时候它**仍然可见**）。
+fn term_widget(st: &puttyplus::panel::PanelState) -> gtk::Widget {
+    st.term
+        .borrow()
+        .as_ref()
+        .expect("面板应当记着终端")
+        .widget()
+        .clone()
+}
+
+/// 这个控件上有没有装某类事件控制器（拖拽源 / 拖放接收器）。
+///
+/// ⚠️ GTK4 **没有公开**「某个控件挂了哪些控制器」⇒ 用
+/// `gtk_widget_observe_controllers`（gtk4-rs 绑成了 `observe_controllers`）。
+fn controllers(w: &impl IsA<gtk::Widget>) -> Vec<glib::Object> {
+    let m = w.as_ref().observe_controllers();
+    (0..m.n_items()).filter_map(|i| m.item(i)).collect()
+}
+
+/// 控件上有没有装拖拽源。
+fn has_drag_source(w: &impl IsA<gtk::Widget>) -> bool {
+    controllers(w)
+        .iter()
+        .any(|o| o.downcast_ref::<gtk::DragSource>().is_some())
+}
+
+/// 控件上有没有装拖放接收器。
+fn has_drop_target(w: &impl IsA<gtk::Widget>) -> bool {
+    controllers(w)
+        .iter()
+        .any(|o| o.downcast_ref::<gtk::DropTargetAsync>().is_some())
+}
+
+/// 这棵控件树里有没有装拖拽源（编辑器的小标签上的那个）。
+fn tree_has_drag_source(w: &impl IsA<gtk::Widget>) -> bool {
+    if has_drag_source(w.as_ref()) {
+        return true;
+    }
+    let mut c = w.as_ref().first_child();
+    while let Some(x) = c {
+        if tree_has_drag_source(&x) {
+            return true;
+        }
+        c = x.next_sibling();
+    }
+    false
+}
+
+/// 我们自己那个窗口的 X id。
+fn window_wid() -> String {
+    std::process::Command::new("xdotool")
+        .args(["search", "--name", "fileedit panel smoke"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// 窗口在屏幕上的绝对位置（**没有窗口管理器**时是 (0,0)）。
+///
+/// ⚠️ Xvfb 下**没有 WM** ⇒ 窗口没有标题栏、没有边框 ⇒ 控件在窗口里的
+/// 坐标就是屏幕坐标。
+fn window_origin(title: &str) -> (i32, i32) {
+    let out = std::process::Command::new("xdotool")
+        .args(["search", "--name", title])
+        .output();
+    let Ok(out) = out else { return (0, 0) };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(wid) = text.lines().next() else {
+        return (0, 0);
+    };
+    let geo = std::process::Command::new("xdotool")
+        .args(["getwindowgeometry", "--shell", wid])
+        .output();
+    let Ok(geo) = geo else { return (0, 0) };
+    let text = String::from_utf8_lossy(&geo.stdout);
+    let mut x = 0;
+    let mut y = 0;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("X=") {
+            x = v.trim().parse().unwrap_or(0);
+        }
+        if let Some(v) = line.strip_prefix("Y=") {
+            y = v.trim().parse().unwrap_or(0);
+        }
+    }
+    (x, y)
+}
+
+/// 屏幕上**除了我们这个窗口**、还有哪些「像窗口」的窗口。
+///
+/// ⚠️ 连接失败时面板会弹一个模态对话框（「SFTP 连接失败」）⇒ 它
+/// **抓走输入** ⇒ 父窗口一个事件都收不到 ⇒ 真拖拽按不动。
+///
+/// ⇒ 拖之前先看一眼有没有它，有就**跳过真拖拽**（别去关它：
+/// `xdotool windowclose` 会让 GDK 在销毁 EGL surface 时断言崩掉）。
+fn extra_windows(keep: &str) -> Vec<String> {
+    let Ok(all) = std::process::Command::new("xdotool")
+        .args(["search", "--onlyvisible", "--name", ".*"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    // 根窗口不算（它跟屏幕一样大）
+    //
+    // ⚠️ `xdotool getwindowroot` 在老版本 xdotool 里**没有**这个命令
+    // ⇒ 改成按**尺寸**判断：跟屏幕一样大的就是根窗口。
+    let disp = std::process::Command::new("xdotool")
+        .arg("getdisplaygeometry")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().map(|v| v.to_string()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let screen_w: i32 = disp.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let screen_h: i32 = disp.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut names: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&all.stdout).lines() {
+        let wid = line.trim();
+        if wid.is_empty() || wid == keep {
+            continue;
+        }
+        // 只关「像对话框」的那些（1x1 的辅助窗口不算）
+        let Ok(geo) = std::process::Command::new("xdotool")
+            .args(["getwindowgeometry", "--shell", wid])
+            .output()
+        else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&geo.stdout);
+        let num = |k: &str| {
+            text.lines()
+                .find(|l| l.starts_with(k))
+                .and_then(|l| l.split('=').nth(1))
+                .and_then(|v| v.trim().parse::<i32>().ok())
+                .unwrap_or(0)
+        };
+        if num("WIDTH") < 50 || num("HEIGHT") < 50 {
+            continue;
+        }
+        // 根窗口（跟屏幕一样大）不算
+        if screen_w > 0 && num("WIDTH") >= screen_w && num("HEIGHT") >= screen_h {
+            continue;
+        }
+        let nm = std::process::Command::new("xdotool")
+            .args(["getwindowname", wid])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        names.push(format!("{wid}「{nm}」"));
+    }
+    names
+}
+
+/// 树里第一个按钮（编辑器小标签里那个「文件名」按钮）。
+fn find_button(w: &impl IsA<gtk::Widget>) -> Option<gtk::Button> {
+    let mut c = w.as_ref().first_child();
+    while let Some(x) = c {
+        if let Some(b) = x.downcast_ref::<gtk::Button>() {
+            return Some(b.clone());
+        }
+        if let Some(b) = find_button(&x) {
+            return Some(b);
+        }
+        c = x.next_sibling();
+    }
+    None
+}
+
+/// **真的**拖一次（xdotool 驱动 X 指针，GTK 那边照常收到拖拽事件）。
+///
+/// ⚠️ **必须放到另一个线程里跑**：拖拽期间主线程要继续转 GTK 主循环，
+/// 否则事件没人处理 ⇒ 拖不动。
+fn real_drag(from: (i32, i32), to: (i32, i32)) {
+    let xdo = |args: &[&str]| {
+        let _ = std::process::Command::new("xdotool").args(args).status();
+    };
+    xdo(&["mousemove", &from.0.to_string(), &from.1.to_string()]);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    xdo(&["mousedown", "1"]);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // 分好几步移动：GTK 要越过**拖拽阈值**才起拖。
+    for i in 1..=12 {
+        let x = from.0 + (to.0 - from.0) * i / 12;
+        let y = from.1 + (to.1 - from.1) * i / 12;
+        xdo(&["mousemove", &x.to_string(), &y.to_string()]);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    xdo(&["mouseup", "1"]);
 }
 
 /// 截图（同一个 X display 里调 scrot，不用另开一个显示）。
@@ -86,8 +279,13 @@ fn main() {
         "pp_fileedit_panel_smoke_{}.txt",
         std::process::id()
     ));
-    std::fs::write(&tmp_txt, "hello\nPuTTYPlus 阶段 98：编辑页也带文件面板\n").expect("写临时文件");
-    let _guard = TempFiles(vec![settings_ini.clone(), tmp_txt.clone()]);
+    std::fs::write(&tmp_txt, "hello\nPuTTYPlus 阶段 108：编辑器与终端同宽\n").expect("写临时文件");
+    let tmp_two = std::env::temp_dir().join(format!(
+        "pp_fileedit_panel_smoke2_{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&tmp_two, "second\n").expect("写临时文件");
+    let _guard = TempFiles(vec![settings_ini.clone(), tmp_txt.clone(), tmp_two.clone()]);
 
     gtk::init().expect("gtk init");
     puttyplus::theme::apply(puttyplus::theme::Theme::Light);
@@ -116,11 +314,10 @@ fn main() {
     win.set_child(Some(&tabs.notebook));
     win.present();
     pump(600);
-
     let st = tabs.current_panel_state().expect("应有当前面板");
     let sub = st.sub_tabs().expect("应有子标签容器");
 
-    // ---- 1) 终端页：文件面板在终端页的 Paned 里 ----
+    // ---- 1) 布局：文件面板｜终端列（横向），终端列 = 终端｜编辑区（竖向） ----
     assert_eq!(sub.current_kind(), PageKind::Terminal, "第一页应当是终端");
     assert!(st.root.is_mapped(), "终端页时文件面板应当显示在屏幕上");
     let term_host = host_of(&st);
@@ -130,103 +327,347 @@ fn main() {
         "终端页里文件面板的宽度不对：{}",
         term_host.position()
     );
-    let term_id = sub.id_by_title("终端").expect("应当有终端子页");
-    println!("[1] 终端页：文件面板 {w}px 在终端页的 Paned 里 ✓", w = st.root.width());
+    // 阶段 108：终端子页的右半是**终端列**（竖向 Paned）
+    let term_col = term_host
+        .end_child()
+        .and_downcast::<gtk::Paned>()
+        .expect("阶段 108：终端子页右半应当是终端列（竖向 Paned）");
+    let pages_before = sub.page_count();
+    println!(
+        "[1] 布局：文件面板 {w}px｜终端列（竖向）✓",
+        w = st.root.width()
+    );
 
-    // ---- 2) 打开一个文件 ⇒ 编辑器页 ⇒ 文件面板搬进去 ----
+    // ---- 2) 打开一个文件 ⇒ 编辑区进终端列，与终端同宽、不压文件列表 ----
     puttyplus::panel::fileedit::open_local(&st, tmp_txt.to_str().unwrap(), false);
     pump(700);
-    assert_eq!(
-        sub.current_kind(),
-        PageKind::FileEdit,
-        "新开的编辑器应当是当前页（种类没标对 ⇒ 上层不知道它能托管文件面板）"
-    );
-    let edit_title = tmp_txt
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .expect("临时文件应当有文件名");
-    let edit_id = sub
-        .id_by_title(&edit_title)
-        .expect("应当能找到编辑器的子页");
-    let edit_host = host_of(&st);
+    // ⚠️ **核心断言**（放最前）：终端**仍然可见** ⇒ 这就是"同窗同时显示"。
+    let term = term_widget(&st);
     assert!(
-        !same(&term_host, &edit_host),
-        "文件面板没搬进编辑页（还待在终端页里）"
+        term.is_mapped(),
+        "编辑器打开后终端不见了（阶段 107 的核心：两个要同时显示）"
     );
     assert_eq!(
-        edit_host.position(),
-        340,
-        "搬进编辑页后宽度应当按记忆值复位：{}",
-        edit_host.position()
+        sub.page_count(),
+        pages_before,
+        "编辑器不该再占子页签（阶段 107：它住终端列下面的编辑区）"
     );
+    assert_eq!(sub.editor_count(), 1, "编辑区里应当有一个编辑器");
     assert!(
-        st.root.is_mapped(),
-        "编辑页时文件面板应当显示在屏幕上"
+        sub.editor_area_visible(),
+        "编辑区应当露出来（用户开着编辑器却看不见 = 功能等于没有）"
     );
-    println!("[2] 编辑器页：文件面板搬进来了（宽度仍是 340px）✓");
-    shot("/tmp/fileedit_panel.png");
-
-    // ---- 3) 切回终端页 ⇒ 文件面板搬回去 ----
-    sub.switch_to(term_id);
-    pump(400);
-    let back = host_of(&st);
-    assert!(same(&back, &term_host), "切回终端页后文件面板没搬回终端页");
-    assert_eq!(back.position(), 340, "搬回来以后宽度变了");
-    assert!(
-        edit_host.start_child().is_none(),
-        "编辑页的左格应当空了（文件面板搬走了）"
-    );
-    assert!(st.root.is_mapped(), "切回终端页后文件面板应当可见");
-    println!("[3] 切回终端页：文件面板搬回去了 ✓");
-
-    // ---- 4) 再切回编辑页 ⇒ 又搬进去 ----
-    sub.switch_to(edit_id);
-    pump(400);
-    let again = host_of(&st);
-    assert!(same(&again, &edit_host), "切回编辑页后文件面板没搬回去");
-    assert_eq!(again.position(), 340, "搬进去以后宽度变了");
-    println!("[4] 切回编辑页：文件面板又搬进去了 ✓");
-
-    // ---- 5) 切到数据库页 ⇒ 文件面板留在编辑页里 ----
-    puttyplus::panel::on_open_db_page(&st);
-    puttyplus::panel::dbui::mount_for_test(&st);
-    pump(600);
-    assert_eq!(sub.current_kind(), PageKind::Db, "应当切到数据库页");
-    let in_db = host_of(&st);
-    assert!(
-        same(&in_db, &edit_host),
-        "文件面板不该被搬到数据库页（那一页要整页宽度，不托管文件面板）"
-    );
-    assert!(
-        !st.root.is_mapped(),
-        "数据库页激活时文件面板不该露出来（它留在编辑页里）"
-    );
-    println!("[5] 数据库页：文件面板留在编辑页里（数据库页要整页宽度）✓");
-
-    // ---- 6) 关掉编辑页签（此刻文件面板正托管在里面）⇒ 不能被连带销毁 ----
-    assert!(
-        sub.close_page(edit_id),
-        "关不掉编辑器的子页签"
-    );
-    pump(400);
+    // 文件面板**不再**搬进编辑器页 ⇒ 一直待在终端页里。
     assert!(
         st.root.parent().is_some(),
-        "文件面板被连带销毁了（关个编辑页签不该把文件面板弄没）"
+        "文件面板被连带销毁了（开编辑器不该动它）"
     );
-    println!("[6] 关掉编辑页签：文件面板没被连带销毁 ✓");
+    let still_term = host_of(&st);
+    assert_eq!(
+        still_term.position(),
+        340,
+        "文件面板宽度变了：{}",
+        still_term.position()
+    );
 
-    // ---- 7) 切回终端页 ⇒ 文件面板回来了 ----
-    sub.switch_to(term_id);
-    pump(500);
-    let home = host_of(&st);
-    assert!(same(&home, &term_host), "文件面板没回到终端页");
-    assert_eq!(home.position(), 340, "回来以后宽度变了");
+    // ---- 阶段 108 的核心：编辑区在**终端列**里，与终端**同宽** ----
+    let area = sub.editor_area_widget();
+    let area_host = area
+        .parent()
+        .and_downcast::<gtk::Paned>()
+        .expect("阶段 108：编辑区应当挂在终端列（竖向 Paned）里");
     assert!(
-        st.root.is_mapped(),
-        "文件面板回来以后应当可见（不能把用户永久关在门外）"
+        area_host == term_col,
+        "阶段 108：编辑区没住进终端列（编辑区应当与终端同宽）"
     );
-    assert!(st.root.width() > 100, "文件面板应当占着宽度");
-    println!("[7] 切回终端页：文件面板回来了（{}px）✓", st.root.width());
+    // 与终端**等宽**、**左边缘对齐**
+    //
+    // ⚠️ **允许 4px 的差**：Paned 的**分隔条（handle）**本身占 1~2px ⇒
+    // 终端那一格比编辑区那格窄那么一点点（文件面板那侧也一样）。
+    let tx = term
+        .compute_point(&area, &gtk::graphene::Point::new(0.0, 0.0))
+        .expect("终端与编辑区要能互相换算坐标")
+        .x() as f64;
+    assert!(
+        tx.abs() <= 1.0,
+        "编辑器与终端左边缘没对齐（差 {tx}px）"
+    );
+    let dw = (term.width() - area.width()).abs();
+    assert!(
+        dw <= 4,
+        "编辑器与终端不等宽：终端 {}px、编辑器 {}px（差 {dw}px）",
+        term.width(),
+        area.width()
+    );
+    // **不占文件列表的空间**：编辑区左边缘（换算到文件面板那边）
+    // 必须在文件面板右边。
+    let ex = area
+        .compute_point(&st.root, &gtk::graphene::Point::new(0.0, 0.0))
+        .expect("编辑区与文件面板要能互相换算坐标")
+        .x() as f64;
+    let fw = st.root.width() as f64;
+    assert!(
+        ex >= fw - 0.5,
+        "编辑器压在文件列表上了：编辑器左边缘 {ex}px < 文件面板宽 {fw}px"
+    );
+    println!(
+        "[2] 编辑区在终端列里：与终端同宽（{w}px）、不压文件列表（{ex} >= {fw}）✓",
+        w = area.width(),
+        ex = ex,
+        fw = fw
+    );
+    shot("/tmp/fileedit_panel.png");
+
+    // ---- 3) 拖放零件真的装上了（阶段 108） ----
+    assert!(
+        tree_has_drag_source(&area),
+        "编辑区上没装拖拽源（编辑器标签拖不动 = 功能等于没有）"
+    );
+    assert!(
+        has_drop_target(&sub.nb),
+        "页签栏上没装拖放接收器（编辑器拖不回子标签栏 = 功能等于没有）"
+    );
+    assert!(
+        has_drop_target(&area),
+        "编辑区上没装停靠接收器（编辑器拖不回编辑区 = 功能等于没有）"
+    );
+    println!("[3] 拖放零件齐了：拖拽源 + 页签栏接收器 + 停靠接收器 ✓");
+    // ---- 4) 拖回子标签栏 ⇒ 变回子页签；再拖回来 ⇒ 变回编辑区 ----
+    let eid = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
+    // ⚠️ **走跟拖放落点一样的路**：先解析负载，再调用同一个转换函数。
+    let payload = format!("pp-editor:{eid}");
+    let pid = puttyplus::panel::subtabs::parse_editor_payload(&payload)
+        .expect("拖放负载应当能解析出编辑器 id");
+    assert_eq!(pid, eid, "负载里的 id 跟编辑器对不上");
+    assert!(
+        sub.undock_editor(pid),
+        "编辑器没能拖回子标签栏（阶段 108 的核心）"
+    );
+    pump(400);
+    assert_eq!(
+        sub.editor_is_docked(pid),
+        Some(false),
+        "编辑器应当已经不在编辑区里了"
+    );
+    assert_eq!(
+        sub.page_count(),
+        pages_before + 1,
+        "拖回子标签栏后应当多一个子页签"
+    );
+    assert!(
+        sub.editor_area_visible(),
+        "编辑器被拖到子标签栏后，编辑区应当**留成停靠区**（不然用户没地方拖回来）"
+    );
+    // ⚠️ **拖出去后不切页**（阶段 108）：终端页还在 ⇒ 编辑区（停靠区）
+    //    还在屏幕上 ⇒ 用户**直接就能把它拖回去**。
+    //
+    //    反过来：要是这里就切到「编辑器」那一页，终端页被藏起来 ⇒
+    //    停靠区跟着看不见 ⇒ 拖回去就没地方拖了（真拖拽失败正是这个原因）。
+    assert_eq!(
+        sub.current_kind(),
+        PageKind::Terminal,
+        "编辑器拖到子标签栏后**不该切页**（切了停靠区就看不见了）"
+    );
+    assert!(
+        area.is_mapped(),
+        "拖出去后停靠区应当还在屏幕上（不然用户没地方把它拖回去）"
+    );
+    println!(
+        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、页面没切 ✓",
+        n = pages_before + 1
+    );
+
+    // 再拖回来
+    assert!(sub.dock_editor(pid), "编辑器没能拖回编辑区");
+    pump(400);
+    assert_eq!(sub.editor_is_docked(pid), Some(true), "编辑器应当停回编辑区");
+    assert_eq!(
+        sub.page_count(),
+        pages_before,
+        "拖回来后子页签数应当复原"
+    );
+    assert!(sub.editor_area_visible(), "编辑区应当重新露出来");
+    println!("[5] 拖回编辑区：又变回编辑区里的编辑器 ✓");
+
+    // ---- 5b) **真的**拖一次（xdotool 驱动 X 指针）→ 拖到子标签栏 ----
+    //
+    // ⚠️ 这一段验的是「拖放接线真的通」：拖拽源 → 负载 → 接收器 →
+    // 转换。前面那几步是直接调转换函数，**没经过 GTK 的拖放管线**。
+    let has_xdo = std::process::Command::new("xdotool")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_xdo {
+        println!("[5b] ⚠️ 没有 xdotool ⇒ 真拖拽这一段没验（转换逻辑前面验过）");
+    } else {
+        // ⚠️ **有模态对话框就不能拖**：它抓走输入 ⇒ 父窗口收不到事件。
+        //    （连接失败时面板弹的那个「SFTP 连接失败」就是它。）
+        let extra = extra_windows(&window_wid());
+        if !extra.is_empty() {
+            println!(
+                "[5b] ⚠️ 有模态对话框挡着（{}）⇒ 真拖拽跳过（转换逻辑前面已验）",
+                extra.join("、")
+            );
+            // 编辑器本来就还停在编辑区（这次没拖）⇒ 确认一下就好
+            assert_eq!(sub.editor_is_docked(eid), Some(true), "应当还停在编辑区");
+            println!("[5b] （跳过的部分不影响其余断言）");
+        } else {
+            let tab = sub
+                .editor_tab_widget(eid)
+                .expect("编辑区里应当有小标签");
+            let (ox, oy) = window_origin("fileedit panel smoke");
+            // 起点：小标签上那个名字按钮（用户就是这么拖的）
+            let name_btn = find_button(&tab).expect("小标签里应当有个名字按钮");
+            let p = name_btn
+                .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
+                .expect("要能算出按钮在窗口里的位置");
+            // 终点：子标签栏（notebook 的顶部一条）
+            let q = sub
+                .nb
+                .compute_point(&win, &gtk::graphene::Point::new(80.0, 6.0))
+                .expect("要能算出页签栏在窗口里的位置");
+            let from = (ox + p.x() as i32, oy + p.y() as i32);
+            let to = (ox + q.x() as i32, oy + q.y() as i32);
+            println!(
+                "[5b] 真拖拽：从 ({}, {}) 拖到 ({}, {})",
+                from.0, from.1, to.0, to.1
+            );
+            let h = std::thread::spawn(move || real_drag(from, to));
+            // ⚠️ **主线程要继续转主循环**：拖拽事件得有人处理。
+            while !h.is_finished() {
+                pump(30);
+            }
+            let _ = h.join();
+            pump(600);
+            assert_eq!(
+                sub.editor_is_docked(eid),
+                Some(false),
+                "真拖拽没把编辑器拖回子标签栏（拖放管线没通）"
+            );
+            assert_eq!(
+                sub.page_count(),
+                pages_before + 1,
+                "真拖拽之后应当多一个子页签"
+            );
+            println!("[5b] 真拖拽成功：编辑器拖回了子标签栏 ✓");
+
+            // ---- 5c) 再**真拖**回去：从子标签栏拖回终端列的底部 ----
+            //
+            // ⚠️ 得先切回终端页：编辑区藏在终端列里，终端页不显示 ⇒
+            //    拖放目标（终端列）也不显示。
+            let term_id = sub.id_by_title("终端").expect("应当有终端子页签");
+            sub.switch_to(term_id);
+            pump(400);
+            // 起点：子标签栏上那个编辑器的页签头
+            let widget = sub.editor_widget(eid).expect("应当有编辑器正文");
+            let head = sub
+                .nb
+                .tab_label(&widget)
+                .expect("编辑器的页签头");
+            let p = head
+                .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
+                .expect("要能算出页签头的位置");
+            // 终点：**编辑区**那条（停靠区）
+            //
+            // ⚠️ 编辑器被拖到子标签栏去了 ⇒ 编辑区只剩一条小标签栏
+            //    （留着当停靠区用）⇒ 落点就按它算。
+            let q = area
+                .compute_point(&win, &gtk::graphene::Point::new(40.0, 8.0))
+                .expect("要能算出编辑区的位置");
+            let from = (ox + p.x() as i32, oy + p.y() as i32);
+            let to = (ox + q.x() as i32, oy + q.y() as i32);
+            println!(
+                "[5c] 真拖拽（拖回）：从 ({}, {}) 拖到 ({}, {})",
+                from.0, from.1, to.0, to.1
+            );
+            // ⚠️ **拖之前先确认「停靠区」在屏幕上**（阶段 108 的关键）：
+            //    编辑区住在**终端页**里 ⇒ 那一页不显示 ⇒ 停靠区也不显示
+            //    ⇒ 拖放管线根本接不上（真拖拽白拖一场）。
+            assert!(
+                area.is_mapped(),
+                "停靠区没在屏幕上（编辑区应当在终端页里露着）"
+            );
+            let h = std::thread::spawn(move || real_drag(from, to));
+            while !h.is_finished() {
+                pump(30);
+            }
+            let _ = h.join();
+            pump(600);
+            assert_eq!(
+                sub.editor_is_docked(eid),
+                Some(true),
+                "真拖拽没把编辑器拖回编辑区（停靠区没接住）"
+            );
+            assert!(
+                sub.editor_area_visible(),
+                "拖回编辑区后编辑区应当露出来"
+            );
+            // ⚠️ **拖动过程中停靠区得一直在屏幕上**（阶段 108 的关键修复）：
+            //    GTK 的 notebook **按下页签就切页**（`gtknotebook.c`）⇒ 用户
+            //    一按住编辑器的页签头，notebook 就切到「编辑器」那一页 ⇒
+            //    编辑器正文盖住整页 ⇒ **停靠区（落点）被藏起来** ⇒ 拖放
+            //    管线接不上（接收器连 `accept` 都不触发）。
+            //    ⇒ 拖动**开始**时切回终端页（见 `subtabs.rs` 的 drag-begin）。
+            assert!(
+                area.is_mapped(),
+                "拖完之后停靠区应当还在屏幕上（拖动开始时应切回终端页）"
+            );
+            println!("[5c] 真拖拽（拖回）成功：编辑器停回了终端列下面 ✓");
+        }
+    }
+
+    // ---- 6) 再开一个 ⇒ 编辑区 2 个；关掉 ⇒ 1 个；全关 ⇒ 编辑区藏起来 ----
+    puttyplus::panel::fileedit::open_local(&st, tmp_two.to_str().unwrap(), false);
+    pump(700);
+    assert_eq!(sub.editor_count(), 2, "编辑区里应当有两个编辑器");
+    assert_eq!(
+        sub.page_count(),
+        pages_before,
+        "第二个编辑器也不该占子页签"
+    );
+    println!("[6] 两个文件：编辑区 2 个编辑器、子页签仍是 {n} 个 ✓", n = pages_before);
+
+    // 改内容 ⇒ 标题带「●」脏标记（阶段 107 的小标签栏）
+    assert!(
+        puttyplus::panel::fileedit::type_into(&st, tmp_txt.to_str().unwrap(), "dirty\n"),
+        "往编辑器里插字失败"
+    );
+    pump(300);
+    let dirty_title = puttyplus::panel::fileedit::tab_title_for(&st, tmp_txt.to_str().unwrap());
+    assert!(
+        dirty_title.contains('●'),
+        "脏标记没进小标签标题：{dirty_title}"
+    );
+    println!("[7] 脏标记进了小标签标题：{dirty_title} ✓");
+
+    // 关掉一个 ⇒ 1 个
+    let e1 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
+    assert!(
+        puttyplus::panel::fileedit::close_editor_by_id(&st, e1),
+        "关不掉编辑器"
+    );
+    pump(400);
+    assert_eq!(sub.editor_count(), 1, "应当剩一个编辑器");
+    assert!(
+        sub.editor_area_visible(),
+        "还有一个编辑器开着 ⇒ 编辑区不该藏起来"
+    );
+
+    // 全关 ⇒ 编辑区藏起来（界面跟没开过编辑器一样）
+    let e2 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_two.to_str().unwrap());
+    assert!(
+        puttyplus::panel::fileedit::close_editor_by_id(&st, e2),
+        "关不掉第二个编辑器"
+    );
+    pump(400);
+    assert_eq!(sub.editor_count(), 0, "应当没有编辑器了");
+    assert!(
+        !sub.editor_area_visible(),
+        "没有编辑器时编辑区应当藏起来（别占着半屏）"
+    );
+    assert!(term.is_mapped(), "终端还在（编辑器全关了也不该影响它）");
+    println!("[8] 全部关掉：编辑区藏起来了、终端还在 ✓");
 
     println!("fileedit_panel_smoke: OK");
 }

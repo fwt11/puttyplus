@@ -757,6 +757,41 @@ pub fn close_all(st: &Rc<PanelState>) {
     }
 }
 
+/// 冒烟 / e2e 用：某个文件的小标签标题（**带脏标记**）。
+pub fn tab_title_for(st: &Rc<PanelState>, path: &str) -> String {
+    st.file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .map(|e| tab_title(e))
+        .unwrap_or_default()
+}
+
+/// 冒烟 / e2e 用：某个文件对应的**编辑器 id**（= 编辑区里那一页的 id）。
+pub fn editor_id_for(st: &Rc<PanelState>, path: &str) -> u64 {
+    st.file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.path == path)
+        .map(|e| e.id)
+        .unwrap_or(0)
+}
+
+/// 冒烟 / e2e 用：**不询问**直接关掉某个编辑器。
+pub fn close_editor_by_id(st: &Rc<PanelState>, id: u64) -> bool {
+    let Some(e) = st
+        .file_edits
+        .borrow()
+        .iter()
+        .find(|e| e.id == id)
+        .cloned()
+    else {
+        return false;
+    };
+    close_tab(st, &e);
+    true
+}
+
 /// 冒烟 / e2e 用：往编辑器里插一段文字（模拟用户打字）。
 ///
 /// 走的是**真的 buffer 变更** ⇒ 走的是真的 `connect_changed` 回调 ⇒
@@ -867,9 +902,9 @@ fn focus_existing(st: &Rc<PanelState>, remote: bool, path: &str, readonly: bool)
         .cloned();
     let Some(e) = existing else { return false };
     if e.base_readonly == readonly || !e.base_readonly {
-        // 聚焦已开的那一页（原来是 present 弹窗）
+        // 聚焦已开的那一页（阶段 107：编辑区里切过去）
         if let Some(sub) = st.sub_tabs() {
-            sub.switch_to(e.tab_id.get());
+            sub.switch_editor(e.tab_id.get());
         }
         return true;
     }
@@ -1116,36 +1151,31 @@ fn attach_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
     });
     // 阶段 98：编辑器页**也带上文件面板**（左边文件面板 / 右边编辑器）。
     //
-    // ⚠️ **页面内容要包一层 Paned**：文件面板是**会话级的一个 widget**，
-    // 它跟着「当前页」走（切到编辑页就搬进编辑页）⇒ 编辑器页也得有个
-    // 能托管它的槽位。跟终端子页一个结构。
-    let page_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    // ⚠️ **阶段 107：编辑器不再占子页签**——它住进连接页**底部**的编辑区
+    // （上面是终端页签区）⇒ **终端和编辑器同窗同时显示**（用户
+    // 2026-11-14：「终端和文件编辑可以放在同一个窗口中，同时显示」）。
+    //
+    // ⇒ 也**不再需要**给编辑器页包一层 Paned 来托管文件面板：文件面板
+    // 一直待在终端页里（编辑器在它下面，不抢它的位置）。
     e.page.set_hexpand(true);
     e.page.set_vexpand(true);
-    page_paned.set_end_child(Some(e.page.clone().upcast_ref::<gtk::Widget>()));
-    page_paned.set_hexpand(true);
-    page_paned.set_vexpand(true);
-    // 宽度上限跟终端页一样（编辑器才是主角，最多 38% 或 520px）
-    crate::settings::clamp_paned_start(&page_paned, 0.38, 520);
-    // 拖分割条 ⇒ 宽度同步回 `file_w`（只有真正托管文件面板的那个框才算数）
-    super::track_file_width(st, &page_paned);
-    let tab_id = sub.add_page_icon_kind(
+    let editor_id = sub.add_editor(
+        e.id,
         Some(tab_icon(e)),
         &tab_title(e),
-        super::subtabs::PageKind::FileEdit,
-        page_paned.upcast(),
+        e.page.clone().upcast(),
         Some(on_close),
     );
-    e.tab_id.set(tab_id);
-    sub.switch_to(tab_id);
+    e.tab_id.set(editor_id);
+    sub.switch_editor(editor_id);
 }
 
-/// 关掉编辑器所在的子标签（**已经确认过**可以直接关的路径用这个）。
+/// 关掉编辑器所在的**编辑区页**（**已经确认过**可以直接关的路径用这个）。
 fn close_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
     forget(st, e.id);
     match st.sub_tabs() {
         Some(sub) => {
-            sub.remove_page(e.tab_id.get());
+            sub.remove_editor(e.tab_id.get());
         }
         // 独立窗口路径（没有子标签容器）：页签没得摘，得把窗口本身关掉，
         // 否则关连接标签后编辑器窗口还飘在桌面上。
@@ -2018,7 +2048,7 @@ fn update_ui(e: &FileEdit) {
     // 编辑/查看由图标表示，标题只留文件名）
     if let Some(st) = e.st.upgrade() {
         if let Some(sub) = st.sub_tabs() {
-            sub.set_title(e.tab_id.get(), &tab_title(e));
+            sub.set_editor_title(e.tab_id.get(), &tab_title(e));
         }
     }
     e.sub_lbl.set_text(&format!("{} · {}",
@@ -2352,7 +2382,7 @@ fn select_nearest(e: &Rc<FileEdit>, pos: i32) {
 /// 这个函数负责把两者分开。
 pub fn active_editor(st: &Rc<PanelState>) -> Option<Rc<FileEdit>> {
     let sub = st.sub_tabs()?;
-    let id = sub.current_id()?;
+    let id = sub.current_editor()?;
     st.file_edits
         .borrow()
         .iter()

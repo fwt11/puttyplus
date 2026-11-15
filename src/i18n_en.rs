@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1755] = [
+pub static EN: [(&str, &str); 1756] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -918,6 +918,7 @@ pub static EN: [(&str, &str); 1755] = [
     ("把字段 / 索引 / 外键的改动写进库", "Write the field / index / foreign key changes into the database"),
     ("把定义文本复制到剪贴板", "Copy the definition text to the clipboard"),
     ("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里", "Export the whole table to a local file (CSV / SQL / JSON), or import a local CSV into the table"),
+    ("把编辑器拖回这里停靠", "Drag the editor back here to dock it"),
     ("把表「{table}」改成新名字。", "Rename table \"{table}\"."),
     ("把这一行往上挪一位：新加的字段会按这个顺序加进表里（已有列的物理顺序数据库改不了，要改得重建表）", "Move this row up one position: newly added fields are added to the table in this order (the database cannot change the physical order of existing columns — that needs a table rebuild)"),
     ("把这一行往下挪一位：新加的字段会按这个顺序加进表里（已有列的物理顺序数据库改不了，要改得重建表）", "Move this row down one position: newly added fields are added to the table in this order (the database cannot change the physical order of existing columns — that needs a table rebuild)"),

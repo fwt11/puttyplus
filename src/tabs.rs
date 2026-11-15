@@ -102,6 +102,32 @@ fn term_container(pane: &TermPane) -> gtk::Paned {
     p
 }
 
+/// 把「顶上来」的兄弟终端放回它该在的位置（阶段 108）。
+///
+/// ⚠️ **终端子页现在是两层 Paned**：
+///
+/// ```text
+/// 终端子页（横向）              ← `Tab.paned`
+/// ├── 左：文件面板
+/// └── 右：终端列（竖向）
+///     ├── 上：终端容器（横向，term_container）
+///     └── 下：编辑区（阶段 108）
+/// ```
+///
+/// ⇒ 兄弟终端要塞回**终端容器**那一格，塞到「终端子页」那格会把
+/// 整个编辑区顶掉。
+fn put_back_terminal(term_page: &gtk::Paned, sibling: &gtk::Widget) {
+    // 终端列（竖向）的上半 = 终端容器（横向）
+    if let Some(col) = term_page.end_child().and_downcast::<gtk::Paned>() {
+        if let Some(wrap) = col.start_child().and_downcast::<gtk::Paned>() {
+            wrap.set_start_child(Some(sibling));
+            return;
+        }
+    }
+    // 兜底：没有那两层 ⇒ 直接塞回终端子页（老布局）
+    term_page.set_end_child(Some(sibling));
+}
+
 /// 装"会话存活"钩子（阶段 65）：终端起来 / 结束 → 面板状态跟着变。
 ///
 /// ⚠️ 闭包只抓**弱引用**（AGENTS.md 的引用环红线）。
@@ -519,7 +545,16 @@ impl Tabs {
         // 隐式契约），所以外面这层 Paned 只管文件面板的宽度。
         let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
         let term_wrap = term_container(&tp);
-        term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        // 阶段 108：**终端列** = 竖向 Paned（上＝终端、下＝编辑区）。
+        //
+        // ⇒ 编辑器与终端**同宽**，也**不占文件列表的空间**
+        // （用户 2026-11-15：「文本编辑器和 term 的宽度一样，就是不要
+        // 占用文件列表的空间」）。
+        let term_col = gtk::Paned::new(gtk::Orientation::Vertical);
+        term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        term_col.set_hexpand(true);
+        term_col.set_vexpand(true);
+        term_page.set_end_child(Some(term_col.upcast_ref::<gtk::Widget>()));
         // 面板宽度：用上次会话记忆（默认 340：280 时工具栏 + 路径框挤在一起，
         // 路径永远只显示后半截）
         let pos = crate::settings::sftp_pane_pos();
@@ -532,6 +567,8 @@ impl Tabs {
         // 文件面板的家：先记它的宿主（宽度变化要同步回 file_w），再挂进去
         panel::track_file_width(&sp.st, &term_page);
         panel::host_file_panel(&sp.st, &term_page);
+        // 阶段 108：编辑区住进**终端列**（没有编辑器时它自己藏起来）。
+        sub.host_editor_area(&term_col);
         // 终端页签带图标：主标签头已经不放图标了，"这一页是终端"由子页签
         // 自己的图标说（标签头只留状态点 + 标题 + ×）。
         let term_sub_id = sub.add_page_icon_kind(
@@ -567,20 +604,26 @@ impl Tabs {
             sub.nb.connect_switch_page(move |_nb, _page, num| {
                 let Some(sub) = subw.upgrade() else { return };
                 let Some(st) = stw.upgrade() else { return };
-                // 只有切到「终端」页或「文本编辑」页才搬文件面板；
-                // 切到数据库页**不动**它（它留在上一个宿主里，随那一页一起隐藏）。
+                // 只有切到「终端」页才搬文件面板；切到数据库页**不动**它
+                // （它留在上一个宿主里，随那一页一起隐藏）。
+                //
+                // ⚠️ 阶段 107：文件编辑器**不再是子页签**（它住连接页底部的
+                // 编辑区）⇒ 这里不用再管它。
                 //
                 // ⚠️ **按传进来的页序号查**：`switch-page` 是切换**之前**发的，
                 // 那时 `current_kind()` 还是旧页的。
                 let kind = sub.kind_by_page_num(num);
-                if kind != panel::subtabs::PageKind::Terminal
-                    && kind != panel::subtabs::PageKind::FileEdit
-                {
+                if kind != panel::subtabs::PageKind::Terminal {
                     return;
                 }
                 // 拿不到宿主就**静默不动**：界面不崩、不空半个页面。
                 let Some(host) = sub.paned_by_page_num(num) else { return };
                 panel::host_file_panel(&st, &host);
+                // 阶段 108：编辑区跟着**当前终端页**走（跟文件面板一个
+                // 规矩）⇒ 切到别的终端页签时，编辑器也得跟过去。
+                if let Some(col) = host.end_child().and_downcast::<gtk::Paned>() {
+                    sub.host_editor_area(&col);
+                }
             });
         }
         // 连接页控件 = **子标签区的外层容器**（notebook + 尾部的「+」按钮），
@@ -1013,15 +1056,22 @@ impl Tabs {
                 });
             }
         }
-        // 阶段 97：额外终端页签也是「文件面板｜终端」的 Paned，
+        // 阶段 97：额外终端页签也是「文件面板｜终端列」的 Paned，
         // **左格先空着**（文件面板只有一个父级，用户切过来时才搬进来）。
         let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
         let term_wrap = term_container(&tp);
-        term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        // 阶段 108：终端列 = 竖向 Paned（上＝终端、下＝编辑区）。
+        let term_col = gtk::Paned::new(gtk::Orientation::Vertical);
+        term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        term_col.set_hexpand(true);
+        term_col.set_vexpand(true);
+        term_page.set_end_child(Some(term_col.upcast_ref::<gtk::Widget>()));
         term_page.set_hexpand(true);
         term_page.set_vexpand(true);
         // 宽度跟着记忆走（切过去时文件面板会按它复位）
         panel::track_file_width(&panel_st, &term_page);
+        // 阶段 108：编辑区也住进这一列（切过来时它跟着走）。
+        sub.host_editor_area(&term_col);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
@@ -1206,16 +1256,23 @@ impl Tabs {
         // 拖文件到终端 = 上传到当前远程目录
         panel::enable_drop_upload(&st, tp.terminal());
 
-        // 阶段 97：重建的主终端页签也是「文件面板｜终端」的 Paned，
+        // 阶段 97：重建的主终端页签也是「文件面板｜终端列」的 Paned，
         // **把文件面板搬回来**（用户 × 掉终端页签时它只是"寄存"着，
         // 没被销毁——`PanelState` 一直持有它）。
         let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
         let term_wrap = term_container(&tp);
-        term_page.set_end_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        // 阶段 108：终端列 = 竖向 Paned（上＝终端、下＝编辑区）。
+        let term_col = gtk::Paned::new(gtk::Orientation::Vertical);
+        term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
+        term_col.set_hexpand(true);
+        term_col.set_vexpand(true);
+        term_page.set_end_child(Some(term_col.upcast_ref::<gtk::Widget>()));
         term_page.set_hexpand(true);
         term_page.set_vexpand(true);
         panel::track_file_width(&st, &term_page);
         panel::host_file_panel(&st, &term_page);
+        // 阶段 108：编辑区住进这一列。
+        sub.host_editor_area(&term_col);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
@@ -1545,7 +1602,10 @@ impl Tabs {
                 parent.set_end_child(Some(&sibling));
             }
         } else {
-            t.paned.set_end_child(Some(&sibling));
+            // ⚠️ 阶段 108：**终端列**是竖向的（终端列 = 竖 Paned，编辑区在
+            // 它下面）⇒ 兄弟要塞回「终端容器」里，不能直接塞 `t.paned`
+            // （那会把编辑区顶掉）。
+            put_back_terminal(&t.paned, &sibling);
         }
         // 关掉的那半边的控件
         if target_is_a {
