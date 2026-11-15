@@ -77,7 +77,13 @@ const AUTO_REFRESH_SECS: u32 = 7;
 /// 容器页的界面状态。
 pub struct DockerUi {
     /// 子标签页的内容。
+    ///
+    /// ⚠️ **阶段 113 之后**：它是「外层竖向 Paned」——上＝页面内容、
+    ///   下＝**编辑区的落点**（用户 2026-11-16：编辑器要**马上能看到**，
+    ///   不能藏在 term 界面里）。
     pub page: gtk::Widget,
+    /// 外层那根竖向 Paned（**编辑区的宿主**，见 `mount` 里登记的地方）。
+    pub column: gtk::Paned,
     /// 本页在子标签里的页 id。
     pub tab_id: Cell<u64>,
     /// 表格的模型（**树形**：compose 项目是父行）。
@@ -96,6 +102,17 @@ pub struct DockerUi {
     search: RefCell<String>,
     /// 正在刷新（防重入：慢命令不能叠加）。
     busy: Cell<bool>,
+    /// **工具条里的小转圈**（取数据的时候转）。
+    ///
+    /// ⚠️ **干什么用**（用户 2026-11-16）：「容器界面打开后需要一段时间
+    ///   才能看到容器」⇒ 这段时间里界面是**空的**，用户不知道程序是在
+    ///   干活还是卡死了 ⇒ 给个**看得见的动画**。
+    spin: gtk::Spinner,
+    /// **表格区居中的大转圈**（**首次**加载、表格还是空的时候显示）。
+    ///
+    /// ⚠️ 为什么要两个：工具条那个只是「右上角有个小东西在转」⇒ 不够
+    ///   醒目；这个**在列表正中间**，是「正在加载」的经典样子。
+    spin_big: gtk::Spinner,
     /// 自动刷新的定时器（页签关掉时要停掉）。
     timer: Cell<Option<glib::SourceId>>,
     /// **后台任务 → 主线程**的结果通道（⚠️ 见 [`refresh`] 的说明）。
@@ -133,6 +150,15 @@ pub struct DockerUi {
     log_stop: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     /// 日志流**是不是在跑**。
     log_running: Cell<bool>,
+    /// **容器内终端**的通道（阶段 113；空 = 没开）。
+    term_chan: RefCell<Option<crate::backend::shell::ShellChannel>>,
+    /// 容器内终端**是不是开着**。
+    term_running: Cell<bool>,
+    /// 容器内终端的**控件句柄**（测试钩子读屏幕用）。
+    ///
+    /// ⚠️ 窗口关掉时**要清掉**（`stop_terminal`）⇒ 不然这里攥着一个
+    ///    已经被销毁的控件 ⇒ 用它会炸。
+    term_view: RefCell<Option<crate::termview::TermView>>,
     /// 当前选中的**容器名**（空 = 没选容器）。
     ///
     /// ⚠️ **刷新要保住它**：自动刷新每 7 秒重建一次表格 ⇒ 不记住选中行的话，
@@ -194,6 +220,8 @@ struct DetailUi {
     btn_start: gtk::Button,
     btn_stop: gtk::Button,
     btn_restart: gtk::Button,
+    /// **「终端」按钮**（阶段 113：开容器内终端）。
+    btn_term: gtk::Button,
     /// **compose 项目详情**那块（阶段 111：选中项目行时显示，与容器详情互斥）。
     proj_root: gtk::Box,
     /// 项目标题（「compose 项目：postgres」）。
@@ -413,7 +441,6 @@ impl DockerUi {
 
     /// 刷新完了：填表 + 更新状态行。
     fn apply(&self, info: &DockerInfo) {
-        self.busy.set(false);
         *self.containers.borrow_mut() = info.containers.clone();
         *self.version.borrow_mut() = info.version.clone();
         let shown = self.filter_rows(&info.containers);
@@ -431,14 +458,47 @@ impl DockerUi {
             v = info.version
         );
         self.status.set_text(&msg);
+        // ⚠️ **放最后**：大转圈要不要消失，取决于「列表空不空」⇒ 得等
+        //   列表填好了再判断（见 `set_loading` 的说明）。
+        self.set_loading(false);
     }
 
     /// 失败：清空表格 + 说清楚为什么（**中文 + 怎么办**）。
     fn fail(&self, msg: &str) {
-        self.busy.set(false);
         self.model.clear();
         self.containers.borrow_mut().clear();
+        self.set_loading(false);
         self.status.set_text(msg);
+    }
+
+    /// **loading 动画**的开关（用户 2026-11-16）。
+    ///
+    /// ⚠️ **干什么用**：打开容器界面后要走 SSH 去远端跑 `docker ps`
+    ///   ⇒ 要等一会儿 ⇒ 这期间列表是**空的** ⇒ 用户不知道程序是在干活
+    ///   还是卡死了 ⇒ 给个**看得见的动画**。
+    ///
+    /// - 工具条的小转圈：**每次**取数据都转（自动刷新时也让用户知道
+    ///   刚刚更新过）；
+    /// - 列表正中间的大转圈：只在「正在加载 **且** 列表还是空的」时候
+    ///   显示（**首次**加载）⇒ 经典的「正在加载」的样子。
+    ///
+    /// ⚠️ **顺序要紧**：大转圈要不要显示，取决于「列表空不空」⇒ 所以
+    ///   **先填列表，再调这个函数**（否则会按旧数据判断）。
+    fn set_loading(&self, loading: bool) {
+        self.busy.set(loading);
+        self.spin.set_visible(loading);
+        if loading {
+            self.spin.start();
+        } else {
+            self.spin.stop();
+        }
+        let big = loading && self.containers.borrow().is_empty();
+        self.spin_big.set_visible(big);
+        if big {
+            self.spin_big.start();
+        } else {
+            self.spin_big.stop();
+        }
     }
 
     /// 按「过滤 + 搜索」筛一遍。
@@ -994,6 +1054,11 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     refresh_btn.set_tooltip_text(Some(tr("刷新")));
     refresh_btn.add_css_class("flat");
 
+    let spin = gtk::Spinner::new();
+    spin.set_size_request(16, 16);
+    spin.set_valign(gtk::Align::Center);
+    spin.set_visible(false);
+
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bar.set_margin_start(6);
     bar.set_margin_end(6);
@@ -1006,6 +1071,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     bar.append(&last);
     bar.append(&auto_lbl);
     bar.append(&auto);
+    // ⚠️ loading 动画的小转圈（用户 2026-11-16）。
+    bar.append(&spin);
     bar.append(&refresh_btn);
 
     // ---- 表格（**树形**）----
@@ -1071,6 +1138,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     scroll.set_hexpand(true);
     scroll.set_child(Some(&view));
 
+    // ---- loading 动画（用户 2026-11-16）----
+    //
+    // ⚠️ **为什么要有**：打开容器界面后要走 SSH 去远端跑 `docker ps`
+    //   ⇒ 要等一会儿 ⇒ 这期间列表是**空的** ⇒ 用户不知道是在干活还是卡死。
+    //
+    // ⚠️ **两个转圈的分工**：
+    // - `spin_big`：**列表正中间**的大转圈 ⇒ 只在「正在加载 **且** 列表
+    //   还是空的」时候显示（首次加载）⇒ 经典的「正在加载」的样子；
+    // - `spin`：工具条里的小转圈 ⇒ **每次**取数据都转（自动刷新时也让
+    //   用户知道刚刚更新过）。
+    let spin_big = gtk::Spinner::new();
+    spin_big.set_size_request(32, 32);
+    spin_big.set_halign(gtk::Align::Center);
+    spin_big.set_valign(gtk::Align::Center);
+    spin_big.set_visible(false);
+    let table_overlay = gtk::Overlay::new();
+    table_overlay.set_child(Some(&scroll));
+    table_overlay.add_overlay(&spin_big);
+
     // ---- 详情区（阶段 110：选中容器才显示）----
     //
     // 布局：标题行（容器名 + 状态 + 三个动作按钮）＋ 四张卡片（2×2 网格）。
@@ -1088,6 +1174,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let d_start = mk_btn(tr("启动"));
     let d_stop = mk_btn(tr("停止"));
     let d_restart = mk_btn(tr("重启"));
+    // 「终端」⇒ 开**容器内终端**（阶段 113）。
+    //
+    // ⚠️ **不是写操作**（只是进容器里跑个 shell）⇒ 不用二次确认。
+    let d_term = mk_btn(tr("终端"));
 
     let d_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     d_row.set_margin_start(8);
@@ -1097,6 +1187,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     d_row.append(&d_start);
     d_row.append(&d_stop);
     d_row.append(&d_restart);
+    d_row.append(&d_term);
 
     // 一张卡片 = 标题 + 正文（正文自己能滚 ⇒ 内容再多也不撑破版面）。
     let mk_card = |title: &str| -> (gtk::Box, gtk::Label) {
@@ -1288,7 +1379,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ⚠️ 用 **Paned**（可拖）：详情区矮了就把它拖矮，别把列表挤没。
     let top = gtk::Box::new(gtk::Orientation::Vertical, 0);
     top.append(&bar);
-    top.append(&scroll);
+    // ⚠️ **用 Overlay 包一层**：大转圈要**在列表正中间**（loading 动画）。
+    top.append(&table_overlay);
 
     let paned = gtk::Paned::new(gtk::Orientation::Vertical);
     paned.set_vexpand(true);
@@ -1300,6 +1392,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     page.append(&paned);
     page.append(&status);
 
+    // ---- 外层：给**编辑区**留一个落点（阶段 113 之后）----
+    //
+    // ⚠️ **为什么要有这一层**（用户 2026-11-16 报的）：
+    //   「编辑 docker-compose 文件」按钮点了以后，文件编辑器打开了，
+    //   **却不在容器界面**，用户会找不到 ⇒ 应该打开之后**用户马上能看到**，
+    //   **不要跑到 term 界面**。
+    //
+    // ⇒ 根因：编辑区（阶段 107）是**一个共享的 widget**，它住在**终端列**
+    //   下面 ⇒ 用户在**容器页**打开编辑器 ⇒ 编辑器建好了，却待在终端页里
+    //   ⇒ **眼前什么也没变**。
+    //
+    // ⇒ 修法：容器页也给编辑区一个落点（就是这一列）⇒ 切到容器页时把
+    //   编辑区搬过来（见 `SubTabs::host_editor_area_for_page_num`）。
+    let column = gtk::Paned::new(gtk::Orientation::Vertical);
+    column.set_vexpand(true);
+    column.set_hexpand(true);
+    column.set_start_child(Some(&page));
+    column.set_end_child(None::<&gtk::Widget>);
+
     // ---- 结果通道（后台任务 → 主线程）----
     //
     // ⚠️ **为什么用通道而不是 `idle_add_local_once`**：后台任务跑在 tokio
@@ -1309,7 +1420,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let (tx, rx) = async_channel::unbounded::<Msg>();
 
     let ui = Rc::new(DockerUi {
-        page: page.upcast(),
+        page: column.clone().upcast(),
+        column,
         tab_id: Cell::new(0),
         model,
         view: view.clone(),
@@ -1319,6 +1431,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         filter: Cell::new(Filter::All),
         search: RefCell::new(String::new()),
         busy: Cell::new(false),
+        spin,
+        spin_big,
         timer: Cell::new(None),
         tx,
         containers: RefCell::new(Vec::new()),
@@ -1334,6 +1448,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             btn_start: d_start.clone(),
             btn_stop: d_stop.clone(),
             btn_restart: d_restart.clone(),
+            btn_term: d_term.clone(),
             proj_root: p_root,
             proj_title: p_title,
             proj_info: p_info,
@@ -1362,6 +1477,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         log_search: RefCell::new(String::new()),
         log_stop: RefCell::new(None),
         log_running: Cell::new(false),
+        term_chan: RefCell::new(None),
+        term_running: Cell::new(false),
+        term_view: RefCell::new(None),
         selected: RefCell::new(String::new()),
         selected_project: RefCell::new(String::new()),
         restoring: Cell::new(false),
@@ -1522,6 +1640,23 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 );
             });
         }
+    }
+    // **容器内终端**（阶段 113）
+    //
+    // ⚠️ **不是写操作**（只是进容器里跑个 shell）⇒ 不用二次确认。
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        d_term.connect_clicked(move |_| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return;
+            };
+            let name = u.selected.borrow().clone();
+            if name.is_empty() {
+                return;
+            }
+            open_container_terminal(&st, &u, &name);
+        });
     }
     // **compose 项目的 5 个操作**（阶段 111）
     {
@@ -1982,6 +2117,154 @@ fn do_compose_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: ComposeActi
     });
 }
 
+/// 打开**容器内终端**（`docker exec -it`；阶段 113）。
+///
+/// ⚠️ **走共享连接**上的独立 exec 通道（不新增 SSH 连接）。
+/// ⚠️ **容器里可能没有 shell** ⇒ 挨个试 `/bin/sh` → `/bin/bash` → … ⇒
+///    全都没有才报错（说清楚试了哪些）。
+/// ⚠️ **终端另开一个窗口**：容器详情区只有一小块 ⇒ 终端塞进去只有几行
+///    （用户没法用）⇒ 单独一个窗口（跟「外观窗口」「凭据库管理器」一样）。
+fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    // 已经在开着 ⇒ 别开第二个（远端会多一个孤儿 shell）。
+    if ui.term_running.get() {
+        ui.status.set_text(tr("容器终端已经开着（在另一个窗口里）"));
+        return;
+    }
+
+    // ⚠️ **后端跟主终端一致**（用户在首选项里选了 ghostty ⇒ 容器终端也
+    //    是 ghostty）⇒ 行为统一。
+    let term = crate::term::new_term_backend();
+    let view = term.widget().clone();
+    term.set_expand(true, true);
+
+    let win = gtk::Window::new();
+    win.set_title(Some(&trf!("容器终端：{n}", n = name)));
+    win.set_default_size(900, 560);
+    let status = gtk::Label::new(Some(tr("正在打开容器终端…")));
+    status.set_xalign(0.0);
+    status.set_margin_start(6);
+    status.set_margin_end(6);
+    status.set_margin_bottom(4);
+    status.add_css_class("dim-label");
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.append(&view);
+    vbox.append(&status);
+    win.set_child(Some(&vbox));
+    win.present();
+
+    // ⚠️ **窗口关掉 ⇒ 远端那条 `docker exec` 也要收掉**（否则容器里会留下
+    //    一个孤儿 shell 一直占着）。
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_close_request(move |_| {
+            if let Some(u) = u.upgrade() {
+                stop_terminal(&u);
+            }
+            glib::Propagation::Proceed
+        });
+    }
+
+    // ⚠️ **尺寸同步不用自己写**：两个后端都自带 ——
+    //    VTE 后端每 300ms 看一眼行列数（变了才发 window-change），
+    //    ghostty 后端在 `set_term_size` 里发（内核与 pty 一起）。
+
+    // ---- 后台：找 shell → 开通道 → 读循环 ----
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name = name.to_string();
+    let name2 = name.clone();
+    // 事件通道：后台 → 主线程（终端控件**只能**在主线程上碰）。
+    let (ev_tx, ev_rx) = async_channel::unbounded::<ShellEvent>();
+    let (res_tx, res_rx) = async_channel::bounded::<
+        Result<crate::backend::shell::ShellChannel, String>,
+    >(1);
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let session = match shared_session(&opts, pw).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = res_tx.send_blocking(Err(e));
+                return;
+            }
+        };
+        let shell = match docker::find_shell(&session, &name).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = res_tx.send_blocking(Err(e.0));
+                return;
+            }
+        };
+        let ch = match docker::open_exec_shell(&session, &name, &shell, 80, 24).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = res_tx.send_blocking(Err(e.0));
+                return;
+            }
+        };
+        let _ = res_tx.send_blocking(Ok(ch.clone()));
+        // 读循环：远程字节 → 主线程（终端控件在主线程 ⇒ 必须这么走）。
+        while let Some(ev) = ch.next_event().await {
+            if ev_tx.send(ev).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // ---- 主线程：拿到通道 ⇒ 交给终端控件 ----
+    {
+        let u = Rc::downgrade(ui);
+        let status2 = status.clone();
+        let term2 = term.clone();
+        glib::MainContext::default().spawn_local(async move {
+            match res_rx.recv().await {
+                Ok(Ok(chan)) => {
+                    let Some(u) = u.upgrade() else { return };
+                    let chan2 = chan.clone();
+                    let st2 = status2.clone();
+                    let ok = term2.attach_shell(
+                        chan,
+                        ev_rx,
+                        Box::new(move |code| {
+                            let msg = if code == 0 {
+                                tr("容器终端已退出").to_string()
+                            } else {
+                                trf!("容器终端已退出（退出码 {c}）", c = code)
+                            };
+                            st2.set_text(&msg);
+                        }),
+                    );
+                    if !ok {
+                        status2.set_text(tr("当前终端后端不支持容器终端"));
+                        return;
+                    }
+                    *u.term_chan.borrow_mut() = Some(chan2);
+                    *u.term_view.borrow_mut() = Some(term2.clone());
+                    u.term_running.set(true);
+                    status2.set_text(&trf!(
+                        "容器终端：{n}（输入 exit 可以退出）",
+                        n = name2
+                    ));
+                }
+                Ok(Err(msg)) => {
+                    status2.set_text(&msg);
+                }
+                Err(_) => {}
+            }
+        });
+    }
+}
+
+/// 停掉**容器内终端**（关通道 ⇒ 容器里那个 shell 退出）。
+fn stop_terminal(ui: &Rc<DockerUi>) {
+    if let Some(ch) = ui.term_chan.borrow_mut().take() {
+        ch.close();
+    }
+    // ⚠️ **控件句柄也要清掉**：窗口已经关了 ⇒ 那个控件已经被销毁 ⇒
+    //    攥着它再用会炸。
+    ui.term_view.borrow_mut().take();
+    ui.term_running.set(false);
+}
+
 /// 「编辑 compose 文件」⇒ **用编辑器打开远程文件**。
 ///
 /// ⚠️ 多个 compose 文件时**只打开第一个**（标签里是逗号分隔的）。
@@ -2008,6 +2291,17 @@ fn open_compose_file(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     };
     ui.status
         .set_text(&trf!("正在打开 {p}…", p = path));
+    // ⚠️ **先确保编辑区就挂在这一页**（用户 2026-11-16：「打开之后用户马上
+    //   能看到，不要跑到 term 界面」）。
+    //
+    //   编辑区是**一个共享的 widget** ⇒ 它同一时刻只能待在一页里 ⇒ 切页
+    //   时会跟着搬；但**保险起见**这里再钉一次（万一切页回调没赶上）。
+    if let Some(sub) = st.sub_tabs() {
+        let tab = ui.tab_id.get();
+        if tab != 0 {
+            sub.host_editor_area_for_page(tab);
+        }
+    }
     // ⚠️ **远程文件** ⇒ 走 SFTP 打开（编辑区里另开一个编辑器标签）。
     crate::panel::fileedit::open_remote(st, &path, false);
 }
@@ -2021,6 +2315,8 @@ fn refresh(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
         return; // 上一次还没回来 ⇒ 不叠加
     }
     ui.busy.set(true);
+    // ⚠️ **loading 动画**（用户 2026-11-16）：开始取了 ⇒ 转起来。
+    ui.set_loading(true);
     ui.status.set_text(&tr("正在读取远程容器…"));
 
     let opts = st.opts.clone();
@@ -2056,16 +2352,21 @@ pub fn mount(st: &Rc<PanelState>) {
     // 页签可能已经被用户 × 掉了 ⇒ 不在 notebook 里就重新挂一个。
     let already = ui.tab_id.get() != 0 && sub.nb.page_num(&ui.page).is_some();
     if !already {
-        let id = sub.add_page_icon(
+        let id = sub.add_page_icon_kind(
             // ⚠️ **图标名必须是主题里真有的**：`docker-symbolic` 来自
             //    docker-icon-theme 包，**大多数系统没装** ⇒ 会显示成「缺图」。
             //    ⇒ 用 Adwaita（GTK4 基础主题）自带的**箱子**图标。
             Some("package-x-generic-symbolic"),
             tr("容器"),
+            crate::panel::subtabs::PageKind::Docker,
             ui.page.clone(),
             None,
         );
         ui.tab_id.set(id);
+        // ⚠️ **登记编辑区的落点**（阶段 113 之后）：用户在容器页点
+        //   「编辑 compose 文件」⇒ 编辑器要**就在容器界面下面**，
+        //   马上能看见（用户 2026-11-16 报的「跑到 term 界面去了」）。
+        sub.set_page_editor_host(id, ui.column.clone());
         // 关掉这个页签 ⇒ 停掉自动刷新（否则定时器还在跑，白费连接）。
         let u = Rc::downgrade(&ui);
         sub.add_close_hook(move |cid| {
@@ -2074,11 +2375,28 @@ pub fn mount(st: &Rc<PanelState>) {
                 stop_auto(&u);
                 // ⚠️ **日志流也得停**（否则远端的 `docker logs -f` 一直挂着）。
                 stop_logs(&u);
+                // ⚠️ **容器内终端也得停**（否则容器里留着孤儿 shell）。
+                stop_terminal(&u);
             }
         });
     }
     if let Some(num) = sub.nb.page_num(&ui.page) {
         sub.nb.set_current_page(Some(num));
+    }
+    // ⚠️ **把编辑区搬到这个页面来**（用户 2026-11-16：「编辑器打开了，却
+    //   不在容器界面，用户会找不到 ⇒ 应该打开之后用户马上能看到，
+    //   不要跑到 term 界面」）。
+    //
+    //   编辑区是**一个共享的 widget** ⇒ 它同一时刻只能待在一页里 ⇒ 之前
+    //   它住在**终端列**下面 ⇒ 用户在容器页打开编辑器时，编辑器建好了
+    //   却**藏在 term 界面里**。
+    //
+    //   ⚠️ **为什么这里再做一遍**（tabs.rs 的切页回调也会做）：那个回调
+    //   只在**真的连接页**里才有 ⇒ 这里自己再做一次（幂等，重复调用
+    //   没有副作用）。
+    let tab = ui.tab_id.get();
+    if tab != 0 {
+        sub.host_editor_area_for_page(tab);
     }
     refresh(st, &ui);
 }
@@ -2147,6 +2465,8 @@ pub fn set_rows_for_test(st: &Rc<PanelState>, rows: Vec<ContainerInfo>) {
     ui.busy.set(false);
     *ui.containers.borrow_mut() = rows.clone();
     ui.rebuild(&rows);
+    // ⚠️ **loading 动画停掉**（测试里不连服务器 ⇒ 没有「正在加载」这回事）。
+    ui.set_loading(false);
 }
 
 /// 测试钩子：**灌一份详情**进界面（**不连服务器**）＋ 把它当成选中的容器。
@@ -2329,8 +2649,85 @@ pub fn expand_project_for_test(st: &Rc<PanelState>, name: &str) -> bool {
     true
 }
 
-/// 测试钩子：**展开所有 compose 项目**。
+/* ---------------- 阶段 113：容器内终端的测试钩子 ---------------- */
+
+/// 测试钩子：**打开容器内终端**（真连服务器 ⇒ 真进容器里跑 shell）。
+pub fn open_terminal_for_test(st: &Rc<PanelState>, name: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    open_container_terminal(st, ui, name);
+}
+
+/// 测试钩子：容器内终端**是不是开着**。
+pub fn term_running_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.term_running.get()).unwrap_or(false)
+}
+
+/// 测试钩子：容器内终端**屏幕上**的字（冒烟用它验「真的有回显」）。
+pub fn term_screen_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return String::new();
+    };
+    let view = ui.term_view.borrow();
+    view.as_ref()
+        .and_then(|t| t.visible_text())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：**往容器内终端里打字**（模拟用户敲键）。
+pub fn term_send_for_test(st: &Rc<PanelState>, bytes: &[u8]) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let view = ui.term_view.borrow();
+    if let Some(t) = view.as_ref() {
+        t.feed_child(bytes);
+    }
+}
+
+/// 测试钩子：**停掉**容器内终端（窗口关掉时走的就是它）。
+pub fn stop_terminal_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    stop_terminal(ui);
+}
+
+/// 测试钩子：容器详情区的**「终端」按钮**能不能点。
+pub fn term_button_sensitive_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.detail.btn_term.is_sensitive())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：**loading 动画**的状态（用户 2026-11-16）。
 ///
+/// 返回 `(工具条小转圈可见, 列表正中大转圈可见, 小转圈在转)`。
+pub fn loading_spinners_for_test(st: &Rc<PanelState>) -> (bool, bool, bool) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return (false, false, false) };
+    (
+        ui.spin.is_visible(),
+        ui.spin_big.is_visible(),
+        ui.spin.is_spinning(),
+    )
+}
+
+/// 测试钩子：**编辑区是不是挂在容器页这一列**。
+///
+/// ⚠️ **干什么用**（用户 2026-11-16）：「编辑 docker-compose 文件」点了
+///   以后，编辑器打开了**却不在容器界面** ⇒ 用户会找不到 ⇒ 断言「编辑区
+///   的宿主是容器页那根 Paned」⇒ 钉住「编辑器就在容器界面下面」。
+pub fn editor_area_in_docker_page_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(sub) = st.sub_tabs() else { return false };
+    let area = sub.editor_area_widget();
+    area.parent().and_downcast::<gtk::Paned>() == Some(ui.column.clone())
+}
+
+/// 测试钩子：**展开所有 compose 项目**。///
 /// ⚠️ **为什么需要它**：GTK 的 `set_cursor` 对**看不见的行**（收着的项目里
 ///    的子行）**不生效** ⇒ 冒烟要选 compose 组里的容器 ⇒ 得先展开。
 pub fn expand_all_projects_for_test(st: &Rc<PanelState>) {

@@ -181,10 +181,12 @@ fn find_ok_button(w: &gtk::Widget) -> Option<gtk::Button> {
     None
 }
 
-/// 远端还有没有 `docker logs` 进程（**看门狗**的判据）。
+/// 远端还有没有**某个进程**（判据用）。
 ///
-/// ⚠️ `pgrep -af '[d]ocker logs'` 里的 `[d]` 是老技巧：命令自己不会匹配自己。
-fn remote_log_procs(opts: &ConnOptions) -> String {
+/// ⚠️ `pgrep -af '[d]ocker logs'` 里的 `[d]` 是老技巧：命令自己不会匹配自己
+///    （不然 pgrep 那行命令自己也算一个 ⇒ 永远非空）。
+fn remote_procs(opts: &ConnOptions, what: &str) -> String {
+    let pat = format!("[{}]{}", &what[..1], &what[1..]);
     let keyfile = opts.keyfile.clone().unwrap_or_default();
     let user = opts.user.clone();
     let host = opts.host.clone();
@@ -200,12 +202,17 @@ fn remote_log_procs(opts: &ConnOptions) -> String {
         };
         let (_, out) = docker::run_cmd(
             shared.session().as_ref(),
-            "pgrep -af '[d]ocker logs' || true",
+            &format!("pgrep -af '{pat}' || true"),
         )
         .await
         .unwrap_or((0, String::new()));
         out.trim().to_string()
     })
+}
+
+/// 远端还有没有 `docker logs` 进程（**看门狗**的判据）。
+fn remote_log_procs(opts: &ConnOptions) -> String {
+    remote_procs(opts, "docker logs")
 }
 
 fn main() {
@@ -326,6 +333,21 @@ fn main() {
         } else {
             println!("[信息] 没有容器可查详情（跳过）");
         }
+
+        // ② 之四：**退出码**要真的传回来（2026-11-16 修的真 bug）。
+        //
+        // ⚠️ **为什么要有这条**：服务端发包顺序是 **EOF → exit-status →
+        //   close**（exit-status 排在 EOF **后面**）⇒ 以前「一收到 EOF 就
+        //   收尾」⇒ **退出码永远是 0** ⇒ `run_cmd` 的 `code != 0`
+        //   从来不成立 ⇒ 「挨个试哪个 shell 能用」根本没试。
+        let (ecode, eout) = docker::run_cmd(&session, "sh -c 'exit 7'")
+            .await
+            .unwrap_or((-1, String::new()));
+        check!(
+            "② 远程命令的退出码真的传回来了",
+            ecode == 7,
+            format!("拿到的是 {ecode}（输出 {eout:?}）")
+        );
 
         // ② 之三：**日志流**（真后端）——`docker logs -f` 的独立通道。
         //
@@ -1066,20 +1088,22 @@ fn main() {
         );
     }
 
+    // ⚠️ **F / G 两组都要用**（真连真容器的那个面板）⇒ 提到外层。
+    let opts_f = ConnOptions {
+        proto: "ssh".into(),
+        host: HOST.into(),
+        port,
+        user: user.clone(),
+        keyfile: Some(keyfile_f.clone()),
+        ..Default::default()
+    };
+    let panel2 = SftpPanel::new(&opts_f);
+    *panel2.st.sub_tabs.borrow_mut() = Some(subtabs::SubTabs::new());
+
     // ================= F 组：阶段 112 —— 真实端到端（真连 + 真日志） =================
     {
         // ⚠️ **另起一个面板**（带私钥）⇒ 能真的连上 ⇒ 走完整的
         //    「选中容器 ⇒ 取详情 ⇒ 起日志流 ⇒ 切走就停」。
-        let opts = ConnOptions {
-            proto: "ssh".into(),
-            host: HOST.into(),
-            port,
-            user: user.clone(),
-            keyfile: Some(keyfile_f.clone()),
-            ..Default::default()
-        };
-        let panel2 = SftpPanel::new(&opts);
-        *panel2.st.sub_tabs.borrow_mut() = Some(subtabs::SubTabs::new());
         // ⚠️ **页面直接放进窗口**（不 mount 进子标签）⇒ 截图能拍到日志页
         //    （挂在子标签里的话，那个页签不是当前页 ⇒ 拍不到）。
         dockerui::ensure(&panel2.st);
@@ -1162,7 +1186,7 @@ fn main() {
             let mut waited4 = 0;
             let mut leftover = String::new();
             while waited4 < 20 {
-                leftover = remote_log_procs(&opts);
+                leftover = remote_log_procs(&opts_f);
                 if leftover.is_empty() {
                     break;
                 }
@@ -1175,6 +1199,201 @@ fn main() {
                 format!("远端还挂着：{leftover}")
             );
         }
+    }
+
+    // ================= G 组：阶段 113 —— 容器内终端（真连真容器） =================
+    {
+        // ⚠️ 复用 F 组那个面板（容器列表已经在、容器也选中了）。
+        let keyfile_g = keyfile_f.clone();
+        let user_g = user.clone();
+        let cs = dockerui::containers_for_test(&panel2.st);
+        let c0 = cs
+            .iter()
+            .find(|c| c.state == "running")
+            .or_else(|| cs.first())
+            .cloned();
+        if let Some(c0) = c0 {
+            let name = c0.name.clone();
+            let name_b = name.clone();
+            // ---- 后端：先看容器里有没有 shell ----
+            let shell = hub::runtime().block_on(async move {
+                let creds = hub::Creds {
+                    keyfile: Some(keyfile_g.clone()),
+                    ..Default::default()
+                };
+                let key = hub::ServerKey::new(HOST, port, &user_g);
+                let Ok(shared) = hub::acquire(key, &creds).await else {
+                    return Err("连不上".to_string());
+                };
+                docker::find_shell(shared.session().as_ref(), &name_b)
+                    .await
+                    .map_err(|e| e.0)
+            });
+            match shell {
+                Ok(sh) => {
+                    println!("[信息] 容器 {name} 里的 shell：{sh}");
+                    check!(
+                        "⑯ 容器里找到能用的 shell",
+                        sh.starts_with("/bin/"),
+                        format!("找到的是 {sh:?}")
+                    );
+                }
+                Err(msg) => {
+                    println!("[FAIL] 容器里找不到 shell：{msg}");
+                    FAILS.with(|f| f.borrow_mut().push(format!("容器里找不到 shell：{msg}")));
+                }
+            }
+
+            // ---- 前端：开容器内终端 ----
+            check!(
+                "⑯ 详情区的「终端」按钮能点",
+                dockerui::term_button_sensitive_for_test(&panel2.st),
+                "按钮是灰的"
+            );
+            dockerui::open_terminal_for_test(&panel2.st, &name);
+            let mut waited = 0;
+            while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
+                pump(200);
+                waited += 1;
+            }
+            check!(
+                "⑯ 容器内终端开起来了",
+                dockerui::term_running_for_test(&panel2.st),
+                format!("等了 {waited} 次还没起来")
+            );
+
+            // ---- 往终端里打字 ⇒ 屏幕上有回显 ⇒ 命令真的跑起来了 ----
+            dockerui::term_send_for_test(&panel2.st, b"echo pp-shell-ok\n");
+            let mut waited2 = 0;
+            let mut screen = String::new();
+            while waited2 < 30 {
+                pump(200);
+                waited2 += 1;
+                screen = dockerui::term_screen_for_test(&panel2.st);
+                if screen.contains("pp-shell-ok") {
+                    break;
+                }
+            }
+            println!("[信息] 终端屏幕：\n{screen}");
+            check!(
+                "⑯ 终端里有回显（命令真的在容器里跑起来了）",
+                screen.contains("pp-shell-ok"),
+                format!("屏幕上没有回显：\n{screen}")
+            );
+            // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张容器内终端。
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                shot(&format!("{base}-term.png"));
+            }
+
+            // ---- 关掉 ⇒ 远端不许留孤儿 `docker exec` ----
+            dockerui::stop_terminal_for_test(&panel2.st);
+            let mut waited3 = 0;
+            let mut leftover = String::new();
+            while waited3 < 20 {
+                leftover = remote_procs(&opts_f, "docker exec");
+                if leftover.is_empty() {
+                    break;
+                }
+                pump(300);
+                waited3 += 1;
+            }
+            check!(
+                "⑯ 关掉终端后远端没有残留的 docker exec 进程",
+                leftover.is_empty(),
+                format!("远端还挂着：{leftover}")
+            );
+        }
+    }
+
+    // ================= H 组：阶段 113 之后 —— 编辑器要「就在容器界面里」 =================
+    //
+    // ⚠️ **用户 2026-11-16 报的**：「编辑 docker-compose 文件」按钮点了以后，
+    //   文件编辑器打开了，**却不在容器界面**，用户会找不到 ⇒ 应该打开之后
+    //   **用户马上能看到**，**不要跑到 term 界面**。
+    //
+    // ⇒ 根因：编辑区是**一个共享的 widget**，它住在**终端列**下面 ⇒ 在
+    //   容器页打开编辑器 ⇒ 编辑器建好了，却**藏在 term 界面里**。
+    // ⇒ 修法：容器页也有编辑区的落点 ⇒ 切到容器页时把编辑区搬过来。
+    {
+        let panel3 = SftpPanel::new(&opts_f);
+        let sub3 = subtabs::SubTabs::new();
+        *panel3.st.sub_tabs.borrow_mut() = Some(sub3.clone());
+        let win3 = gtk::Window::new();
+        win3.set_default_size(1000, 620);
+        win3.set_child(Some(&sub3.root().clone()));
+        win3.present();
+        pump(200);
+        // 挂载容器页 ⇒ 它成为当前页 ⇒ **同时开始取数据**。
+        dockerui::mount(&panel3.st);
+
+        // ---- ⑱ loading 动画（用户 2026-11-16）----
+        //
+        // ⚠️ **为什么要有**：打开容器界面后要走 SSH 去远端跑 `docker ps`
+        //   ⇒ 要等一会儿 ⇒ 这期间列表是**空的** ⇒ 用户不知道是在干活还是
+        //   卡死了 ⇒ 要有**看得见的动画**。
+        //
+        // ⚠️ **这里刻意不 pump**：`refresh()` 是**同步**发起取数的 ⇒
+        //   `set_loading(true)` 也在这一刻就跑完了 ⇒ 不 pump 就不会
+        //   「等太久、列表已经到了、转圈已经停了」（⇒ 断言是确定的）。
+        let (small_v, big_v, spinning) = dockerui::loading_spinners_for_test(&panel3.st);
+        check!(
+            "⑱ 加载时工具条有转圈",
+            small_v && spinning,
+            format!("小转圈可见={small_v} 在转={spinning}")
+        );
+        check!(
+            "⑱ 首次加载时列表正中间有转圈",
+            big_v,
+            "正中间那个大转圈没出现"
+        );
+        // 截一张 loading 动画（要 pump 一下 ⇒ GTK 才真的画出来）。
+        pump(300);
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            shot(&format!("{base}-loading.png"));
+        }
+
+        check!(
+            "⑰ 容器页挂上了",
+            sub3.page_count() >= 1,
+            "容器页没进子标签"
+        );
+        check!(
+            "⑰ 编辑区搬到了容器页（不用去 term 界面找）",
+            dockerui::editor_area_in_docker_page_for_test(&panel3.st),
+            "编辑区还在终端列里"
+        );
+        // 加一个编辑器 ⇒ 编辑区露出来，而且**还在容器页里**。
+        let dummy = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sub3.add_editor(9001, None, "冒烟", dummy.upcast(), None);
+        pump(200);
+        check!(
+            "⑰ 编辑区露出来了（开着编辑器却看不见 = 功能等于没有）",
+            sub3.editor_area_visible(),
+            "编辑区是隐的"
+        );
+        check!(
+            "⑰ 编辑器还在容器页里",
+            dockerui::editor_area_in_docker_page_for_test(&panel3.st),
+            "编辑区被搬走了"
+        );
+        // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张「编辑器在容器页里」。
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            shot(&format!("{base}-editor.png"));
+        }
+
+        // ---- 等列表真的到了 ⇒ 转圈**就该停**（不然一直转 ⇒ 误导用户）----
+        let mut waited = 0;
+        while waited < 40 && dockerui::containers_for_test(&panel3.st).is_empty() {
+            pump(200);
+            waited += 1;
+        }
+        pump(200);
+        let (small_v2, big_v2, _) = dockerui::loading_spinners_for_test(&panel3.st);
+        check!(
+            "⑱ 列表到了以后转圈停掉",
+            !small_v2 && !big_v2,
+            format!("小转圈可见={small_v2} 大转圈可见={big_v2}")
+        );
     }
     }
 

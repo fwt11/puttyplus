@@ -101,6 +101,8 @@ pub enum PageKind {
     Terminal,
     /// 数据库工作台页
     Db,
+    /// **容器页**（阶段 109；阶段 113 之后**也有编辑区的落点**）。
+    Docker,
 }
 
 /// 一个子页。
@@ -202,6 +204,18 @@ pub struct SubTabs {
     editor_current: Cell<Option<u64>>,
     /// 编辑区现在的**宿主**（终端列那个竖向 Paned，阶段 108）。
     editor_host: RefCell<Option<gtk::Paned>>,
+    /// **每一页自己的**编辑区宿主（页 id → 竖向 Paned）。
+    ///
+    /// ⚠️ **干什么用**：编辑区（阶段 107）是**一个共享的 widget** ⇒ 它同一
+    ///   时刻只能待在**一页**里 ⇒ 切页时得把它**搬到当前页**。
+    ///   - 终端页的宿主 = 「终端列」（阶段 108）；
+    ///   - **容器页的宿主 = 它自己那一列**（阶段 113 之后）⇒ 用户在容器页
+    ///     点「编辑 compose 文件」⇒ **编辑器就在容器界面下面**，用户马上
+    ///     能看到（**不用跑到 term 界面去找**——用户 2026-11-16 报的）。
+    ///
+    /// ⚠️ **没登记的页不动编辑区**（例如数据库工作台页 ⇒ 编辑区留在终端
+    ///   列里，跟以前一样）。
+    page_editor_hosts: RefCell<std::collections::HashMap<u64, gtk::Paned>>,
     /// 空编辑区时的提示（**停靠区**：把编辑器拖回来）。
     editor_hint: gtk::Label,
     pages: RefCell<Vec<SubPage>>,
@@ -311,6 +325,7 @@ impl SubTabs {
             tracked_editor_hosts: RefCell::new(Vec::new()),
             editor_current: Cell::new(None),
             editor_host: RefCell::new(None),
+            page_editor_hosts: RefCell::new(std::collections::HashMap::new()),
             editor_hint: hint,
             pages: RefCell::new(Vec::new()),
             next_id: Cell::new(1),
@@ -598,11 +613,55 @@ impl SubTabs {
         }
         host.set_end_child(Some(w.upcast_ref::<gtk::Widget>()));
         *self.editor_host.borrow_mut() = Some(host.clone());
+        // ⚠️ **换了宿主 ⇒ 分割条位置要重算**：位置是按宿主高度算的
+        //   （`layout_editor_area`）⇒ 不重算的话，编辑区在新宿主里
+        //   可能只有 0 高度（**看不见**）。
+        self.refresh_editor_area();
     }
 
     /// 编辑区控件（**测试钩子**：冒烟要量它的位置/宽度）。
     pub fn editor_area_widget(&self) -> gtk::Widget {
         self.editor_area.clone().upcast()
+    }
+
+    /// 登记「**这一页**的编辑区宿主」（竖向 Paned）。
+    ///
+    /// 干什么用：编辑区是**一个共享的 widget** ⇒ 它同一时刻只能待在一页
+    /// 里 ⇒ 切页时得把它搬过去（见 [`Self::host_editor_area_for_page`]）。
+    ///
+    /// ⚠️ **谁要登记**：页面自己（容器页在 `dockerui::mount` 里登记）。
+    pub fn set_page_editor_host(self: &Rc<Self>, page_id: u64, host: gtk::Paned) {
+        self.page_editor_hosts
+            .borrow_mut()
+            .insert(page_id, host);
+    }
+
+    /// 把编辑区挂到**某一页**的宿主（这一页没登记 ⇒ 什么都不做）。
+    ///
+    /// 返回 true = 挂过去了（调用方据此知道「这一页自己管编辑区」）。
+    pub fn host_editor_area_for_page(self: &Rc<Self>, page_id: u64) -> bool {
+        let host = self.page_editor_hosts.borrow().get(&page_id).cloned();
+        let Some(host) = host else { return false };
+        self.host_editor_area(&host);
+        true
+    }
+
+    /// 按**页序号**把编辑区挂到那一页的宿主（没登记 ⇒ 返回 false）。
+    ///
+    /// ⚠️ **干什么用**：切子页签时调用 ⇒ 编辑区**跟着当前页走**
+    ///   （终端页 ⇒ 终端列；容器页 ⇒ 容器页自己那一列）。
+    pub fn host_editor_area_for_page_num(self: &Rc<Self>, num: u32) -> bool {
+        let id = {
+            let pages = self.pages.borrow();
+            pages
+                .iter()
+                .find(|p| self.nb.page_num(&p.widget) == Some(num))
+                .map(|p| p.id)
+        };
+        match id {
+            Some(id) => self.host_editor_area_for_page(id),
+            None => false,
+        }
     }
 
     /// 编辑器的正文控件（**测试钩子**：冒烟要靠它找页签头）。

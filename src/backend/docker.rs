@@ -31,6 +31,7 @@ use crate::backend::conn::HostKeyHandler;
 use crate::backend::shell::{ShellChannel, ShellEvent};
 use crate::backend::{BackendError, BackendResult};
 use crate::i18n::tr;
+use crate::trf;
 
 /// 字段分隔符（见模块注释：为什么不用制表符）。
 pub const SEP: char = '|';
@@ -467,6 +468,94 @@ pub async fn open_logs(
     Ok(ch)
 }
 
+/* ---------------- 阶段 113：容器内终端 ---------------- */
+
+/// 容器里可能有的 shell（**按顺序挨个试**）。
+///
+/// ⚠️ **为什么要挨个试**：容器镜像千差万别 —— alpine 只有 `/bin/sh`
+///    （busybox），debian 有 `/bin/sh` ＋ `/bin/bash`，有些镜像**一个都没有**
+///    （distroless）⇒ 挨个试，全不行才报错。
+///
+/// ⚠️ **顺序**：先 `/bin/sh`（几乎所有镜像都有，且是 POSIX 的）⇒ 命中率最高。
+pub const SHELL_CANDIDATES: [&str; 4] = ["/bin/sh", "/bin/bash", "/bin/ash", "/bin/zsh"];
+
+/// 探测命令：这个 shell 在容器里**能不能跑**（**不分配 pty** ⇒ 不需要交互）。
+///
+/// ⚠️ 用 `exit 0` 而不是 `true`：命令 `true` 得是容器里的**二进制**，
+///    而 distroless 那种镜像里未必有 ⇒ 用 shell 内建的 `exit` 最保险。
+pub fn shell_probe_cmd(name: &str, shell: &str) -> String {
+    format!(
+        "docker exec {n} {sh} -c 'exit 0' 2>&1",
+        n = crate::backend::checksum::sh_quote(name),
+        sh = crate::backend::checksum::sh_quote(shell)
+    )
+}
+
+/// 容器内终端的命令（`docker exec -it`）。
+///
+/// ⚠️ **`-t`（在容器里分配 pty）**：容器里的 shell 需要终端才是交互式的
+///    （提示符、行规程都靠它）⇒ 我们这条 SSH 通道**也**申请了 pty
+///    （`ShellChannel::open_exec(..., pty=true)`）⇒ 两边都是 tty ⇒ docker
+///    不会报「the input device is not a TTY」。
+pub fn exec_shell_cmd(name: &str, shell: &str) -> String {
+    format!(
+        "docker exec -it {n} {sh}",
+        n = crate::backend::checksum::sh_quote(name),
+        sh = crate::backend::checksum::sh_quote(shell)
+    )
+}
+
+/// 挨个试 ⇒ 容器里到底哪个 shell 能用（都没有 ⇒ 报错说清楚）。
+///
+/// ⚠️ **失败要给「怎么办」**：容器**没在运行**时也说「没有可用的 shell」是
+///    误导 ⇒ 单独认出来。
+pub async fn find_shell(session: &Handle<HostKeyHandler>, name: &str) -> BackendResult<String> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let mut last = String::new();
+    for sh in SHELL_CANDIDATES {
+        let (code, out) = run_cmd(session, &shell_probe_cmd(name, sh)).await?;
+        if code == 0 {
+            return Ok(sh.to_string());
+        }
+        last = out;
+    }
+    let low = last.to_ascii_lowercase();
+    if low.contains("is not running") || low.contains("container is not running") {
+        return Err(BackendError(
+            tr("这个容器没有在运行（先启动它才能进终端）").to_string(),
+        ));
+    }
+    if low.contains("permission denied") || low.contains("docker.sock") {
+        return Err(BackendError(
+            tr("当前账号没有访问 Docker 的权限（需要加入 docker 组，或改用有权限的账号登录）")
+                .to_string(),
+        ));
+    }
+    Err(BackendError(trf!(
+        "这个容器里没有可用的 shell（试过 {list}）",
+        list = SHELL_CANDIDATES.join("、")
+    )))
+}
+
+/// 开一条**容器内终端**通道（`docker exec -it`）。
+///
+/// ⚠️ **要 pty**（`pty = true`）：容器里的 shell 得有个终端才是交互式的。
+pub async fn open_exec_shell(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+    shell: &str,
+    cols: u16,
+    rows: u16,
+) -> BackendResult<ShellChannel> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let ch = ShellChannel::open_exec(session, &exec_shell_cmd(name, shell), cols, rows, true).await?;
+    Ok(ch)
+}
+
 /* ---------------- 输出解析（纯函数，好测） ---------------- */
 
 /// 解析 `docker ps` 的输出。
@@ -663,6 +752,8 @@ pub fn classify_failure(raw: &str) -> String {
         tr("远程的 Docker 服务没有运行（守护进程没起来）").to_string()
     } else if s.contains("permission denied") || s.contains("docker.sock") {
         tr("当前账号没有访问 Docker 的权限（需要加入 docker 组，或改用有权限的账号登录）").to_string()
+    } else if s.contains("no such container") {
+        tr("取不到这个容器的信息（容器可能已经被删掉了）").to_string()
     } else if s.contains("command not found") || s.contains("no such file or directory") {
         tr("远程没有找到 docker（这台服务器上可能没装 Docker）").to_string()
     } else if s.contains("template parsing error") {
@@ -708,13 +799,15 @@ pub async fn run_cmd(
 /// 探路：远程有没有 docker、守护进程在不在、版本多少。
 pub async fn probe(session: &Handle<HostKeyHandler>) -> BackendResult<String> {
     let (code, out) = run_cmd(session, &which_cmd()).await?;
-    if code != 0 {
-        return Err(BackendError(classify_failure(&out)));
-    }
+    // ⚠️ **先看输出、再看退出码**：`command -v docker` 找不到时**输出是空的**
+    //   （退出码 1）⇒ 说「这台机器上没装 Docker」比说「执行失败」准。
     if out.trim().is_empty() {
         return Err(BackendError(
             tr("远程没有找到 docker（这台服务器上可能没装 Docker）").to_string(),
         ));
+    }
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
     }
     let (code, ver) = run_cmd(session, &version_cmd()).await?;
     if code != 0 {
@@ -846,6 +939,29 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].ports, "0.0.0.0:80->80/tcp");
         assert_eq!(v[0].compose, "");
+    }
+
+    /// 容器已经被删掉时，错误要说清楚（别把英文原文甩给用户）。
+    ///
+    /// ⚠️ **这条为什么现在才有用**：退出码修好之前（2026-11-16 之前）
+    ///   `run_cmd` 的 `code` 恒为 0 ⇒ **根本走不到 `classify_failure`**
+    ///   ⇒ 这条分支是死代码。
+    #[test]
+    fn 容器不在了的错误能认出来() {
+        let s = classify_failure("Error response from daemon: No such container: web");
+        assert!(
+            s.contains("容器可能已经被删掉了"),
+            "认错了，得到的是 {s}"
+        );
+    }
+
+    /// 守护进程没起时，错误要说清楚（这条分支同样只有退出码修好后才有意义）。
+    #[test]
+    fn 守护进程没起的错误能认出来() {
+        let s = classify_failure(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+        );
+        assert!(s.contains("守护进程"), "认错了，得到的是 {s}");
     }
 
     #[test]
@@ -1140,5 +1256,50 @@ mod tests {
             !stripped.contains("rm -rf"),
             "容器名漏出了引号（能被注入）：{c}"
         );
+    }
+
+    /* ---------------- 阶段 113：容器内终端 ---------------- */
+
+    /// 探测命令：**不**分配 pty（探路不该要终端）。
+    #[test]
+    fn 探测命令不分配pty() {
+        let c = shell_probe_cmd("web", "/bin/sh");
+        assert!(c.contains("docker exec"), "应当是 docker exec：{c}");
+        assert!(!c.contains("-it"), "探测不该分配 pty：{c}");
+        assert!(
+            c.contains("'web'") && c.contains("'/bin/sh'"),
+            "参数没包引号：{c}"
+        );
+        // ⚠️ 用 shell 内建的 `exit`（不要 `true` 那种二进制）。
+        assert!(c.contains("exit 0"), "探测命令不对：{c}");
+    }
+
+    /// 终端命令：**要** `-it`（容器里的 shell 得有个终端才是交互式的）。
+    #[test]
+    fn 终端命令带it() {
+        let c = exec_shell_cmd("web", "/bin/sh");
+        assert!(c.contains("docker exec -it"), "应当带 -it：{c}");
+        assert!(
+            c.contains("'web'") && c.contains("'/bin/sh'"),
+            "参数没包引号：{c}"
+        );
+    }
+
+    /// ⚠️ **容器名是远端可控的内容** ⇒ 必须引起来（防注入）。
+    #[test]
+    fn 终端命令防注入() {
+        let c = exec_shell_cmd("a; rm -rf /", "/bin/sh");
+        assert!(c.contains("'a; rm -rf /'"), "容器名没被引号包住：{c}");
+        let c2 = shell_probe_cmd("a; rm -rf /", "/bin/sh");
+        assert!(c2.contains("'a; rm -rf /'"), "容器名没被引号包住：{c2}");
+    }
+
+    /// 挨个试的顺序：先 `/bin/sh`（几乎所有镜像都有 ⇒ 命中率最高）。
+    #[test]
+    fn shell候选按命中率排序() {
+        assert_eq!(SHELL_CANDIDATES[0], "/bin/sh");
+        for s in ["/bin/bash", "/bin/ash", "/bin/zsh"] {
+            assert!(SHELL_CANDIDATES.contains(&s), "候选里少了 {s}");
+        }
     }
 }

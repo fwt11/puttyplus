@@ -621,6 +621,15 @@ impl Tabs {
                 }
                 let kind = sub.kind_by_page_num(num);
                 if kind != panel::subtabs::PageKind::Terminal {
+                    // ⚠️ **阶段 113 之后**：别的页也可能**自己登记了编辑区
+                    //   的落点**（容器页就是）⇒ 把编辑区搬过去 ⇒ 用户在
+                    //   容器页点「编辑 compose 文件」⇒ **编辑器就在容器
+                    //   界面下面**，马上能看见（用户 2026-11-16 报的
+                    //   「跑到 term 界面去了」）。
+                    //
+                    // ⚠️ **文件面板不动**：它是会话级的一个 widget ⇒ 待在
+                    //   终端页里（容器页没有文件面板）。
+                    sub.host_editor_area_for_page_num(num);
                     return;
                 }
                 // 拿不到宿主就**静默不动**：界面不崩、不空半个页面。

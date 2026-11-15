@@ -2512,7 +2512,11 @@ fn build_ready_hook(
 /// ⚠️ `PP_TERM_BACKEND=ghostty|vte` 可**强制**用某个后端——自测用
 /// （`examples/term_reconnect_smoke.rs` 那套冒烟换个环境变量就能跑
 /// ghostty 后端）。
-fn new_term_backend() -> TermView {
+///
+/// ⚠️ **别处也要用**（阶段 113：容器内终端）⇒ `pub(crate)` ⇒ 容器终端
+///    与主终端**用同一个后端**（用户在首选项里选了 ghostty ⇒ 容器终端
+///    也走 ghostty ⇒ 行为一致）。
+pub(crate) fn new_term_backend() -> TermView {
     // ① **环境变量**（自测用，最高优先）：`PP_TERM_BACKEND=ghostty|vte`
     let forced = std::env::var("PP_TERM_BACKEND").unwrap_or_default();
     if forced.eq_ignore_ascii_case("ghostty") {

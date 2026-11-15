@@ -197,10 +197,63 @@ let ch = ShellChannel::open_exec(session.as_ref(), &cmd, 80, 24, false).await?;
 - ⚠️ **冒烟里的一条 GTK 行为**：`set_cursor` 对**看不见的行**（收着的项目里
   的子行）**不生效** ⇒ 要选 compose 组里的容器 ⇒ 得先展开项目。
 
-### 阶段 113：容器内终端
+### 阶段 113：容器内终端 —— ✅ **2026-11-16 完成**
 
 - `docker exec -it` ⇒ 复用 `TermView`（进程内 pty）。
-- ⚠️ 容器里可能没有 `/bin/sh` ⇒ 依次试 `/bin/sh` → `/bin/bash` → 报「容器里没有可用的 shell」。
+- ⚠️ 容器里可能没有 `/bin/sh` ⇒ 依次试 `/bin/sh` → `/bin/bash` → `/bin/ash`
+  → `/bin/zsh` ⇒ 报「容器里没有可用的 shell」。
+- **实际交付**：
+  - 后端 `src/backend/docker.rs`：`SHELL_CANDIDATES`、`shell_probe_cmd`
+    （`docker exec <容器> <shell> -c 'exit 0'`，**不**分配 pty）、`exec_shell_cmd`
+    （`docker exec -it`）、`find_shell`（挨个试）、`open_exec_shell`（**要 pty**）；
+    容器名过 `valid_name` ＋ `sh_quote`；
+  - 前端 `src/panel/dockerui.rs`：详情区多一个**「终端」**按钮（**不是写操作**
+    ⇒ 不用二次确认）⇒ **另开一个窗口**（详情区只有 ~160px ⇒ 塞终端没法用）
+    ⇒ 复用 `TermView`（`src/term.rs` 的 `new_term_backend()` 改成 `pub(crate)`）；
+    关闭 ⇒ `ShellChannel::close()` ⇒ 远端不留孤儿 `docker exec`；
+  - ⚠️ **顺手修了一个藏得很深的真 bug**：**远程命令的退出码恒为 0**
+    （详见下面的「退出码」一节）。
+- ⚠️ **实测踩出来的坑**：
+  1. **exit-status 排在 EOF 后面** ⇒ 以前「一收到 EOF 就收尾」⇒
+     **退出码永远是 0** ⇒ 「挨个试哪个 shell 能用」**根本没试**（探测永远
+     「成功」）⇒ 容器里没有 `/bin/sh` 也会说「有」。
+     ⇒ 修法：`next_event()` 收到 EOF **不算结束**（继续等 exit-status/close，
+     EOF 之后最多再等 2 秒兜底）；退出码只报一次。
+  2. **两个 pty 才对**：SSH 通道也申请 pty（`pty = true`）⇒ 两边都是 tty
+     ⇒ docker 不会报「the input device is not a TTY」。
+     ⚠️ 只去掉其中一个 ⇒ 冒烟的「终端里有回显」那条会红（实测）。
+  3. **退出码修好之后，`classify_failure` 里那些分支才不是死代码**
+     （以前 `code` 恒为 0 ⇒ 根本走不到）⇒ 补了「容器不在了」的识别。
+- ⚠️ **容器的 shell 探测命令**用 shell 内建的 `exit 0`，**不要**用 `true`
+  那个二进制 ⇒ distroless 那种镜像里未必有。
+
+### 阶段 123：容器列表的 loading 动画 —— ✅ **2026-11-16 完成**
+
+- 用户 2026-11-16：「容器界面打开后需要一段时间才能看到容器，这时候可以加一个
+  **loading 动画**」。
+- **实际交付**：两个 `gtk::Spinner` ——
+  - **工具条里的小转圈**：**每次**取数据都转（自动刷新时也让用户知道
+    刚刚更新过）；
+  - **列表正中间的大转圈**（`gtk::Overlay` 包住表格区）：只在「正在加载
+    **且** 列表还是空的」时候显示 ⇒ 首次加载的经典样子。
+- ⚠️ **顺序要紧**：大转圈要不要消失取决于「列表空不空」⇒ **先填列表，
+  再关动画**（否则会按旧数据判断）。
+
+### 阶段 124：编辑器就在容器页里 —— ✅ **2026-11-16 完成**
+
+- 用户 2026-11-16：「编辑 docker-compose 文件按钮点了以后，文件编辑器打开了，
+  **却不在容器界面**，用户会找不到 ⇒ 应该打开之后**用户马上能看到**，
+  **不要跑到 term 界面**」。
+- **根因**：编辑区（阶段 107）是**一个共享的 widget**，它住在**终端列**下面
+  ⇒ 用户在**容器页**点「编辑」⇒ 编辑器建好了，却**藏在 term 界面里**。
+- **实际交付**：
+  - `SubTabs` 增加「**每页登记自己的编辑区宿主**」机制
+    （`set_page_editor_host` / `host_editor_area_for_page` /
+    `host_editor_area_for_page_num`）；
+  - 容器页外层多一根竖向 Paned（编辑区的落点）；
+  - 切到容器页 ⇒ 编辑区搬过去 ⇒ 编辑器**就显示在容器界面下方**（同窗、
+    马上可见）。
+- ⚠️ **文件面板不动**：它是会话级的一个 widget ⇒ 一直待在终端页里。
 
 ### 阶段 114：监控曲线
 
@@ -295,3 +348,19 @@ let ch = ShellChannel::open_exec(session.as_ref(), &cmd, 80, 24, false).await?;
     行为 14 条）＋ **F 组**（**真连真容器**端到端 6 条）—— 全绿；
   - **2 轮反向验证**（退掉看门狗 ⇒ 残留进程那条红；退掉 `selected` 修复 ⇒
     详情/日志那两条红）。
+- 2026-11-16：**阶段 113 完成**（容器内终端）＋ **阶段 123**（loading 动画）
+  ＋ **阶段 124**（编辑器就在容器页里）—— 用户插队的两条也一并做了。
+  - 阶段 113：后端 `shell_probe_cmd` / `exec_shell_cmd` / `find_shell` /
+    `open_exec_shell`；前端「终端」按钮 ⇒ **另开窗口**跑 `TermView`；
+  - ⚠️ **顺手修了一个藏得很深的真 bug**：**远程命令的退出码恒为 0**
+    （服务端发包顺序是 **EOF → exit-status → close** ⇒ exit-status 排在
+    EOF 后面 ⇒ 以前一收到 EOF 就收尾 ⇒ 退出码永远是 0 ⇒ 「挨个试哪个
+    shell 能用」**根本没试**）⇒ `next_event()` 改成 EOF 不算结束；
+  - 阶段 123：两个 `gtk::Spinner`（工具条小转圈 ＋ 列表正中大转圈）；
+  - 阶段 124：容器页也登记了**编辑区的落点** ⇒ 编辑器不再藏在 term 界面；
+  - 单测 **822 passed / 0 failed**；冒烟 `docker_ui_smoke` 增 **G 组**
+    （容器内终端 5 条）＋ **H 组**（编辑器落点 4 条）＋ **⑱ 组**
+    （loading 动画 3 条）＋ A 组加一条**退出码**断言 —— 全绿；
+  - **4 轮反向验证**（退掉 pty ⇒ 回显那条红；退掉 `ch.close()` ⇒ 远端残留
+    那条红；退掉 `find_shell` 的挨个试 ⇒ 3 条红；退掉 EOF 的处理 ⇒ 退出码
+    那条红；不登记编辑区宿主 ⇒ 2 条红；转圈永远不显示 ⇒ 2 条红）。

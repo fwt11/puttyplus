@@ -53,12 +53,71 @@ use crate::backend::{BackendError, BackendResult};
 /// 会让远程少一块功能（鼠标模式）。
 pub const TERM_TYPE: &str = "xterm-256color";
 
+/// 收到 EOF 之后，**最多再等多久**去拿 `exit-status`。
+///
+/// ⚠️ **为什么要这个上限**：exit-status 排在 EOF 后面（见 `next_event`
+///   的说明）⇒ 得等它；但万一服务器只发 EOF 不发 close ⇒ 不能把调用方
+///   挂死 ⇒ 2 秒足够（同一台机器上毫秒级就到）。
+const EXIT_AFTER_EOF: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 通道里出来的事件。
 pub enum ShellEvent {
     /// 远程来的字节（喂给终端内核）。
     Data(Vec<u8>),
     /// 远程退出了（带退出码）。
     Exit(i32),
+}
+
+/// 通道消息 ⇒ 事件的翻译结果。
+enum Step {
+    /// 这条消息自己不带事件 ⇒ 继续等。
+    Wait,
+    /// 有数据要往外送。
+    Data(Vec<u8>),
+    /// 通道收尾了（带退出码）。
+    Done(i32),
+}
+
+/// 通道消息的**状态机**（纯逻辑 ⇒ 好测）。
+///
+/// ⚠️ **为什么要抽成纯函数**：退出码那个坑**极隐蔽**（exit-status 排在
+///   EOF 后面 ⇒ 早退一步就永远拿不到退出码）⇒ 抽出来才能用单测钉住
+///   （真服务器上的验证在 `examples/docker_ui_smoke.rs` 的 A 组）。
+#[derive(Default)]
+struct ExitTracker {
+    /// 退出码（`exit-status` 到达时记下）。
+    code: Option<i32>,
+    /// 见过 EOF 了（⇒ 之后只等一小会儿，别把调用方挂死）。
+    eof_seen: bool,
+}
+
+impl ExitTracker {
+    /// 处理一条通道消息。
+    fn on_msg(&mut self, msg: &ChannelMsg) -> Step {
+        match msg {
+            ChannelMsg::Data { data } => Step::Data(data.to_vec()),
+            // stderr 一般不用（交互 shell 里混着跑才有意义）⇒ 并进 stdout
+            ChannelMsg::ExtendedData { data, .. } => Step::Data(data.to_vec()),
+            ChannelMsg::ExitStatus { exit_status } => {
+                // ⚠️ 退出码**先记下**、不等它就返回：exit-status 之后
+                // 可能还有数据没发完（真 PuTTY 也是等 EOF 才收尾）。
+                self.code = Some(*exit_status as i32);
+                Step::Wait
+            }
+            ChannelMsg::Eof => {
+                // ⚠️ **不是结束**：exit-status 排在 EOF 后面（见 `next_event`）。
+                self.eof_seen = true;
+                Step::Wait
+            }
+            ChannelMsg::Close => Step::Done(self.code()),
+            _ => Step::Wait,
+        }
+    }
+
+    /// 手上的退出码（没拿到就是 0）。
+    fn code(&self) -> i32 {
+        self.code.unwrap_or(0)
+    }
 }
 
 /// 进程内 SSH 的交互通道。
@@ -77,6 +136,14 @@ pub struct ShellChannel {
     read: Arc<tokio::sync::Mutex<ChannelReadHalf>>,
     /// 建通道时所在的 tokio 运行时（写操作要在它上面发起）。
     rt: tokio::runtime::Handle,
+    /// 通道**已经收尾**了（退出码已经报过一次）⇒ 之后的 `next_event`
+    /// 一律返回 `None`。
+    ///
+    /// ⚠️ **为什么需要它**：`next_event` 现在会**先报一次退出码**再收尾
+    ///   （见那里的说明）⇒ 同一个通道只能报一次 ⇒ 第二次开始要返回
+    ///   `None`，否则调用方的 `while let Some(ev) = …` 会**死循环**
+    ///   （每次都拿到一个 `Exit`）。
+    done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ShellChannel {
@@ -150,6 +217,7 @@ impl ShellChannel {
             write: Arc::new(write),
             read: Arc::new(tokio::sync::Mutex::new(read)),
             rt: tokio::runtime::Handle::current(),
+            done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -200,25 +268,63 @@ impl ShellChannel {
     /// 读下一个事件（**阻塞到有数据或通道关闭**）。
     ///
     /// ⚠️ 只有一个读者（后台任务循环调它）⇒ 读端用异步锁保护。
+    ///
+    /// ## ⚠️ 退出码：**收到 EOF 不算结束**（2026-11-16 实测踩出来的坑）
+    ///
+    /// OpenSSH 发包的顺序是 **EOF(96) → exit-status(98) → close(97)**
+    /// （用 `ssh -vvv` 抓的包序）⇒ **exit-status 排在 EOF 后面**。
+    ///
+    /// ⇒ 以前这里「一收到 EOF 就返回退出码」⇒ **退出码永远是 0**
+    /// （exit-status 还没送到就被丢掉了）⇒ 凡是靠退出码判断成败的地方
+    /// 全都失灵：
+    /// - `docker.rs` 的 `run_cmd` ⇒ `code != 0` 从来不成立；
+    /// - 阶段 113 的 `find_shell` ⇒ 「挨个试哪个 shell 能用」**根本没试**
+    ///   （探测永远「成功」）⇒ 容器里没有 `/bin/sh` 也会说「有」；
+    /// - 终端退出时显示的状态码。
+    ///
+    /// ⇒ 现在：**EOF 只是「不再有数据了」的信号**，**继续等**
+    /// `exit-status` / `close`；等到了才带真实退出码收尾。
+    ///
+    /// ⚠️ **兜底**：万一服务器只发 EOF 不发 close（不常见，但存在）⇒
+    ///   EOF 之后**最多再等 2 秒** ⇒ 免得调用方永远挂着。
+    ///
+    /// ⚠️ **退出码只报一次**：报完就把 `done` 置上 ⇒ 之后再调返回 `None`
+    ///   （否则调用方的 `while let Some(ev) = …` 会死循环）。
     pub async fn next_event(&self) -> Option<ShellEvent> {
+        use std::sync::atomic::Ordering;
         let mut read = self.read.lock().await;
-        let mut exit_code: Option<i32> = None;
+        if self.done.load(Ordering::SeqCst) {
+            return None;
+        }
+        let mut tracker = ExitTracker::default();
         loop {
-            match read.wait().await? {
-                ChannelMsg::Data { data } => return Some(ShellEvent::Data(data.to_vec())),
-                // stderr 一般不用（交互 shell 里混着跑才有意义）⇒ 并进 stdout
-                ChannelMsg::ExtendedData { data, .. } => {
-                    return Some(ShellEvent::Data(data.to_vec()))
+            // ⚠️ EOF 之后只再等一会儿（等 exit-status）⇒ 别把调用方挂死。
+            let msg = if tracker.eof_seen {
+                match tokio::time::timeout(EXIT_AFTER_EOF, read.wait()).await {
+                    Ok(Some(m)) => m,
+                    // 超时了（服务器没给退出码）⇒ 就按手上的信息收尾。
+                    Ok(None) | Err(_) => {
+                        self.done.store(true, Ordering::SeqCst);
+                        return Some(ShellEvent::Exit(tracker.code()));
+                    }
                 }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    // ⚠️ 退出码**先记下**、不等它就返回：exit-status 之后
-                    // 可能还有数据没发完（真 PuTTY 也是等 EOF 才收尾）。
-                    exit_code = Some(exit_status as i32);
+            } else {
+                match read.wait().await {
+                    Some(m) => m,
+                    // 通道没了（服务器关了它 / 整条 SSH 断了）⇒ 收尾。
+                    None => {
+                        self.done.store(true, Ordering::SeqCst);
+                        return Some(ShellEvent::Exit(tracker.code()));
+                    }
                 }
-                ChannelMsg::Eof | ChannelMsg::Close => {
-                    return Some(ShellEvent::Exit(exit_code.unwrap_or(0)))
+            };
+            match tracker.on_msg(&msg) {
+                Step::Wait => continue,
+                Step::Data(b) => return Some(ShellEvent::Data(b)),
+                Step::Done(code) => {
+                    self.done.store(true, Ordering::SeqCst);
+                    return Some(ShellEvent::Exit(code));
                 }
-                _ => {}
             }
         }
     }
@@ -241,6 +347,39 @@ mod tests {
     #[test]
     fn 终端类型是_xterm_256color() {
         assert_eq!(TERM_TYPE, "xterm-256color");
+    }
+
+    /// ⚠️ **回归钉**：退出码排在 **EOF 后面**（服务端发包顺序实测：
+    ///   EOF → exit-status → close）⇒ **收到 EOF 不能收尾**。
+    ///
+    /// ⚠️ **这条为什么值钱**：早退一步（EOF 就返回）⇒ 退出码**永远是 0**
+    ///   ⇒ `run_cmd` 的 `code != 0` 从来不成立 ⇒ 「挨个试哪个 shell 能用」
+    ///   根本没试 ⇒ 而且**看不出来**（探测永远「成功」）。
+    #[test]
+    fn 退出码排在eof后面也得拿到() {
+        let mut t = ExitTracker::default();
+        // EOF：**不是结束** ⇒ 继续等。
+        assert!(matches!(t.on_msg(&ChannelMsg::Eof), Step::Wait));
+        // exit-status：记下来，但**还不收尾**（后面可能还有数据）。
+        assert!(matches!(
+            t.on_msg(&ChannelMsg::ExitStatus { exit_status: 7 }),
+            Step::Wait
+        ));
+        // close：这时候才收尾，退出码是 7。
+        match t.on_msg(&ChannelMsg::Close) {
+            Step::Done(code) => assert_eq!(code, 7, "退出码没带对"),
+            _ => panic!("close 应当收尾"),
+        }
+    }
+
+    /// 退出码排在 **close 后面**的服务器（少见）⇒ 收尾时按 0 算。
+    #[test]
+    fn 没有退出码就按零收尾() {
+        let mut t = ExitTracker::default();
+        match t.on_msg(&ChannelMsg::Close) {
+            Step::Done(code) => assert_eq!(code, 0),
+            _ => panic!("close 应当收尾"),
+        }
     }
 
     /// 事件枚举能安全地跨线程传（后台任务 → GTK 主线程）。

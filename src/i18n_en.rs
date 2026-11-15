@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1878] = [
+pub static EN: [(&str, &str); 1887] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -688,6 +688,11 @@ pub static EN: [(&str, &str); 1878] = [
     ("容器…", "Containers…"),
     ("容器列表只支持 SSH 会话：当前协议没有可复用的 SSH 连接。", "The container list only supports SSH sessions: the current protocol has no reusable SSH connection."),
     ("容器名不合法", "The container name is not valid"),
+    ("容器终端已经开着（在另一个窗口里）", "The container terminal is already open (in another window)"),
+    ("容器终端已退出", "The container terminal has exited"),
+    ("容器终端已退出（退出码 {c}）", "The container terminal has exited (exit code {c})"),
+    ("容器终端：{n}", "Container terminal: {n}"),
+    ("容器终端：{n}（输入 exit 可以退出）", "Container terminal: {n} (type exit to quit)"),
     ("容器（{n} 个）：", "Containers ({n}):"),
     ("密码", "Password"),
     ("密码优先（默认）", "Password first (default)"),
@@ -879,6 +884,7 @@ pub static EN: [(&str, &str); 1878] = [
     ("当前日期", "Current date"),
     ("当前时间", "Current time"),
     ("当前没有会话，先新建一个连接", "There is no session yet, create a connection first"),
+    ("当前终端后端不支持容器终端", "The current terminal backend does not support container terminals"),
     ("当前终端后端不支持进程内 SSH。", "The current terminal backend does not support in-process SSH."),
     ("当前终端引擎还不支持进程内 SSH，这个选择暂时退回 spawn。", "The current terminal engine does not support in-process SSH yet, so this choice falls back to spawn for now."),
     ("当前账号没有访问 Docker 的权限（需要加入 docker 组，或改用有权限的账号登录）", "The current account has no permission to access Docker (join the docker group, or log in with an account that has permission)"),
@@ -1262,6 +1268,7 @@ pub static EN: [(&str, &str); 1878] = [
     ("正在导入 {v0} 行到 {schema}.{table}…", "Importing {v0} rows into {schema}.{table}…"),
     ("正在导出 {schema}.{table} 到 {path}…", "Exporting {schema}.{table} to {path}…"),
     ("正在打开 {p}…", "Opening {p}…"),
+    ("正在打开容器终端…", "Opening the container terminal…"),
     ("正在执行 DDL…", "Executing the DDL…"),
     ("正在执行定义（{total} 条语句）…", "Executing the definition ({total} statements)…"),
     ("正在扫描本地与远程目录…", "Scanning the local and remote directories…"),
@@ -1711,6 +1718,8 @@ pub static EN: [(&str, &str); 1878] = [
     ("这个 compose 项目没有记录配置文件路径，没法编辑", "This compose project does not record a configuration file path, so it cannot be edited"),
     ("这个会话下还没有数据库连接", "There is no database connection under this session yet"),
     ("这个凭据库没有主密码（不加密模式）。\n设一个主密码就会把它变成加密库——库里的连接密码原样保留。", "This credential vault has no master password (unencrypted mode).\nSetting one turns it into an encrypted vault — the connection passwords in it are kept as they are."),
+    ("这个容器没有在运行（先启动它才能进终端）", "This container is not running (start it before opening a terminal)"),
+    ("这个容器里没有可用的 shell（试过 {list}）", "This container has no usable shell (tried {list})"),
     ("这个模式里有 {v0} 张表，一次画不下（上限 {ER_MAX_TABLES} 张）。先在对象树里选一张表，看它跟别人的关系。", "There are {v0} tables in this schema, too many to draw at once (the limit is {ER_MAX_TABLES}). Pick one table in the object tree first and look at how it relates to the others."),
     ("这个结果不是表数据，不能编辑", "This result is not table data, so it cannot be edited"),
     ("这些是全局设置，对之后新建的传输任务生效。\n要改点「去设置」——设置只在首选项中心里改一处。", "These are global settings, they apply to the transfer tasks you create from now on.\nTo change them click \"Go to settings\" — they are only changed in one place, the preferences."),
