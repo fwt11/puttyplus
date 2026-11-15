@@ -25,6 +25,7 @@ pub mod fwdmgr;
 /// **二进制内容的 hex 转储**（hex 模式打开非文本文件时用）。
 pub mod hexdump;
 pub mod mirrorui;
+pub mod moveop;
 pub mod namecell;
 pub mod pane;
 pub mod pulse;
@@ -1283,6 +1284,64 @@ fn submit_simple(st: &Rc<PanelState>, op: SimpleOp, path: &str, new_path: Option
     });
 }
 
+/* ---------------- 拖动移动（阶段 106） ---------------- */
+
+/// **拖动移动**：把远端文件/文件夹移进 `dst_dir`（远端绝对路径）。
+///
+/// ⚠️ 远端路径**恒为 POSIX** ⇒ 目标路径在 worker 侧拼
+/// （`moveop::remote_target`），UI 这边只发命令。
+pub fn move_remote_into(st: &Rc<PanelState>, paths: &[String], dst_dir: &str) {
+    if paths.is_empty() {
+        return;
+    }
+    if !st.conn_ok.get() {
+        dialogs::show_error(
+            st.topwin().as_ref(),
+            tr("未连接"),
+            tr("SFTP 尚未连接，无法移动。"),
+        );
+        return;
+    }
+    for p in paths {
+        // ⚠️ **只认远端绝对路径**（POSIX，恒以 `/` 开头）：这个目标也收
+        // 外部拖进来的 `text/plain`（比如从终端里拖一段文字过来）⇒
+        // 那种东西不是路径 ⇒ 直接跳过，别弹一堆"移动失败"。
+        if !p.starts_with('/') {
+            continue;
+        }
+        // 移到**自己所在的目录** ⇒ 什么都不做（不是错误）。
+        if path_parent(p) == dst_dir {
+            continue;
+        }
+        let _ = st.tx.borrow().as_ref().unwrap().send(WorkerCmd::Move {
+            path: p.clone(),
+            dst_dir: dst_dir.to_string(),
+        });
+    }
+}
+
+/// **拖动移动**：把本地文件/文件夹移进 `dst_dir`（本地路径）。
+///
+/// ⚠️ 本地移动**不走 worker**（worker 那边是 SFTP）⇒ 直接在这里做，
+/// 做完刷新本地面板。
+pub fn move_local_into(st: &Rc<PanelState>, paths: &[String], dst_dir: &str) {
+    if paths.is_empty() {
+        return;
+    }
+    let mut first_err: Option<String> = None;
+    for p in paths {
+        if let Err(e) = moveop::move_local(p, dst_dir) {
+            first_err.get_or_insert(e);
+        }
+    }
+    if let Some(e) = first_err {
+        dialogs::show_error(st.topwin().as_ref(), tr("移动失败"), &e);
+    }
+    // ⚠️ **只刷新当前目录**：本地面板一次只显示一个目录（列别的目录会把
+    // 视图换掉）；目标目录里多出来的那个文件，用户自己进去才看得见。
+    fill_local_pane(st);
+}
+
 /* ---------------- 事件处理（主线程） ---------------- */
 
 /// 连接被替换/断开时，旧调度器里的任务已经 abort；把 UI 侧还没落终态的
@@ -1564,6 +1623,16 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 let cwd = st.remote_cwd.borrow().clone();
                 submit_list(st, &cwd);
             }
+        }
+        PanelEvent::Moved { path, dst_dir, result } => {
+            if let Err(err) = &result {
+                dialogs::show_error(st.topwin().as_ref(), tr("移动失败"), err);
+            }
+            // ⚠️ **只刷新当前目录**：远端面板一次只显示一个目录（列别的目录
+            // 会把视图换掉 ⇒ 用户"莫名其妙跳到别的目录去了"）。
+            let cwd = st.remote_cwd.borrow().clone();
+            submit_list(st, &cwd);
+            let _ = (&path, &dst_dir);
         }
         PanelEvent::PathResolved { path, result } => {
             on_path_resolved(st, &path, result);
@@ -2426,14 +2495,22 @@ fn do_submit(
 }
 
 pub fn start_uploads(st: &Rc<PanelState>, lpaths: Vec<String>) {
+    let dst = st.remote_cwd.borrow().clone();
+    start_uploads_to(st, lpaths, &dst);
+}
+
+/// 上传到**指定**的远端目录（阶段 106：落在文件夹行上 ⇒ 上传进那个文件夹）。
+pub fn start_uploads_to(st: &Rc<PanelState>, lpaths: Vec<String>, dst_dir: &str) {
     if !st.conn_ok.get() {
         dialogs::show_error(st.topwin().as_ref(), tr("未连接"), tr("SFTP 尚未连接，无法上传。"));
         return;
     }
-    let dst = st.remote_cwd.borrow().clone();
     submit_transfers(
         st,
-        lpaths.into_iter().map(|p| (p, dst.clone(), true)).collect(),
+        lpaths
+            .into_iter()
+            .map(|p| (p, dst_dir.to_string(), true))
+            .collect(),
     );
 }
 
@@ -2479,6 +2556,20 @@ pub fn drop_upload_paths(st: &Rc<PanelState>, paths: Vec<String>) -> bool {
     true
 }
 
+/// 拖放上传到**指定**目录（阶段 106：落在文件夹行上 ⇒ 上传进那个文件夹）。
+pub fn drop_upload_paths_to(st: &Rc<PanelState>, paths: Vec<String>, dst_dir: &str) -> bool {
+    if paths.is_empty() {
+        set_remote_status(
+            st,
+            crate::theme::State::Warn,
+            &tr("拖进来的东西里没有可上传的本地文件"),
+        );
+        return false;
+    }
+    start_uploads_to(st, paths, dst_dir);
+    true
+}
+
 /// 一次拖放的落地处理：**拿到路径就传，没拿到就说清楚**。
 ///
 /// ⚠️ 「没拿到数据」必须**说出来**：X11 上源端可以接了拖拽却never应答，
@@ -2486,7 +2577,7 @@ pub fn drop_upload_paths(st: &Rc<PanelState>, paths: Vec<String>) -> bool {
 /// 只会一次次重拖，然后以为功能坏了。
 pub fn on_drop_result(st: &Rc<PanelState>, res: dnd::DropResult) {
     match res {
-        dnd::DropResult::Paths(paths) => {
+        dnd::DropResult::Paths { paths, .. } => {
             drop_upload_paths(st, paths);
         }
         dnd::DropResult::NoData => {
@@ -2517,6 +2608,8 @@ pub fn enable_drop_upload(st: &Rc<PanelState>, term: &crate::termview::TermView)
             let Some(st) = weak.upgrade() else { return };
             on_drop_result(&st, res);
         },
+        // 终端上**没有**文件夹行 ⇒ 没有"落点目录"可言 ⇒ 不高亮。
+        |_at| {},
     );
 }
 
@@ -2543,14 +2636,22 @@ pub fn on_paste_upload(st: &Rc<PanelState>) {
 }
 
 pub fn start_downloads(st: &Rc<PanelState>, rpaths: Vec<String>) {
+    let dst = st.local_cwd.borrow().clone();
+    start_downloads_to(st, rpaths, &dst);
+}
+
+/// 下载到**指定**的本地目录（阶段 106：落在文件夹行上 ⇒ 下载进那个文件夹）。
+pub fn start_downloads_to(st: &Rc<PanelState>, rpaths: Vec<String>, dst_dir: &str) {
     if !st.conn_ok.get() {
         dialogs::show_error(st.topwin().as_ref(), tr("未连接"), tr("SFTP 尚未连接，无法下载。"));
         return;
     }
-    let dst = st.local_cwd.borrow().clone();
     submit_transfers(
         st,
-        rpaths.into_iter().map(|p| (p, dst.clone(), false)).collect(),
+        rpaths
+            .into_iter()
+            .map(|p| (p, dst_dir.to_string(), false))
+            .collect(),
     );
 }
 

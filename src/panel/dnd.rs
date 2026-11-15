@@ -82,7 +82,11 @@ pub enum Want {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DropResult {
     /// 拿到了路径（上传=本地路径，下载=远端绝对路径）。
-    Paths(Vec<String>),
+    ///
+    /// `at` = **落点坐标**（相对目标控件的像素坐标；拿不到就是 `None`）。
+    /// 干什么用（阶段 106）：拖到**文件夹那一行**上 = 移进那个文件夹 ⇒
+    /// 调用方要靠这个坐标做命中测试。
+    Paths { paths: Vec<String>, at: Option<(i32, i32)> },
     /// 源端没给出数据（拒绝、超时、或给的格式里没有可用路径）。
     NoData,
 }
@@ -179,15 +183,22 @@ pub fn slurp(stream: &gtk::gio::InputStream, cb: impl FnOnce(String) + 'static) 
 ///
 /// `on_result` 收到拖放的结果（拿到路径 / 源端没给数据）。
 ///
+/// `on_hover` 收到**拖动过程中的落点**（`Some((x, y))` = 鼠标在目标控件的
+/// 哪个位置；`None` = 拖动离开了这个控件）。
+/// 干什么用（阶段 106）：拖到**文件夹那一行**上 = 移进那个文件夹 ⇒ 要在
+/// 拖动过程中就告诉调用方「落在哪」⇒ 调用方去高亮那一行。
+///
 /// ⚠️ 回调在**异步读取完成之后**才跑（GTK 的数据是异步取的），
 /// 所以它运行在主循环里，但已经不是 drop 事件的同步上下文了。
-pub fn attach<F>(w: &gtk::Widget, want: Want, on_result: F)
+pub fn attach<F, H>(w: &gtk::Widget, want: Want, on_result: F, on_hover: H)
 where
     F: Fn(DropResult) + 'static,
+    H: Fn(Option<(i32, i32)>) + 'static,
 {
     // formats = None ⇒ 先全接，再由 accept 回调按实际内容决定。
     let dst = gtk::DropTargetAsync::new(None, gdk::DragAction::COPY);
     let on_result = Rc::new(on_result);
+    let on_hover = Rc::new(on_hover);
 
     // 弱引用拿回控件：X11 直读要知道「收到拖放的窗口」是谁（落点窗口）。
     //
@@ -203,9 +214,24 @@ where
 
     // 告诉源「我接受复制」——不接的话源会当场把拖拽撤了。
     dst.connect_drag_enter(move |_d, _drop, _x, _y| gdk::DragAction::COPY);
-    dst.connect_drag_motion(move |_d, _drop, _x, _y| gdk::DragAction::COPY);
 
-    dst.connect_drop(move |_d, drop, _x, _y| {
+    // ⚠️ **拖动过程中**把落点报给调用方（阶段 106：高亮命中的那行）。
+    {
+        let on_hover = Rc::clone(&on_hover);
+        dst.connect_drag_motion(move |_d, _drop, x, y| {
+            on_hover(Some((x as i32, y as i32)));
+            gdk::DragAction::COPY
+        });
+    }
+    // 拖动离开 ⇒ 取消高亮（不撤的话那一行会一直亮着）。
+    {
+        let on_hover = Rc::clone(&on_hover);
+        dst.connect_drag_leave(move |_d, _drop| on_hover(None));
+    }
+
+    dst.connect_drop(move |_d, drop, x, y| {
+        // 落点坐标（相对目标控件）⇒ 命中测试用（阶段 106）。
+        let at = Some((x as i32, y as i32));
         // drop 是借用，异步回调里还要用 ⇒ 先 clone 一份（它是 GObject）。
         let drop_read = drop.clone();
         let drop_finish = drop.clone();
@@ -246,7 +272,7 @@ where
                 {
                     let paths = parse_uri_list(&text);
                     if !paths.is_empty() && !done.replace(true) {
-                        on_result(DropResult::Paths(paths));
+                        on_result(DropResult::Paths { paths, at });
                         drop_finish.finish(gdk::DragAction::COPY);
                         return true;
                     }
@@ -274,7 +300,7 @@ where
                                 if paths.is_empty() {
                                     on_result(DropResult::NoData);
                                 } else {
-                                    on_result(DropResult::Paths(paths));
+                                    on_result(DropResult::Paths { paths, at });
                                 }
                                 drop_finish.finish(gdk::DragAction::COPY);
                             });
@@ -309,7 +335,7 @@ where
                         if paths.is_empty() {
                             on_result(DropResult::NoData);
                         } else {
-                            on_result(DropResult::Paths(paths));
+                            on_result(DropResult::Paths { paths, at });
                         }
                         drop_finish.finish(gdk::DragAction::COPY);
                     },

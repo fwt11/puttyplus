@@ -53,6 +53,13 @@ mod imp {
         /// 变化，这样更明显些」——进度文字在窄面板里经常被挤掉，光靠
         /// 那几个字不够显眼 ⇒ 整行给个会呼吸的底色。
         pub xfer: StdCell<bool>,
+        /// **这一行是拖放的目标**（把文件/文件夹拖到它上面）⇒ 画高亮底色。
+        ///
+        /// 干什么用（阶段 106）：拖动移动是**看不见结果**的操作——松手前
+        /// 用户不知道会移进哪个目录 ⇒ 命中的那行必须明显高亮。
+        /// ⚠️ 与 `xfer` 的区别：`xfer` 是**呼吸**的（传输还在进行），
+        /// 这里是**静态**的（只是个落点提示）。
+        pub drop_target: StdCell<bool>,
     }
 
     #[glib::object_subclass]
@@ -119,6 +126,37 @@ mod imp {
                 );
                 let mut bar = accent;
                 bar.set_alpha(0.85);
+                snapshot.append_color(
+                    &bar,
+                    &graphene::Rect::new(
+                        cell_area.x() as f32,
+                        cell_area.y() as f32,
+                        3.0,
+                        cell_area.height() as f32,
+                    ),
+                );
+            }
+
+            // ⚠️ **拖放目标行**（阶段 106）：把文件/文件夹拖到这一行上
+            // ⇒ 高亮它（用户得知道「松手会移进这个目录」）。
+            //
+            // 画在**文字底下**（跟传输中的呼吸背景一个套路），左边再补一条
+            // 实色竖条 ⇒ 扫一眼就知道落在哪。
+            if self.drop_target.get() {
+                let accent = crate::panel::pulse::accent(widget);
+                let mut bg = accent;
+                bg.set_alpha(0.16);
+                snapshot.append_color(
+                    &bg,
+                    &graphene::Rect::new(
+                        cell_area.x() as f32,
+                        cell_area.y() as f32,
+                        cell_area.width() as f32,
+                        cell_area.height() as f32,
+                    ),
+                );
+                let mut bar = accent;
+                bar.set_alpha(0.9);
                 snapshot.append_color(
                     &bar,
                     &graphene::Rect::new(
@@ -251,6 +289,11 @@ impl NameCellRenderer {
     /// 这一行**正在传输**（上传或下载）⇒ 画呼吸背景。
     pub fn set_xfer(&self, on: bool) {
         self.imp().xfer.set(on);
+    }
+
+    /// 这一行是**拖放目标**（拖到它上面会把文件移进去）⇒ 画高亮底色。
+    pub fn set_drop_target(&self, on: bool) {
+        self.imp().drop_target.set(on);
     }
 
     /// **进度文案**的透明度（终态文案渐隐用；文件名本身不受影响）。

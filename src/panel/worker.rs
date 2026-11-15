@@ -147,6 +147,12 @@ pub enum WorkerCmd {
         path: String,
         new_path: Option<String>,
     },
+    /// **拖动移动**（阶段 106）：把 `path`（文件或文件夹）移进 `dst_dir`。
+    ///
+    /// ⚠️ **为什么不用 `Simple::Rename`**：改名是「同一个目录里换个名」，
+    /// 移动是「换个目录」⇒ 目标路径要**在 worker 侧按远端 POSIX 规则拼**
+    /// （`path_join`），而且**移动前要先查同名**（用户定的：不覆盖）。
+    Move { path: String, dst_dir: String },
     /// 终端目录跟随轮询：远程找本会话 shell 的 cwd
     Follow {
         age_sec: i64,
@@ -478,6 +484,14 @@ pub enum PanelEvent {
         path: String,
         result: Result<(), String>,
     },
+    /// **拖动移动**的结果（阶段 106）。
+    ///
+    /// `path` = 被移动的那个（远端绝对路径）；`dst_dir` = 移进的目录。
+    Moved {
+        path: String,
+        dst_dir: String,
+        result: Result<(), String>,
+    },
     /// 内置查看/编辑器：远端文件内容（或读取失败原因）
     FileRead {
         id: u64,
@@ -794,6 +808,33 @@ pub fn spawn_worker(
                                 None => 0,
                             };
                             let _ = ui_tx.try_send(PanelEvent::DirStamp { path, mtime });
+                        }
+                        WorkerCmd::Move { path, dst_dir } => {
+                            // ⚠️ **移动前先查同名**（用户 2026-11-14 拍板：
+                            //    不覆盖，报错停下）。
+                            //    为什么不能靠 rename 自己报错：SFTP 服务端的
+                            //    rename 通常是 `rename(2)` ⇒ **会默默覆盖**
+                            //    目标文件 ⇒ 用户拖一下就丢了另一个文件。
+                            let result = match &conn {
+                                None => Err(tr("连接已断开").into()),
+                                Some(c) => {
+                                    let dst = crate::panel::moveop::remote_target(&path, &dst_dir);
+                                    let name = path_basename(&path);
+                                    match c.path_kind(&dst).await {
+                                        Ok(_) => Err(trf!(
+                                            "目标目录里已经有同名的「{name}」了，没有动它。",
+                                            name = name
+                                        )),
+                                        Err(_) => c.rename(&path, &dst).await.map_err(|e| e.0),
+                                    }
+                                }
+                            };
+                            send_ev(
+                                &ui_tx,
+                                &conn,
+                                &conn_dead,
+                                PanelEvent::Moved { path, dst_dir, result },
+                            );
                         }
                         WorkerCmd::Simple { op, path, new_path } => {
                             let result = match &conn {

@@ -52,6 +52,11 @@ pub const COL_FADE: i32 = 12;
 /// 干什么用：队列每刷新一次就会把状态写回文件行 ⇒ 没有这个标记的话，
 /// 淡完之后下一次刷新又会把「完成」点亮 ⇒ 用户看到「完成」反复冒出来。
 pub const COL_FADE_AT: i32 = 13;
+/// **这一行是拖放的目标**（把文件/文件夹拖到它上面）⇒ 名称单元格画高亮。
+///
+/// 干什么用（阶段 106）：拖动移动是**看不见结果**的操作——松手之前用户
+/// 不知道会移进哪个目录 ⇒ 命中的那行必须明显高亮。
+pub const COL_DROP: i32 = 14;
 
 /* ---------------- 图标 ---------------- */
 
@@ -94,6 +99,11 @@ pub struct Pane {
     pub entry: gtk::Entry,
     pub toolbar: gtk::Box,
     pub show_hidden: Cell<bool>,
+    /// **当前高亮的拖放目标行**（模型里的行下标；`None` = 没有高亮）。
+    ///
+    /// 干什么用（阶段 106）：拖动移动时要把「会移进哪个目录」画出来 ⇒
+    /// 记着高亮的是哪一行，换行时只改**那两行**（见 `set_drop_highlight`）。
+    pub drop_row: Cell<Option<usize>>,
     /// 远程状态行（仅远程面板）
     pub status_lbl: gtk::Label,
     /// 可开关列（列显隐设置）；本地无权限列
@@ -201,6 +211,8 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
             r.set_xfer(model.get::<bool>(iter, COL_XFER));
             // ⚠️ **终态文案渐隐**（「完成」别一直挂在那儿）
             r.set_fade(model.get::<f32>(iter, COL_FADE));
+            // ⚠️ **拖放目标行 ⇒ 高亮**（阶段 106：告诉用户会移进哪个目录）
+            r.set_drop_target(model.get::<bool>(iter, COL_DROP));
         }
     });
     view.append_column(&col_name);
@@ -300,6 +312,74 @@ impl Pane {
         }
         out
     }
+}
+
+/* ---------------- 拖放：落点命中测试（阶段 106） ---------------- */
+
+/// 一行**能不能当拖放目标**（纯函数 ⇒ 好测）。
+///
+/// - `..`（"上级目录"那一行）**不算**目标：它是导航，不是"移进去"的目录；
+/// - 文件（非目录）也不算：拖到文件上没意义。
+///
+/// ⚠️ **远端路径恒为 POSIX**，本地路径在 Windows 上是 `C:\dir` ⇒ 两种语义
+/// 要分开（阶段 C5 那条红线）。
+pub fn target_dir_of(name: &str, is_dir: bool, cwd: &str, remote: bool) -> Option<String> {
+    if name == ".." || !is_dir {
+        return None;
+    }
+    Some(if remote {
+        path_join(cwd, name)
+    } else {
+        crate::platform::localpath::join(cwd, name)
+    })
+}
+
+/// 拖放落点（相对列表的坐标）⇒ 命中的**目录行** ⇒ (行下标, 目录绝对路径)。
+///
+/// ⚠️ `path_at_pos` 在 GTK 4.10 起被标记 deprecated（gtk4-rs 0.11 **只有**
+/// 这一个命中测试 API）⇒ 调用处 `#[allow(deprecated)]`。
+pub fn drop_target_row(pane: &Pane, cwd: &str, x: i32, y: i32) -> Option<(usize, String)> {
+    #[allow(deprecated)]
+    let (path, _col, _cx, _cy) = pane.view.path_at_pos(x, y)?;
+    let path = path?;
+    // 扁平列表（ListStore）⇒ 路径只有一段，就是行号。
+    let idx = *path.indices().first()? as usize;
+    let it = pane.model.iter(&path)?;
+    let name: String = pane.model.get(&it, COL_NAME);
+    let is_dir: bool = pane.model.get(&it, COL_ISDIR);
+    let dir = target_dir_of(&name, is_dir, cwd, pane.remote)?;
+    Some((idx, dir))
+}
+
+/// 高亮「拖放目标」行（**只改那两行** ⇒ 不会整表重画）。
+///
+/// ⚠️ 为什么只改两行：项目踩过「整表重画把主线程拖死」的坑（上传时界面
+/// 整体卡死那个）⇒ 拖动时每一帧都重画整表 = 又卡一次 ⇒ 只标脏新旧两行
+/// （`model.set` 只让那两行变脏 ⇒ GTK 只重画那两行）。
+pub fn set_drop_highlight(pane: &Pane, row: Option<usize>) {
+    let cur = pane.drop_row.get();
+    if cur == row {
+        return;
+    }
+    pane.drop_row.set(row);
+    if let Some(i) = cur {
+        if let Some(it) = row_iter(pane, i) {
+            pane.model.set(&it, &[(COL_DROP as u32, &false)]);
+        }
+    }
+    if let Some(i) = row {
+        if let Some(it) = row_iter(pane, i) {
+            pane.model.set(&it, &[(COL_DROP as u32, &true)]);
+        }
+    }
+}
+
+/// 按行下标拿模型的迭代器。
+///
+/// ⚠️ gtk4-rs 0.11 的 `ListStore` **没有** `iter_nth` ⇒ 自己拼 `TreePath`。
+fn row_iter(pane: &Pane, idx: usize) -> Option<gtk::TreeIter> {
+    let path = gtk::TreePath::from_indices(&[idx as i32]);
+    pane.model.iter(&path)
 }
 
 /// 当前的**单调**时钟（毫秒）。
@@ -591,6 +671,7 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
                 (COL_XFER as u32, &false),
                 (COL_FADE as u32, &1.0f32),
                 (COL_FADE_AT as u32, &0i64),
+                (COL_DROP as u32, &false),
             ],
         );
     }
@@ -635,6 +716,7 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
                 (COL_XFER as u32, &false),
                 (COL_FADE as u32, &1.0f32),
                 (COL_FADE_AT as u32, &0i64),
+                (COL_DROP as u32, &false),
             ],
         );
     }
@@ -825,6 +907,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         glib::Type::BOOL,   // XFER（正在传输 ⇒ 呼吸背景）
         glib::Type::F32,    // FADE（进度文案的透明度：终态文案渐隐用）
         glib::Type::I64,    // FADE_AT（终态文案的起始时刻：0=没有，>0=正在淡出，<0=已淡完）
+        glib::Type::BOOL,   // DROP（这一行是拖放目标 ⇒ 高亮；阶段 106）
     ]);
     let view = gtk::TreeView::new();
     let entry = gtk::Entry::new();
@@ -1276,6 +1359,7 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         entry,
         toolbar,
         show_hidden: Cell::new(false),
+        drop_row: Cell::new(None),
         status_lbl,
         col_size: cols.size,
         col_mtime: cols.mtime,
@@ -1751,6 +1835,17 @@ fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
     // ⚠️ 抓**弱引用**：控制器挂在 view 上，view 属于 PanelState 的控件树；
     // 抓强引用就是「PanelState → view → 控制器 → PanelState」的**引用环**，
     // 面板永远释放不掉（AGENTS.md 的红线）。
+    //
+    // **语义（阶段 106）**：**落在哪个文件夹行上，目标就是那个文件夹**；
+    // 落在空白处 / 文件行上 ⇒ 目标还是**当前目录**（保持原来的行为）。
+    //
+    // | 列表 | 收什么 | 干什么 |
+    // |---|---|---|
+    // | 远端 | 外部拖进来的本地文件 | **上传**到目标目录 |
+    // | 远端 | **本程序的远端行** | **移动**进目标目录（阶段 106 新增） |
+    // | 本地 | 外部拖进来的本地文件 | **复制**进目标目录 |
+    // | 本地 | **本程序的本地行** | **移动**进目标目录（阶段 106 新增） |
+    // | 本地 | 本程序的远端行 | **下载**到目标目录 |
     {
         let weak = Rc::downgrade(st);
         let r = remote;
@@ -1759,18 +1854,26 @@ fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
             super::dnd::Want::Files,
             move |res| {
                 let Some(st) = weak.upgrade() else { return };
-                if st.drag_from.get() == Some(r) {
-                    return; // 同面板自拖忽略
-                }
                 match res {
-                    super::dnd::DropResult::Paths(paths) => {
+                    super::dnd::DropResult::Paths { paths, at } => {
                         if r {
                             // 拖到**远程文件列表** = 上传（跟拖到终端同一个入口）
-                            super::drop_upload_paths(&st, paths);
+                            let cwd = st.pane_cwd(true);
+                            let dst = hit_dir(&st, true, at).unwrap_or(cwd);
+                            super::drop_upload_paths_to(&st, paths, &dst);
                         } else {
-                            // 拖到**本地文件列表** = 复制进当前目录（非递归，与 C 版一致）
+                            if st.drag_from.get() == Some(false) {
+                                // ⚠️ **本地面板自己拖出来的**（阶段 106）⇒
+                                // **移动**进目标目录（不是复制）。
+                                let cwd = st.pane_cwd(false);
+                                let dst = hit_dir(&st, false, at).unwrap_or(cwd);
+                                super::move_local_into(&st, &paths, &dst);
+                                return;
+                            }
+                            // 拖到**本地文件列表** = 复制进目标目录（非递归，与 C 版一致）
                             let cwd = st.pane_cwd(false);
-                            super::copy_uris_into_local(&st, &paths, &cwd);
+                            let dst = hit_dir(&st, false, at).unwrap_or(cwd);
+                            super::copy_uris_into_local(&st, &paths, &dst);
                         }
                     }
                     super::dnd::DropResult::NoData => {
@@ -1779,9 +1882,28 @@ fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
                     }
                 }
             },
+            hover_cb(st, remote),
         );
     }
-    if !remote {
+    if remote {
+        // **远端行拖回远端列表** = 移动（阶段 106）。
+        //
+        // ⚠️ 原来这里是「同面板自拖忽略」⇒ 拖来拖去什么都不会发生。
+        let weak = Rc::downgrade(st);
+        super::dnd::attach(
+            view.upcast_ref::<gtk::Widget>(),
+            super::dnd::Want::Paths,
+            move |res| {
+                let Some(st) = weak.upgrade() else { return };
+                if let super::dnd::DropResult::Paths { paths, at } = res {
+                    let cwd = st.pane_cwd(true);
+                    let dst = hit_dir(&st, true, at).unwrap_or(cwd);
+                    super::move_remote_into(&st, &paths, &dst);
+                }
+            },
+            hover_cb(st, remote),
+        );
+    } else {
         // 同上：弱引用，别把 PanelState 钉死。
         let weak = Rc::downgrade(st);
         super::dnd::attach(
@@ -1792,10 +1914,38 @@ fn install_drag(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView) {
                 if st.drag_from.get() == Some(false) {
                     return; // 本地面板自己拖出来的（那是上传方向）
                 }
-                if let super::dnd::DropResult::Paths(paths) = res {
-                    super::start_downloads(&st, paths);
+                if let super::dnd::DropResult::Paths { paths, at } = res {
+                    // ⚠️ 落在文件夹行上 ⇒ 下载**进那个文件夹**（阶段 106）
+                    let cwd = st.pane_cwd(false);
+                    let dst = hit_dir(&st, false, at).unwrap_or(cwd);
+                    super::start_downloads_to(&st, paths, &dst);
                 }
             },
+            hover_cb(st, remote),
         );
     }
+}
+
+/// 拖动过程中的**高亮回调**（阶段 106）：命中的文件夹行要亮起来。
+///
+/// ⚠️ **每个目标都要挂**：GTK4 里 `accept` 拒绝的目标**收不到 motion 事件**
+/// ⇒ 远端行拖回远端列表时，`Want::Files` 那个目标会拒绝（格式不匹配）
+/// ⇒ 高亮只能由 `Want::Paths` 那个目标报 ⇒ 少挂一个 = 移动时没有预览。
+fn hover_cb(st: &Rc<PanelState>, remote: bool) -> impl Fn(Option<(i32, i32)>) + 'static {
+    let weak = Rc::downgrade(st);
+    move |at| {
+        let Some(st) = weak.upgrade() else { return };
+        let cwd = st.pane_cwd(remote);
+        let row = at.and_then(|(x, y)| {
+            drop_target_row(&st.pane(remote), &cwd, x, y).map(|(i, _)| i)
+        });
+        set_drop_highlight(&st.pane(remote), row);
+    }
+}
+
+/// 拖放落点 ⇒ 命中的**目录**（没有就 `None` ⇒ 目标 = 当前目录）。
+fn hit_dir(st: &Rc<PanelState>, remote: bool, at: Option<(i32, i32)>) -> Option<String> {
+    let cwd = st.pane_cwd(remote);
+    let (x, y) = at?;
+    drop_target_row(&st.pane(remote), &cwd, x, y).map(|(_, dir)| dir)
 }
