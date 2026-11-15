@@ -266,6 +266,20 @@ fn shot(path: &str) {
         .status();
     println!("[截图] {path}：{:?}", st.map(|s| s.success()));
 }
+/// 页签头里的**文件名标签**（阶段 117 回归断言用）。
+///
+/// 干什么用：用户报「编辑器拖到子标签栏后，**页签头上不显示文件名了**」
+/// ⇒ 冒烟必须能问出「页签头上那个标签还在不在、文字对不对」。
+fn head_file_label(head: &gtk::Widget) -> Option<gtk::Label> {
+    let mut c = head.first_child();
+    while let Some(x) = c {
+        if let Some(l) = x.downcast_ref::<gtk::Label>() {
+            return Some(l.clone());
+        }
+        c = x.next_sibling();
+    }
+    None
+}
 
 fn main() {
     // ⚠️ **别碰用户真实的设置文件**：这个冒烟会拖分割条、翻页签。
@@ -458,24 +472,49 @@ fn main() {
         sub.editor_area_visible(),
         "编辑器被拖到子标签栏后，编辑区应当**留成停靠区**（不然用户没地方拖回来）"
     );
-    // ⚠️ **拖出去后不切页**（阶段 108）：终端页还在 ⇒ 编辑区（停靠区）
-    //    还在屏幕上 ⇒ 用户**直接就能把它拖回去**。
+    // ⚠️ **拖出去后切到「编辑器」那一页**（阶段 117，用户 2026-11-15：
+    // 「拖动后就只能看到一个，**应该是显示编辑器**，因为鼠标肯定点的是
+    // 编辑器」）。
     //
-    //    反过来：要是这里就切到「编辑器」那一页，终端页被藏起来 ⇒
-    //    停靠区跟着看不见 ⇒ 拖回去就没地方拖了（真拖拽失败正是这个原因）。
+    // 停靠区住在**终端页**里 ⇒ 切到编辑器页后它不在屏幕上了 ⇒ 想拖回去：
+    // 从**子标签栏上那个页签头**拖走（拖动开始时 `show_editor_host_page`
+    // 会把终端页切回来 ⇒ 落点重新出现）。
+    let ewidget = sub
+        .editor_widget(pid)
+        .expect("拖出去后应当还有编辑器正文");
+    let enum_page = sub.nb.page_num(&ewidget).expect("编辑器应当是一个子页签");
     assert_eq!(
-        sub.current_kind(),
-        PageKind::Terminal,
-        "编辑器拖到子标签栏后**不该切页**（切了停靠区就看不见了）"
+        sub.nb.current_page(),
+        Some(enum_page),
+        "编辑器拖到子标签栏后应当切到编辑器那一页（用户 2026-11-15）"
+    );
+    // ⚠️ **页签头上必须有文件名**（阶段 117 回归：拖出去后文件名不见了）。
+    //
+    // 根因：GTK 的 `GtkButton` 私下记着 `priv->child` ⇒ 把 Label 从按钮里
+    // 搬走之后，按钮销毁时还会**再摘一次** ⇒ 文件名凭空消失。
+    let head = sub.nb.tab_label(&ewidget).expect("应当有页签头");
+    let fname = head_file_label(&head).expect(
+        "页签头上必须有文件名标签（拖到子标签栏后文件名不见了 = 回归）",
     );
     assert!(
-        area.is_mapped(),
-        "拖出去后停靠区应当还在屏幕上（不然用户没地方把它拖回去）"
+        fname.text().contains("pp_fileedit_panel_smoke"),
+        "页签头上的文件名不对：{:?}",
+        fname.text()
+    );
+    assert!(
+        fname.parent().is_some(),
+        "文件名标签被从页签头上摘掉了（GTK 的 GtkButton 会把搬走的子控件再摘一次）"
+    );
+    assert!(
+        fname.is_mapped(),
+        "文件名标签没被画出来（在页签头上却看不见 = 还是丢了）"
     );
     println!(
-        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、页面没切 ✓",
-        n = pages_before + 1
+        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、**切到编辑器页**、文件名「{t}」还在 ✓",
+        n = pages_before + 1,
+        t = fname.text()
     );
+    shot("/tmp/fileedit-undock.png");
 
     // 再拖回来
     assert!(sub.dock_editor(pid), "编辑器没能拖回编辑区");

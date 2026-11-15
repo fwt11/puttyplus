@@ -103,3 +103,8 @@ required-features = ["ghostty"]
 [[example]]
 name = "ghostty_select_smoke"
 required-features = ["ghostty"]
+
+# ghostty 自绘终端的**滚动历史**冒烟（阶段 117）：需要 `ghostty` 特性
+[[example]]
+name = "ghostty_scroll_smoke"
+required-features = ["ghostty"]

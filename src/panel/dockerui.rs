@@ -39,7 +39,9 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 
-use crate::backend::docker::{self, ContainerInfo, DockerInfo};
+use crate::backend::docker::{
+    self, Action, ComposeAction, ContainerDetail, ContainerInfo, DockerInfo,
+};
 use crate::i18n::tr;
 use crate::panel::PanelState;
 use crate::trf;
@@ -91,7 +93,7 @@ pub struct DockerUi {
     /// 自动刷新的定时器（页签关掉时要停掉）。
     timer: Cell<Option<glib::SourceId>>,
     /// **后台任务 → 主线程**的结果通道（⚠️ 见 [`refresh`] 的说明）。
-    tx: async_channel::Sender<Result<DockerInfo, String>>,
+    tx: async_channel::Sender<Msg>,
     /// 最近一次取到的容器（**冒烟测试读它**）。
     pub containers: RefCell<Vec<ContainerInfo>>,
     /// 远程 docker 版本（显示在状态行里）。
@@ -102,6 +104,67 @@ pub struct DockerUi {
     ///    `add_attribute` 绑定 ⇒ 画完之后渲染器的 "text" 属性里**有值**；
     ///    没绑定就是空的（表格一片空白）。
     name_renderer: Option<gtk::CellRendererText>,
+    /// **详情区**（阶段 110：选中容器才显示）。
+    detail: DetailUi,
+    /// 当前选中的**容器名**（空 = 没选容器）。
+    ///
+    /// ⚠️ **刷新要保住它**：自动刷新每 7 秒重建一次表格 ⇒ 不记住选中行的话，
+    ///    用户刚点开的容器就被「刷新」顶掉了。
+    selected: RefCell<String>,
+    /// 当前选中的 **compose 项目名**（空 = 没选项目行）。
+    ///
+    /// ⚠️ 与 `selected` **互斥**：项目行是父行 ⇒ 选中它就不选容器。
+    selected_project: RefCell<String>,
+    /// 正在**程序性**地恢复选中（⇒ 别因此又去取一次详情）。
+    restoring: Cell<bool>,
+    /// **最近一次写操作的结果**（空 = 没执行过写操作）。
+    ///
+    /// ⚠️ 单独记一份（不靠状态行）：状态行会被「刷新」改掉 ⇒ 拿它判断
+    ///    「动作有没有执行」会**误判**（刷新先到了就会被当成动作跑了）。
+    last_action: RefCell<String>,
+}
+
+/// 后台任务回主线程的消息（⚠️ 通道里只能传**纯数据**）。
+enum Msg {
+    /// 容器列表刷新完了。
+    List(Result<DockerInfo, String>),
+    /// 某个容器的详情取回来了（⚠️ 带上容器名 ⇒ 旧结果能认出来、丢掉）。
+    Detail {
+        name: String,
+        r: Result<ContainerDetail, String>,
+    },
+    /// 写操作（启停/重启）的结果（中文提示）。
+    Action(String),
+}
+
+/// 详情区的控件（阶段 110）。
+struct DetailUi {
+    /// 整块（**没选容器时不显示**）。
+    root: gtk::Box,
+    /// 标题（「详情：web（运行中）」）。
+    title: gtk::Label,
+    /// 四张卡片的正文。
+    config: gtk::Label,
+    net: gtk::Label,
+    mount: gtk::Label,
+    env: gtk::Label,
+    /// 「启动」「停止」「重启」三个按钮（**写操作 ⇒ 点了要二次确认**）。
+    btn_start: gtk::Button,
+    btn_stop: gtk::Button,
+    btn_restart: gtk::Button,
+    /// **compose 项目详情**那块（阶段 111：选中项目行时显示，与容器详情互斥）。
+    proj_root: gtk::Box,
+    /// 项目标题（「compose 项目：postgres」）。
+    proj_title: gtk::Label,
+    /// 项目正文（配置文件 / 工作目录 / 容器清单）。
+    proj_info: gtk::Label,
+    /// 「编辑 compose 文件」。
+    btn_edit: gtk::Button,
+    /// 「启动」「停止」「销毁」「重建」（**写操作 ⇒ 点了要二次确认**）。
+    btn_cstart: gtk::Button,
+    btn_cstop: gtk::Button,
+    btn_cdown: gtk::Button,
+    btn_cup: gtk::Button,
 }
 
 /// 表格里的一个**顶层行**（重建时用的中间形状）。
@@ -193,8 +256,12 @@ impl DockerUi {
     /// 重建整张表（**容器数量很少，整表重建没问题**）。
     ///
     /// ⚠️ **展开状态要保住**：用户刚点开的 compose 项目，刷新后还得是开的。
+    /// ⚠️ **选中行也要保住**：自动刷新每 7 秒重建一次 ⇒ 不恢复的话，用户刚
+    ///    选中的容器就被「刷新」顶掉了（详情也跟着没了）。
     fn rebuild(&self, rows: &[ContainerInfo]) {
         let expanded = self.expanded_projects();
+        let sel = self.selected.borrow().clone();
+        let sel_proj = self.selected_project.borrow().clone();
         self.model.clear();
         for node in Self::group(rows) {
             match node {
@@ -217,6 +284,22 @@ impl DockerUi {
                     }
                 }
             }
+        }
+        // 恢复选中（**程序性** ⇒ 不触发重新取详情）。
+        //
+        // ⚠️ **项目行与容器行二选一**：项目名优先（它也是顶层行 ⇒
+        //    `find_path` 能找到）。
+        let restore = if !sel_proj.is_empty() {
+            sel_proj.clone()
+        } else {
+            sel.clone()
+        };
+        if !restore.is_empty() {
+            self.restoring.set(true);
+            if let Some(path) = self.find_path(&restore) {
+                gtk::prelude::TreeViewExt::set_cursor(&self.view, &path, None, false);
+            }
+            self.restoring.set(false);
         }
     }
 
@@ -264,6 +347,11 @@ impl DockerUi {
         *self.version.borrow_mut() = info.version.clone();
         let shown = self.filter_rows(&info.containers);
         self.rebuild(&shown);
+        // ⚠️ 选中的**项目** ⇒ 项目详情也跟着刷新（容器状态变了）。
+        let proj = self.selected_project.borrow().clone();
+        if !proj.is_empty() {
+            self.show_project(&proj);
+        }
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
         self.last.set_text(&trf!("上次刷新 {t}", t = now));
         let msg = trf!(
@@ -366,6 +454,304 @@ impl DockerUi {
         }
         None
     }
+
+    /* ---------------- 阶段 110：详情 ---------------- */
+
+    /// **当前选中的容器名**（选中的是**项目行** ⇒ `None`）。
+    fn selected_container_name(&self) -> Option<String> {
+        let (path, _col) = gtk::prelude::TreeViewExt::cursor(&self.view);
+        let path = path?;
+        let it = self.model.iter(&path)?;
+        // 项目行（有子行）不是容器 ⇒ 不取它的详情。
+        if self.model.iter_children(Some(&it)).is_some() {
+            return None;
+        }
+        let name: String = self.model.get(&it, COL_NAME as i32);
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
+    /// **当前选中的 compose 项目名**（选中的是**容器行** ⇒ `None`）。
+    ///
+    /// ⚠️ **怎么认出项目行**：项目行是**父行**（模型里有子行）⇒ 容器行没有。
+    fn selected_project_name(&self) -> Option<String> {
+        let (path, _col) = gtk::prelude::TreeViewExt::cursor(&self.view);
+        let path = path?;
+        let it = self.model.iter(&path)?;
+        // 只有**有子行的**才是项目行。
+        if self.model.iter_children(Some(&it)).is_none() {
+            return None;
+        }
+        let name: String = self.model.get(&it, COL_NAME as i32);
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
+    /// 找到某一行（**容器名**）的路径（顶层 + 子行都找）。
+    fn find_path(&self, name: &str) -> Option<gtk::TreePath> {
+        let mut it = self.model.iter_first()?;
+        loop {
+            let n: String = self.model.get(&it, COL_NAME as i32);
+            if n == name {
+                return Some(self.model.path(&it));
+            }
+            // 子行
+            let mut sub = self.model.iter_children(Some(&it));
+            while let Some(s) = sub {
+                let sn: String = self.model.get(&s, COL_NAME as i32);
+                if sn == name {
+                    return Some(self.model.path(&s));
+                }
+                let mut next = s;
+                if !self.model.iter_next(&mut next) {
+                    break;
+                }
+                sub = Some(next);
+            }
+            let mut next = it;
+            if !self.model.iter_next(&mut next) {
+                break;
+            }
+            it = next;
+        }
+        None
+    }
+
+    /// 详情取回来了 ⇒ 填四张卡片。
+    fn apply_detail(&self, d: &ContainerDetail) {
+        self.detail
+            .title
+            .set_text(&trf!("详情：{n}（{s}）", n = d.name, s = d.state_label()));
+        self.detail.config.set_text(&detail_config_text(d));
+        self.detail.net.set_text(&detail_net_text(d));
+        self.detail.mount.set_text(&detail_mount_text(d));
+        self.detail.env.set_text(&detail_env_text(d));
+        // 按钮：运行中只能停/重启；停了才能启动。
+        self.detail.btn_start.set_sensitive(!d.is_running());
+        self.detail.btn_stop.set_sensitive(d.is_running());
+        self.detail.btn_restart.set_sensitive(true);
+        self.detail.root.set_visible(true);
+    }
+
+    /// 详情取失败 ⇒ 说清楚为什么（**别静默**）。
+    fn detail_error(&self, msg: &str) {
+        self.detail.title.set_text(tr("取不到容器详情"));
+        self.detail.config.set_text(msg);
+        self.detail.net.set_text("");
+        self.detail.mount.set_text("");
+        self.detail.env.set_text("");
+        self.detail.root.set_visible(true);
+    }
+
+    /// 没选容器 ⇒ 详情区收起来。
+    fn clear_detail(&self) {
+        *self.selected.borrow_mut() = String::new();
+        *self.selected_project.borrow_mut() = String::new();
+        self.detail.root.set_visible(false);
+        self.detail.proj_root.set_visible(false);
+    }
+
+    /* ---------------- 阶段 111：compose 项目详情 ---------------- */
+
+    /// 一个 compose 项目的**汇总信息**（从容器列表里推出来）。
+    ///
+    /// ⚠️ compose 的配置文件路径与工作目录取自**容器的标签**
+    ///    （`com.docker.compose.project.config_files` /
+    ///    `com.docker.compose.project.working_dir`）⇒ 每个容器都带一份，
+    ///    这里取第一个非空的。
+    fn project_summary(&self, name: &str) -> Option<ProjectSummary> {
+        let mut files = String::new();
+        let mut dir = String::new();
+        let mut items: Vec<(String, String)> = Vec::new();
+        for c in self.containers.borrow().iter() {
+            if c.compose != name {
+                continue;
+            }
+            if files.is_empty() && !c.compose_files.is_empty() {
+                files = c.compose_files.clone();
+            }
+            if dir.is_empty() && !c.compose_dir.is_empty() {
+                dir = c.compose_dir.clone();
+            }
+            items.push((c.name.clone(), c.state_label().to_string()));
+        }
+        if items.is_empty() {
+            return None;
+        }
+        Some(ProjectSummary {
+            name: name.to_string(),
+            files,
+            dir,
+            items,
+        })
+    }
+
+    /// 选中了一个 **compose 项目行** ⇒ 显示项目详情（藏起容器详情）。
+    fn show_project(&self, name: &str) {
+        *self.selected.borrow_mut() = String::new();
+        *self.selected_project.borrow_mut() = name.to_string();
+        let Some(sum) = self.project_summary(name) else {
+            self.clear_detail();
+            return;
+        };
+        self.detail
+            .proj_title
+            .set_text(&trf!("compose 项目：{n}", n = sum.name));
+        self.detail.proj_info.set_text(&project_info_text(&sum));
+        // 「编辑」要 compose 文件 ⇒ 没有文件就禁用（别给用户一个点不动的按钮）。
+        self.detail.btn_edit.set_sensitive(!sum.files.is_empty());
+        self.detail.proj_root.set_visible(true);
+        self.detail.root.set_visible(false);
+    }
+}
+
+/// 时间戳（ISO8601）⇒ **本地时间**（看得懂）。
+///
+/// ⚠️ docker 给的是 UTC 的 RFC3339 ⇒ 直接显示用户得自己换算 ⇒ 换成本地。
+fn fmt_time(s: &str) -> String {
+    if s.trim().is_empty() {
+        return tr("—").to_string();
+    }
+    match chrono::DateTime::parse_from_rfc3339(s.trim()) {
+        Ok(t) => t
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => s.trim().to_string(),
+    }
+}
+
+/// 「运行配置」卡片。
+fn detail_config_text(d: &ContainerDetail) -> String {
+    let mut v: Vec<String> = Vec::new();
+    v.push(trf!("镜像：{x}", x = d.image));
+    let mut st = d.state_label().to_string();
+    if !d.health.is_empty() && d.health != "none" {
+        st = trf!("{s}（{h}）", s = st, h = d.health);
+    }
+    v.push(trf!("状态：{s}", s = st));
+    v.push(trf!("创建时间：{t}", t = fmt_time(&d.created)));
+    v.push(trf!("启动时间：{t}", t = fmt_time(&d.started_at)));
+    v.push(trf!("退出时间：{t}", t = fmt_time(&d.finished_at)));
+    if !d.exit_code.is_empty() {
+        v.push(trf!("退出码：{c}", c = d.exit_code));
+    }
+    v.push(trf!("重启策略：{p}", p = d.restart_policy));
+    if !d.restart_count.is_empty() {
+        v.push(trf!("重启次数：{c}", c = d.restart_count));
+    }
+    v.push(trf!(
+        "运行用户：{u}",
+        u = if d.user.is_empty() {
+            tr("root")
+        } else {
+            d.user.as_str()
+        }
+    ));
+    v.push(trf!("工作目录：{w}", w = d.workdir));
+    if !d.command.is_empty() {
+        v.push(trf!("命令：{c}", c = d.command));
+    }
+    v.join("\n")
+}
+
+/// 「网络与端口」卡片。
+fn detail_net_text(d: &ContainerDetail) -> String {
+    let mut v: Vec<String> = Vec::new();
+    v.push(trf!("网络模式：{m}", m = d.network_mode));
+    for n in d.networks.iter() {
+        v.push(trf!(
+            "网络：{name}（{ip}，网关 {gw}）",
+            name = n.name,
+            ip = n.ip,
+            gw = n.gateway
+        ));
+    }
+    for p in d.ports.iter() {
+        if p.host_port.is_empty() {
+            v.push(trf!("端口：{c}（未发布）", c = p.container));
+        } else {
+            v.push(trf!(
+                "端口：{c} → {ip}:{hp}",
+                c = p.container,
+                ip = p.host_ip,
+                hp = p.host_port
+            ));
+        }
+    }
+    if v.len() == 1 {
+        v.push(tr("（没有网络信息）").to_string());
+    }
+    v.join("\n")
+}
+
+/// 「挂载」卡片。
+fn detail_mount_text(d: &ContainerDetail) -> String {
+    if d.mounts.is_empty() {
+        return tr("（没有挂载）").to_string();
+    }
+    let mut v: Vec<String> = Vec::new();
+    for m in d.mounts.iter() {
+        v.push(trf!(
+            "{kind}：{src} → {dst}（{rw}）",
+            kind = m.kind,
+            src = m.source,
+            dst = m.dest,
+            rw = if m.rw == "true" {
+                tr("可写")
+            } else {
+                tr("只读")
+            }
+        ));
+    }
+    v.join("\n")
+}
+
+/// 「环境变量」卡片。
+fn detail_env_text(d: &ContainerDetail) -> String {
+    if d.env.is_empty() {
+        return tr("（没有环境变量）").to_string();
+    }
+    d.env.join("\n")
+}
+
+/// 一个 compose 项目的**汇总**（阶段 111）。
+#[derive(Clone, Debug, Default)]
+struct ProjectSummary {
+    /// 项目名。
+    name: String,
+    /// compose 配置文件路径（可能是逗号分隔的多个）。
+    files: String,
+    /// compose 工作目录。
+    dir: String,
+    /// 项目里的容器：`(名字, 状态)`。
+    items: Vec<(String, String)>,
+}
+
+/// compose 项目详情的正文。
+fn project_info_text(s: &ProjectSummary) -> String {
+    let mut v: Vec<String> = Vec::new();
+    if s.files.is_empty() {
+        v.push(tr("（这个项目没有记录 compose 配置文件路径）").to_string());
+    } else {
+        v.push(trf!("配置文件：{f}", f = s.files));
+    }
+    if s.dir.is_empty() {
+        v.push(tr("工作目录：（未知）").to_string());
+    } else {
+        v.push(trf!("工作目录：{d}", d = s.dir));
+    }
+    v.push(trf!("容器（{n} 个）：", n = s.items.len()));
+    for (name, state) in &s.items {
+        v.push(trf!("  {name}（{state}）", name = name, state = state));
+    }
+    v.join("\n")
 }
 
 /// 建界面（**只建一次**；挂在 [`PanelState::docker_ui`] 上）。
@@ -501,6 +887,131 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     scroll.set_hexpand(true);
     scroll.set_child(Some(&view));
 
+    // ---- 详情区（阶段 110：选中容器才显示）----
+    //
+    // 布局：标题行（容器名 + 状态 + 三个动作按钮）＋ 四张卡片（2×2 网格）。
+    let d_title = gtk::Label::new(Some(""));
+    d_title.set_xalign(0.0);
+    d_title.set_hexpand(true);
+    d_title.add_css_class("heading");
+
+    // ⚠️ **动作按钮是写操作** ⇒ 点了必须**二次确认**（见下面的事件接线）。
+    let mk_btn = |label: &str| {
+        let b = gtk::Button::with_label(label);
+        b.add_css_class("flat");
+        b
+    };
+    let d_start = mk_btn(tr("启动"));
+    let d_stop = mk_btn(tr("停止"));
+    let d_restart = mk_btn(tr("重启"));
+
+    let d_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    d_row.set_margin_start(8);
+    d_row.set_margin_end(8);
+    d_row.set_margin_top(4);
+    d_row.append(&d_title);
+    d_row.append(&d_start);
+    d_row.append(&d_stop);
+    d_row.append(&d_restart);
+
+    // 一张卡片 = 标题 + 正文（正文自己能滚 ⇒ 内容再多也不撑破版面）。
+    let mk_card = |title: &str| -> (gtk::Box, gtk::Label) {
+        let head = gtk::Label::new(Some(title));
+        head.set_xalign(0.0);
+        head.add_css_class("heading");
+        let body = gtk::Label::new(Some(""));
+        body.set_xalign(0.0);
+        body.set_yalign(0.0);
+        body.set_wrap(true);
+        body.set_selectable(true);
+        let sw = gtk::ScrolledWindow::new();
+        sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        sw.set_child(Some(&body));
+        sw.set_vexpand(true);
+        let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        b.set_hexpand(true);
+        b.set_vexpand(true);
+        b.append(&head);
+        b.append(&sw);
+        (b, body)
+    };
+    let (c_config, card_config) = mk_card(tr("运行配置"));
+    let (c_net, card_net) = mk_card(tr("网络与端口"));
+    let (c_mount, card_mount) = mk_card(tr("挂载"));
+    let (c_env, card_env) = mk_card(tr("环境变量"));
+
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(8);
+    grid.set_row_spacing(6);
+    grid.set_hexpand(true);
+    grid.set_vexpand(true);
+    grid.attach(&c_config, 0, 0, 1, 1);
+    grid.attach(&c_net, 1, 0, 1, 1);
+    grid.attach(&c_mount, 0, 1, 1, 1);
+    grid.attach(&c_env, 1, 1, 1, 1);
+
+    let d_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    d_root.set_margin_start(6);
+    d_root.set_margin_end(6);
+    d_root.set_margin_bottom(6);
+    d_root.append(&d_row);
+    d_root.append(&grid);
+    // ⚠️ **没选容器时不显示**（Paned 里隐藏的子控件不占地方 ⇒ 列表拿满）。
+    d_root.set_visible(false);
+
+    // ---- compose 项目详情（阶段 111：选中项目行时显示）----
+    //
+    // ⚠️ 与**容器详情互斥**：两块都在 Paned 的下半区，谁显示谁。
+    let p_title = gtk::Label::new(Some(""));
+    p_title.set_xalign(0.0);
+    p_title.set_hexpand(true);
+    p_title.add_css_class("heading");
+
+    // 「编辑 compose 文件」+「启动」「停止」「销毁」「重建」。
+    //
+    // ⚠️ **图标按钮统一走 `a11y::icon_button`**（AGENTS.md 的 lint）——
+    //    这里用的是**带文字的按钮**（不是图标）⇒ 不受那条约束。
+    let p_edit = gtk::Button::with_label(tr("编辑 compose 文件"));
+    p_edit.add_css_class("flat");
+    let p_start = mk_btn(tr("启动"));
+    let p_stop = mk_btn(tr("停止"));
+    let p_down = mk_btn(tr("销毁"));
+    let p_up = mk_btn(tr("重建"));
+
+    let p_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    p_row.set_margin_start(8);
+    p_row.set_margin_end(8);
+    p_row.set_margin_top(4);
+    p_row.append(&p_title);
+    p_row.append(&p_edit);
+    p_row.append(&p_start);
+    p_row.append(&p_stop);
+    p_row.append(&p_down);
+    p_row.append(&p_up);
+
+    let p_info = gtk::Label::new(Some(""));
+    p_info.set_xalign(0.0);
+    p_info.set_yalign(0.0);
+    p_info.set_wrap(true);
+    p_info.set_selectable(true);
+    let p_scroll = gtk::ScrolledWindow::new();
+    p_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    p_scroll.set_child(Some(&p_info));
+    p_scroll.set_vexpand(true);
+
+    let p_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    p_root.set_margin_start(6);
+    p_root.set_margin_end(6);
+    p_root.set_margin_bottom(6);
+    p_root.append(&p_row);
+    p_root.append(&p_scroll);
+    p_root.set_visible(false);
+
+    // 两块详情**装在同一个盒子里**（Paned 的下半区只有一块）。
+    let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    detail_box.append(&d_root);
+    detail_box.append(&p_root);
+
     // ---- 状态行 ----
     let status = gtk::Label::new(Some(tr("正在读取远程容器…")));
     status.set_xalign(0.0);
@@ -509,9 +1020,21 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     status.set_margin_top(2);
     status.set_margin_bottom(2);
 
+    // ---- 页面：上（工具条 + 表格）｜下（详情区）----
+    //
+    // ⚠️ 用 **Paned**（可拖）：详情区矮了就把它拖矮，别把列表挤没。
+    let top = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    top.append(&bar);
+    top.append(&scroll);
+
+    let paned = gtk::Paned::new(gtk::Orientation::Vertical);
+    paned.set_vexpand(true);
+    paned.set_start_child(Some(&top));
+    paned.set_end_child(Some(&detail_box));
+    paned.set_position(360);
+
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    page.append(&bar);
-    page.append(&scroll);
+    page.append(&paned);
     page.append(&status);
 
     // ---- 结果通道（后台任务 → 主线程）----
@@ -519,8 +1042,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ⚠️ **为什么用通道而不是 `idle_add_local_once`**：后台任务跑在 tokio
     //    的**多线程**运行时上 ⇒ 它 spawn 的 future 必须是 `Send` ⇒
     //    **不能把 `Rc`/`Weak` 抓进去**（`Rc` 不是 `Send`）。
-    // ⇒ 后台只发**纯数据**（`DockerInfo` / 错误串），主线程这边收。
-    let (tx, rx) = async_channel::unbounded::<Result<DockerInfo, String>>();
+    // ⇒ 后台只发**纯数据**（`Msg`），主线程这边收。
+    let (tx, rx) = async_channel::unbounded::<Msg>();
 
     let ui = Rc::new(DockerUi {
         page: page.upcast(),
@@ -538,23 +1061,199 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         containers: RefCell::new(Vec::new()),
         version: RefCell::new(String::new()),
         name_renderer,
+        detail: DetailUi {
+            root: d_root,
+            title: d_title,
+            config: card_config,
+            net: card_net,
+            mount: card_mount,
+            env: card_env,
+            btn_start: d_start.clone(),
+            btn_stop: d_stop.clone(),
+            btn_restart: d_restart.clone(),
+            proj_root: p_root,
+            proj_title: p_title,
+            proj_info: p_info,
+            btn_edit: p_edit.clone(),
+            btn_cstart: p_start.clone(),
+            btn_cstop: p_stop.clone(),
+            btn_cdown: p_down.clone(),
+            btn_cup: p_up.clone(),
+        },
+        selected: RefCell::new(String::new()),
+        selected_project: RefCell::new(String::new()),
+        restoring: Cell::new(false),
+        last_action: RefCell::new(String::new()),
     });
 
     // 主线程接收循环（**弱引用** ⇒ 面板关了这条循环自己会结束）。
     {
         let u = Rc::downgrade(&ui);
+        let stw = Rc::downgrade(st);
         glib::MainContext::default().spawn_local(async move {
             while let Ok(r) = rx.recv().await {
                 let Some(u) = u.upgrade() else { break };
                 match r {
-                    Ok(info) => u.apply(&info),
-                    Err(msg) => u.fail(&msg),
+                    Msg::List(Ok(info)) => u.apply(&info),
+                    Msg::List(Err(msg)) => u.fail(&msg),
+                    Msg::Detail { name, r } => {
+                        // ⚠️ **只认当前选中的那个**：用户连着点了两个容器 ⇒
+                        //    先回来的那个可能已经过时了 ⇒ 丢掉。
+                        if u.selected.borrow().as_str() != name {
+                            continue;
+                        }
+                        match r {
+                            Ok(d) => u.apply_detail(&d),
+                            Err(msg) => u.detail_error(&msg),
+                        }
+                    }
+                    Msg::Action(msg) => {
+                        *u.last_action.borrow_mut() = msg.clone();
+                        u.status.set_text(&msg);
+                        // 动作完了 ⇒ 列表刷新（状态变了）＋ 详情重取。
+                        if let Some(st) = stw.upgrade() {
+                            refresh(&st, &u);
+                            let name = u.selected.borrow().clone();
+                            if !name.is_empty() {
+                                load_detail(&st, &u, &name);
+                            }
+                        }
+                    }
                 }
             }
         });
     }
 
     // ---- 事件 ----
+    // **选中一行 ⇒ 取它的详情**（阶段 110）
+    //
+    // ⚠️ 只对**容器行**响应（项目行是父行 ⇒ 选中它不取详情）。
+    // ⚠️ `restoring` 是**程序性**恢复选中（刷新后恢复）⇒ 那时**不重新取**
+    //    （不然每 7 秒自动刷新就多一条 docker 命令）。
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        view.connect_cursor_changed(move |_| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return;
+            };
+            if u.restoring.get() {
+                return;
+            }
+            // ⚠️ **项目行优先**：项目行是父行 ⇒ 选中它显示「项目详情」
+            //    （编辑 / 启动 / 停止 / 销毁 / 重建），不是容器详情。
+            if let Some(p) = u.selected_project_name() {
+                u.show_project(&p);
+                return;
+            }
+            match u.selected_container_name() {
+                Some(n) => load_detail(&st, &u, &n),
+                None => u.clear_detail(),
+            }
+        });
+    }
+    // **启停 / 重启**（**写操作 ⇒ 二次确认**）
+    {
+        for (btn, action) in [
+            (d_start.clone(), Action::Start),
+            (d_stop.clone(), Action::Stop),
+            (d_restart.clone(), Action::Restart),
+        ] {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            btn.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                let name = u.selected.borrow().clone();
+                if name.is_empty() {
+                    return;
+                }
+                // ⚠️ **二次确认**：停掉用户服务器上的容器是**不可逆**的副作用 ⇒
+                //    先问一句（默认焦点落在「取消」上 ⇒ 手快按回车不会误停）。
+                let msg = trf!(
+                    "确定要{act}容器「{name}」吗？",
+                    act = action.label(),
+                    name = name
+                );
+                let (st2, u2) = (st.clone(), u.clone());
+                crate::panel::dialogs::confirm_title(
+                    st.topwin().as_ref(),
+                    tr("请确认"),
+                    &msg,
+                    action.label(),
+                    move |ok| {
+                        if !ok {
+                            return;
+                        }
+                        do_action(&st2, &u2, action);
+                    },
+                );
+            });
+        }
+    }
+    // **compose 项目的 5 个操作**（阶段 111）
+    {
+        // 「编辑 compose 文件」⇒ **打开远程文件**（不是写操作 ⇒ 不必确认）。
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            p_edit.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                open_compose_file(&st, &u);
+            });
+        }
+        // 启动 / 停止 / 销毁 / 重建（**写操作 ⇒ 二次确认**）。
+        for (btn, action) in [
+            (p_start.clone(), ComposeAction::Start),
+            (p_stop.clone(), ComposeAction::Stop),
+            (p_down.clone(), ComposeAction::Down),
+            (p_up.clone(), ComposeAction::Up),
+        ] {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            btn.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                let name = u.selected_project.borrow().clone();
+                if name.is_empty() {
+                    return;
+                }
+                // ⚠️ **二次确认**：在用户服务器上动 compose 项目是**不可逆**的
+                //    副作用（销毁还会删掉容器与网络）⇒ 先问一句（默认焦点在
+                //    「取消」上 ⇒ 手快按回车不会误操作）。
+                let msg = if action.is_dangerous() {
+                    trf!(
+                        "确定要{act} compose 项目「{name}」吗？（容器和网络会被删除）",
+                        act = action.label(),
+                        name = name
+                    )
+                } else {
+                    trf!(
+                        "确定要{act} compose 项目「{name}」吗？",
+                        act = action.label(),
+                        name = name
+                    )
+                };
+                let (st2, u2) = (st.clone(), u.clone());
+                crate::panel::dialogs::confirm_title(
+                    st.topwin().as_ref(),
+                    tr("请确认"),
+                    &msg,
+                    action.label(),
+                    move |ok| {
+                        if !ok {
+                            return;
+                        }
+                        do_compose_action(&st2, &u2, action);
+                    },
+                );
+            });
+        }
+    }
     // 搜索框一变就重新过滤（**不重新连服务器**）
     {
         let u = Rc::downgrade(&ui);
@@ -672,6 +1371,26 @@ async fn fetch_all(
     opts: &crate::args::ConnOptions,
     pw: Option<String>,
 ) -> Result<DockerInfo, String> {
+    let session = shared_session(opts, pw).await?;
+    let version = docker::probe(&session).await.map_err(|e| e.0)?;
+    let containers = docker::list(&session).await.map_err(|e| e.0)?;
+    Ok(DockerInfo {
+        containers,
+        version,
+    })
+}
+
+/// 在**共享连接**上拿一个 session（⚠️ **不新增连接**）。
+///
+/// ⚠️ 同一台服务器（host+port+user）整个程序只有一条 SSH 连接 ⇒ 容器视图的
+///    列表、详情、启停**全都走这一条**（各开各的 exec 通道）。
+async fn shared_session(
+    opts: &crate::args::ConnOptions,
+    pw: Option<String>,
+) -> Result<
+    std::sync::Arc<russh::client::Handle<crate::backend::conn::HostKeyHandler>>,
+    String,
+> {
     let creds = crate::backend::hub::Creds {
         password: pw,
         keyfile: opts.keyfile.clone().filter(|k| !k.is_empty()),
@@ -686,13 +1405,120 @@ async fn fetch_all(
     let shared = crate::backend::hub::acquire(key, &creds)
         .await
         .map_err(|e| e.0)?;
-    let session = shared.session().clone();
-    let version = docker::probe(&session).await.map_err(|e| e.0)?;
-    let containers = docker::list(&session).await.map_err(|e| e.0)?;
-    Ok(DockerInfo {
-        containers,
-        version,
-    })
+    Ok(shared.session().clone())
+}
+
+/// 取一个容器的详情（后台任务里跑，结果回主线程）。
+fn load_detail(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name = name.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => docker::fetch_detail(&session, &name)
+                .await
+                .map_err(|e| e.0),
+            Err(e) => Err(e),
+        };
+        let _ = tx.send_blocking(Msg::Detail { name, r });
+    });
+}
+
+/// 做一次**写操作**（启停 / 重启）。
+///
+/// ⚠️ **界面必须先二次确认**（见 `build()` 里的按钮接线）⇒ 这里只管执行。
+fn do_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: Action) {
+    let name = ui.selected.borrow().clone();
+    if name.is_empty() {
+        return;
+    }
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name2 = name.clone();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => docker::run_action(&session, &name2, action)
+                .await
+                .map_err(|e| e.0),
+            Err(e) => Err(e),
+        };
+        let msg = match r {
+            Ok(m) => trf!("{n}：{m}", n = name2, m = m),
+            Err(e) => trf!("{act}失败：{e}", act = action.label(), e = e),
+        };
+        let _ = tx.send_blocking(Msg::Action(msg));
+    });
+}
+
+/// 做一次 **compose 项目的写操作**（启动 / 停止 / 销毁 / 重建）。
+///
+/// ⚠️ **界面必须先二次确认**（见 `build()` 里的按钮接线）⇒ 这里只管执行。
+fn do_compose_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: ComposeAction) {
+    let name = ui.selected_project.borrow().clone();
+    if name.is_empty() {
+        return;
+    }
+    // 配置文件与工作目录取自**容器标签**（项目里每个容器都带一份）。
+    let Some(sum) = ui.project_summary(&name) else {
+        ui.status.set_text(tr("找不到这个 compose 项目的容器"));
+        return;
+    };
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name2 = name.clone();
+    let files = sum.files.clone();
+    let dir = sum.dir.clone();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => {
+                docker::run_compose_action(&session, &name2, &files, &dir, action)
+                    .await
+                    .map_err(|e| e.0)
+            }
+            Err(e) => Err(e),
+        };
+        let msg = match r {
+            Ok(m) => trf!("{n}：{m}", n = name2, m = m),
+            Err(e) => trf!("{act}失败：{e}", act = action.label(), e = e),
+        };
+        let _ = tx.send_blocking(Msg::Action(msg));
+    });
+}
+
+/// 「编辑 compose 文件」⇒ **用编辑器打开远程文件**。
+///
+/// ⚠️ 多个 compose 文件时**只打开第一个**（标签里是逗号分隔的）。
+/// ⚠️ 没有文件路径 ⇒ 说清楚为什么（别静默）。
+fn open_compose_file(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    let name = ui.selected_project.borrow().clone();
+    if name.is_empty() {
+        return;
+    }
+    let Some(sum) = ui.project_summary(&name) else {
+        ui.status.set_text(tr("找不到这个 compose 项目的容器"));
+        return;
+    };
+    let Some(path) = sum
+        .files
+        .split(',')
+        .map(str::trim)
+        .find(|f| !f.is_empty())
+        .map(|f| f.to_string())
+    else {
+        ui.status
+            .set_text(tr("这个 compose 项目没有记录配置文件路径，没法编辑"));
+        return;
+    };
+    ui.status
+        .set_text(&trf!("正在打开 {p}…", p = path));
+    // ⚠️ **远程文件** ⇒ 走 SFTP 打开（编辑区里另开一个编辑器标签）。
+    crate::panel::fileedit::open_remote(st, &path, false);
 }
 
 /// 触发一次刷新。
@@ -718,7 +1544,7 @@ fn refresh(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     rt.spawn(async move {
         let r = fetch_all(&opts, pw).await;
         // 通道断了 = 界面已经没了 ⇒ 忽略。
-        let _ = tx.send_blocking(r);
+        let _ = tx.send_blocking(Msg::List(r));
     });
 }
 
@@ -819,8 +1645,7 @@ pub fn model_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, bool, bool)> {
         .unwrap_or_default()
 }
 
-/// 测试钩子：**灌一批容器进表格**（**不连服务器**）。
-///
+/// 测试钩子：**灌一批容器进表格**（**不连服务器**）。///
 /// 冒烟用它验界面的树形形状（compose 项目是父行、独立容器是顶层行、
 /// 默认收起、点开才显示……）⇒ 不用真的连一台有 docker 的机器。
 pub fn set_rows_for_test(st: &Rc<PanelState>, rows: Vec<ContainerInfo>) {
@@ -829,6 +1654,174 @@ pub fn set_rows_for_test(st: &Rc<PanelState>, rows: Vec<ContainerInfo>) {
     ui.busy.set(false);
     *ui.containers.borrow_mut() = rows.clone();
     ui.rebuild(&rows);
+}
+
+/// 测试钩子：**灌一份详情**进界面（**不连服务器**）＋ 把它当成选中的容器。
+///
+/// 冒烟用它验详情区（标题 / 四张卡片 / 按钮可用性）⇒ 不用真的连服务器。
+pub fn set_detail_for_test(st: &Rc<PanelState>, d: ContainerDetail) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    *ui.selected.borrow_mut() = d.name.clone();
+    ui.apply_detail(&d);
+}
+
+/// 测试钩子：详情区是不是显示着（**没选容器时应当是收起的**）。
+pub fn detail_visible_for_test(st: &Rc<PanelState>) -> bool {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.detail.root.is_visible())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：详情标题文字（「详情：web（运行中）」）。
+pub fn detail_title_for_test(st: &Rc<PanelState>) -> String {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.detail.title.text().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：某张卡片的文字（`config` / `net` / `mount` / `env`）。
+pub fn detail_card_for_test(st: &Rc<PanelState>, which: &str) -> String {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| match which {
+            "config" => u.detail.config.text().to_string(),
+            "net" => u.detail.net.text().to_string(),
+            "mount" => u.detail.mount.text().to_string(),
+            "env" => u.detail.env.text().to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// 测试钩子：**最近一次写操作的结果**（空 = 没执行过写操作）。
+pub fn last_action_for_test(st: &Rc<PanelState>) -> String {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.last_action.borrow().clone())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：当前选中的容器名。
+pub fn selected_for_test(st: &Rc<PanelState>) -> String {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.selected.borrow().clone())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：动作按钮**能不能点**（`start` / `stop` / `restart`）。
+pub fn action_sensitive_for_test(st: &Rc<PanelState>, which: &str) -> bool {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| match which {
+            "start" => u.detail.btn_start.is_sensitive(),
+            "stop" => u.detail.btn_stop.is_sensitive(),
+            "restart" => u.detail.btn_restart.is_sensitive(),
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
+/// 测试钩子：**点一下动作按钮**（冒烟要验「二次确认拦在前面」）。
+///
+/// ⚠️ 冒烟里点的是**不存在的容器名** ⇒ 就算确认逻辑坏了，命令也只会被
+///    docker 拒绝 ⇒ **碰不到用户机器上的真容器**。
+pub fn click_action_for_test(st: &Rc<PanelState>, which: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let btn = match which {
+        "start" => ui.detail.btn_start.clone(),
+        "stop" => ui.detail.btn_stop.clone(),
+        "restart" => ui.detail.btn_restart.clone(),
+        _ => return,
+    };
+    btn.emit_clicked();
+}
+
+/// 测试钩子：**选中**某个 compose 项目行（冒烟要验「项目详情 + 5 个操作」）。
+pub fn select_project_for_test(st: &Rc<PanelState>, name: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(it) = ui.project_iter(name) else {
+        return false;
+    };
+    let path = ui.model.path(&it);
+    gtk::prelude::TreeViewExt::set_cursor(&ui.view, &path, None, false);
+    true
+}
+
+/// 测试钩子：当前选中的 **compose 项目名**（空 = 没选项目）。
+pub fn selected_project_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.selected_project.borrow().clone())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：**项目详情**是不是显示着（没选项目行时应当是隐藏的）。
+pub fn project_detail_visible_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.detail.proj_root.is_visible())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：项目详情的标题（「compose 项目：xxx」）。
+pub fn project_title_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.detail.proj_title.text().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：项目详情的正文（配置文件 / 工作目录 / 容器清单）。
+pub fn project_info_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.detail.proj_info.text().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：某个项目操作按钮**能不能点**（`edit`/`start`/`stop`/`down`/`up`）。
+pub fn project_action_sensitive_for_test(st: &Rc<PanelState>, which: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let btn = match which {
+        "edit" => &ui.detail.btn_edit,
+        "start" => &ui.detail.btn_cstart,
+        "stop" => &ui.detail.btn_cstop,
+        "down" => &ui.detail.btn_cdown,
+        "up" => &ui.detail.btn_cup,
+        _ => return false,
+    };
+    btn.is_sensitive()
+}
+
+/// 测试钩子：**点一下**某个项目操作按钮。
+///
+/// ⚠️ 冒烟里点的是**不存在的项目名** ⇒ 就算确认逻辑坏了，命令也只会被
+///    docker 拒绝 ⇒ **碰不到用户机器上的真项目**。
+pub fn click_project_action_for_test(st: &Rc<PanelState>, which: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let btn = match which {
+        "edit" => ui.detail.btn_edit.clone(),
+        "start" => ui.detail.btn_cstart.clone(),
+        "stop" => ui.detail.btn_cstop.clone(),
+        "down" => ui.detail.btn_cdown.clone(),
+        "up" => ui.detail.btn_cup.clone(),
+        _ => return,
+    };
+    btn.emit_clicked();
 }
 
 /// 测试钩子：**展开**某个 compose 项目（冒烟要验证「点开才显示」）。
@@ -841,6 +1834,12 @@ pub fn expand_project_for_test(st: &Rc<PanelState>, name: &str) -> bool {
     let path = ui.model.path(&it);
     ui.view.expand_row(&path, false);
     true
+}
+
+/// 测试钩子：容器页在子标签里的 id（冒烟要切到那一页去截图）。
+pub fn tab_id_for_test(st: &Rc<PanelState>) -> u64 {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.tab_id.get()).unwrap_or(0)
 }
 
 /// 测试钩子：某个 compose 项目**是不是展开着**。
@@ -867,6 +1866,16 @@ mod tests {
             state: "running".to_string(),
             ports: String::new(),
             compose: compose.to_string(),
+            compose_files: if compose.is_empty() {
+                String::new()
+            } else {
+                "/srv/app/docker-compose.yml".to_string()
+            },
+            compose_dir: if compose.is_empty() {
+                String::new()
+            } else {
+                "/srv/app".to_string()
+            },
             cpu: "1.0%".to_string(),
             mem: "10MiB".to_string(),
         }

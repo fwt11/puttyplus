@@ -123,6 +123,11 @@ const STATE_DATA_KEY: &str = "pp-ghostty-state";
 /// ⚠️ 不能只靠「是不是 DrawingArea」认——界面上别的 DrawingArea 多的是。
 const TERM_CSS_CLASS: &str = "pp-ghostty-term";
 
+/// 滚轮一格滚几行（阶段 118）。
+///
+/// ⚠️ 3 行是 VTE / ghostty 官方终端的观感（滚一格 = 3 行）。
+const SCROLL_LINES_PER_WHEEL: i64 = 3;
+
 /// 控件的全部可变状态（放在 `Rc` 里，好让 GTK 回调共享）。
 struct State {
     /// 控件本体（**弱引用**）。
@@ -478,6 +483,7 @@ impl GhosttyView {
         view.install_draw();
         view.install_click_focus();
         view.install_selection();
+        view.install_scroll();
         view.install_keys();
         view.install_ime();
         view
@@ -486,6 +492,21 @@ impl GhosttyView {
     /// 控件本体（塞进容器用）。
     pub fn widget(&self) -> &gtk::Widget {
         self.area.upcast_ref::<gtk::Widget>()
+    }
+
+    /// **滚动视口**（`lines` **负数往回看**＝看更早的内容）。
+    ///
+    /// 干什么用（阶段 118）：用户报「ghostty 下看不到屏幕之前的内容」⇒
+    /// 滚轮、滚动键、程序自己（比如「回到末尾」）都走这一个口子。
+    pub fn scroll_lines(&self, lines: i64) {
+        scroll_lines(&self.state, lines);
+    }
+
+    /// 视口是不是**贴着底部**（没往上滚）。
+    ///
+    /// 冒烟用：滚上去之后应当变成 false ⇒ 证明「真的滚上去了」。
+    pub fn viewport_active(&self) -> bool {
+        self.state.term.borrow().viewport_active()
     }
 
     /// DrawingArea 本体（要拿焦点、加控制器时用）。
@@ -1050,6 +1071,35 @@ impl GhosttyView {
         self.area.add_controller(drag);
     }
 
+    /// 装**滚轮**（阶段 118）：往上滚 ⇒ 看**更早的内容**（回滚缓冲）。
+    ///
+    /// 干什么用（用户 2026-11-15）：「ghostty 下面还不能查看和选择屏幕当前
+    /// 显示的内容**之前**的内容」⇒ 之前根本没有滚动的入口（VTE 是控件
+    /// 自己滚的，ghostty 是自绘的 ⇒ 得自己接）。
+    ///
+    /// ⚠️ **滚上去之后内核不会把视口拽回底部**（新输出也不拽）⇒ 用户能
+    /// 安心翻旧内容；要回到底部往下滚（或按 `Shift+PageDown`）。
+    fn install_scroll(&self) {
+        let area = self.area.clone();
+        let state = self.state.clone();
+        let ctrl = gtk::EventControllerScroll::new(
+            gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE,
+        );
+        ctrl.connect_scroll(move |_c, _dx, dy| {
+            // ⚠️ **dy < 0 = 往上滚**（GTK 的约定，源码 `gdkevents.c` 的
+            //    `gdk_scroll_event_new_discrete`：`GDK_SCROLL_UP ⇒ delta_y = -1`）
+            //    ⇒ 往上滚 = 看更早的内容 = 视口往回滚（内核的 Delta 负数）。
+            let lines = if dy < 0.0 {
+                -SCROLL_LINES_PER_WHEEL
+            } else {
+                SCROLL_LINES_PER_WHEEL
+            };
+            scroll_lines(&state, lines);
+            glib::Propagation::Stop
+        });
+        area.add_controller(ctrl);
+    }
+
     /* ---------------- 按键 ---------------- */
 
     fn install_keys(&self) {
@@ -1573,6 +1623,47 @@ fn clear_selection(state: &Rc<State>) {
     state.queue_draw_self();
 }
 
+/* ---------------- 视口滚动 ---------------- */
+
+/// 滚动视口（`lines` **负数往回看**＝看更早的内容）。
+///
+/// ⚠️ **重画是必须的**：视口一动 ⇒ 画出来的是不同的行（历史）⇒ 不重画
+/// 用户看着像"滚了没反应"。
+fn scroll_lines(state: &Rc<State>, lines: i64) {
+    if lines == 0 {
+        return;
+    }
+    {
+        let mut term = state.term.borrow_mut();
+        term.scroll_viewport(lines);
+    }
+    state.queue_draw_self();
+}
+
+/// 滚动键 ⇒ 滚几行（`None` = 不是滚动键 ⇒ 交给终端）。
+///
+/// ⚠️ **跟 VTE 的默认键位对齐**（VTE 那边是控件自己处理的）：
+/// - `Shift+PageUp` / `Shift+PageDown` ⇒ 翻**一屏**；
+/// - `Ctrl+Shift+Up` / `Ctrl+Shift+Down` ⇒ 翻**一行**。
+///
+/// ⚠️ 这些键**不发**给远端（VTE 也是自己吃掉）⇒ 远端程序（less / vim）
+/// 收不到 `Shift+PageUp`。
+fn scroll_key_lines(state: &Rc<State>, keyval: gdk::Key, mods: gdk::ModifierType) -> Option<i64> {
+    if !mods.contains(gdk::ModifierType::SHIFT_MASK) {
+        return None;
+    }
+    let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+    // 一屏 = 视口高度（至少 1 行）。
+    let page = state.term.borrow().row_count().max(1);
+    match keyval {
+        gdk::Key::Page_Up | gdk::Key::KP_Page_Up => Some(-page),
+        gdk::Key::Page_Down | gdk::Key::KP_Page_Down => Some(page),
+        gdk::Key::Up | gdk::Key::KP_Up if ctrl => Some(-1),
+        gdk::Key::Down | gdk::Key::KP_Down if ctrl => Some(1),
+        _ => None,
+    }
+}
+
 /* ---------------- 按键处理 ---------------- */
 
 /// 输入法的 commit ⇒ 按 UTF-8 字节发出去。
@@ -1592,6 +1683,11 @@ fn commit_text(state: &Rc<State>, text: &str) {
 fn handle_key(state: &Rc<State>, keyval: gdk::Key, mods: gdk::ModifierType) {
     // 敲键了 ⇒ 光标马上实心、相位从头计（见 `reset_blink`）。
     state.reset_blink();
+    // ⚠️ **滚动键自己吃掉**（VTE 同款）：`Shift+PageUp` 等不该发给远端。
+    if let Some(lines) = scroll_key_lines(state, keyval, mods) {
+        scroll_lines(state, lines);
+        return;
+    }
     let Some(code) = keycode_from_gdk(keyval) else {
         return;
     };

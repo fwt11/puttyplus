@@ -40,7 +40,7 @@ pub const SEP: char = '|';
 /// ⚠️ `{{.Label "com.docker.compose.project"}}` 要 **Docker 17.06+**；
 /// 老版本会报「template parsing error」⇒ 有个**降级模板**（见
 /// [`list_cmd_simple`]）。
-const PS_FIELDS: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Label \"com.docker.compose.project\"}}";
+const PS_FIELDS: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Label \"com.docker.compose.project\"}}|{{.Label \"com.docker.compose.project.config_files\"}}|{{.Label \"com.docker.compose.project.working_dir\"}}";
 
 /// 容器列表的字段模板（**降级版**：不依赖 `.Label`，老 Docker 也能用）。
 const PS_FIELDS_SIMPLE: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}";
@@ -62,6 +62,12 @@ pub struct ContainerInfo {
     pub ports: String,
     /// compose 项目名（不在 compose 里就是空）。
     pub compose: String,
+    /// compose 的**配置文件路径**（标签 `com.docker.compose.project.config_files`）。
+    ///
+    /// ⚠️ 多个文件时是**逗号分隔**（`-f a.yml -f b.yml` 的项目）。
+    pub compose_files: String,
+    /// compose 的**工作目录**（标签 `com.docker.compose.project.working_dir`）。
+    pub compose_dir: String,
     /// CPU 占用（`2.3%`；没采到就是空）。
     pub cpu: String,
     /// 内存占用（`51MiB / 63GiB`；没采到就是空）。
@@ -91,6 +97,98 @@ pub struct DockerInfo {
     pub containers: Vec<ContainerInfo>,
     /// 远程 docker 的服务端版本（探测到的）。
     pub version: String,
+}
+
+/* ---------------- 容器详情（阶段 110） ---------------- */
+
+/// 一个**挂载**（bind / volume）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountInfo {
+    /// 类型（`bind` / `volume` / `tmpfs`）。
+    pub kind: String,
+    /// 来源（宿主机的路径或卷名）。
+    pub source: String,
+    /// 容器里的目标路径。
+    pub dest: String,
+    /// 是否可写（`true` / `false`）。
+    pub rw: String,
+}
+
+/// 一个**发布端口**。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PortInfo {
+    /// 容器端口（`5432/tcp`）。
+    pub container: String,
+    /// 主机端口（没发布就是空）。
+    pub host_port: String,
+    /// 主机地址（`0.0.0.0` / `127.0.0.1`；没发布就是空）。
+    pub host_ip: String,
+}
+
+/// 一个**网络**。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkInfo {
+    /// 网络名。
+    pub name: String,
+    /// 容器在这个网络里的 IP。
+    pub ip: String,
+    /// 网关。
+    pub gateway: String,
+}
+
+/// 一个容器的**详情**（阶段 110）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerDetail {
+    /// 容器名（`docker inspect` 给的是 `/名字` ⇒ 去掉开头的斜杠）。
+    pub name: String,
+    /// 镜像。
+    pub image: String,
+    /// 创建时间（ISO8601）。
+    pub created: String,
+    /// 状态（`running` / `exited` / …）。
+    pub status: String,
+    /// 健康检查（`healthy` / `unhealthy` / `none`）。
+    pub health: String,
+    /// 上次启动时间。
+    pub started_at: String,
+    /// 上次退出时间。
+    pub finished_at: String,
+    /// 上次退出的退出码。
+    pub exit_code: String,
+    /// 重启过几次。
+    pub restart_count: String,
+    /// 重启策略（`always` / `on-failure` / `no`）。
+    pub restart_policy: String,
+    /// 重启策略的最大重试次数（`on-failure` 才有意义）。
+    pub restart_max_retry: String,
+    /// 运行用户（空 = root）。
+    pub user: String,
+    /// 工作目录。
+    pub workdir: String,
+    /// 启动命令（`[sh -c …]` 这种原样）。
+    pub command: String,
+    /// 网络模式（`bridge` / `host` / `none` / 自定义网络名）。
+    pub network_mode: String,
+    /// 环境变量（`KEY=VALUE` 原样）。
+    pub env: Vec<String>,
+    /// 挂载。
+    pub mounts: Vec<MountInfo>,
+    /// 发布端口。
+    pub ports: Vec<PortInfo>,
+    /// 网络。
+    pub networks: Vec<NetworkInfo>,
+}
+
+impl ContainerDetail {
+    /// 状态的中文说法（界面徽章）。
+    pub fn state_label(&self) -> &'static str {
+        state_label(&self.status)
+    }
+
+    /// 是不是在跑（决定「启动 / 停止」哪个按钮可用）。
+    pub fn is_running(&self) -> bool {
+        self.status == "running"
+    }
 }
 
 /* ---------------- 命令拼装（纯函数，好测） ---------------- */
@@ -124,6 +222,199 @@ pub fn stats_cmd() -> String {
         .to_string()
 }
 
+/* ---------------- 阶段 110：容器详情 + 启停 ---------------- */
+
+/// 详情模板（**一条命令出全部字段**）。
+///
+/// ⚠️ **不用 JSON**：`docker inspect` 默认吐 JSON，而仓库里**没有 serde_json**
+///    （也不打算为一个页面加依赖）⇒ 改用 docker 的 **Go 模板**直接吐
+///    **带标签的行**：
+///
+/// ```text
+/// F|字段|值      ← 标量字段（镜像、状态、重启策略……）
+/// E|KEY=VALUE    ← 一个环境变量一行
+/// M|类型|源|目标|读写   ← 一个挂载一行
+/// P|容器端口|主机端口|主机地址   ← 一个发布端口一行
+/// N|网络名|IP|网关   ← 一个网络一行
+/// ```
+///
+/// ⇒ 按**行首标签**解析 ⇒ 值里有没有 `|` 都不影响（只有 M/P/N 内部按 `|` 切）。
+const INSPECT_TEMPLATE: &str = r#"F|Name|{{.Name}}
+F|Image|{{.Config.Image}}
+F|Created|{{.Created}}
+F|Status|{{.State.Status}}
+F|Health|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}
+F|StartedAt|{{.State.StartedAt}}
+F|FinishedAt|{{.State.FinishedAt}}
+F|ExitCode|{{.State.ExitCode}}
+F|RestartCount|{{.RestartCount}}
+F|RestartPolicy|{{.HostConfig.RestartPolicy.Name}}
+F|MaxRetry|{{.HostConfig.RestartPolicy.MaximumRetryCount}}
+F|User|{{.Config.User}}
+F|WorkDir|{{.Config.WorkingDir}}
+F|Command|{{.Config.Cmd}}
+F|NetworkMode|{{.HostConfig.NetworkMode}}
+{{range .Config.Env}}E|{{.}}
+{{end}}{{range .Mounts}}M|{{.Type}}|{{.Source}}|{{.Destination}}|{{.RW}}
+{{end}}{{range $p, $bindings := .NetworkSettings.Ports}}{{range $bindings}}P|{{$p}}|{{.HostPort}}|{{.HostIP}}
+{{end}}{{end}}{{range $n, $v := .NetworkSettings.Networks}}N|{{$n}}|{{$v.IPAddress}}|{{$v.Gateway}}
+{{end}}"#;
+
+/// 容器名**合不合法**（docker 只允许 `[a-zA-Z0-9][a-zA-Z0-9_.-]*`）。
+///
+/// ⚠️ **为什么必须验**：下面的命令是**拼出来的**（`docker stop <名字>`）⇒
+///    名字里带 `;` `$(` 就能注入命令 ⇒ 拼之前先验一遍。
+pub fn valid_name(name: &str) -> bool {
+    let mut cs = name.chars();
+    match cs.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    name.len() <= 128
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
+/// 容器详情命令（`docker inspect` + 上面那个模板）。
+pub fn inspect_cmd(name: &str) -> String {
+    format!("docker inspect --format '{INSPECT_TEMPLATE}' {name} 2>&1")
+}
+
+/// 对容器做的**写操作**（阶段 110）。
+///
+/// ⚠️ **这是写操作** ⇒ 界面必须先**二次确认**（见 `panel::dockerui`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// 启动。
+    Start,
+    /// 停止。
+    Stop,
+    /// 重启。
+    Restart,
+}
+
+impl Action {
+    /// 这个动作的命令。
+    ///
+    /// ⚠️ 名字**必须先过 [`valid_name`]**（见 [`run_action`]）。
+    pub fn cmd(&self, name: &str) -> String {
+        match self {
+            Action::Start => format!("docker start {name} 2>&1"),
+            Action::Stop => format!("docker stop {name} 2>&1"),
+            Action::Restart => format!("docker restart {name} 2>&1"),
+        }
+    }
+
+    /// 按钮上的字（动词）。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Action::Start => tr("启动"),
+            Action::Stop => tr("停止"),
+            Action::Restart => tr("重启"),
+        }
+    }
+
+    /// 做完之后说的字（过去式）。
+    pub fn past_label(&self) -> &'static str {
+        match self {
+            Action::Start => tr("已启动"),
+            Action::Stop => tr("已停止"),
+            Action::Restart => tr("已重启"),
+        }
+    }
+}
+
+/* ---------------- compose 项目（阶段 111） ---------------- */
+
+/// 对 **compose 项目**做的写操作。
+///
+/// ⚠️ **这是写操作** ⇒ 界面必须先**二次确认**（见 `panel::dockerui`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposeAction {
+    /// 启动（`docker compose start`）：把**已停止**的容器起起来。
+    Start,
+    /// 停止（`docker compose stop`）：停掉容器，**容器还留着**。
+    Stop,
+    /// 销毁（`docker compose down`）：停掉并**删除**容器与网络。
+    Down,
+    /// 重建（`docker compose up`）：按 compose 文件**重新创建并启动**。
+    Up,
+}
+
+impl ComposeAction {
+    /// `docker compose` 的子命令。
+    pub fn subcmd(&self) -> &'static str {
+        match self {
+            ComposeAction::Start => "start",
+            ComposeAction::Stop => "stop",
+            ComposeAction::Down => "down",
+            ComposeAction::Up => "up",
+        }
+    }
+
+    /// 按钮上的字（动词）。
+    pub fn label(&self) -> &'static str {
+        match self {
+            ComposeAction::Start => tr("启动"),
+            ComposeAction::Stop => tr("停止"),
+            ComposeAction::Down => tr("销毁"),
+            ComposeAction::Up => tr("重建"),
+        }
+    }
+
+    /// 做完之后说的字（过去式）。
+    pub fn past_label(&self) -> &'static str {
+        match self {
+            ComposeAction::Start => tr("已启动"),
+            ComposeAction::Stop => tr("已停止"),
+            ComposeAction::Down => tr("已销毁"),
+            ComposeAction::Up => tr("已重建"),
+        }
+    }
+
+    /// 是不是**危险**动作（销毁会删掉容器与网络 ⇒ 确认框要说清楚）。
+    pub fn is_dangerous(&self) -> bool {
+        matches!(self, ComposeAction::Down)
+    }
+}
+
+/// compose 项目的**写操作**命令。
+///
+/// ## 为什么这么拼
+///
+/// - **先 `cd` 到工作目录**：compose 会按目录找 `.env`、解析相对路径的卷
+///   ⇒ 不 cd 的话行为跟用户自己在那个目录里跑不一样。
+/// - **带 `-p <项目名>`**：项目名取自容器标签（`com.docker.compose.project`）
+///   ⇒ **不靠目录推导**（用户可能把文件挪过位置）。
+/// - **带 `-f <配置文件>`**：`up`/`down` **必须**有 compose 文件（否则 compose
+///   报「no configuration file provided」）；文件路径同样取自标签。
+///
+/// ⚠️ 三个参数都来自**远端容器的标签**（= 远端可控的内容）⇒ 全部
+///    `sh_quote` ⇒ 既防命令注入，也防路径里的空格把参数拆开。
+pub fn compose_cmd(project: &str, files: &str, dir: &str, action: ComposeAction) -> String {
+    let mut cmd = String::new();
+    if !dir.is_empty() {
+        cmd.push_str(&format!(
+            "cd {} && ",
+            crate::backend::checksum::sh_quote(dir)
+        ));
+    }
+    cmd.push_str("docker compose");
+    if !project.is_empty() {
+        cmd.push_str(&format!(" -p {}", crate::backend::checksum::sh_quote(project)));
+    }
+    for f in files.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+        cmd.push_str(&format!(" -f {}", crate::backend::checksum::sh_quote(f)));
+    }
+    cmd.push(' ');
+    cmd.push_str(action.subcmd());
+    // ⚠️ `up` 默认**占着前台**（不返回）⇒ 必须加 `-d`（后台）。
+    if matches!(action, ComposeAction::Up) {
+        cmd.push_str(" -d");
+    }
+    cmd.push_str(" 2>&1");
+    cmd
+}
+
 /* ---------------- 输出解析（纯函数，好测） ---------------- */
 
 /// 解析 `docker ps` 的输出。
@@ -154,6 +445,8 @@ pub fn parse_ps(out: &str) -> Vec<ContainerInfo> {
             state,
             ports: f.next().unwrap_or("").trim().to_string(),
             compose: f.next().unwrap_or("").trim().to_string(),
+            compose_files: f.next().unwrap_or("").trim().to_string(),
+            compose_dir: f.next().unwrap_or("").trim().to_string(),
             cpu: String::new(),
             mem: String::new(),
         });
@@ -182,8 +475,96 @@ pub fn parse_stats(out: &str) -> HashMap<String, (String, String)> {
     m
 }
 
-/// 从状态原文归类出状态（`running` / `exited` / …）。
+/// 解析 `docker inspect` 的输出（**带标签的行** ⇒ 按行首标签分派）。
 ///
+/// ⚠️ **认不出的行直接忽略**（docker 的报错文字、模板不支持时的提示……）。
+/// ⚠️ `F|Name` 给的是 `/名字` ⇒ 去掉开头的斜杠。
+pub fn parse_inspect(out: &str) -> ContainerDetail {
+    let mut d = ContainerDetail::default();
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let (tag, rest) = match line.split_once('|') {
+            Some(x) => x,
+            None => continue,
+        };
+        match tag {
+            "F" => {
+                // F|字段|值
+                let Some((k, v)) = rest.split_once('|') else { continue };
+                let v = v.trim().to_string();
+                match k {
+                    "Name" => d.name = v.trim_start_matches('/').to_string(),
+                    "Image" => d.image = v,
+                    "Created" => d.created = v,
+                    "Status" => d.status = v,
+                    "Health" => d.health = v,
+                    "StartedAt" => d.started_at = v,
+                    "FinishedAt" => d.finished_at = v,
+                    "ExitCode" => d.exit_code = v,
+                    "RestartCount" => d.restart_count = v,
+                    "RestartPolicy" => d.restart_policy = v,
+                    "MaxRetry" => d.restart_max_retry = v,
+                    "User" => d.user = v,
+                    "WorkDir" => d.workdir = v,
+                    "Command" => d.command = v,
+                    "NetworkMode" => d.network_mode = v,
+                    _ => {}
+                }
+            }
+            "E" => {
+                // E|KEY=VALUE（原样；⚠️ 值里可能有 `|`，这里不切）
+                if !rest.is_empty() {
+                    d.env.push(rest.to_string());
+                }
+            }
+            "M" => {
+                // M|类型|源|目标|读写
+                let mut f = rest.splitn(4, '|');
+                let kind = f.next().unwrap_or("").trim().to_string();
+                let source = f.next().unwrap_or("").trim().to_string();
+                let dest = f.next().unwrap_or("").trim().to_string();
+                let rw = f.next().unwrap_or("").trim().to_string();
+                d.mounts.push(MountInfo {
+                    kind,
+                    source,
+                    dest,
+                    rw,
+                });
+            }
+            "P" => {
+                // P|容器端口|主机端口|主机地址
+                let mut f = rest.splitn(3, '|');
+                let container = f.next().unwrap_or("").trim().to_string();
+                let host_port = f.next().unwrap_or("").trim().to_string();
+                let host_ip = f.next().unwrap_or("").trim().to_string();
+                d.ports.push(PortInfo {
+                    container,
+                    host_port,
+                    host_ip,
+                });
+            }
+            "N" => {
+                // N|网络名|IP|网关
+                let mut f = rest.splitn(3, '|');
+                let name = f.next().unwrap_or("").trim().to_string();
+                let ip = f.next().unwrap_or("").trim().to_string();
+                let gateway = f.next().unwrap_or("").trim().to_string();
+                d.networks.push(NetworkInfo {
+                    name,
+                    ip,
+                    gateway,
+                });
+            }
+            _ => {}
+        }
+    }
+    d
+}
+
+/// 从状态原文归类出状态（`running` / `exited` / …）。
 /// ⚠️ **不依赖 `{{.State}}` 模板字段**（老 Docker 没有）⇒ 从状态文字推。
 pub fn state_of(status: &str) -> &'static str {
     let s = status.trim();
@@ -321,6 +702,71 @@ pub async fn list(session: &Handle<HostKeyHandler>) -> BackendResult<Vec<Contain
     Ok(list)
 }
 
+/// 取一个容器的**详情**（阶段 110）。
+///
+/// ⚠️ 走**共享连接**上的 exec 通道（不是新连接）⇒ 一台服务器仍然只有一条
+///    SSH 连接。
+pub async fn fetch_detail(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+) -> BackendResult<ContainerDetail> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let (code, out) = run_cmd(session, &inspect_cmd(name)).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    let d = parse_inspect(&out);
+    if d.name.is_empty() && d.image.is_empty() {
+        return Err(BackendError(
+            tr("取不到这个容器的信息（容器可能已经被删掉了）").to_string(),
+        ));
+    }
+    Ok(d)
+}
+
+/// 对容器做一次**写操作**（启动 / 停止 / 重启）。
+///
+/// ⚠️ **这是写操作** ⇒ 调用方（界面）必须先**二次确认**。
+/// ⚠️ 失败**给原因**（中文）⇒ 用户知道是权限不够还是容器不存在。
+pub async fn run_action(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+    action: Action,
+) -> BackendResult<String> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let (code, out) = run_cmd(session, &action.cmd(name)).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    Ok(action.past_label().to_string())
+}
+
+/// 对 compose 项目做一次**写操作**（启动 / 停止 / 销毁 / 重建）。
+///
+/// ⚠️ **这是写操作** ⇒ 调用方（界面）必须先**二次确认**。
+/// ⚠️ 失败**给原因**（中文）⇒ 用户知道是权限不够还是 compose 文件找不到了。
+pub async fn run_compose_action(
+    session: &Handle<HostKeyHandler>,
+    project: &str,
+    files: &str,
+    dir: &str,
+    action: ComposeAction,
+) -> BackendResult<String> {
+    if project.trim().is_empty() {
+        return Err(BackendError(tr("compose 项目名不合法").to_string()));
+    }
+    let cmd = compose_cmd(project, files, dir, action);
+    let (code, out) = run_cmd(session, &cmd).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    Ok(action.past_label().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +794,79 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].ports, "0.0.0.0:80->80/tcp");
         assert_eq!(v[0].compose, "");
+    }
+
+    #[test]
+    fn compose的配置文件与工作目录也取得到() {
+        let out = "abc123def456|db|postgres:17|Up 2 hours||proj|/srv/app/docker-compose.yml|/srv/app\n";
+        let v = parse_ps(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].compose, "proj");
+        assert_eq!(v[0].compose_files, "/srv/app/docker-compose.yml");
+        assert_eq!(v[0].compose_dir, "/srv/app");
+    }
+
+    #[test]
+    fn compose命令带项目名配置文件和工作目录() {
+        let cmd = compose_cmd(
+            "proj",
+            "/srv/app/docker-compose.yml",
+            "/srv/app",
+            ComposeAction::Stop,
+        );
+        assert!(
+            cmd.contains("docker compose"),
+            "命令里应当有 docker compose：{cmd}"
+        );
+        assert!(cmd.contains("-p 'proj'"), "应当带项目名：{cmd}");
+        assert!(
+            cmd.contains("-f '/srv/app/docker-compose.yml'"),
+            "应当带配置文件：{cmd}"
+        );
+        assert!(cmd.starts_with("cd '/srv/app' && "), "应当先 cd：{cmd}");
+        assert!(cmd.contains(" stop"), "子命令不对：{cmd}");
+        assert!(
+            !cmd.contains(" -d"),
+            "stop 不该带 -d（只有 up 才带）：{cmd}"
+        );
+    }
+
+    #[test]
+    fn compose重建要后台跑() {
+        let cmd = compose_cmd("proj", "/a/compose.yml", "/a", ComposeAction::Up);
+        assert!(cmd.contains(" up -d"), "up 必须加 -d（否则占着前台）：{cmd}");
+    }
+
+    #[test]
+    fn compose命令的参数被引号包住() {
+        // ⚠️ 标签是**远端可控**的内容 ⇒ 路径里有空格/引号时不能把参数拆开。
+        let cmd = compose_cmd(
+            "my proj",
+            "/srv/my app/compose.yml",
+            "/srv/my app",
+            ComposeAction::Down,
+        );
+        assert!(cmd.contains("-p 'my proj'"), "项目名没包引号：{cmd}");
+        assert!(
+            cmd.contains("-f '/srv/my app/compose.yml'"),
+            "配置文件没包引号：{cmd}"
+        );
+        assert!(cmd.starts_with("cd '/srv/my app' && "), "目录没包引号：{cmd}");
+    }
+
+    #[test]
+    fn compose命令防注入() {
+        // ⚠️ 标签里塞 shell 元字符 ⇒ 不能被当成命令执行。
+        let cmd = compose_cmd(
+            "p; rm -rf /",
+            "/a/b.yml",
+            "",
+            ComposeAction::Start,
+        );
+        assert!(
+            cmd.contains("-p 'p; rm -rf /'"),
+            "项目名没被引号包住（能被注入）：{cmd}"
+        );
     }
 
     #[test]
@@ -401,5 +920,123 @@ mod tests {
         assert!(classify_failure("template parsing error").contains("版本太老"));
         // 认不出来 ⇒ 原文给用户（不吞信息）
         assert_eq!(classify_failure("some weird failure"), "some weird failure");
+    }
+
+    /* ---------------- 阶段 110：详情 + 启停 ---------------- */
+
+    /// 解析 `docker inspect` 的输出（**真机模板的形状**）。
+    #[test]
+    fn 解析容器详情() {
+        let out = "F|Name|/web\n\
+                   F|Image|nginx:latest\n\
+                   F|Created|2026-11-10T11:44:26Z\n\
+                   F|Status|running\n\
+                   F|Health|healthy\n\
+                   F|StartedAt|2026-11-15T00:59:47Z\n\
+                   F|FinishedAt|2026-11-14T15:56:52Z\n\
+                   F|ExitCode|0\n\
+                   F|RestartCount|2\n\
+                   F|RestartPolicy|always\n\
+                   F|MaxRetry|0\n\
+                   F|User|www-data\n\
+                   F|WorkDir|/app\n\
+                   F|Command|[nginx -g daemon off;]\n\
+                   F|NetworkMode|bridge\n\
+                   E|PATH=/usr/bin\n\
+                   E|DB_URL=postgres://u:p@h:5432/db?a=1|2\n\
+                   M|bind|/srv/site|/usr/share/nginx/html|false\n\
+                   M|volume|vol1|/data|true\n\
+                   P|443/tcp|8443|0.0.0.0\n\
+                   N|infra|172.19.0.2|172.19.0.1\n";
+        let d = parse_inspect(out);
+        // 名字去掉 docker 给的斜杠
+        assert_eq!(d.name, "web");
+        assert_eq!(d.image, "nginx:latest");
+        assert_eq!(d.status, "running");
+        assert!(d.is_running());
+        assert_eq!(d.health, "healthy");
+        assert_eq!(d.restart_count, "2");
+        assert_eq!(d.restart_policy, "always");
+        assert_eq!(d.user, "www-data");
+        assert_eq!(d.workdir, "/app");
+        assert_eq!(d.network_mode, "bridge");
+        // 环境变量：值里有 `|` 也不能被切坏
+        assert_eq!(d.env.len(), 2);
+        assert_eq!(d.env[0], "PATH=/usr/bin");
+        assert_eq!(d.env[1], "DB_URL=postgres://u:p@h:5432/db?a=1|2");
+        // 挂载 / 端口 / 网络
+        assert_eq!(d.mounts.len(), 2);
+        assert_eq!(d.mounts[0].kind, "bind");
+        assert_eq!(d.mounts[0].source, "/srv/site");
+        assert_eq!(d.mounts[0].dest, "/usr/share/nginx/html");
+        assert_eq!(d.mounts[0].rw, "false");
+        assert_eq!(d.ports.len(), 1);
+        assert_eq!(d.ports[0].container, "443/tcp");
+        assert_eq!(d.ports[0].host_port, "8443");
+        assert_eq!(d.networks.len(), 1);
+        assert_eq!(d.networks[0].name, "infra");
+        assert_eq!(d.networks[0].ip, "172.19.0.2");
+    }
+
+    /// 认不出的行**直接忽略**（别把 docker 的报错文字当成字段）。
+    #[test]
+    fn 详情解析忽略杂行() {
+        let out = "Error: No such object: nope\n\
+                   F|Name|/web\n\
+                   \n\
+                   随便一行\n\
+                   F|Image|img\n";
+        let d = parse_inspect(out);
+        assert_eq!(d.name, "web");
+        assert_eq!(d.image, "img");
+        assert!(d.env.is_empty());
+        assert!(d.mounts.is_empty());
+    }
+
+    /// 空输出 ⇒ 空详情（界面据此报「取不到信息」）。
+    #[test]
+    fn 详情解析空输出() {
+        let d = parse_inspect("");
+        assert_eq!(d.name, "");
+        assert_eq!(d.image, "");
+        assert!(!d.is_running());
+    }
+
+    /// 容器名**必须合法**（命令是拼出来的 ⇒ 别让人拼进 shell 元字符）。
+    #[test]
+    fn 容器名要合法() {
+        assert!(valid_name("web"));
+        assert!(valid_name("my-app_1.2"));
+        assert!(valid_name("A"));
+        assert!(!valid_name(""));
+        assert!(!valid_name(".hidden"));
+        assert!(!valid_name("-dash"));
+        assert!(!valid_name("web; rm -rf /"));
+        assert!(!valid_name("web$(id)"));
+        assert!(!valid_name("web`id`"));
+        assert!(!valid_name("web|x"));
+        assert!(!valid_name(&"a".repeat(129)));
+    }
+
+    /// 详情命令：一条命令出全部字段（不解析 JSON）。
+    #[test]
+    fn 详情命令用模板不用json() {
+        let c = inspect_cmd("web");
+        assert!(c.contains("docker inspect"));
+        assert!(c.contains("{{.Config.Image}}"));
+        assert!(c.contains("com.docker.compose") == false, "详情不需要 compose 标签");
+        assert!(!c.contains("--format json"));
+        // 名字是拼进去的 ⇒ 命令里就是它（合法性由 valid_name 守着）
+        assert!(c.ends_with("web 2>&1"));
+    }
+
+    /// 启停命令拼得对。
+    #[test]
+    fn 启停命令() {
+        assert!(Action::Start.cmd("web").contains("docker start web"));
+        assert!(Action::Stop.cmd("web").contains("docker stop web"));
+        assert!(Action::Restart.cmd("web").contains("docker restart web"));
+        assert_eq!(Action::Start.label(), "启动");
+        assert_eq!(Action::Stop.past_label(), "已停止");
     }
 }

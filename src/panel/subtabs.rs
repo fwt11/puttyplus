@@ -127,7 +127,8 @@ struct EditorPage {
     icon: Option<String>,
     /// 标题（重建标签时要用）。
     title: String,
-    /// 标题标签（**两种位置共用同一个** ⇒ 改标题只改一处）。
+    /// 标题标签（**当前活着的那一个**：搬家时换新的 ⇒ 改标题只改一处，
+    /// 理由见 `make_title_label`）。
     label: gtk::Label,
     /// **编辑区小标签栏**上那一块（停靠时存在）。
     tab: Option<gtk::Box>,
@@ -621,13 +622,9 @@ impl SubTabs {
         content.set_vexpand(true);
         self.editor_stack.add_named(&content, Some(&id.to_string()));
 
-        // 标题标签：**两种位置共用同一个** ⇒ 改标题只改一处。
-        let label = gtk::Label::new(Some(title));
-        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        let w = display_width(title).max(4) as i32;
-        label.set_width_chars(w.min(MAX_TITLE_CHARS));
-        label.set_max_width_chars(MAX_TITLE_CHARS);
-        label.set_tooltip_text(Some(title));
+        // 标题标签：**每次都新造一个**（不在容器之间搬家 ⇒ 文件名不会丢，
+        // 理由见 `make_title_label`）。
+        let label = self.make_title_label(title);
 
         let tab = self.build_editor_tab(id, icon, title, &label);
         self.editor_tabs.append(&tab);
@@ -714,13 +711,15 @@ impl SubTabs {
     }
 
     /// 编辑器在**子标签栏**里时的页签头：[图标][文件名][×]（阶段 108）。
+    ///
+    /// 返回 `(页签头, 文件名标签)`——**文件名标签是新造的**（理由见
+    /// [`SubTabs::make_title_label`]）。
     fn build_editor_head(
         self: &Rc<Self>,
         id: u64,
         icon: Option<&str>,
         title: &str,
-        label: &gtk::Label,
-    ) -> gtk::Box {
+    ) -> (gtk::Box, gtk::Label) {
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         head.set_margin_start(4);
         head.set_margin_end(2);
@@ -730,9 +729,10 @@ impl SubTabs {
             img.set_valign(gtk::Align::Center);
             head.append(&img);
         }
-        // 标签从编辑区的小标签栏搬过来（同一个 widget 不能有两个父级）。
-        label.unparent();
-        head.append(label);
+        // ⚠️ **新建一个文件名标签**（不是把小标签栏那个搬过来）——
+        // 搬运会**丢文件名**，见 `make_title_label` 的说明。
+        let label = self.make_title_label(title);
+        head.append(&label);
         let close = crate::a11y::icon_button("window-close-symbolic");
         close.add_css_class("flat");
         close.set_valign(gtk::Align::Center);
@@ -751,7 +751,33 @@ impl SubTabs {
                 }
             });
         }
-        head
+        (head, label)
+    }
+
+    /// 造一个**文件名标签**（编辑区小标签 / 子页签头里显示的那个）。
+    ///
+    /// ⚠️ **每次都新造一个，绝不在容器之间搬家**（阶段 117，2026-11-15）。
+    ///
+    /// 干什么用：用户报「编辑器拖到子标签栏后，**页签头上不显示文件名了**」。
+    ///
+    /// **根因**（GTK 4 的 `gtkbutton.c`）：`GtkButton` 私下记着
+    /// `priv->child`。我们原来把 Label 从名字按钮里 `unparent()` 出来、
+    /// 搬进页签头 ⇒ 按钮**还记着**那个 Label ⇒ 等旧标签框被销毁时，
+    /// 按钮的 dispose 会
+    /// `g_clear_pointer (&priv->child, gtk_widget_unparent)`
+    /// ⇒ **把已经搬进页签头的 Label 又摘一次** ⇒ 文件名凭空消失
+    /// （页签头上只剩图标和「×」）。
+    ///
+    /// ⇒ 改成「**旧控件随旧容器一起销毁，新控件给新容器**」⇒
+    /// 任何时候都没有"控件被两个容器抢"的情况 ⇒ 文件名不会丢。
+    fn make_title_label(&self, title: &str) -> gtk::Label {
+        let label = gtk::Label::new(Some(title));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let w = display_width(title).max(4) as i32;
+        label.set_width_chars(w.min(MAX_TITLE_CHARS));
+        label.set_max_width_chars(MAX_TITLE_CHARS);
+        label.set_tooltip_text(Some(title));
+        label
     }
 
     /// 给编辑器的小标签 / 页签头挂**拖拽源**（阶段 108）。
@@ -913,7 +939,7 @@ impl SubTabs {
     ///
     /// 返回是否真拖回去了（本来就在编辑区 ⇒ false）。
     pub fn undock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, title, label, widget) = {
+        let (icon, title, widget) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
@@ -924,7 +950,6 @@ impl SubTabs {
             (
                 p.icon.clone(),
                 p.title.clone(),
-                p.label.clone(),
                 p.widget.clone(),
             )
         };
@@ -937,8 +962,8 @@ impl SubTabs {
         if let Some(t) = &tab {
             self.editor_tabs.remove(t);
         }
-        // 变成一个子页签。
-        let head = self.build_editor_head(id, icon.as_deref(), &title, &label);
+        // 变成一个子页签（**页签头是新造的** ⇒ 文件名一定在）。
+        let (head, label) = self.build_editor_head(id, icon.as_deref(), &title);
         self.nb.append_page(&widget, Some(&head));
         {
             let mut pages = self.editor_pages.borrow_mut();
@@ -946,11 +971,21 @@ impl SubTabs {
                 p.docked = false;
                 p.head = Some(head);
                 p.tab = None;
+                p.label = label;
             }
         }
         // 编辑区可能空了 ⇒ 变成一条「停靠区」（用户还能把编辑器拖回来）。
         self.refresh_editor_area();
-        // 「当前」那个被拖走了 ⇒ 让给还停靠着的那个（没有就清空）。
+        // ⚠️ **拖出去后切到「编辑器」那一页**（阶段 117，用户 2026-11-15：
+        // 「拖动后就只能看到一个，**应该是显示编辑器**，因为鼠标肯定点的是
+        // 编辑器」）。
+        //
+        // ⚠️ 阶段 108 当初**故意不切**（怕终端页被藏起来 ⇒ 停靠区看不见 ⇒
+        // 拖不回去）。现在看：**页签头一直在子标签栏上** ⇒ 想拖回去时从
+        // 页签头拖走即可（拖动开始时 `show_editor_host_page` 会把终端页
+        // 切回来 ⇒ 落点重新出现）⇒ 切页不影响「拖回去」。
+        self.switch_editor(id);
+        // 「当前编辑器」指针留给**还停靠着的**那个（拖走的那个不在编辑区里）。
         if self.editor_current.get() == Some(id) {
             let next = self
                 .editor_pages
@@ -959,19 +994,8 @@ impl SubTabs {
                 .filter(|p| p.docked)
                 .last()
                 .map(|p| p.id);
-            match next {
-                Some(n) => self.switch_editor(n),
-                None => self.editor_current.set(None),
-            }
+            self.editor_current.set(next);
         }
-        // ⚠️ **拖出去后不自动切到「编辑器」那一页**（阶段 108）。
-        //
-        // 干什么用：编辑器现在是一个**子页签** ⇒ 点它的页签就能打开（GTK
-        // 的标准行为）。但要是这里就切过去，**终端页就被藏起来了** ⇒
-        // 编辑区（停靠区）也跟着看不见 ⇒ 用户想「拖回去」都没地方拖。
-        //
-        // ⇒ 留在当前页（终端页）⇒ 编辑区还在（只剩一条小标签栏 + 提示）
-        // ⇒ 想拖回去，**直接拖**；想看内容，**点页签**。
         true
     }
 
@@ -979,7 +1003,7 @@ impl SubTabs {
     ///
     /// 返回是否真停回去了（本来就在编辑区 ⇒ false）。
     pub fn dock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, title, label, widget) = {
+        let (icon, title, widget) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
@@ -990,7 +1014,6 @@ impl SubTabs {
             (
                 p.icon.clone(),
                 p.title.clone(),
-                p.label.clone(),
                 p.widget.clone(),
             )
         };
@@ -998,8 +1021,8 @@ impl SubTabs {
         if let Some(num) = self.nb.page_num(&widget) {
             self.nb.remove_page(Some(num));
         }
-        // 标签从页签头搬回小标签栏。
-        label.unparent();
+        // 小标签：**新造一个**（不把页签头那个搬回来 ⇒ 文件名不会丢）。
+        let label = self.make_title_label(&title);
         let tab = self.build_editor_tab(id, icon.as_deref(), &title, &label);
         self.editor_stack.add_named(&widget, Some(&id.to_string()));
         self.editor_tabs.append(&tab);
@@ -1009,6 +1032,7 @@ impl SubTabs {
                 p.docked = true;
                 p.tab = Some(tab);
                 p.head = None;
+                p.label = label;
             }
         }
         self.refresh_editor_area();

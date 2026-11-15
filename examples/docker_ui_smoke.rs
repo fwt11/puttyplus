@@ -29,7 +29,7 @@
 
 use gtk::prelude::*;
 use puttyplus::args::ConnOptions;
-use puttyplus::backend::docker;
+use puttyplus::backend::docker::{self, ContainerDetail, MountInfo, NetworkInfo, PortInfo};
 use puttyplus::backend::hub;
 use puttyplus::panel::{SftpPanel, dockerui, subtabs};
 
@@ -83,6 +83,18 @@ fn fake_containers() -> Vec<puttyplus::backend::docker::ContainerInfo> {
         state: if running { "running".into() } else { "exited".into() },
         ports: String::new(),
         compose: compose.to_string(),
+        // ⚠️ compose 项目的容器**都带**这两个标签（阶段 111：靠它们找
+        //    compose 文件与工作目录）。
+        compose_files: if compose.is_empty() {
+            String::new()
+        } else {
+            "/srv/app/docker-compose.yml".to_string()
+        },
+        compose_dir: if compose.is_empty() {
+            String::new()
+        } else {
+            "/srv/app".to_string()
+        },
         cpu: "1.0%".to_string(),
         mem: "10MiB".to_string(),
     };
@@ -107,6 +119,65 @@ fn shot(path: &str) {
         Ok(s) => println!("[信息] 截图命令退出码 {s}（没截到，不影响测试结果）"),
         Err(e) => println!("[信息] 截图失败（{e}）——不影响测试结果"),
     }
+}
+
+
+/// 当前**顶层窗口**的个数（用来验「点动作按钮 ⇒ 弹出确认框」）。
+fn toplevel_count() -> u32 {
+    use gtk::gio::prelude::ListModelExt;
+    gtk::Window::toplevels().n_items()
+}
+
+/// 关掉**最后一个**顶层窗口（冒烟里用来「取消」确认框）。
+///
+/// ⚠️ 关掉 ⇒ 对话框给的响应**不是「确定」** ⇒ 动作**不会执行**。
+fn close_last_toplevel() {
+    use gtk::gio::prelude::ListModelExt;
+    let model = gtk::Window::toplevels();
+    let n = model.n_items();
+    for i in (0..n).rev() {
+        if let Some(obj) = model.item(i) {
+            if let Ok(w) = obj.downcast::<gtk::Window>() {
+                w.close();
+                return;
+            }
+        }
+
+    }
+}
+
+/// 点**最后一个**对话框的「确定」按钮（冒烟里用来「确认」）。
+///
+/// ⚠️ 找不到就什么都不做（别乱点别的窗口）。
+fn confirm_last_dialog() {
+    use gtk::gio::prelude::ListModelExt;
+    let model = gtk::Window::toplevels();
+    let n = model.n_items();
+    for i in (0..n).rev() {
+        let Some(obj) = model.item(i) else { continue };
+        let Ok(w) = obj.downcast::<gtk::Window>() else { continue };
+        if let Some(btn) = find_ok_button(w.upcast_ref::<gtk::Widget>()) {
+            btn.emit_clicked();
+            return;
+        }
+    }
+}
+
+/// 树里那个**不是「取消」**的按钮（确认框的「确定」）。
+fn find_ok_button(w: &gtk::Widget) -> Option<gtk::Button> {
+    let mut c = w.first_child();
+    while let Some(x) = c {
+        if let Some(b) = x.downcast_ref::<gtk::Button>() {
+            if b.label().unwrap_or_default().to_string() != "取消" {
+                return Some(b.clone());
+            }
+        }
+        if let Some(b) = find_ok_button(&x) {
+            return Some(b);
+        }
+        c = x.next_sibling();
+    }
+    None
 }
 
 fn main() {
@@ -193,6 +264,38 @@ fn main() {
             n_compose > 0,
             format!("没有任何容器带 compose 项目标签（共 {} 个）", containers.len())
         );
+
+        // ② 之二：**详情**（真后端）——拿第一个容器的详情。
+        if let Some(c0) = containers.first() {
+            match docker::fetch_detail(&session, &c0.name).await {
+                Ok(d) => {
+                    check!(
+                        "② 取到容器详情",
+                        !d.name.is_empty(),
+                        "详情里连名字都没有"
+                    );
+                    check!(
+                        "② 详情里有镜像",
+                        !d.image.is_empty(),
+                        "详情里镜像是空的"
+                    );
+                    println!(
+                        "[信息] 详情：{} / 镜像 {} / 环境变量 {} 个 / 挂载 {} 个 / 端口 {} 个",
+                        d.name,
+                        d.image,
+                        d.env.len(),
+                        d.mounts.len(),
+                        d.ports.len()
+                    );
+                }
+                Err(e) => {
+                    println!("[FAIL] 取不到容器详情：{}", e.0);
+                    FAILS.with(|f| f.borrow_mut().push(format!("取不到容器详情：{}", e.0)));
+                }
+            }
+        } else {
+            println!("[信息] 没有容器可查详情（跳过）");
+        }
 
         // ③ **不新增连接**：容器视图用的就是这条共享连接
         let conns_after = hub::conn_count();
@@ -411,10 +514,315 @@ fn main() {
             theme.has_icon("package-x-generic-symbolic"),
             "package-x-generic-symbolic 不在系统主题里（会显示成缺图）"
         );
+
+    // ================= C 组：阶段 110 —— 详情 + 启停（只读验 + 二次确认） =================
+    {
+        // ⚠️ **把面板挂进一个窗口**（真实程序里面板在主窗口里）⇒
+        //    `st.topwin()` 才找得到父窗口 ⇒ 确认框才有父窗口（项目规矩：
+        //    对话框必须**必定**挂上父窗口，阶段 67 / 审计 P2-16）。
+        let root_win = gtk::Window::new();
+        root_win.set_child(Some(panel.widget()));
+        root_win.present();
+        pump(200);
+
+        // ⚠️ **灌一份假详情**（不连服务器）⇒ 验详情区的形状。
+        let d = ContainerDetail {
+            name: "web".into(),
+            image: "nginx:latest".into(),
+            created: "2026-11-10T11:44:26Z".into(),
+            status: "running".into(),
+            health: "healthy".into(),
+            started_at: "2026-11-15T00:59:47Z".into(),
+            finished_at: "".into(),
+            exit_code: "0".into(),
+            restart_count: "2".into(),
+            restart_policy: "always".into(),
+            restart_max_retry: "0".into(),
+            user: "www-data".into(),
+            workdir: "/app".into(),
+            command: "[nginx -g daemon off;]".into(),
+            network_mode: "bridge".into(),
+            env: vec!["PATH=/usr/bin".into(), "TZ=UTC".into()],
+            mounts: vec![MountInfo {
+                kind: "bind".into(),
+                source: "/srv/site".into(),
+                dest: "/usr/share/nginx/html".into(),
+                rw: "false".into(),
+            }],
+            ports: vec![PortInfo {
+                container: "443/tcp".into(),
+                host_port: "8443".into(),
+                host_ip: "0.0.0.0".into(),
+            }],
+            networks: vec![NetworkInfo {
+                name: "infra".into(),
+                ip: "172.19.0.2".into(),
+                gateway: "172.19.0.1".into(),
+            }],
+        };
+        dockerui::set_detail_for_test(&panel.st, d);
+        pump(200);
+
+        check!(
+            "⑨ 详情区显示出来了",
+            dockerui::detail_visible_for_test(&panel.st),
+            "详情区还是收着的（选中了容器就该显示）"
+        );
+        let title = dockerui::detail_title_for_test(&panel.st);
+        check!(
+            "⑨ 标题写着容器名和状态",
+            title.contains("web") && title.contains("运行中"),
+            format!("标题是 {title:?}")
+        );
+        let cfg = dockerui::detail_card_for_test(&panel.st, "config");
+        check!(
+            "⑨ 运行配置卡片有镜像、状态、重启策略",
+            cfg.contains("nginx:latest") && cfg.contains("运行中") && cfg.contains("always"),
+            format!("运行配置卡片是：\n{cfg}")
+        );
+        let net = dockerui::detail_card_for_test(&panel.st, "net");
+        check!(
+            "⑨ 网络与端口卡片有网络和端口",
+            net.contains("infra") && net.contains("8443"),
+            format!("网络与端口卡片是：\n{net}")
+        );
+        let mnt = dockerui::detail_card_for_test(&panel.st, "mount");
+        check!(
+            "⑨ 挂载卡片有源和目标",
+            mnt.contains("/srv/site") && mnt.contains("/usr/share/nginx/html"),
+            format!("挂载卡片是：\n{mnt}")
+        );
+        let env = dockerui::detail_card_for_test(&panel.st, "env");
+        check!(
+            "⑨ 环境变量卡片有内容",
+            env.contains("PATH=/usr/bin"),
+            format!("环境变量卡片是：\n{env}")
+        );
+        check!(
+            "⑨ 运行中 ⇒ 「启动」点不了、「停止」能点",
+            !dockerui::action_sensitive_for_test(&panel.st, "start")
+                && dockerui::action_sensitive_for_test(&panel.st, "stop"),
+            "按钮可用性跟状态对不上"
+        );
+
+        // ⚠️ **刷新不能把选中顶掉**（自动刷新每 7 秒来一次 ⇒ 用户刚选中的
+        //    容器要是被「刷新」清掉，详情也就跟着没了）。
+        dockerui::set_rows_for_test(&panel.st, fake_containers());
+        pump(200);
+        check!(
+            "⑨ 刷新后选中还在",
+            dockerui::selected_for_test(&panel.st) == "web",
+            format!(
+                "刷新后选中变成了 {:?}",
+                dockerui::selected_for_test(&panel.st)
+            )
+        );
+        check!(
+            "⑨ 刷新后详情区还开着",
+            dockerui::detail_visible_for_test(&panel.st),
+            "刷新后详情区收起来了"
+        );
+
+        // ⚠️ **二次确认**：写操作（停容器）**必须先问一句**。
+        //
+        // ⚠️ **安全**：这里点的是**不存在的容器名** ⇒ 就算确认逻辑坏了，
+        //    docker 也只会拒绝 ⇒ **碰不到用户机器上的真容器**。
+        let before = toplevel_count();
+        // ⚠️ 判据用「**最近一次写操作**」，**不用状态行**：状态行会被后台
+        //    刷新改掉 ⇒ 拿它判断会误判（刷新先到就当成动作跑了）。
+        let action_before = dockerui::last_action_for_test(&panel.st);
+        dockerui::click_action_for_test(&panel.st, "stop");
+        pump(300);
+        let after = toplevel_count();
+        check!(
+            "⑩ 点「停止」弹出确认框（写操作有二次确认）",
+            after > before,
+            format!("顶层窗口数 {before} → {after}（没弹出确认框）")
+        );
+        check!(
+            "⑩ 没点确定 ⇒ 动作**没有**执行",
+            dockerui::last_action_for_test(&panel.st) == action_before,
+            "没确认就执行了！"
+        );
+        // 关掉确认框（**不是点确定**）⇒ 什么都不该发生。
+        close_last_toplevel();
+        pump(300);
+        check!(
+            "⑩ 取消确认框后仍然没有执行",
+            dockerui::last_action_for_test(&panel.st) == action_before,
+            "取消之后动作还是跑了"
+        );
+        check!(
+            "⑩ 确认框是**挂着父窗口**的（项目规矩）",
+            !puttyplus::windows::dialogs_without_parent()
+                .iter()
+                .any(|t| t.contains("请确认")),
+            format!(
+                "确认框没有父窗口：{:?}",
+                puttyplus::windows::dialogs_without_parent()
+            )
+        );
+        }
+
+        // ================= D 组：阶段 111 —— compose 项目的 5 个操作 =================
+        {
+            // ⚠️ **把面板挂进一个窗口**（确认框要有父窗口 ⇒ 项目规矩）。
+            //
+            // ⚠️ 面板**已经有父控件了**（C 组那个窗口）⇒ 直接 set_child
+            //    会踩 GTK 的断言（`gtk_window_set_child`）⇒ 先摘下来。
+            let pw = panel.widget();
+            pw.unparent();
+            let root_win = gtk::Window::new();
+            // ⚠️ **给窗口起个名**：`import -window root` 抓的是整屏 ⇒ 会把
+            //    别的窗口拍进来 ⇒ 改成按标题找窗口、定点截。
+            root_win.set_title(Some("docker 项目详情冒烟"));
+            root_win.set_default_size(900, 520);
+            root_win.set_child(Some(pw));
+            root_win.present();
+            pump(200);
+
+            dockerui::set_rows_for_test(&panel.st, fake_containers());
+            pump(200);
+
+            // ---- 选中 compose 项目行 ⇒ 项目详情 ----
+            check!(
+                "⑪ 能选中 compose 项目行",
+                dockerui::select_project_for_test(&panel.st, "proj"),
+                "选不中项目行"
+            );
+            pump(300);
+            check!(
+                "⑪ 选中的项目名对",
+                dockerui::selected_project_for_test(&panel.st) == "proj",
+                format!(
+                    "选中的项目是 {:?}",
+                    dockerui::selected_project_for_test(&panel.st)
+                )
+            );
+            check!(
+                "⑪ 项目详情显示出来了",
+                dockerui::project_detail_visible_for_test(&panel.st),
+                "项目详情没显示"
+            );
+            check!(
+                "⑪ 容器详情**藏起来**了（两种详情互斥）",
+                !dockerui::detail_visible_for_test(&panel.st),
+                "容器详情还开着"
+            );
+            let ptitle = dockerui::project_title_for_test(&panel.st);
+            check!(
+                "⑪ 项目标题写着项目名",
+                ptitle.contains("proj"),
+                format!("项目标题是 {ptitle:?}")
+            );
+            let pinfo = dockerui::project_info_for_test(&panel.st);
+            check!(
+                "⑪ 项目详情里有 compose 文件路径和工作目录",
+                pinfo.contains("docker-compose.yml") && pinfo.contains("/srv/app"),
+                format!("项目详情是：\n{pinfo}")
+            );
+            check!(
+                "⑪ 项目详情里列出了它组织的容器",
+                pinfo.contains("web") && pinfo.contains("db"),
+                format!("项目详情是：\n{pinfo}")
+            );
+            // ---- 5 个操作按钮 ----
+            for which in ["edit", "start", "stop", "down", "up"] {
+                check!(
+                    format!("⑪ 项目操作按钮「{which}」能点"),
+                    dockerui::project_action_sensitive_for_test(&panel.st, which),
+                    format!("按钮 {which} 是灰的")
+                );
+            }
+
+            // ---- 写操作 ⇒ 二次确认 ----
+            //
+            // ⚠️ **安全**：这里**不点确定** ⇒ 命令不会跑 ⇒ 碰不到远端任何项目。
+            let before = toplevel_count();
+            let action_before = dockerui::last_action_for_test(&panel.st);
+            dockerui::click_project_action_for_test(&panel.st, "down");
+            pump(300);
+            check!(
+                "⑫ 点「销毁」弹出确认框（写操作有二次确认）",
+                toplevel_count() > before,
+                format!("顶层窗口数 {before} → {}（没弹出确认框）", toplevel_count())
+            );
+            check!(
+                "⑫ 没点确定 ⇒ 动作**没有**执行",
+                dockerui::last_action_for_test(&panel.st) == action_before,
+                "没确认就执行了！"
+            );
+            close_last_toplevel();
+            pump(300);
+            check!(
+                "⑫ 取消确认框后仍然没有执行",
+                dockerui::last_action_for_test(&panel.st) == action_before,
+                "取消之后动作还是跑了"
+            );
+            check!(
+                "⑫ 确认框是**挂着父窗口**的（项目规矩）",
+                !puttyplus::windows::dialogs_without_parent()
+                    .iter()
+                    .any(|t| t.contains("请确认")),
+                format!(
+                    "确认框没有父窗口：{:?}",
+                    puttyplus::windows::dialogs_without_parent()
+                )
+            );
+
+            // ---- 真跑一次：对着**不存在的项目**（碰不到任何真东西）----
+            //
+            // ⚠️ 目的是验「确认之后**真的**把命令发到远端了」⇒ 判据是
+            //    **执行结果**（失败也算执行了）+ 失败原因来自远端。
+            let mut rows = fake_containers();
+            rows.push(puttyplus::backend::docker::ContainerInfo {
+                id: "ghost-id".into(),
+                name: "ghost".into(),
+                image: "img:1".into(),
+                status: "Up 1 hour".into(),
+                state: "running".into(),
+                ports: String::new(),
+                compose: "pp-smoke-nonexistent".into(),
+                compose_files: "/srv/app/docker-compose.yml".into(),
+                compose_dir: "/srv/app".into(),
+                cpu: "1.0%".into(),
+                mem: "10MiB".into(),
+            });
+            dockerui::set_rows_for_test(&panel.st, rows);
+            pump(200);
+            check!(
+                "⑬ 能选中那个不存在的项目",
+                dockerui::select_project_for_test(&panel.st, "pp-smoke-nonexistent"),
+                "选不中那个项目行"
+            );
+            pump(200);
+            dockerui::click_project_action_for_test(&panel.st, "start");
+            pump(400);
+            // ⚠️ 确认框 ⇒ **点确定**（这才是「真跑一次」）。
+            confirm_last_dialog();
+            // 后台命令要跑一会儿（要走 SSH）⇒ 等它回来。
+            let mut waited = 0;
+            while waited < 60
+                && dockerui::last_action_for_test(&panel.st) == action_before
+            {
+                pump(200);
+                waited += 1;
+            }
+            let last = dockerui::last_action_for_test(&panel.st);
+            check!(
+                "⑬ 确认之后**真的**把命令发到远端了（结果有来）",
+                !last.is_empty() && last != action_before,
+                format!("等了 {waited} 次还是没结果：{last:?}")
+            );
+            check!(
+                "⑬ 不存在的项目 ⇒ 失败并说清原因",
+                last.contains("失败") || last.contains("已启动"),
+                format!("执行结果是 {last:?}")
+            );
+        }
     }
 
-    let n_fail = FAILS.with(|f| f.borrow().len());
-    if n_fail == 0 {
+    let n_fail = FAILS.with(|f| f.borrow().len());    if n_fail == 0 {
         println!("docker_ui_smoke: 全部通过");
     } else {
         println!("docker_ui_smoke: {} 条失败", n_fail);

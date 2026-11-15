@@ -26,7 +26,7 @@ use ghostty_vt::key::{Action, Encoder, Key, Mods};
 use ghostty_vt::search::Search;
 use ghostty_vt::selection::{FormatOptions, Selection};
 use ghostty_vt::style::{Palette as GtPalette, RgbColor};
-use ghostty_vt::terminal::{Event, Options, Point, PointCoordinate, Terminal};
+use ghostty_vt::terminal::{Event, Options, Point, PointCoordinate, ScrollViewport, Terminal};
 
 pub use ghostty_vt::key::{Action as KeyAction, Key as KeyCode, Mods as KeyMods};
 
@@ -205,6 +205,27 @@ impl GhosttyTerm {
     /// 回滚缓冲里有多少行（历史行数）。
     pub fn scrollback_rows(&self) -> i64 {
         self.term.scrollback_rows().unwrap_or(0) as i64
+    }
+
+    /* ---------------- 视口滚动（看历史） ---------------- */
+
+    /// 滚动**视口**（`delta` **负数往回看**（更早的内容），正数往回看新内容）。
+    ///
+    /// ⚠️ **视口 ≠ 光标**：光标一直在活动区（屏幕底部）里 ⇒ 滚上去之后
+    /// 光标那一行不在视口内 ⇒ 那一行不画光标（跟真 ghostty / VTE 一样）。
+    ///
+    /// ⚠️ **不会**把新输出顶下去：视口滚上去之后，内核**不会**因为新输出
+    /// 而把视口拽回底部（用户可以安心翻旧内容）⇒ 要回到底部得自己滚。
+    pub fn scroll_viewport(&mut self, delta: i64) {
+        self.term
+            .scroll_viewport(ScrollViewport::Delta(delta as isize));
+    }
+
+    /// 视口是不是**贴着底部**（= 没往上滚）。
+    ///
+    /// ⚠️ 内核报错了就当「贴着底部」（= 保守：别让界面显示成"滚上去了"）。
+    pub fn viewport_active(&self) -> bool {
+        self.term.is_viewport_active().unwrap_or(true)
     }
 
     /// 屏幕 + 回滚缓冲一共多少行。
@@ -743,6 +764,89 @@ mod tests {
         assert!(
             t.selection_text().is_none(),
             "清掉选区后不该还有文本"
+        );
+    }
+
+    /* ---------------- 视口滚动（看历史） ---------------- */
+
+    /// 从**渲染快照**里取「视口当前显示的行」（文本，按行号排好）。
+    ///
+    /// ⚠️ 用的是**渲染状态**（跟自绘控件同一套）⇒ 断言的是「屏幕上真正
+    /// 画出来的是什么」，不是「内核里存了什么」。
+    fn 视口行(term: &Terminal) -> Vec<String> {
+        let mut rs = ghostty_vt::render::RenderState::new().expect("渲染状态");
+        let mut row_iter = ghostty_vt::render::RowIterator::new().expect("行迭代器");
+        let mut cell_iter = ghostty_vt::render::CellIterator::new().expect("单元格迭代器");
+        let snap = rs.update(term).expect("快照");
+        let mut rows = row_iter.update(&snap).expect("行迭代");
+        let mut out: Vec<(i32, String)> = Vec::new();
+        while let Some(row) = rows.next() {
+            let vy = row.viewport_y().unwrap_or(-1);
+            if vy < 0 {
+                continue; // overscan 行（视口上方，不在屏上）
+            }
+            let mut cells = cell_iter.update(row).expect("单元格");
+            let mut s = String::new();
+            while let Some(c) = cells.next() {
+                let t: String = c.graphemes().unwrap_or_default().iter().collect();
+                s.push_str(&t);
+            }
+            out.push((vy, s.trim_end().to_string()));
+        }
+        out.sort_by_key(|(y, _)| *y);
+        out.into_iter().map(|(_, s)| s).collect()
+    }
+
+    #[test]
+    fn 滚上去能看到更早的内容() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.set_scrollback_lines(1000);
+        let mut buf = String::new();
+        for i in 0..100 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        assert!(t.viewport_active(), "刚建好时视口应当贴着底部");
+        let before = 视口行(&t.term);
+        assert!(!before.is_empty(), "视口里应当有内容");
+        // 往上滚 10 行
+        t.scroll_viewport(-10);
+        assert!(!t.viewport_active(), "滚上去了，视口应当离开底部");
+        let after = 视口行(&t.term);
+        assert_eq!(after.len(), before.len(), "滚动后视口的行数不该变");
+        // ⚠️ **相对断言**：往上滚 10 行 ⇒ 原来第 0 行挪到第 10 行
+        //    （不写死行号：回滚缓冲的裁剪规则变了也不会假红）。
+        assert_eq!(
+            after[10], before[0],
+            "往上滚 10 行，原来的首行应当挪到第 10 行\n滚之前：{before:?}\n滚之后：{after:?}"
+        );
+        // 滚回去 ⇒ 内容原样回来
+        t.scroll_viewport(10);
+        assert!(t.viewport_active(), "滚回来应当重新贴着底部");
+        assert_eq!(视口行(&t.term), before, "滚回来之后内容应当和滚之前一样");
+    }
+
+    #[test]
+    fn 滚上去也能选到历史里的字() {
+        let mut t = GhosttyTerm::new(80, 24).expect("建终端");
+        t.set_scrollback_lines(1000);
+        let mut buf = String::new();
+        for i in 0..100 {
+            buf.push_str(&format!("line {i}\r\n"));
+        }
+        t.feed(buf.as_bytes());
+        t.scroll_viewport(-10);
+        let first = 视口行(&t.term)
+            .first()
+            .cloned()
+            .expect("视口里应当有内容");
+        // 视口坐标 (0,0) = 屏幕上第一行（已经是历史里的行了）
+        assert!(t.set_selection((0, 0), (9, 0)), "选区没设上");
+        let text = t.selection_text().expect("选区应有文本");
+        println!("滚上去之后选到的文本 = {text:?}（视口第一行 = {first:?}）");
+        assert_eq!(
+            text, first,
+            "选区里的文字应当就是「滚上去之后」视口第一行的内容"
         );
     }
 
