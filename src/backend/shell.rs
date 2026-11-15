@@ -181,6 +181,22 @@ impl ShellChannel {
         });
     }
 
+    /// **主动关掉通道**（停流式输出时用）。
+    ///
+    /// ⚠️ **为什么必须有**：russh 的通道**析构时不会**发 close ⇒ 只把
+    ///    通道丢掉的话，远端的命令（`docker logs -f`）会**继续挂着**
+    ///    （它还在往一个没人读的通道里写）⇒ 白白占着远端的进程。
+    ///    显式 close ⇒ 远端收到 EOF/SIGPIPE ⇒ 命令自己退出 ✓。
+    ///
+    /// ⚠️ 异步的（要发 SSH 消息）⇒ 这里**不等**：丢给建通道时那个
+    ///    tokio 运行时去做（与 `send` / `resize` 同一个套路）。
+    pub fn close(&self) {
+        let write = Arc::clone(&self.write);
+        self.rt.spawn(async move {
+            let _ = write.close().await;
+        });
+    }
+
     /// 读下一个事件（**阻塞到有数据或通道关闭**）。
     ///
     /// ⚠️ 只有一个读者（后台任务循环调它）⇒ 读端用异步锁保护。

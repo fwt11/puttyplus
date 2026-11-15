@@ -415,6 +415,58 @@ pub fn compose_cmd(project: &str, files: &str, dir: &str, action: ComposeAction)
     cmd
 }
 
+/* ---------------- 阶段 112：容器日志（流式） ---------------- */
+
+/// 日志的**默认回看行数**（`docker logs --tail N`）。
+pub const LOG_TAIL: usize = 200;
+
+/// 日志流命令（`docker logs -f`）—— **带看门狗**（纯函数，好测）。
+///
+/// ## 为什么要有看门狗（**实测踩出来的坑**）
+///
+/// `docker logs -f` 是**长跑**的 ⇒ 通道断了以后它**不会自己退出**：
+/// 实测（ssh 客户端断开后）远端还留着 `docker logs -f` 进程 ⇒
+/// 用户每开关一次日志，就漏一个进程在服务器上跑着（容器安静的时候
+/// 它能挂到天荒地老 —— 它不写数据 ⇒ 就不会收到 SIGPIPE）。
+///
+/// ⇒ 用「看门狗」把它包起来：
+/// - `docker logs` 放**后台**（`p=$!`）；
+/// - 看门狗（`w=$!`）读**通道的 stdin** ⇒ 通道一关，stdin 就是 EOF ⇒
+///   看门狗 `kill` 掉 `docker logs`；
+/// - `docker logs` 自己先退出（容器被删了……）⇒ `wait $p` 返回 ⇒ 顺手把
+///   看门狗收掉 ⇒ 通道正常收尾（客户端能看到「流结束了」）。
+///
+/// ⚠️ **通道的 stdin 只有关通道时才关**（我们从不发 eof）⇒ 平时 `read`
+///    一直阻塞 ⇒ 不会误杀。
+/// ⚠️ 整个子 shell 的 **stderr 丢到 /dev/null** ⇒ 杀掉后台任务时 shell 会
+///    打一句 "Terminated" ⇒ 那句话会混进日志里（实测）⇒ 丢掉。
+///    ⚠️ 但 `docker logs` 自己的 stderr 仍要并进 stdout ⇒ 命令里单独写
+///    `2>&1`（那是 **docker 进程**的 fd2，不是 shell 的）。
+/// ⚠️ **容器名必须 `sh_quote`**（名字来自远端 ⇒ 远端可控 ⇒ 防注入）。
+pub fn logs_cmd(name: &str, tail: usize) -> String {
+    format!(
+        "( docker logs -f --tail {tail} {n} 2>&1 & p=$!; ( read -r _; kill $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; wait $w 2>/dev/null ) 2>/dev/null",
+        n = crate::backend::checksum::sh_quote(name),
+    )
+}
+
+/// 开一条**日志流**通道（`docker logs -f`）。
+///
+/// ⚠️ **返回通道**（不是输出）⇒ 调用方能**边收边显示**，也能**主动关掉**
+///    （`ShellChannel::close` ⇒ 远端的命令退出 ⇒ 看门狗收尾）。
+/// ⚠️ **不 pty** ⇒ 输出是原样字节（换行不被翻译成 `\r\n`）。
+pub async fn open_logs(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+    tail: usize,
+) -> BackendResult<ShellChannel> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let ch = ShellChannel::open_exec(session, &logs_cmd(name, tail), 80, 24, false).await?;
+    Ok(ch)
+}
+
 /* ---------------- 输出解析（纯函数，好测） ---------------- */
 
 /// 解析 `docker ps` 的输出。
@@ -1038,5 +1090,55 @@ mod tests {
         assert!(Action::Restart.cmd("web").contains("docker restart web"));
         assert_eq!(Action::Start.label(), "启动");
         assert_eq!(Action::Stop.past_label(), "已停止");
+    }
+
+    /* ---------------- 阶段 112：日志流 ---------------- */
+
+    /// 日志命令：`docker logs -f` + 回看行数。
+    #[test]
+    fn 日志命令是跟随式的() {
+        let c = logs_cmd("web", 200);
+        assert!(c.contains("docker logs -f"), "应当是跟随式的：{c}");
+        assert!(c.contains("--tail 200"), "应当带回看行数：{c}");
+        assert!(c.contains("'web'"), "容器名没包引号：{c}");
+        // ⚠️ 容器自己的 stderr 要并进 stdout（docker logs 分两路写）。
+        assert!(c.contains("2>&1"), "应当合并 stderr：{c}");
+    }
+
+    /// ⚠️ **看门狗必须还在**（否则关掉日志页后远端会漏进程）。
+    ///
+    /// 这条是**回归钉**：谁把看门狗删了 ⇒ 用户每开关一次日志就在服务器上
+    /// 漏一个 `docker logs -f` 进程（实测：断开后它一直挂着）。
+    #[test]
+    fn 日志命令带看门狗() {
+        let c = logs_cmd("web", 200);
+        // 看门狗读通道的 stdin ⇒ 通道一关（EOF）就杀掉 docker logs。
+        assert!(c.contains("read -r _"), "看门狗没了（不再盯着 stdin）：{c}");
+        assert!(c.contains("kill $p"), "看门狗不杀进程了：{c}");
+        // docker logs 自己退出时，看门狗也要被收掉。
+        assert!(c.contains("wait $p"), "没有等 docker logs 退出：{c}");
+        assert!(c.contains("kill $w"), "没回收看门狗：{c}");
+        // ⚠️ 杀掉后台任务时 shell 会打 "Terminated" ⇒ 会混进日志 ⇒ 丢掉。
+        assert!(c.contains("2>/dev/null"), "shell 的杂音没丢掉：{c}");
+    }
+
+    /// 回看行数可以调。
+    #[test]
+    fn 日志命令的回看行数可调() {
+        assert!(logs_cmd("web", 50).contains("--tail 50"));
+        assert!(logs_cmd("web", LOG_TAIL).contains("--tail 200"));
+    }
+
+    /// ⚠️ **容器名是远端可控的内容** ⇒ 必须引起来（防注入）。
+    #[test]
+    fn 日志命令防注入() {
+        let c = logs_cmd("a; rm -rf /", 200);
+        assert!(c.contains("'a; rm -rf /'"), "容器名没被引号包住：{c}");
+        // 把引号那一处去掉以后 ⇒ 名字不该再出现在命令里。
+        let stripped = c.replace("'a; rm -rf /'", "");
+        assert!(
+            !stripped.contains("rm -rf"),
+            "容器名漏出了引号（能被注入）：{c}"
+        );
     }
 }

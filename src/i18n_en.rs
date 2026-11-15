@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1871] = [
+pub static EN: [(&str, &str); 1878] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1014,6 +1014,7 @@ pub static EN: [(&str, &str); 1871] = [
     ("搜索容器", "Search containers"),
     ("搜索对象", "Search objects"),
     ("搜索对象…", "Search objects…"),
+    ("搜索日志", "Search logs"),
     ("搜索结果格式不对", "The search results are not in the expected format"),
     ("撤销", "Undo"),
     ("撤销 (Ctrl+Z)", "Undo (Ctrl+Z)"),
@@ -1153,6 +1154,8 @@ pub static EN: [(&str, &str); 1871] = [
     ("无法读取私钥 {kf}。\n若是 PuTTY 的 .ppk 格式，请先转换：\n  puttygen key.ppk -O private-openssh -o key.openssh", "Cannot read the private key {kf}.\nIf it is in the PuTTY .ppk format, convert it first:\nputtygen key.ppk -O private-openssh -o key.openssh"),
     ("无法重新载入", "Cannot reload"),
     ("日志", "Log"),
+    ("日志流已结束", "Log stream ended"),
+    ("日志流已结束（退出码 {c}）", "Log stream ended (exit code {c})"),
     ("旧式 PEM", "Legacy PEM"),
     ("旧式 PEM（带口令）：ssh 可直接使用；管理器不解析元数据", "Legacy PEM (with passphrase): ssh can use it directly; the manager does not parse its metadata"),
     ("旧式 PEM：ssh 可直接使用；管理器不解析元数据", "Legacy PEM: ssh can use it directly; the manager does not parse its metadata"),
@@ -1167,6 +1170,7 @@ pub static EN: [(&str, &str); 1871] = [
     ("显示列", "Show columns"),
     ("显示未变化的文件", "Show unchanged files"),
     ("显示这一列", "Show this column"),
+    ("暂停", "Pause"),
     ("暗色底，夜间/暗光环境", "Dark background, night/low-light environment"),
     ("替换", "Replace"),
     ("替换 (Ctrl+H)", "Replace (Ctrl+H)"),
@@ -1244,6 +1248,7 @@ pub static EN: [(&str, &str); 1871] = [
     ("样例值", "Sample value"),
     ("根行子节点 {kids} 个", "The root row has {kids} children"),
     ("格式", "Format"),
+    ("概览", "Overview"),
     ("模型 {total} 行", "The model has {total} rows"),
     ("模型是空的", "The model is empty"),
     ("模式", "Schema"),
@@ -1260,6 +1265,7 @@ pub static EN: [(&str, &str); 1871] = [
     ("正在执行 DDL…", "Executing the DDL…"),
     ("正在执行定义（{total} 条语句）…", "Executing the definition ({total} statements)…"),
     ("正在扫描本地与远程目录…", "Scanning the local and remote directories…"),
+    ("正在接收日志…", "Receiving logs…"),
     ("正在搜索「{kw}」…", "Searching for \"{kw}\"…"),
     ("正在改表结构…", "Changing the table structure…"),
     ("正在统计总行数…", "Counting total rows…"),
@@ -1527,6 +1533,7 @@ pub static EN: [(&str, &str); 1871] = [
     ("能干什么：\n• <b>SSH 终端</b>：多标签分屏、按键广播、日志与录制回放\n• <b>SFTP 文件管理</b>：上传下载、断点续传、目录镜像\n• <b>数据库工作台</b>：PostgreSQL / MySQL 的对象浏览与查询\n\n命令行参数与 PuTTY 兼容，终端内转发、端口转发、串口等由系统自带的 ssh / plink 承接。", "What it can do:\n• <b>SSH terminal</b>: multiple tabs with splits, keystroke broadcast, logging and recording replay\n• <b>SFTP file manager</b>: upload and download, resumable transfers, directory mirroring\n• <b>Database workbench</b>: object browsing and queries for PostgreSQL / MySQL\n\nThe command line arguments are compatible with PuTTY; terminal forwarding, port forwarding, serial ports and the like are handled by the system's own ssh / plink."),
     ("自动刷新", "Auto refresh"),
     ("自动换行", "Word wrap"),
+    ("自动跟随", "Auto-follow"),
     ("自动（优先直连，失败转本机中转）", "Automatic (direct first, relay through this machine if that fails)"),
     ("自增当前值", "Current auto-increment value"),
     ("自定义", "Custom"),

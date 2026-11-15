@@ -31,6 +31,7 @@ use gtk::prelude::*;
 use puttyplus::args::ConnOptions;
 use puttyplus::backend::docker::{self, ContainerDetail, MountInfo, NetworkInfo, PortInfo};
 use puttyplus::backend::hub;
+use puttyplus::backend::shell::ShellEvent;
 use puttyplus::panel::{SftpPanel, dockerui, subtabs};
 
 const HOST: &str = "127.0.0.1";
@@ -180,6 +181,33 @@ fn find_ok_button(w: &gtk::Widget) -> Option<gtk::Button> {
     None
 }
 
+/// 远端还有没有 `docker logs` 进程（**看门狗**的判据）。
+///
+/// ⚠️ `pgrep -af '[d]ocker logs'` 里的 `[d]` 是老技巧：命令自己不会匹配自己。
+fn remote_log_procs(opts: &ConnOptions) -> String {
+    let keyfile = opts.keyfile.clone().unwrap_or_default();
+    let user = opts.user.clone();
+    let host = opts.host.clone();
+    let port = opts.port;
+    hub::runtime().block_on(async move {
+        let creds = hub::Creds {
+            keyfile: Some(keyfile),
+            ..Default::default()
+        };
+        let key = hub::ServerKey::new(&host, port, &user);
+        let Ok(shared) = hub::acquire(key, &creds).await else {
+            return String::new();
+        };
+        let (_, out) = docker::run_cmd(
+            shared.session().as_ref(),
+            "pgrep -af '[d]ocker logs' || true",
+        )
+        .await
+        .unwrap_or((0, String::new()));
+        out.trim().to_string()
+    })
+}
+
 fn main() {
     // ⚠️ **别碰用户的真实配置**。
     let settings_ini = std::env::temp_dir().join(format!("pp-docker-smoke-{}.ini", std::process::id()));
@@ -215,6 +243,8 @@ fn main() {
     let keyfile = std::env::var("HOME")
         .map(|h| format!("{h}/.ssh/id_rsa"))
         .unwrap_or_default();
+    // ⚠️ A 组把 `keyfile` **move** 进异步块了 ⇒ F 组要另留一份。
+    let keyfile_f = keyfile.clone();
 
     // ⚠️ **必须用全局运行时**：连接中枢在那儿（russh 的 Handle 绑 runtime）。
     let user_bg = user.clone();
@@ -295,6 +325,77 @@ fn main() {
             }
         } else {
             println!("[信息] 没有容器可查详情（跳过）");
+        }
+
+        // ② 之三：**日志流**（真后端）——`docker logs -f` 的独立通道。
+        //
+        // ⚠️ 这条验的是**整条链**：命令拼装 → 远端执行 → 增量收数据。
+        // ⚠️ 只等一小会儿：`docker logs -f` 是长跑的 ⇒ 不会自己结束。
+        let log_target = containers
+            .iter()
+            .find(|c| c.state == "running")
+            .map(|c| c.name.clone());
+        match log_target {
+            Some(name) => {
+                let ch = docker::open_logs(&session, &name, 5)
+                    .await
+                    .expect("应当能开日志通道");
+                let mut buf = String::new();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while std::time::Instant::now() < deadline && buf.is_empty() {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        ch.next_event(),
+                    )
+                    .await
+                    {
+                        Ok(Some(ShellEvent::Data(b))) => {
+                            buf.push_str(&String::from_utf8_lossy(&b));
+                        }
+                        Ok(Some(ShellEvent::Exit(_))) | Ok(None) => break,
+                        // 超时 ⇒ 还没数据 ⇒ 接着等。
+                        Err(_) => continue,
+                    }
+                }
+                println!("[信息] 日志流收到 {} 字节：{buf}", buf.len());
+                check!(
+                    "② 日志流真的来数据了",
+                    !buf.trim().is_empty(),
+                    "等了 10 秒也没收到日志（容器可能真的没日志）"
+                );
+                // ⚠️ **关通道 ⇒ 远端不许留进程**（这是「看门狗」的用处）。
+                //
+                // ⚠️ 实测过：不带看门狗的话，`docker logs -f` 在通道断开后
+                //    **还会一直挂着**（容器安静时它不写数据 ⇒ 收不到 SIGPIPE）
+                //    ⇒ 用户每开关一次日志就在服务器上漏一个进程。
+                ch.close();
+                // 等看门狗收尾（它要等通道的 stdin 变成 EOF 才动手）。
+                let mut waited = 0;
+                let mut leftover = String::new();
+                while waited < 20 {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    waited += 1;
+                    let (_, out) = docker::run_cmd(
+                        &session,
+                        // ⚠️ `[d]ocker` 是 pgrep 的老技巧：命令自己不会匹配自己。
+                        "pgrep -af '[d]ocker logs' || true",
+                    )
+                    .await
+                    .unwrap_or((0, String::new()));
+                    leftover = out.trim().to_string();
+                    if leftover.is_empty() {
+                        break;
+                    }
+                }
+                check!(
+                    "② 关掉通道后远端没有残留的 docker logs 进程",
+                    leftover.is_empty(),
+                    format!("远端还挂着：{leftover}")
+                );
+            }
+            None => {
+                println!("[信息] 没有运行中的容器（跳过日志流）");
+            }
         }
 
         // ③ **不新增连接**：容器视图用的就是这条共享连接
@@ -820,6 +921,261 @@ fn main() {
                 format!("执行结果是 {last:?}")
             );
         }
+
+    // ================= E 组：阶段 112 —— 日志（界面行为） =================
+    // ⚠️ 还在 B 组的作用域里 ⇒ 复用同一个面板（同一个窗口、同一批假容器）。
+    {
+        // ⚠️ 灌进来的日志**走真实的消息通道** ⇒ 和真流走的是同一条路
+        //    （消息循环、拆行、过滤、暂停……全是真的）。
+        dockerui::log_watch_for_test(&panel.st, "web");
+        pump(100);
+        dockerui::log_show_page_for_test(&panel.st);
+        pump(200);
+        check!(
+            "⑭ 能切到日志页",
+            dockerui::log_page_visible_for_test(&panel.st),
+            "切不过去"
+        );
+        check!(
+            "⑭ 日志正文是等宽的",
+            dockerui::log_view_is_monospace_for_test(&panel.st),
+            "不是等宽字体（看日志费劲）"
+        );
+
+        // 分两块灌：第一块**故意不带换行** ⇒ 验「跨块的半行会拼起来」。
+        dockerui::log_push_for_test(&panel.st, "web", "第一行 hello\n第二行 world\n第三");
+        pump(200);
+        dockerui::log_push_for_test(&panel.st, "web", "行（接上）\n");
+        pump(200);
+
+        let text = dockerui::log_text_for_test(&panel.st);
+        check!(
+            "⑭ 日志显示出来了",
+            text.contains("第一行 hello") && text.contains("第二行 world"),
+            format!("日志区是：\n{text}")
+        );
+        check!(
+            "⑭ 跨块的半行拼起来了",
+            text.contains("第三行（接上）"),
+            format!("日志区是：\n{text}")
+        );
+        check!(
+            "⑭ 收到了三行",
+            dockerui::log_line_count_for_test(&panel.st) == 3,
+            format!("收到 {} 行", dockerui::log_line_count_for_test(&panel.st))
+        );
+
+        // ---- **暂停**：数据照收，显示不更新 ----
+        dockerui::log_click_pause_for_test(&panel.st);
+        pump(100);
+        check!(
+            "⑭ 进暂停了",
+            dockerui::log_paused_for_test(&panel.st),
+            "没进暂停"
+        );
+        dockerui::log_push_for_test(&panel.st, "web", "暂停期间来的行\n");
+        pump(200);
+        let t2 = dockerui::log_text_for_test(&panel.st);
+        check!(
+            "⑭ 暂停时显示不更新",
+            !t2.contains("暂停期间来的行"),
+            format!("暂停时显示还是变了：\n{t2}")
+        );
+        check!(
+            "⑭ 暂停时数据照收（没丢日志）",
+            dockerui::log_line_count_for_test(&panel.st) == 4,
+            format!("收到 {} 行", dockerui::log_line_count_for_test(&panel.st))
+        );
+
+        // ---- **继续**：把暂停期间的行补上 ----
+        dockerui::log_click_pause_for_test(&panel.st);
+        pump(200);
+        let t3 = dockerui::log_text_for_test(&panel.st);
+        check!(
+            "⑭ 继续后补上暂停期间的行",
+            t3.contains("暂停期间来的行"),
+            format!("继续后还是缺：\n{t3}")
+        );
+
+        // ---- **搜索** ----
+        dockerui::log_set_search_for_test(&panel.st, "hello");
+        pump(200);
+        let t4 = dockerui::log_text_for_test(&panel.st);
+        check!(
+            "⑭ 搜索只留匹配的行",
+            t4.contains("第一行 hello") && !t4.contains("第二行 world"),
+            format!("搜索后是：\n{t4}")
+        );
+        dockerui::log_set_search_for_test(&panel.st, "");
+        pump(200);
+        let t5 = dockerui::log_text_for_test(&panel.st);
+        check!(
+            "⑭ 清掉搜索词后全都回来了",
+            t5.contains("第一行 hello") && t5.contains("第二行 world"),
+            format!("清搜索后是：\n{t5}")
+        );
+
+        // ---- **清空** ----
+        dockerui::log_click_clear_for_test(&panel.st);
+        pump(200);
+        check!(
+            "⑭ 清空后显示是空的",
+            dockerui::log_text_for_test(&panel.st).trim().is_empty(),
+            format!("清空后还有：\n{}", dockerui::log_text_for_test(&panel.st))
+        );
+        check!(
+            "⑭ 清空后已收到的行也没了",
+            dockerui::log_line_count_for_test(&panel.st) == 0,
+            "行数没清"
+        );
+
+        // ---- **自动跟随** ----
+        //
+        // ⚠️ 先灌**很多行**（正文比视口高）⇒ 才谈得上「滚到底」。
+        let many: String = (0..300).map(|i| format!("第 {i} 行\n")).collect();
+        dockerui::log_push_for_test(&panel.st, "web", &many);
+        pump(400);
+        check!(
+            "⑭ 自动跟随默认开着",
+            dockerui::log_follow_for_test(&panel.st),
+            "默认没开"
+        );
+        check!(
+            "⑭ 自动跟随 ⇒ 滚到底",
+            dockerui::log_at_bottom_for_test(&panel.st),
+            "没滚到底"
+        );
+        // 关掉跟随 + 滚到顶 ⇒ 来了新日志也不许抢走用户的滚动位置。
+        dockerui::log_set_follow_for_test(&panel.st, false);
+        pump(100);
+        dockerui::log_scroll_to_top_for_test(&panel.st);
+        pump(100);
+        dockerui::log_push_for_test(&panel.st, "web", "关掉跟随之后来的行\n");
+        pump(300);
+        check!(
+            "⑭ 关掉跟随 ⇒ 不再自动滚",
+            !dockerui::log_at_bottom_for_test(&panel.st),
+            "还是滚到底了（把用户正在看的位置抢走了）"
+        );
+        dockerui::log_set_follow_for_test(&panel.st, true);
+        pump(300);
+        check!(
+            "⑭ 重新打开跟随 ⇒ 又滚到底",
+            dockerui::log_at_bottom_for_test(&panel.st),
+            "没滚到底"
+        );
+    }
+
+    // ================= F 组：阶段 112 —— 真实端到端（真连 + 真日志） =================
+    {
+        // ⚠️ **另起一个面板**（带私钥）⇒ 能真的连上 ⇒ 走完整的
+        //    「选中容器 ⇒ 取详情 ⇒ 起日志流 ⇒ 切走就停」。
+        let opts = ConnOptions {
+            proto: "ssh".into(),
+            host: HOST.into(),
+            port,
+            user: user.clone(),
+            keyfile: Some(keyfile_f.clone()),
+            ..Default::default()
+        };
+        let panel2 = SftpPanel::new(&opts);
+        *panel2.st.sub_tabs.borrow_mut() = Some(subtabs::SubTabs::new());
+        // ⚠️ **页面直接放进窗口**（不 mount 进子标签）⇒ 截图能拍到日志页
+        //    （挂在子标签里的话，那个页签不是当前页 ⇒ 拍不到）。
+        dockerui::ensure(&panel2.st);
+        let page2 = dockerui::page_for_test(&panel2.st).expect("应当有容器页");
+        let win2 = gtk::Window::new();
+        win2.set_title(Some("docker 日志冒烟"));
+        win2.set_default_size(1000, 620);
+        win2.set_child(Some(&page2));
+        win2.present();
+        pump(200);
+        // ⚠️ **不 mount**（mount 才刷新）⇒ 这里手动触发一次刷新。
+        dockerui::refresh_for_test(&panel2.st);
+        // 等容器列表真的到（要走 SSH ⇒ 可能要几秒）。
+        let mut waited = 0;
+        while waited < 40 && dockerui::containers_for_test(&panel2.st).is_empty() {
+            pump(200);
+            waited += 1;
+        }
+        let cs = dockerui::containers_for_test(&panel2.st);
+        check!(
+            "⑮ 真连上了，容器列表到了",
+            !cs.is_empty(),
+            format!("等了 {waited} 次还是没列表")
+        );
+        if let Some(c0) = cs.iter().find(|c| c.state == "running").or_else(|| cs.first()) {
+            let name = c0.name.clone();
+            // ⚠️ **先展开所有 compose 项目**：GTK 的 `set_cursor` 对**看不见
+            //    的行**（收着的项目里的子行）**不生效** ⇒ 不展开就选不中。
+            dockerui::expand_all_projects_for_test(&panel2.st);
+            pump(200);
+            check!(
+                "⑮ 能选中那个容器行",
+                dockerui::select_container_for_test(&panel2.st, &name),
+                "选不中"
+            );
+            // ⚠️ **等详情真的到**。
+            //
+            // ⚠️ 这条同时验了**阶段 112 修的那个 bug**：之前 `selected`
+            //    只有测试钩子会写 ⇒ 真实流程里详情消息被当成「过时的」
+            //    丢掉 ⇒ **详情区永远不显示**（冒烟当时没抓住）。
+            let mut waited2 = 0;
+            while waited2 < 40 && !dockerui::detail_visible_for_test(&panel2.st) {
+                pump(200);
+                waited2 += 1;
+            }
+            println!(
+                "[信息] 选中={:?} 光标={:?} 状态行={:?}",
+                dockerui::selected_for_test(&panel2.st),
+                dockerui::cursor_name_for_test(&panel2.st),
+                dockerui::status_for_test(&panel2.st)
+            );
+            check!(
+                "⑮ 选中容器后详情真的显示出来了",
+                dockerui::detail_visible_for_test(&panel2.st),
+                format!("等了 {waited2} 次还是没详情")
+            );
+            // 切到日志页 ⇒ 起流 ⇒ 等日志真的进来。
+            dockerui::log_show_page_for_test(&panel2.st);
+            pump(200);
+            let mut waited3 = 0;
+            while waited3 < 40 && dockerui::log_line_count_for_test(&panel2.st) == 0 {
+                pump(200);
+                waited3 += 1;
+            }
+            let n = dockerui::log_line_count_for_test(&panel2.st);
+            println!("[信息] 真实日志流收到 {n} 行（容器 {name}）");
+            check!(
+                "⑮ 日志流真的往界面上送行了",
+                n > 0,
+                format!("等了 {waited3} 次还是没日志（容器可能真的没日志）")
+            );
+            // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张日志页。
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                pump(300);
+                shot(&format!("{base}-log.png"));
+            }
+            // 切回概览 ⇒ 流停 ⇒ **远端不许留进程**（看门狗）。
+            dockerui::log_show_overview_for_test(&panel2.st);
+            pump(300);
+            let mut waited4 = 0;
+            let mut leftover = String::new();
+            while waited4 < 20 {
+                leftover = remote_log_procs(&opts);
+                if leftover.is_empty() {
+                    break;
+                }
+                pump(300);
+                waited4 += 1;
+            }
+            check!(
+                "⑮ 切走日志页后远端没有残留的 docker logs 进程",
+                leftover.is_empty(),
+                format!("远端还挂着：{leftover}")
+            );
+        }
+    }
     }
 
     let n_fail = FAILS.with(|f| f.borrow().len());    if n_fail == 0 {

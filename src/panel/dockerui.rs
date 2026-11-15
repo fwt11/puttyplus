@@ -40,11 +40,17 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use crate::backend::docker::{
-    self, Action, ComposeAction, ContainerDetail, ContainerInfo, DockerInfo,
+    self, Action, ComposeAction, ContainerDetail, ContainerInfo, DockerInfo, LOG_TAIL,
 };
+use crate::backend::shell::ShellEvent;
 use crate::i18n::tr;
 use crate::panel::PanelState;
 use crate::trf;
+
+/// 概览页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
+const PAGE_OVERVIEW: &str = "overview";
+/// 日志页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
+const PAGE_LOGS: &str = "logs";
 
 /// 表格的列（**顺序 = `TreeStore` 的列顺序**）。
 const COL_NAME: usize = 0;
@@ -106,6 +112,27 @@ pub struct DockerUi {
     name_renderer: Option<gtk::CellRendererText>,
     /// **详情区**（阶段 110：选中容器才显示）。
     detail: DetailUi,
+    /// **日志页**（阶段 112）。
+    log: LogUi,
+    /// 详情区里的 **Stack**（概览 / 日志两页）。
+    stack: gtk::Stack,
+    /// 正在看**哪个容器**的日志（空 = 没在看）。
+    ///
+    /// ⚠️ **用来认「这条数据是不是现在这条流的」**：换了容器以后，旧流
+    ///    还在往通道里写 ⇒ 它的数据必须丢掉（不然两个容器的日志混一块）。
+    log_name: RefCell<String>,
+    /// 收到的**全部**日志行（**暂停时也照收** ⇒ 恢复时能补上）。
+    log_lines: RefCell<Vec<String>>,
+    /// **还没收全**的半行（跨块的一行 ⇒ 拼起来）。
+    log_partial: RefCell<String>,
+    /// **暂停**中（数据照收，显示不更新）。
+    log_paused: Cell<bool>,
+    /// 日志的**搜索词**（空 = 全显示）。
+    log_search: RefCell<String>,
+    /// 停日志流的**信号**（`oneshot` ⇒ 发了就停）。
+    log_stop: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// 日志流**是不是在跑**。
+    log_running: Cell<bool>,
     /// 当前选中的**容器名**（空 = 没选容器）。
     ///
     /// ⚠️ **刷新要保住它**：自动刷新每 7 秒重建一次表格 ⇒ 不记住选中行的话，
@@ -135,6 +162,21 @@ enum Msg {
     },
     /// 写操作（启停/重启）的结果（中文提示）。
     Action(String),
+    /// 日志**增量**（⚠️ 带上容器名 ⇒ 旧容器的残留能认出来、丢掉）。
+    LogChunk {
+        name: String,
+        data: String,
+    },
+    /// 日志流**结束了**（远端命令退出；`code` 是退出码）。
+    LogEnd {
+        name: String,
+        code: i32,
+    },
+    /// 日志流**开不起来**（连不上 / 没权限 / 容器没了）。
+    LogError {
+        name: String,
+        msg: String,
+    },
 }
 
 /// 详情区的控件（阶段 110）。
@@ -165,6 +207,28 @@ struct DetailUi {
     btn_cstop: gtk::Button,
     btn_cdown: gtk::Button,
     btn_cup: gtk::Button,
+}
+
+/// 日志页的控件（阶段 112）。
+struct LogUi {
+    /// 整块（**只在日志页里显示** ⇒ 概览页看不见它）。
+    root: gtk::Box,
+    /// 日志正文（**只读**、等宽）。
+    view: gtk::TextView,
+    /// 正文缓冲（**增量追加** ⇒ 不整表重画）。
+    buffer: gtk::TextBuffer,
+    /// 包着正文的滚动容器（**自动跟随**要拿它的 adjustment）。
+    scroll: gtk::ScrolledWindow,
+    /// 搜索框（按内容过滤）。
+    search: gtk::SearchEntry,
+    /// 「暂停 / 继续」按钮。
+    btn_pause: gtk::Button,
+    /// 「清空」按钮。
+    btn_clear: gtk::Button,
+    /// 「自动跟随」开关（默认开）。
+    follow: gtk::Switch,
+    /// 状态行（「正在接收…」「已结束」「出错原因」）。
+    status: gtk::Label,
 }
 
 /// 表格里的一个**顶层行**（重建时用的中间形状）。
@@ -262,6 +326,14 @@ impl DockerUi {
         let expanded = self.expanded_projects();
         let sel = self.selected.borrow().clone();
         let sel_proj = self.selected_project.borrow().clone();
+        // ⚠️ **整段重建都算「程序性」**（`restoring`）。
+        //
+        // ⚠️ **为什么必须挡这一段**：清空模型会**清掉光标** ⇒ GTK 会发
+        //    `cursor-changed` ⇒ 那时候「界面上选中的行」已经没了 ⇒ 处理器
+        //    会把 `selected` 清空、把详情区收起来 ⇒ **刷新一次，用户刚选中
+        //    的容器就丢了**（详情区消失、启停按钮失灵、日志流也停）。
+        //    ⇒ 用 `restoring` 把这段「假的光标变化」挡掉。
+        self.restoring.set(true);
         self.model.clear();
         for node in Self::group(rows) {
             match node {
@@ -295,12 +367,11 @@ impl DockerUi {
             sel.clone()
         };
         if !restore.is_empty() {
-            self.restoring.set(true);
             if let Some(path) = self.find_path(&restore) {
                 gtk::prelude::TreeViewExt::set_cursor(&self.view, &path, None, false);
             }
-            self.restoring.set(false);
         }
+        self.restoring.set(false);
     }
 
     /// 写一个容器行。
@@ -525,6 +596,9 @@ impl DockerUi {
 
     /// 详情取回来了 ⇒ 填四张卡片。
     fn apply_detail(&self, d: &ContainerDetail) {
+        // ⚠️ **顺手记下选中的容器**（阶段 112 修的 bug）：消息循环拿它比对
+        //    「这条结果是不是现在选的那个」⇒ 它必须**一直是对的**。
+        *self.selected.borrow_mut() = d.name.clone();
         self.detail
             .title
             .set_text(&trf!("详情：{n}（{s}）", n = d.name, s = d.state_label()));
@@ -608,6 +682,116 @@ impl DockerUi {
         self.detail.btn_edit.set_sensitive(!sum.files.is_empty());
         self.detail.proj_root.set_visible(true);
         self.detail.root.set_visible(false);
+    }
+
+    /* ---------------- 阶段 112：日志 ---------------- */
+
+    /// **日志页是不是正开着**（用户在看日志）。
+    fn log_page_visible(&self) -> bool {
+        self.stack.visible_child_name().as_deref() == Some(PAGE_LOGS)
+    }
+
+    /// 收到**一块**日志 ⇒ 拆成行、收下、该显示就显示。
+    ///
+    /// ⚠️ **跨块的一行要拼起来**：SSH/TCP 的分块跟行没关系 ⇒ 一行可能
+    ///    被拆成好几块 ⇒ 半行先存着，等下一块补齐。
+    fn log_push_text(&self, text: &str) {
+        let mut rest = std::mem::take(&mut *self.log_partial.borrow_mut());
+        rest.push_str(text);
+        let mut done: Vec<String> = Vec::new();
+        let mut tail = String::new();
+        for part in rest.split_inclusive('\n') {
+            match part.strip_suffix('\n') {
+                Some(s) => done.push(s.trim_end_matches('\r').to_string()),
+                // 最后一段没有换行 ⇒ 还没收全 ⇒ 留着等下一块。
+                None => tail.push_str(part),
+            }
+        }
+        *self.log_partial.borrow_mut() = tail;
+        for l in done {
+            self.log_push_line(&l);
+        }
+    }
+
+    /// 收到**一行** ⇒ **收下**（暂停也收）⇒ 该显示就显示。
+    fn log_push_line(&self, line: &str) {
+        self.log_lines.borrow_mut().push(line.to_string());
+        // ⚠️ **暂停**：数据照收，显示不更新（恢复时一次性补上）。
+        if self.log_paused.get() {
+            return;
+        }
+        if !self.log_line_matches(line) {
+            return;
+        }
+        self.log_append(line);
+        self.log_follow_end();
+    }
+
+    /// 这一行**要不要显示**（按搜索词过滤）。
+    fn log_line_matches(&self, line: &str) -> bool {
+        let q = self.log_search.borrow().to_ascii_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        line.to_ascii_lowercase().contains(&q)
+    }
+
+    /// **追加**一行到显示（**增量** ⇒ 不整表重画）。
+    ///
+    // ⚠️ 项目踩过「整表重画把主线程拖死」的坑（AGENTS.md）⇒ 日志流
+    //    是最容易被灌爆的地方 ⇒ 只追加新来的那一行。
+    fn log_append(&self, line: &str) {
+        let mut end = self.log.buffer.end_iter();
+        self.log.buffer.insert(&mut end, &format!("{line}\n"));
+    }
+
+    /// **按当前搜索词重建**显示（从已收到的全部行里挑出该显示的）。
+    fn log_rebuild(&self) {
+        let shown: Vec<String> = {
+            let lines = self.log_lines.borrow();
+            lines
+                .iter()
+                .filter(|l| self.log_line_matches(l))
+                .cloned()
+                .collect()
+        };
+        self.log.buffer.set_text("");
+        for l in shown.iter() {
+            self.log_append(l);
+        }
+        self.log_follow_end();
+    }
+
+    /// **清空**（显示 + 已收到的行都清掉）。
+    fn log_clear(&self) {
+        self.log_lines.borrow_mut().clear();
+        self.log_partial.borrow_mut().clear();
+        self.log.buffer.set_text("");
+    }
+
+    /// **重置**整个日志区（换容器 / 重新起流时用）。
+    fn log_reset(&self) {
+        self.log_clear();
+        *self.log_name.borrow_mut() = String::new();
+        self.log_paused.set(false);
+        self.log.btn_pause.set_label(tr("暂停"));
+    }
+
+    /// **滚到底**（**自动跟随**开着才滚）。
+    ///
+    /// ⚠️ **等版面算完再滚**：刚插完文字时 adjustment 的 `upper` 还是旧的
+    ///    ⇒ 直接滚会差一行 ⇒ 丢一个 idle，等 GTK 排完版再滚到底。
+    fn log_follow_end(&self) {
+        if !self.log.follow.is_active() {
+            return;
+        }
+        let scroll = self.log.scroll.clone();
+        glib::idle_add_local_once(move || {
+            let adj = scroll.vadjustment();
+            let lo = adj.lower();
+            let hi = (adj.upper() - adj.page_size()).max(lo);
+            adj.set_value(hi);
+        });
     }
 }
 
@@ -950,12 +1134,91 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     grid.attach(&c_mount, 0, 1, 1, 1);
     grid.attach(&c_env, 1, 1, 1, 1);
 
+    // ---- 日志页（阶段 112）----
+    //
+    // ⚠️ **等宽 + 只读**：日志是「给人看的文本」，不是能编辑的文档。
+    let log_view = gtk::TextView::new();
+    log_view.set_editable(false);
+    log_view.set_cursor_visible(false);
+    log_view.set_monospace(true);
+    // ⚠️ **不自动换行**：日志行往往很长 ⇒ 换行会把时间戳和正文拆开，
+    //    看不出哪行是哪行 ⇒ 横向滚动更合适。
+    log_view.set_wrap_mode(gtk::WrapMode::None);
+    log_view.set_left_margin(6);
+    log_view.set_right_margin(6);
+    log_view.set_top_margin(4);
+    log_view.set_bottom_margin(4);
+    let log_buffer = log_view.buffer().clone();
+
+    let log_search = gtk::SearchEntry::new();
+    log_search.set_placeholder_text(Some(tr("搜索日志")));
+    log_search.set_hexpand(true);
+
+    let log_pause = gtk::Button::with_label(tr("暂停"));
+    log_pause.add_css_class("flat");
+    let log_follow_lbl = gtk::Label::new(Some(tr("自动跟随")));
+    let log_follow = gtk::Switch::new();
+    log_follow.set_valign(gtk::Align::Center);
+    // ⚠️ **默认开**：看日志的人基本都要「跟着最新日志滚」。
+    log_follow.set_active(true);
+    let log_clear = gtk::Button::with_label(tr("清空"));
+    log_clear.add_css_class("flat");
+
+    let log_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    log_bar.set_margin_start(6);
+    log_bar.set_margin_end(6);
+    log_bar.set_margin_top(4);
+    log_bar.append(&log_search);
+    log_bar.append(&log_pause);
+    log_bar.append(&log_follow_lbl);
+    log_bar.append(&log_follow);
+    log_bar.append(&log_clear);
+
+    let log_scroll = gtk::ScrolledWindow::new();
+    log_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    log_scroll.set_child(Some(&log_view));
+    log_scroll.set_vexpand(true);
+
+    let log_status = gtk::Label::new(Some(""));
+    log_status.set_xalign(0.0);
+    log_status.set_margin_start(6);
+    log_status.set_margin_end(6);
+    log_status.set_margin_bottom(2);
+    log_status.add_css_class("dim-label");
+
+    let log_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    log_root.set_margin_start(6);
+    log_root.set_margin_end(6);
+    log_root.set_margin_bottom(6);
+    log_root.append(&log_bar);
+    log_root.append(&log_scroll);
+    log_root.append(&log_status);
+
+    // ---- 详情区：概览 / 日志 两页（**Stack**）----
+    //
+    // ⚠️ 用 **Stack**（不是两个盒子轮流 `set_visible`）⇒ 页面切换是 GTK
+    //    自己的事 ⇒ 不会出现「两个都显示」或「两个都不显示」。
+    let stack = gtk::Stack::new();
+    stack.set_vexpand(true);
+    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    // ⚠️ 页面的**标题**（页签上显示的字）要单独设 ⇒ 页名是内部标识
+    //    （`overview` / `logs`），不能直接拿来做界面文案。
+    let page_overview = stack.add_named(&grid, Some(PAGE_OVERVIEW));
+    page_overview.set_title(tr("概览"));
+    let page_logs = stack.add_named(&log_root, Some(PAGE_LOGS));
+    page_logs.set_title(tr("日志"));
+
+    let switcher = gtk::StackSwitcher::new();
+    switcher.set_stack(Some(&stack));
+    switcher.set_halign(gtk::Align::Start);
+
     let d_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
     d_root.set_margin_start(6);
     d_root.set_margin_end(6);
     d_root.set_margin_bottom(6);
     d_root.append(&d_row);
-    d_root.append(&grid);
+    d_root.append(&switcher);
+    d_root.append(&stack);
     // ⚠️ **没选容器时不显示**（Paned 里隐藏的子控件不占地方 ⇒ 列表拿满）。
     d_root.set_visible(false);
 
@@ -1080,6 +1343,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             btn_cdown: p_down.clone(),
             btn_cup: p_up.clone(),
         },
+        log: LogUi {
+            root: log_root,
+            view: log_view,
+            buffer: log_buffer,
+            scroll: log_scroll,
+            search: log_search.clone(),
+            btn_pause: log_pause.clone(),
+            btn_clear: log_clear.clone(),
+            follow: log_follow.clone(),
+            status: log_status,
+        },
+        stack: stack.clone(),
+        log_name: RefCell::new(String::new()),
+        log_lines: RefCell::new(Vec::new()),
+        log_partial: RefCell::new(String::new()),
+        log_paused: Cell::new(false),
+        log_search: RefCell::new(String::new()),
+        log_stop: RefCell::new(None),
+        log_running: Cell::new(false),
         selected: RefCell::new(String::new()),
         selected_project: RefCell::new(String::new()),
         restoring: Cell::new(false),
@@ -1103,9 +1385,44 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             continue;
                         }
                         match r {
-                            Ok(d) => u.apply_detail(&d),
+                            Ok(d) => {
+                                u.apply_detail(&d);
+                                // ⚠️ **日志页正开着** ⇒ 这时容器才定下来 ⇒
+                                //    现在起流（切页时还没选中容器，起不了）。
+                                if u.log_page_visible() && !u.log_running.get() {
+                                    if let Some(st) = stw.upgrade() {
+                                        start_logs(&st, &u, &name);
+                                    }
+                                }
+                            }
                             Err(msg) => u.detail_error(&msg),
                         }
+                    }
+                    Msg::LogChunk { name, data } => {
+                        // ⚠️ **只认现在这条流的**（换了容器 ⇒ 旧流的数据丢掉）。
+                        if u.log_name.borrow().as_str() != name {
+                            continue;
+                        }
+                        u.log_push_text(&data);
+                    }
+                    Msg::LogEnd { name, code } => {
+                        if u.log_name.borrow().as_str() != name {
+                            continue;
+                        }
+                        u.log_running.set(false);
+                        let msg = if code == 0 {
+                            tr("日志流已结束").to_string()
+                        } else {
+                            trf!("日志流已结束（退出码 {c}）", c = code)
+                        };
+                        u.log.status.set_text(&msg);
+                    }
+                    Msg::LogError { name, msg } => {
+                        if u.log_name.borrow().as_str() != name {
+                            continue;
+                        }
+                        u.log_running.set(false);
+                        u.log.status.set_text(&msg);
                     }
                     Msg::Action(msg) => {
                         *u.last_action.borrow_mut() = msg.clone();
@@ -1147,7 +1464,21 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 return;
             }
             match u.selected_container_name() {
-                Some(n) => load_detail(&st, &u, &n),
+                Some(n) => {
+                    // ⚠️ **先记下选中的容器**（阶段 112 修的 bug）。
+                    //
+                    // ⚠️ **为什么必须在这儿记**：详情消息回来时要拿它比对
+                    //    「这条结果是不是现在选的那个」⇒ 之前**只有测试钩子**
+                    //    会写它 ⇒ **真实流程里详情消息全被当成过时的丢掉**
+                    //    （详情区永远不显示、启停按钮点了没反应）。
+                    *u.selected.borrow_mut() = n.clone();
+                    // ⚠️ **换容器了** ⇒ 停掉上一条日志流（别让远端白挂着）。
+                    if u.log_name.borrow().as_str() != n {
+                        stop_logs(&u);
+                        u.log_reset();
+                    }
+                    load_detail(&st, &u, &n);
+                }
                 None => u.clear_detail(),
             }
         });
@@ -1253,6 +1584,81 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 );
             });
         }
+    }
+    // ================= 阶段 112：日志页 =================
+    // **切到「日志」页 ⇒ 起流；切走 ⇒ 停流**。
+    //
+    // ⚠️ **为什么切走就停**：`docker logs -f` 是长跑的 ⇒ 一直挂着就是
+    //    在用户的服务器上白占一个进程（还占着一条 SSH 通道）⇒ 离开这页
+    //    就该把它收掉。
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        stack.connect_visible_child_name_notify(move |s| {
+            let Some(u) = u.upgrade() else { return };
+            let on_logs = s.visible_child_name().as_deref() == Some(PAGE_LOGS);
+            if !on_logs {
+                stop_logs(&u);
+                return;
+            }
+            // ⚠️ **还没选中容器** ⇒ 等详情到了再起（见消息循环里的处理）。
+            let name = u.selected.borrow().clone();
+            if name.is_empty() || u.log_running.get() {
+                return;
+            }
+            if let Some(st) = stw.upgrade() {
+                start_logs(&st, &u, &name);
+            }
+        });
+    }
+    // **暂停 / 继续**
+    //
+    // ⚠️ **暂停不是「不收」**：数据照收进 `log_lines`，只是**不往显示里
+    //    加** ⇒ 恢复时一次性补上（用户没丢日志）。
+    {
+        let u = Rc::downgrade(&ui);
+        log_pause.connect_clicked(move |_| {
+            let Some(u) = u.upgrade() else { return };
+            let paused = !u.log_paused.get();
+            u.log_paused.set(paused);
+            u.log
+                .btn_pause
+                .set_label(if paused { tr("继续") } else { tr("暂停") });
+            if !paused {
+                // 恢复 ⇒ 把暂停期间收到的行补上。
+                u.log_rebuild();
+            }
+        });
+    }
+    // **搜索日志**
+    {
+        let u = Rc::downgrade(&ui);
+        log_search.connect_search_changed(move |s| {
+            let Some(u) = u.upgrade() else { return };
+            *u.log_search.borrow_mut() = s.text().to_string();
+            u.log_rebuild();
+        });
+    }
+    // **清空日志**
+    {
+        let u = Rc::downgrade(&ui);
+        log_clear.connect_clicked(move |_| {
+            let Some(u) = u.upgrade() else { return };
+            u.log_clear();
+        });
+    }
+    // **自动跟随**：打开时立刻滚到底。
+    {
+        let u = Rc::downgrade(&ui);
+        log_follow.connect_state_set(move |_s, on| {
+            let Some(u) = u.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if on {
+                u.log_follow_end();
+            }
+            glib::Propagation::Proceed
+        });
     }
     // 搜索框一变就重新过滤（**不重新连服务器**）
     {
@@ -1426,6 +1832,91 @@ fn load_detail(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     });
 }
 
+/// 起一条**日志流**（后台任务读，增量发回主线程）。
+///
+/// ⚠️ **不新增 SSH 连接**：走**共享连接**上的**独立 exec 通道**
+///    （通道很轻 ⇒ 一台服务器仍然只有一条连接）。
+/// ⚠️ **能停**：用户切走日志页 ⇒ 发停止信号 ⇒ 后台任务关掉通道 ⇒
+///    远端的 `docker logs -f` 退出（服务器上不留进程）。
+fn start_logs(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    stop_logs(ui);
+    ui.log_reset();
+    *ui.log_name.borrow_mut() = name.to_string();
+    ui.log_running.set(true);
+    ui.log.status.set_text(tr("正在接收日志…"));
+
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name = name.to_string();
+    let tx = ui.tx.clone();
+    // ⚠️ **停止信号**：`oneshot` ⇒ 发一次就醒 ⇒ 后台任务不用等下一块数据
+    //    就能收尾。
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    *ui.log_stop.borrow_mut() = Some(stop_tx);
+
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let session = match shared_session(&opts, pw).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send_blocking(Msg::LogError { name, msg: e });
+                return;
+            }
+        };
+        let ch = match docker::open_logs(&session, &name, LOG_TAIL).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send_blocking(Msg::LogError { name, msg: e.0 });
+                return;
+            }
+        };
+        // ⚠️ **停止信号要能被反复问**：`select!` 会把 future 移走 ⇒ 用
+        //    `&mut` 问它（`oneshot::Receiver` 是 Unpin ⇒ 取消安全）。
+        let mut stop_rx = stop_rx;
+        loop {
+            tokio::select! {
+                ev = ch.next_event() => {
+                    match ev {
+                        Some(ShellEvent::Data(b)) => {
+                            let data = String::from_utf8_lossy(&b).into_owned();
+                            if tx
+                                .send_blocking(Msg::LogChunk { name: name.clone(), data })
+                                .is_err()
+                            {
+                                // 界面没了 ⇒ 关通道（别让远端白挂着）。
+                                ch.close();
+                                break;
+                            }
+                        }
+                        Some(ShellEvent::Exit(code)) => {
+                            let _ = tx.send_blocking(Msg::LogEnd { name, code });
+                            break;
+                        }
+                        None => {
+                            let _ = tx.send_blocking(Msg::LogEnd { name, code: 0 });
+                            break;
+                        }
+                    }
+                }
+                _ = &mut stop_rx => {
+                    // ⚠️ **主动关通道** ⇒ 远端 `docker logs -f` 退出
+                    //    （看门狗收尾 ⇒ 服务器上不留进程）。
+                    ch.close();
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// 停掉日志流（**关通道** ⇒ 远端的 `docker logs -f` 退出）。
+pub fn stop_logs(ui: &Rc<DockerUi>) {
+    if let Some(tx) = ui.log_stop.borrow_mut().take() {
+        let _ = tx.send(());
+    }
+    ui.log_running.set(false);
+}
+
 /// 做一次**写操作**（启停 / 重启）。
 ///
 /// ⚠️ **界面必须先二次确认**（见 `build()` 里的按钮接线）⇒ 这里只管执行。
@@ -1581,6 +2072,8 @@ pub fn mount(st: &Rc<PanelState>) {
             let Some(u) = u.upgrade() else { return };
             if cid == u.tab_id.get() {
                 stop_auto(&u);
+                // ⚠️ **日志流也得停**（否则远端的 `docker logs -f` 一直挂着）。
+                stop_logs(&u);
             }
         });
     }
@@ -1836,6 +2329,39 @@ pub fn expand_project_for_test(st: &Rc<PanelState>, name: &str) -> bool {
     true
 }
 
+/// 测试钩子：**展开所有 compose 项目**。
+///
+/// ⚠️ **为什么需要它**：GTK 的 `set_cursor` 对**看不见的行**（收着的项目里
+///    的子行）**不生效** ⇒ 冒烟要选 compose 组里的容器 ⇒ 得先展开。
+pub fn expand_all_projects_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let mut names: Vec<String> = Vec::new();
+    let mut it = match ui.model.iter_first() {
+        Some(i) => i,
+        None => return,
+    };
+    loop {
+        if ui.model.iter_children(Some(&it)).is_some() {
+            let name: String = ui.model.get(&it, COL_NAME as i32);
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+        let mut next = it;
+        if !ui.model.iter_next(&mut next) {
+            break;
+        }
+        it = next;
+    }
+    for n in names {
+        if let Some(pit) = ui.project_iter(&n) {
+            let path = ui.model.path(&pit);
+            ui.view.expand_row(&path, false);
+        }
+    }
+}
+
 /// 测试钩子：容器页在子标签里的 id（冒烟要切到那一页去截图）。
 pub fn tab_id_for_test(st: &Rc<PanelState>) -> u64 {
     let slot = st.docker_ui.borrow();
@@ -1851,6 +2377,198 @@ pub fn project_expanded_for_test(st: &Rc<PanelState>, name: &str) -> bool {
     };
     let path = ui.model.path(&it);
     ui.view.row_expanded(&path)
+}
+
+/* ---------------- 阶段 112：日志的测试钩子 ---------------- */
+
+/// 测试钩子：**假装在看某个容器的日志**（**不连服务器**）。
+///
+/// ⚠️ 真实流程里 `log_name` 是 `start_logs` 写的 ⇒ 冒烟要验「消息进到
+///    界面」这条路径，就得有办法先把「在看谁」设上。
+pub fn log_watch_for_test(st: &Rc<PanelState>, name: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.log_reset();
+    *ui.log_name.borrow_mut() = name.to_string();
+}
+
+/// 测试钩子：**灌一段日志**（**走真实的消息通道** ⇒ 和真流一样处理）。
+pub fn log_push_for_test(st: &Rc<PanelState>, name: &str, data: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let _ = ui.tx.try_send(Msg::LogChunk {
+        name: name.to_string(),
+        data: data.to_string(),
+    });
+}
+
+/// 测试钩子：**灌一个「流结束」**（走真实的消息通道）。
+pub fn log_end_for_test(st: &Rc<PanelState>, name: &str, code: i32) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let _ = ui.tx.try_send(Msg::LogEnd {
+        name: name.to_string(),
+        code,
+    });
+}
+
+/// 测试钩子：日志区**显示着**的文字。
+pub fn log_text_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return String::new();
+    };
+    let b = &ui.log.buffer;
+    b.text(&b.start_iter(), &b.end_iter(), false).to_string()
+}
+
+/// 测试钩子：**已收到**的行数（暂停时也照收 ⇒ 这个数只增不减）。
+pub fn log_line_count_for_test(st: &Rc<PanelState>) -> usize {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.log_lines.borrow().len())
+        .unwrap_or(0)
+}
+
+/// 测试钩子：日志**是不是暂停**中。
+pub fn log_paused_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.log_paused.get()).unwrap_or(false)
+}
+
+/// 测试钩子：**点一下「暂停 / 继续」**（走真实按钮 ⇒ 触发真实逻辑）。
+pub fn log_click_pause_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.log.btn_pause.emit_clicked();
+}
+
+/// 测试钩子：**点一下「清空」**（走真实按钮）。
+pub fn log_click_clear_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.log.btn_clear.emit_clicked();
+}
+
+/// 测试钩子：**设搜索词**（走真实搜索框 ⇒ 触发真实的重建）。
+pub fn log_set_search_for_test(st: &Rc<PanelState>, q: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.log.search.set_text(q);
+}
+
+/// 测试钩子：**切到日志页**（走真实的 Stack 切换 ⇒ 会起流）。
+pub fn log_show_page_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.stack.set_visible_child_name(PAGE_LOGS);
+    true
+}
+
+/// 测试钩子：**切回概览页**（走真实的 Stack 切换 ⇒ 日志流停）。
+pub fn log_show_overview_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
+    true
+}
+
+/// 测试钩子：日志页**是不是开着**。
+pub fn log_page_visible_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.log_page_visible()).unwrap_or(false)
+}
+
+/// 测试钩子：日志流**是不是在跑**。
+pub fn log_running_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.log_running.get()).unwrap_or(false)
+}
+
+/// 测试钩子：**自动跟随**是不是开着。
+pub fn log_follow_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.log.follow.is_active())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：正文**是不是滚到底了**（自动跟随的判据）。
+pub fn log_at_bottom_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let adj = ui.log.scroll.vadjustment();
+    let lo = adj.lower();
+    let hi = (adj.upper() - adj.page_size()).max(lo);
+    // ⚠️ 差 1 像素以内就算到底（浮点误差）。
+    adj.value() >= hi - 1.0
+}
+
+/// 测试钩子：日志正文**是不是等宽、不自动换行**（看日志要舒服）。
+pub fn log_view_is_monospace_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.log.view.is_monospace())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：日志区**是不是显示着**（在日志页里才显示）。
+pub fn log_visible_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.log.root.is_visible()).unwrap_or(false)
+}
+
+/// 测试钩子：**设「自动跟随」开关**（走真实开关 ⇒ 触发真实逻辑）。
+pub fn log_set_follow_for_test(st: &Rc<PanelState>, on: bool) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.log.follow.set_active(on);
+}
+
+/// 测试钩子：把日志正文**滚到顶**（模拟用户往上翻）。
+pub fn log_scroll_to_top_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let adj = ui.log.scroll.vadjustment();
+    adj.set_value(adj.lower());
+}
+
+/// 测试钩子：**选中**某个容器行（走真实的 `set_cursor` ⇒ 触发真实的
+/// 「选中 ⇒ 取详情」）。
+pub fn select_container_for_test(st: &Rc<PanelState>, name: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(path) = ui.find_path(name) else {
+        return false;
+    };
+    gtk::prelude::TreeViewExt::set_cursor(&ui.view, &path, None, false);
+    true
+}
+
+/// 测试钩子：**触发一次刷新**（真连服务器取容器列表）。
+pub fn refresh_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    refresh(st, ui);
+}
+
+/// 测试钩子：**光标**现在指着哪一行（空 = 没有光标）。
+/// ⚠️ 这是「表格自己的光标」⇒ 和 `selected_for_test`（程序记的选中）
+///    是**两回事** ⇒ 两者不一致就说明中间出了问题。
+pub fn cursor_name_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return String::new();
+    };
+    let (path, _col) = gtk::prelude::TreeViewExt::cursor(&ui.view);
+    let Some(path) = path else {
+        return String::new();
+    };
+    let Some(it) = ui.model.iter(&path) else {
+        return String::new();
+    };
+    let name: String = ui.model.get(&it, COL_NAME as i32);
+    name
 }
 
 #[cfg(test)]
