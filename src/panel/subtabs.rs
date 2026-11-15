@@ -136,6 +136,20 @@ struct EditorPage {
     head: Option<gtk::Box>,
     /// 编辑器的内容（`fileedit::FileEdit::page`）。
     widget: gtk::Widget,
+    /// 「拖回子标签栏」时那一页的**宿主 Paned**（左＝文件面板 / 右＝编辑器）。
+    ///
+    /// ⚠️ **为什么要有它**（阶段 121）：编辑器拖到子标签栏后**不再是一个
+    ///    整页的编辑器**，而是「**SFTP 文件列表 ｜ 编辑器**」——
+    ///    跟阶段 107 之前（term 和编辑器不能同时显示时）的形态一样
+    ///    （用户 2026-11-15：「编辑器旁边要有 sftp，就像我们修改将 term
+    ///    和编辑器能同时显示之前那样」）。
+    ///
+    /// ⇒ 这个 Paned **同时是那一页的内容**（`nb.append_page` 挂的是它）。
+    ///
+    /// ⚠️ **文件面板是「会话级的一个 widget」** ⇒ 同一时刻只能在**一个**
+    ///    宿主里 ⇒ 切到这一页时把它搬过来、切走时搬回去（见 `tabs.rs` 的
+    ///    `switch-page` 回调）。
+    host: Option<gtk::Paned>,
     /// 关之前先问一遍（未保存修改）。返回 false = 不关。
     on_close: Option<Box<dyn Fn() -> bool>>,
     /// 现在停在「编辑区」还是「子标签栏」（阶段 108）。
@@ -177,6 +191,13 @@ pub struct SubTabs {
     editor_stack: gtk::Stack,
     /// 编辑区的页（id → 标题 label / 内容 / 关闭回调）。
     editor_pages: RefCell<Vec<EditorPage>>,
+    /// **已经接过宽度回调**的编辑器 id（阶段 121）。
+    ///
+    /// ⚠️ **为什么要有它**：`track_file_width` 会在宿主 Paned 上挂一个
+    ///    `notify::position` 回调（把分割条位置写回 `file_w`）⇒ **同一个
+    ///    宿主只能挂一次** ⇒ 每次切页都挂 ⇒ 回调越积越多。
+    /// ⇒ 用这个清单记住「谁已经挂过了」。
+    tracked_editor_hosts: RefCell<Vec<u64>>,
     /// 当前显示的编辑器 id。
     editor_current: Cell<Option<u64>>,
     /// 编辑区现在的**宿主**（终端列那个竖向 Paned，阶段 108）。
@@ -287,6 +308,7 @@ impl SubTabs {
             editor_tabs,
             editor_stack,
             editor_pages: RefCell::new(Vec::new()),
+            tracked_editor_hosts: RefCell::new(Vec::new()),
             editor_current: Cell::new(None),
             editor_host: RefCell::new(None),
             editor_hint: hint,
@@ -636,6 +658,7 @@ impl SubTabs {
             tab: Some(tab),
             head: None,
             widget: content,
+            host: None,
             on_close,
             docked: true,
         });
@@ -841,12 +864,12 @@ impl SubTabs {
 
     /// 切到某个编辑器（停靠的切内容栈；拖回子标签栏的切页签）。
     pub fn switch_editor(self: &Rc<Self>, id: u64) {
-        let (docked, widget) = {
+        let (docked, widget, host) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return;
             };
-            (p.docked, p.widget.clone())
+            (p.docked, p.widget.clone(), p.host.clone())
         };
         if docked {
             self.editor_stack.set_visible_child_name(&id.to_string());
@@ -863,8 +886,13 @@ impl SubTabs {
             }
         } else {
             // 已经拖回子标签栏了 ⇒ 切到那个页签。
-            if let Some(num) = self.nb.page_num(&widget) {
-                self.nb.set_current_page(Some(num));
+            //
+            // ⚠️ **页内容是宿主 Paned**（阶段 121：左＝文件面板 / 右＝编辑器）
+            //    ⇒ 用宿主去查页序号，**不能**用编辑器内容 widget。
+            if let Some(h) = &host {
+                if let Some(num) = self.nb.page_num(h) {
+                    self.nb.set_current_page(Some(num));
+                }
             }
             self.editor_current.set(Some(id));
         }
@@ -889,12 +917,13 @@ impl SubTabs {
     pub fn remove_editor(self: &Rc<Self>, id: u64) -> bool {
         let idx = self.editor_pages.borrow().iter().position(|p| p.id == id);
         let Some(idx) = idx else { return false };
-        let (docked, widget, tab) = {
+        let (docked, widget, tab, host) = {
             let pages = self.editor_pages.borrow();
             (
                 pages[idx].docked,
                 pages[idx].widget.clone(),
                 pages[idx].tab.clone(),
+                pages[idx].host.clone(),
             )
         };
         if docked {
@@ -904,8 +933,16 @@ impl SubTabs {
             }
         } else {
             // 拖回子标签栏的那个 ⇒ 从 notebook 里摘掉那一页。
-            if let Some(num) = self.nb.page_num(&widget) {
-                self.nb.remove_page(Some(num));
+            //
+            // ⚠️ **先把两个孩子摘下来**（阶段 121）：编辑器（要留给调用方，
+            //    不然会被连带销毁）+ **文件面板**（它住在左半 ⇒ 宿主被销毁
+            //    时它也会跟着没了 ⇒ **SFTP 列表整个消失**）。
+            if let Some(h) = &host {
+                h.set_end_child(None::<&gtk::Widget>);
+                h.set_start_child(None::<&gtk::Widget>);
+                if let Some(num) = self.nb.page_num(h) {
+                    self.nb.remove_page(Some(num));
+                }
             }
         }
         // 摘登记（顺带把那一块标签控件的引用放掉）。
@@ -963,8 +1000,23 @@ impl SubTabs {
             self.editor_tabs.remove(t);
         }
         // 变成一个子页签（**页签头是新造的** ⇒ 文件名一定在）。
+        //
+        // ⚠️ **那一页的内容是「文件面板 ｜ 编辑器」的 Paned**（阶段 121）。
+        //
+        // 干什么用：用户 2026-11-15：「**编辑器旁边要有 sftp**，就像我们修改
+        // 将 term 和编辑器能同时显示之前那样」⇒ 拖到子标签栏的编辑器要
+        // **自己左边带一份 SFTP 文件列表**（阶段 98 的形态）⇒ 左边放文件
+        // 面板、右边放编辑器。
+        //
+        // ⚠️ **文件面板是「会话级的一个 widget」** ⇒ 同一时刻只能在一个宿主
+        //    里 ⇒ 左边这一格**先空着**，切到这一页时由 `tabs.rs` 的
+        //    `switch-page` 回调把文件面板搬过来（切走时搬回去）。
+        let host = gtk::Paned::new(gtk::Orientation::Horizontal);
+        host.set_end_child(Some(&widget));
+        host.set_hexpand(true);
+        host.set_vexpand(true);
         let (head, label) = self.build_editor_head(id, icon.as_deref(), &title);
-        self.nb.append_page(&widget, Some(&head));
+        self.nb.append_page(&host.clone().upcast::<gtk::Widget>(), Some(&head));
         {
             let mut pages = self.editor_pages.borrow_mut();
             if let Some(p) = pages.iter_mut().find(|p| p.id == id) {
@@ -972,28 +1024,22 @@ impl SubTabs {
                 p.head = Some(head);
                 p.tab = None;
                 p.label = label;
+                p.host = Some(host);
             }
         }
         // 编辑区可能空了 ⇒ 变成一条「停靠区」（用户还能把编辑器拖回来）。
         self.refresh_editor_area();
-        // ⚠️ **拖出去后不切页**（阶段 119，用户 2026-11-15：「编辑器拖动 tab
-        // 仍然有些不对，**应该还能显示 sftp 列表的**，就像今天修改之前那样」）。
+        // ⚠️ **拖出去后切到编辑器那一页**（阶段 117 的行为，阶段 121 恢复）。
         //
-        // 干什么用：**SFTP 文件面板住在终端子页内部**（阶段 97 起文件面板
-        // 搬进了终端子页）⇒ 一旦切到「编辑器」那一页 ⇒ **终端子页被藏起来**
-        // ⇒ **左边的 SFTP 列表跟着消失** ⇒ 用户只剩一个编辑器，看不到文件。
+        // 为什么恢复：这一页现在**左边就是 SFTP 列表**（文件面板搬过来了）
+        // ⇒ 切过去看到的就是「文件列表 ｜ 编辑器」，**正是用户要的样子**
+        // （阶段 107 之前 term 和编辑器不能同时显示时的形态）。
         //
-        // ⇒ 拖完**留在当前页**（通常就是终端页）⇒ 文件列表、终端都还在；
-        // 想看编辑器内容，**点子标签栏上那个页签**（页签头上有文件名 ——
-        // 阶段 117 修好的那个）。
-        //
-        // ⚠️ 阶段 117 曾经在这里 `switch_editor(id)`（自动切到编辑器页）
-        //    ⇒ 那**正是「SFTP 列表不见了」的根因** ⇒ 已撤回。
-        //
-        // ⚠️ 阶段 108 当初「故意不切」的理由（怕停靠区看不见 ⇒ 拖不回去）
-        //    现在不成立：**页签头一直在子标签栏上** ⇒ 想拖回去时从页签头
-        //    拖走即可（拖动开始时 `show_editor_host_page` 会把终端页切回来
-        //    ⇒ 落点重新出现）。
+        // ⚠️ 阶段 119 曾经**撤回**这一步（切过去 ⇒ 终端页被藏起来 ⇒ SFTP
+        //    列表跟着消失）—— 那时编辑器页里**没有**文件面板 ⇒ 用户要的
+        //    「编辑器旁边有 sftp」没解决；现在这一页自带文件面板 ⇒ 撤回的
+        //    理由不再成立。
+        self.switch_editor(id);
         // 「当前编辑器」指针留给**还停靠着的**那个（拖走的那个不在编辑区里）。
         if self.editor_current.get() == Some(id) {
             let next = self
@@ -1012,7 +1058,7 @@ impl SubTabs {
     ///
     /// 返回是否真停回去了（本来就在编辑区 ⇒ false）。
     pub fn dock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, title, widget) = {
+        let (icon, title, widget, host) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
@@ -1024,11 +1070,26 @@ impl SubTabs {
                 p.icon.clone(),
                 p.title.clone(),
                 p.widget.clone(),
+                p.host.clone(),
             )
         };
-        // 从 notebook 里摘掉那一页。
-        if let Some(num) = self.nb.page_num(&widget) {
-            self.nb.remove_page(Some(num));
+        // ⚠️ **顺序很重要**（阶段 121）：
+        //
+        // ① **先把两个孩子从宿主里摘下来**（GTK 的 `set_*_child(None)` 会
+        //    顺带解除父级）：
+        //    - 右半＝**编辑器**（要搬回编辑区 ⇒ 不摘就会被连带销毁）；
+        //    - 左半＝**文件面板**（它由 `PanelState` 持有，但仍是宿主的
+        //      孩子 ⇒ 不摘的话，宿主被销毁时它也会跟着没了 ⇒ **SFTP 列表
+        //      会整个消失**）。
+        if let Some(h) = &host {
+            h.set_end_child(None::<&gtk::Widget>);
+            h.set_start_child(None::<&gtk::Widget>);
+        }
+        // ② 再从 notebook 里摘掉那一页（宿主 Paned 随之销毁）。
+        if let Some(h) = &host {
+            if let Some(num) = self.nb.page_num(h) {
+                self.nb.remove_page(Some(num));
+            }
         }
         // 小标签：**新造一个**（不把页签头那个搬回来 ⇒ 文件名不会丢）。
         let label = self.make_title_label(&title);
@@ -1042,10 +1103,15 @@ impl SubTabs {
                 p.tab = Some(tab);
                 p.head = None;
                 p.label = label;
+                p.host = None;
             }
         }
         self.refresh_editor_area();
         self.switch_editor(id);
+        // ⚠️ **切回「编辑区所在的那一页」**（阶段 121）：编辑器回编辑区了 ⇒
+        // 用户要看的是**终端页**（编辑区在终端列下方）⇒ 顺便把文件面板搬回
+        // 终端页的宿主（`switch-page` 回调做这件事）。
+        self.show_editor_host_page();
         true
     }
 
@@ -1058,15 +1124,67 @@ impl SubTabs {
             .map(|p| p.docked)
     }
 
+    /// 「拖回子标签栏的编辑器」那一页的**宿主 Paned**（左＝文件面板 / 右＝编辑器）。
+    ///
+    /// ⚠️ **阶段 121 新增**：编辑器拖到子标签栏后，那一页**自带一份 SFTP
+    ///    文件列表**（用户 2026-11-15：「编辑器旁边要有 sftp，就像我们修改
+    ///    将 term 和编辑器能同时显示之前那样」）⇒ 这个 Paned 就是它的宿主。
+    ///
+    /// 停靠在编辑区里的编辑器 ⇒ `None`（它在终端列下方，没有自己的宿主）。
+    pub fn editor_host(&self, id: u64) -> Option<gtk::Paned> {
+        self.editor_pages
+            .borrow()
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.host.clone())
+    }
+
+    /// 按**页序号**找「拖回子标签栏的编辑器」那一页的宿主。
+    ///
+    /// 干什么用：切页时要把**文件面板**搬到当前页的宿主里（文件面板是
+    /// 会话级的一个 widget ⇒ 同一时刻只能在一个宿主里）⇒ 上层按页序号
+    /// 问一句「这一页是不是编辑器页、它的宿主在哪」。
+    pub fn editor_host_by_page_num(&self, num: u32) -> Option<(u64, gtk::Paned)> {
+        self.editor_pages.borrow().iter().find_map(|p| {
+            let h = p.host.as_ref()?;
+            if self.nb.page_num(h) == Some(num) {
+                Some((p.id, h.clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 记下「这个编辑器的宿主已经挂过宽度回调了」（第一次返回 true）。
+    ///
+    /// ⚠️ 同一个宿主**只能挂一次** `track_file_width` ⇒ 每次切页都挂 ⇒
+    ///    `notify::position` 的回调会越积越多。
+    pub fn mark_editor_host_tracked(&self, id: u64) -> bool {
+        let mut v = self.tracked_editor_hosts.borrow_mut();
+        if v.contains(&id) {
+            false
+        } else {
+            v.push(id);
+            true
+        }
+    }
+
     /// 当前显示的编辑器 id。
     pub fn current_editor(&self) -> Option<u64> {
         // 当前子页签是不是一个「拖回子标签栏」的编辑器？
+        //
+        // ⚠️ **页内容是宿主 Paned**（阶段 121）⇒ 按**页序号**认，别拿编辑器
+        //    内容 widget 去比（比不上）。
         if let Some(cur) = self.nb.current_page() {
-            if let Some(w) = self.nb.nth_page(Some(cur)) {
-                let pages = self.editor_pages.borrow();
-                if let Some(p) = pages.iter().find(|p| !p.docked && p.widget == w) {
-                    return Some(p.id);
-                }
+            let pages = self.editor_pages.borrow();
+            if let Some(p) = pages.iter().find(|p| {
+                !p.docked
+                    && p.host
+                        .as_ref()
+                        .map(|h| self.nb.page_num(h) == Some(cur))
+                        .unwrap_or(false)
+            }) {
+                return Some(p.id);
             }
         }
         // 否则是编辑区里"当前"那个（**必须是还停靠着的**——拖走的那个

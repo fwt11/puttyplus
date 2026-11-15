@@ -604,14 +604,21 @@ impl Tabs {
             sub.nb.connect_switch_page(move |_nb, _page, num| {
                 let Some(sub) = subw.upgrade() else { return };
                 let Some(st) = stw.upgrade() else { return };
-                // 只有切到「终端」页才搬文件面板；切到数据库页**不动**它
-                // （它留在上一个宿主里，随那一页一起隐藏）。
+                // ⚠️ **阶段 121**：切到「拖回子标签栏的编辑器」那一页 ⇒ 把
+                // **文件面板搬过去**（那一页是「文件面板｜编辑器」的 Paned ⇒
+                // 编辑器**旁边有 SFTP 列表**，跟阶段 107 之前一个样子）。
                 //
-                // ⚠️ 阶段 107：文件编辑器**不再是子页签**（它住连接页底部的
-                // 编辑区）⇒ 这里不用再管它。
-                //
-                // ⚠️ **按传进来的页序号查**：`switch-page` 是切换**之前**发的，
-                // 那时 `current_kind()` 还是旧页的。
+                // ⚠️ 文件面板是**会话级的一个 widget** ⇒ 同一时刻只能在一个
+                //    宿主里 ⇒ 搬过去之前 `host_file_panel` 会先把它从旧宿主
+                //    摘下来 ⇒ 切走时再搬回来（终端页那半边就是这么做的）。
+                if let Some((eid, host)) = sub.editor_host_by_page_num(num) {
+                    // 宽度回调**只挂一次**（同一个宿主挂多次 ⇒ 回调越积越多）。
+                    if sub.mark_editor_host_tracked(eid) {
+                        panel::track_file_width(&st, &host);
+                    }
+                    panel::host_file_panel(&st, &host);
+                    return;
+                }
                 let kind = sub.kind_by_page_num(num);
                 if kind != panel::subtabs::PageKind::Terminal {
                     return;

@@ -472,38 +472,54 @@ fn main() {
         sub.editor_area_visible(),
         "编辑器被拖到子标签栏后，编辑区应当**留成停靠区**（不然用户没地方拖回来）"
     );
-    // ⚠️ **拖出去后仍停在终端页**（阶段 119，用户 2026-11-15：「编辑器拖动 tab
-    // 仍然有些不对，**应该还能显示 sftp 列表的**，就像今天修改之前那样」）。
+    // ⚠️ **拖出去后，那一页的左边就是 SFTP 文件列表**（阶段 121，用户
+    // 2026-11-15：「**编辑器旁边要有 sftp**，就像我们修改将 term 和编辑器能
+    // 同时显示之前那样」）。
     //
-    // **SFTP 文件面板住在终端子页内部**（阶段 97）⇒ 一旦切到「编辑器」那一页
-    // ⇒ 终端子页被藏起来 ⇒ **左边的文件列表跟着消失** ⇒ 拖一次编辑器就看不见
-    // 文件列表了。
-    //
-    // ⇒ 拖完**留在当前页**；想看编辑器内容 ⇒ 点子标签栏上那个页签（页签头上
-    // 有文件名，阶段 117 修好的那个）。
+    // **为什么不是「别切页」**：阶段 119 试过「拖完留在终端页」⇒ SFTP 列表
+    // 确实还在终端页，但**编辑器自己那一页旁边没有列表** ⇒ 用户要的没解决。
+    // ⇒ 现在那一页的内容是「**文件面板 ｜ 编辑器**」的 Paned（阶段 98 的
+    // 形态）⇒ 切过去就是「左边列表、右边编辑器」。
     let ewidget = sub
         .editor_widget(pid)
         .expect("拖出去后应当还有编辑器正文");
-    let enum_page = sub.nb.page_num(&ewidget).expect("编辑器应当是一个子页签");
-    assert_ne!(
-        sub.nb.current_page(),
-        Some(enum_page),
-        "编辑器拖到子标签栏后**不该切到编辑器那一页**（切过去 SFTP 列表就消失了）"
+    let _ = &ewidget; // 编辑器正文本身（页签头挂在宿主上，见下）
+    let host = sub
+        .editor_host(pid)
+        .expect("编辑器拖到子标签栏后应当有自己的宿主（文件面板｜编辑器）");
+    let enum_page = sub
+        .nb
+        .page_num(&host.clone().upcast::<gtk::Widget>())
+        .expect("编辑器应当是一个子页签");
+    // ⚠️ **左边那一格必须是文件面板**（这才是「编辑器旁边有 sftp」）。
+    let left = host
+        .start_child()
+        .expect("宿主左边应当摆着 SFTP 文件面板");
+    // ⚠️ **用 `==` 比较，不要比指针**：`glib::Object` 是 `*mut GObject` 的
+    // 透明包装 ⇒ `as *const _` 拿到的是**栈上 Rust 包装**的地址 ⇒ 每次都
+    // 不同（这个坑把我绕了好几轮）⇒ gtk4-rs 的 `PartialEq` 才是按 GObject
+    // 指针比较的。
+    assert!(
+        left.upcast_ref::<gtk::Widget>() == st.root.upcast_ref::<gtk::Widget>(),
+        "编辑器左边应当是 **SFTP 文件列表**（用户 2026-11-15：「编辑器旁边要有 sftp」）"
     );
     assert_eq!(
-        sub.current_kind(),
-        PageKind::Terminal,
-        "拖出去后应当仍在终端页（SFTP 列表住在终端页里）"
+        sub.nb.current_page(),
+        Some(enum_page),
+        "拖出去后应当切到编辑器那一页（那一页左边就是 SFTP 列表）"
     );
     assert!(
         st.root.is_mapped(),
-        "拖出去后 **SFTP 文件列表应当还在屏幕上**（切走就没了 = 用户报的那个问题）"
+        "拖出去后 **SFTP 文件列表应当还在屏幕上**（编辑器旁边那一列）"
     );
     // ⚠️ **页签头上必须有文件名**（阶段 117 回归：拖出去后文件名不见了）。
     //
     // 根因：GTK 的 `GtkButton` 私下记着 `priv->child` ⇒ 把 Label 从按钮里
     // 搬走之后，按钮销毁时还会**再摘一次** ⇒ 文件名凭空消失。
-    let head = sub.nb.tab_label(&ewidget).expect("应当有页签头");
+    let head = sub
+        .nb
+        .tab_label(&host.clone().upcast::<gtk::Widget>())
+        .expect("应当有页签头");
     let fname = head_file_label(&head).expect(
         "页签头上必须有文件名标签（拖到子标签栏后文件名不见了 = 回归）",
     );
@@ -521,7 +537,7 @@ fn main() {
         "文件名标签没被画出来（在页签头上却看不见 = 还是丢了）"
     );
     println!(
-        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、**留在终端页（SFTP 列表还在）**、文件名「{t}」还在 ✓",
+        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、**左边 SFTP 列表 ｜ 右边编辑器**、文件名「{t}」还在 ✓",
         n = pages_before + 1,
         t = fname.text()
     );
@@ -537,7 +553,12 @@ fn main() {
         "拖回来后子页签数应当复原"
     );
     assert!(sub.editor_area_visible(), "编辑区应当重新露出来");
-    println!("[5] 拖回编辑区：又变回编辑区里的编辑器 ✓");
+    // ⚠️ **文件面板要跟着回终端页**（它住在编辑区所在的那一页里）。
+    assert!(
+        st.root.parent().is_some(),
+        "拖回编辑区后文件面板应当还挂在终端页的宿主上（不能被宿主销毁带走）"
+    );
+    println!("[5] 拖回编辑区：又变回编辑区里的编辑器、SFTP 列表回到终端页 ✓");
 
     // ---- 5b) **真的**拖一次（xdotool 驱动 X 指针）→ 拖到子标签栏 ----
     //
@@ -610,11 +631,13 @@ fn main() {
             sub.switch_to(term_id);
             pump(400);
             // 起点：子标签栏上那个编辑器的页签头
-            let widget = sub.editor_widget(eid).expect("应当有编辑器正文");
-            let head = sub
-                .nb
-                .tab_label(&widget)
-                .expect("编辑器的页签头");
+            //
+            // ⚠️ **页签头挂在「宿主 Paned」上**（阶段 121：那一页的内容是
+            //    「文件面板｜编辑器」）⇒ 要按宿主查，不能拿编辑器正文去查。
+            let host = sub
+                .editor_host(eid)
+                .expect("拖到子标签栏后应当有宿主（文件面板｜编辑器）");
+            let head = sub.nb.tab_label(&host).expect("编辑器的页签头");
             let p = head
                 .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
                 .expect("要能算出页签头的位置");
