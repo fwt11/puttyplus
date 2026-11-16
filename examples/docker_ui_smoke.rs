@@ -1337,6 +1337,84 @@ fn main() {
                 screen.contains("pp-shell-ok"),
                 format!("屏幕上没有回显：\n{screen}")
             );
+            // ---- 阶段 117：**真 TTY**（等价于 docker exec -it）----
+            //
+            // ⚠️ **这三条是「外部可观察量」**（不是我们自己调了几次函数）：
+            //   容器里 `tty` 报什么、`stty size` 报多少、`test -t 0` 成不
+            //   成 ⇒ 全部由**容器里的程序**回答 ⇒ 骗不了人。
+            dockerui::term_send_for_test(
+                &panel2.st,
+                b"tty; test -t 0 && echo STDIN-TTY; stty size; echo TTYCHK\n",
+            );
+            let mut waited_tty = 0;
+            let mut screen_tty = String::new();
+            while waited_tty < 30 {
+                pump(200);
+                waited_tty += 1;
+                screen_tty = dockerui::term_screen_for_test(&panel2.st);
+                if screen_tty.contains("TTYCHK") {
+                    break;
+                }
+            }
+            println!("[信息] 容器终端屏幕：\n{screen_tty}");
+            check!(
+                "⑰ 容器里真的有 TTY（tty 报 /dev/pts/…）",
+                screen_tty.contains("/dev/pts/"),
+                format!("屏幕上没有 /dev/pts/：\n{screen_tty}")
+            );
+            check!(
+                "⑰ 容器的 stdin 也是 TTY（-i 生效）",
+                screen_tty.contains("STDIN-TTY"),
+                format!("stdin 不是 TTY：\n{screen_tty}")
+            );
+            // ⚠️ **尺寸**：容器里的 `stty size` 应当**跟着窗口走**
+            //   （不是写死的 24 80）⇒ 与界面上的终端尺寸对照。
+            let (term_cols, term_rows) = dockerui::term_size_for_test(&panel2.st);
+            let stty_line = screen_tty
+                .lines()
+                .find(|l| {
+                    l.split_whitespace().count() == 2
+                        && l.split_whitespace().all(|w| w.chars().all(|c| c.is_ascii_digit()))
+                })
+                .unwrap_or("");
+            let mut stty_parts = stty_line.split_whitespace();
+            let stty_rows: i64 = stty_parts.next().unwrap_or("").parse().unwrap_or(-1);
+            let stty_cols: i64 = stty_parts.next().unwrap_or("").parse().unwrap_or(-1);
+            check!(
+                "⑰ 容器里的终端尺寸跟界面一致（不是写死的 24×80）",
+                stty_rows > 0
+                    && stty_cols > 0
+                    && stty_rows == term_rows
+                    && stty_cols == term_cols,
+                format!("容器={stty_rows}行×{stty_cols}列 界面={term_rows}行×{term_cols}列")
+            );
+
+            // ---- **Ctrl-C 生效**（真 TTY 的关键差别）----
+            //
+            // ⚠️ **判据**：跑 `sleep 30` ⇒ 按 Ctrl-C ⇒ **立刻**就该回到
+            //   提示符 ⇒ 后面那条 `echo` 马上就能执行 ⇒ 15 秒内看得到。
+            //   （Ctrl-C 要是没生效 ⇒ 得等 sleep 跑完 30 秒 ⇒ 看不到。）
+            dockerui::term_send_for_test(&panel2.st, b"sleep 30\n");
+            pump(800);
+            dockerui::term_send_for_test(&panel2.st, b"\x03");
+            pump(600);
+            dockerui::term_send_for_test(&panel2.st, b"echo AFTER-CTRLC\n");
+            let mut waited_cc = 0;
+            let mut screen_cc = String::new();
+            while waited_cc < 50 {
+                pump(300);
+                waited_cc += 1;
+                screen_cc = dockerui::term_screen_for_test(&panel2.st);
+                if screen_cc.contains("AFTER-CTRLC") {
+                    break;
+                }
+            }
+            check!(
+                "⑰ Ctrl-C 能打断正在跑的命令",
+                screen_cc.contains("AFTER-CTRLC"),
+                format!("等了 {waited_cc} 次还没回到提示符：\n{screen_cc}")
+            );
+
             // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张容器内终端。
             if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
                 shot(&format!("{base}-term.png"));
@@ -1963,6 +2041,101 @@ fn main() {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
     }
+    // ================= N 组：阶段 117 —— 入口好找 ＋ 交互像 docker exec -it =================
+    //
+    // ⚠️ 用户 2026-11-16：「界面里没看到在哪里打开容器shell」⇒ 这组专测
+    //   **入口能不能被找到**（工具条按钮 ＋ 双击容器行）。
+    {
+        // ---- 工具条上有个「进入容器」按钮，选中容器后可点 ----
+        let (label, sensitive) = dockerui::enter_button_for_test(&panel2.st);
+        check!(
+            "㉒ 工具条上有「进入容器」按钮",
+            label == "进入容器",
+            format!("按钮文案={label:?}")
+        );
+        check!(
+            "㉒ 选中容器后「进入容器」可点",
+            sensitive,
+            "按钮是灰的（选中的容器不在？）"
+        );
+        // ---- **点工具条那个「进入容器」按钮 ⇒ 进 shell** ----
+        //
+        // ⚠️ **这条是补上一个漏洞**：光断言「按钮在不在」抓不住「点了没
+        //   反应」（反向验证时退掉回调，断言照样绿）⇒ 必须真的点一下。
+        {
+            let cs0 = dockerui::containers_for_test(&panel2.st);
+            let c0 = cs0
+                .iter()
+                .find(|c| c.state == "running")
+                .or_else(|| cs0.first())
+                .cloned();
+            if let Some(c0) = c0 {
+                dockerui::stop_terminal_for_test(&panel2.st);
+                pump(300);
+                // ⚠️ **先选中那一行**（按钮要「有选中」才可用）。
+                dockerui::select_container_for_test(&panel2.st, &c0.name);
+                pump(300);
+                dockerui::enter_click_for_test(&panel2.st);
+                let mut waited = 0;
+                while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
+                    pump(200);
+                    waited += 1;
+                }
+                check!(
+                    "㉒ 点「进入容器」按钮能进容器 shell",
+                    dockerui::term_running_for_test(&panel2.st),
+                    format!("等了 {waited} 次还没起来")
+                );
+                dockerui::stop_terminal_for_test(&panel2.st);
+                pump(500);
+            }
+        }
+
+        // ---- **双击顶层容器行 ⇒ 进 shell** ----
+        //
+        // ⚠️ 原来顶层容器行双击**什么也不发生** ⇒ 少一个入口。
+        let cs = dockerui::containers_for_test(&panel2.st);
+        let c0 = cs
+            .iter()
+            .find(|c| c.state == "running")
+            .or_else(|| cs.first())
+            .cloned();
+        if let Some(c0) = c0 {
+            dockerui::stop_terminal_for_test(&panel2.st);
+            pump(300);
+            dockerui::double_click_container_for_test(&panel2.st, &c0.name);
+            let mut waited = 0;
+            while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
+                pump(200);
+                waited += 1;
+            }
+            check!(
+                "㉒ 双击容器行能进容器 shell",
+                dockerui::term_running_for_test(&panel2.st),
+                format!("等了 {waited} 次还没起来")
+            );
+            // 进去之后敲一条命令 ⇒ 真的在容器里跑（**端到端**）。
+            dockerui::term_send_for_test(&panel2.st, b"echo DOUBLE-CLICK-OK\n");
+            let mut waited2 = 0;
+            let mut screen = String::new();
+            while waited2 < 30 {
+                pump(200);
+                waited2 += 1;
+                screen = dockerui::term_screen_for_test(&panel2.st);
+                if screen.contains("DOUBLE-CLICK-OK") {
+                    break;
+                }
+            }
+            check!(
+                "㉒ 双击进去后命令真的在容器里跑",
+                screen.contains("DOUBLE-CLICK-OK"),
+                format!("屏幕上没有回显：\n{screen}")
+            );
+            dockerui::stop_terminal_for_test(&panel2.st);
+            pump(500);
+        }
+    }
+
         }
     }
     }

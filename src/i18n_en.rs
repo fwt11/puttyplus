@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1948] = [
+pub static EN: [(&str, &str); 1951] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -371,6 +371,7 @@ pub static EN: [(&str, &str); 1948] = [
     ("偶 (e)", "Even (e)"),
     ("允许把本地 ssh-agent 临时转发给源服务器（直连认证用）", "Allow forwarding the local ssh-agent to the origin server temporarily (used for direct authentication)"),
     ("先写个关键词再搜", "Type a keyword first, then search"),
+    ("先在列表里选中一个容器", "Select a container in the list first"),
     ("先在列表里选中一个文件，再点「查看…」", "Select a file in the list, then click “View…”"),
     ("先在列表里选中一个条目，再点「下载…」", "Select an item in the list, then click “Download…”"),
     ("先在左侧打开一个数据库连接", "Open a database connection on the left first"),
@@ -644,6 +645,7 @@ pub static EN: [(&str, &str); 1948] = [
     ("回车：下一个（{v0}\n{v1}：上一个）", "Enter: next ({v0}\n{v1}: previous)"),
     ("在 SQL 编辑器里只执行选中的那段", "Run only the selected part in the SQL editor"),
     ("在 SQL 编辑器里执行（执行整个编辑框的内容）", "Run in the SQL editor (runs the whole editor content)"),
+    ("在容器里打开一个交互式 shell（等价于 docker exec -it）", "Open an interactive shell inside the container (like docker exec -it)"),
     ("在已加载的行里按文字筛选（不区分大小写，不查库）", "Filter the loaded rows by text (case-insensitive, does not query the database)"),
     ("在当前终端中查找（再按一次收起）", "Find in the current terminal (press again to hide)"),
     ("在当前连接上执行这段定义。触发器与 MySQL 例程会先 DROP 再重建。", "Run this definition on the current connection. Triggers and MySQL routines are dropped and recreated first."),
@@ -1795,6 +1797,7 @@ pub static EN: [(&str, &str); 1948] = [
     ("这条连接的端口无效（去连接管理器里改）", "The port of this connection is invalid (change it in the connection manager)"),
     ("这里是这条连接的默认值，新开的会话都按它来。\n保活、终端类型、认证顺序只对 SSH 连接有意义。\n已经跑着的会话要单独改，用标签上的「会话选项…」——那是临时覆盖，优先于这里。", "These are the defaults of this connection, every new session follows them.\nKeepalive, terminal type and authentication order only make sense for SSH connections.\nA session that is already running is changed separately with \"Session options…\" on the tab — that is a temporary override and takes precedence over this."),
     ("这里留着程序发过的每一条通知（最新的在最上面）。桌面通知发不出去时，             这里就是唯一的记录。", "Every notification the program sent is kept here (the newest one on top). When the desktop notification does not get through,\n             this is the only record."),
+    ("进入容器", "Enter container"),
     ("进入编辑模式（开事务，可改单元格）", "Entering edit mode (opens a transaction, cells can be changed)"),
     ("进度", "Progress"),
     ("进数据库工作台时把左边的文件面板收起来（工作台要宽度）", "Hide the file panel on the left when entering the database workbench (the workbench needs the width)"),

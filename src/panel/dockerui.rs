@@ -152,6 +152,12 @@ pub struct DockerUi {
     name_renderer: Option<gtk::CellRendererText>,
     /// **详情区**（阶段 110：选中容器才显示）。
     detail: DetailUi,
+    /// **「进入容器」按钮**（**工具条上**；阶段 117）。
+    ///
+    /// ⚠️ **为什么放工具条**：原来唯一的入口在**详情区**的标题行 ⇒ 得**先
+    ///   选中容器、还得把下半区拖出来**才看得到 ⇒ 用户（2026-11-16）反馈
+    ///   「界面里没看到在哪里打开容器shell」⇒ 入口必须**一眼可见**。
+    btn_enter: gtk::Button,
     /// **日志页**（阶段 112）。
     log: LogUi,
     /// 详情区里的 **Stack**（概览 / 日志两页）。
@@ -1023,6 +1029,8 @@ impl DockerUi {
     fn clear_detail(&self) {
         *self.selected.borrow_mut() = String::new();
         *self.selected_project.borrow_mut() = String::new();
+        // ⚠️ **阶段 117**：没有选中 ⇒ 「进入容器」不可点。
+        self.btn_enter.set_sensitive(false);
         self.detail.root.set_visible(false);
         self.detail.proj_root.set_visible(false);
     }
@@ -1426,6 +1434,19 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     spin.set_valign(gtk::Align::Center);
     spin.set_visible(false);
 
+    // ⚠️ **阶段 117**：「进入容器」按钮（**列表正上方** ⇒ 一眼可见）。
+    //
+    // ⚠️ **为什么要有它**：原来唯一的入口在**详情区**的标题行 ⇒ 必须先
+    //   选中容器、还得把下半区拖出来才看得到 ⇒ 用户反馈「界面里没看到
+    //   在哪里打开容器 shell」⇒ 现在**列表上方**就有一个。
+    let btn_enter = gtk::Button::with_label(tr("进入容器"));
+    btn_enter.add_css_class("flat");
+    // ⚠️ **没选容器时是灰的**（点了也不知道进哪个）。
+    btn_enter.set_sensitive(false);
+    btn_enter.set_tooltip_text(Some(tr(
+        "在容器里打开一个交互式 shell（等价于 docker exec -it）",
+    )));
+
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bar.set_margin_start(6);
     bar.set_margin_end(6);
@@ -1440,6 +1461,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     bar.append(&auto);
     // ⚠️ loading 动画的小转圈（用户 2026-11-16）。
     bar.append(&spin);
+    // ⚠️ **阶段 117**：「进入容器」在刷新按钮**前面**（它是主操作之一）。
+    bar.append(&btn_enter);
     bar.append(&refresh_btn);
 
     // ---- 表格（**树形**）----
@@ -1604,7 +1627,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // 「终端」⇒ 开**容器内终端**（阶段 113）。
     //
     // ⚠️ **不是写操作**（只是进容器里跑个 shell）⇒ 不用二次确认。
-    let d_term = mk_btn(tr("终端"));
+    // ⚠️ **阶段 117 改名**：原来叫「终端」⇒ 用户以为说的是 PuTTY
+    //   终端（页签上就有个「终端」）⇒ 找不到这个入口 ⇒ 改成「进入容器」。
+    let d_term = mk_btn(tr("进入容器"));
 
     let d_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     d_row.set_margin_start(8);
@@ -2060,6 +2085,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         containers: RefCell::new(Vec::new()),
         version: RefCell::new(String::new()),
         name_renderer,
+        btn_enter: btn_enter.clone(),
         detail: DetailUi {
             root: d_root,
             title: d_title,
@@ -2364,6 +2390,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             }
             match u.selected_container_name() {
                 Some(n) => {
+                    // ⚠️ **阶段 117**：有选中 ⇒ 「进入容器」可点。
+                    u.btn_enter.set_sensitive(true);
                     // ⚠️ **先记下选中的容器**（阶段 112 修的 bug）。
                     //
                     // ⚠️ **为什么必须在这儿记**：详情消息回来时要拿它比对
@@ -2390,6 +2418,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 }
                 None => u.clear_detail(),
             }
+        });
+    }
+    // ---- **「进入容器」按钮**（阶段 117）----
+    //
+    // ⚠️ **为什么在工具条上也放一个**：详情区那个按钮在**下半区** ⇒ 用户
+    //   常常看不到 ⇒ 工具条这个是**列表正上方** ⇒ 一眼能找到。
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        btn_enter.connect_clicked(move |_| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return;
+            };
+            let name = u.selected.borrow().clone();
+            if name.is_empty() {
+                u.status.set_text(tr("先在列表里选中一个容器"));
+                return;
+            }
+            open_container_terminal(&st, &u, &name);
         });
     }
     // **启停 / 重启**（**写操作 ⇒ 二次确认**）
@@ -2943,6 +2990,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     //    单击项目行不会误触发。
     {
         let u = Rc::downgrade(&ui);
+        // ⚠️ **阶段 117**：双击顶层容器行 ⇒ 进 shell ⇒ 要用到 `PanelState`
+        //   （开终端要它）⇒ 这里补一份**弱引用**（AGENTS.md 红线：不能抓强
+        //   引用 ⇒ 会成环）。
+        let stw = Rc::downgrade(st);
         view.connect_row_activated(move |v, path, _col| {
             let Some(u) = u.upgrade() else { return };
             // 只有**有子行的行**（项目行）才响应。
@@ -2950,6 +3001,16 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 return;
             };
             if u.model.iter_children(Some(&it)).is_none() {
+                // ⚠️ **阶段 117**：**没有子行的行 = 独立容器** ⇒ 双击 ⇒
+                //   进容器 shell（`docker exec -it`）。
+                //   ⚠️ **原来这里直接 return** ⇒ 顶层容器行双击**什么也
+                //   不发生** ⇒ 入口少了一个 ⇒ 用户说「没看到在哪开」。
+                let name: String = u.model.get(&it, COL_NAME as i32);
+                if name.is_empty() {
+                    return;
+                }
+                let Some(st) = stw.upgrade() else { return };
+                open_container_terminal(&st, &u, &name);
                 return;
             }
             if v.row_expanded(path) {
@@ -3895,6 +3956,54 @@ pub fn term_send_for_test(st: &Rc<PanelState>, bytes: &[u8]) {
     let view = ui.term_view.borrow();
     if let Some(t) = view.as_ref() {
         t.feed_child(bytes);
+    }
+}
+
+/// 测试钩子：工具条上「进入容器」按钮的**文案 ＋ 可不可点**（阶段 117）。
+///
+/// ⚠️ **返回 (文案, 可点)**：入口**存在**与**能用**是两回事 ⇒ 分开看。
+pub fn enter_button_for_test(st: &Rc<PanelState>) -> (String, bool) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return (String::new(), false);
+    };
+    (
+        ui.btn_enter.label().unwrap_or_default().to_string(),
+        ui.btn_enter.is_sensitive(),
+    )
+}
+
+/// 测试钩子：**点**工具条上那个「进入容器」按钮（阶段 117）。
+///
+/// ⚠️ **为什么要有**：光断言「按钮在不在、文案对不对」**抓不住**「点了没
+///   反应」⇒ 反向验证时退掉回调，断言还是绿的（实测踩过）⇒ 必须真的
+///   **点一下**，看它到底进不进得去。
+pub fn enter_click_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.btn_enter.emit_clicked();
+}
+
+/// 测试钩子：**双击**某个容器行（阶段 117 ⇒ 顶层容器行双击 ⇒ 进 shell）。
+pub fn double_click_container_for_test(st: &Rc<PanelState>, name: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let model = ui.model.clone();
+    let Some(path) = ui.find_path(name) else { return };
+    if model.iter(&path).is_none() {
+        return;
+    }
+    ui.view.emit_row_activated(&path, None);
+}
+
+/// 测试钩子：容器内终端的**尺寸**（列, 行）—— 用来对照容器里的 `stty size`。
+pub fn term_size_for_test(st: &Rc<PanelState>) -> (i64, i64) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return (0, 0) };
+    let view = ui.term_view.borrow();
+    match view.as_ref() {
+        Some(t) => (t.column_count(), t.row_count()),
+        None => (0, 0),
     }
 }
 
