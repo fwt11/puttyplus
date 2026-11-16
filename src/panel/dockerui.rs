@@ -199,6 +199,55 @@ pub struct DockerUi {
     ///   ⇒ 而 `stop_terminal` 现在要**关窗口** ⇒ 不挡一下就是
     ///   「自己调自己」（窗口 → stop_terminal → 关窗口 → 窗口 → …）。
     term_closing: Cell<bool>,
+    /// 容器终端的**工具条**（阶段 119：切 shell / 重连 / 清屏 / 搜索）。
+    ///
+    /// ⚠️ **为什么放在终端窗口里**：这几个操作**只对容器终端**有意义
+    ///   ⇒ 放到容器页的工具条上会让人以为「能对选中的容器做」
+    ///   （其实那个容器可能压根没开终端）。
+    term_bar: RefCell<Option<gtk::Box>>,
+    /// 工具条上的 **shell 下拉**（阶段 119）。
+    ///
+    /// ⚠️ **第 0 项是「自动」**（挨个试 `/bin/sh` → …）⇒ 跟原来的行为
+    ///   一模一样；后面几项是**点名**（用不了就报错，**不悄悄换**）。
+    term_shell_combo: RefCell<Option<gtk::ComboBoxText>>,
+    /// 容器终端的**搜索条**（阶段 119）。
+    term_search_bar: RefCell<Option<gtk::SearchBar>>,
+    /// 容器终端的**搜索输入框**（阶段 119；测试钩子要往里填词）。
+    term_find_entry: RefCell<Option<gtk::Entry>>,
+    /// 容器终端的 **shell 下拉里都有啥**（阶段 119）。
+    ///
+    /// ⚠️ **为什么自己记一份**：`gtk::ComboBoxText` **没有「列出全部选项」
+    ///   的接口**（只有 `active_text()`）⇒ 记一份自己 append 过的 ⇒
+    ///   测试能看见「用户到底能选什么」。
+    term_shell_items: RefCell<Vec<String>>,
+    /// 容器终端的**状态标签**（阶段 119：重连 / 换 shell 时要改它）。
+    term_status: RefCell<Option<gtk::Label>>,
+    /// 「重连」按钮（阶段 119）。
+    term_reconnect_btn: RefCell<Option<gtk::Button>>,
+    /// 「清屏」按钮（阶段 119）。
+    term_clear_btn: RefCell<Option<gtk::Button>>,
+    /// 「搜索」开关按钮（阶段 119）。
+    term_search_btn: RefCell<Option<gtk::ToggleButton>>,
+    /// 容器终端**当前是哪个容器**（阶段 119：重连要用）。
+    term_name: RefCell<String>,
+    /// 容器终端**当前用的 shell**（阶段 119；空 = 还没建起来）。
+    term_shell: RefCell<String>,
+    /// 容器终端的**代次号**（阶段 119）。
+    ///
+    /// ⚠️ **干什么用**：重连时**旧会话**可能还有数据在队列里 ⇒ 那些数据
+    ///   会喂进**同一个**终端控件（新旧混在一起）⇒ 每次起会话**加一代**，
+    ///   转发事件时**只认当前代** ⇒ 过期的一律丢掉。
+    term_gen: Cell<u64>,
+    /// 容器终端**重连过几次**（测试钩子：断言「重连真的发生了」）。
+    term_reconnects: Cell<u32>,
+    /// 容器终端的**请求序号**（阶段 119）。
+    ///
+    /// ⚠️ **为什么和 `term_gen` 分开**：`term_gen` 是「**已经挂上去的会话**」
+    ///   的代号（数据过滤用）⇒ **只有真的换会话时才加** ⇒ 探 shell 失败时
+    ///   **不动它**（旧会话的输出照旧显示）；而 `term_req` 是「**请求**」的
+    ///   序号（每次点「重连」都加）⇒ 用来认出「这个请求已经过期了」
+    ///   （用户连点两次 ⇒ 后一个说了算，前一个的通道要关掉）。
+    term_req: Cell<u64>,
     /// **监控页**（阶段 114）。
     monitor: MonitorUi,
     /// 监控曲线的数据（**共享**给四张图 ⇒ 外面套 `Rc<RefCell<…>>`）。
@@ -2172,6 +2221,20 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         term_win: RefCell::new(None),
         term_closing: Cell::new(false),
         term_view: RefCell::new(None),
+        term_bar: RefCell::new(None),
+        term_shell_combo: RefCell::new(None),
+        term_search_bar: RefCell::new(None),
+        term_find_entry: RefCell::new(None),
+        term_shell_items: RefCell::new(Vec::new()),
+        term_status: RefCell::new(None),
+        term_reconnect_btn: RefCell::new(None),
+        term_clear_btn: RefCell::new(None),
+        term_search_btn: RefCell::new(None),
+        term_name: RefCell::new(String::new()),
+        term_shell: RefCell::new(String::new()),
+        term_gen: Cell::new(0),
+        term_reconnects: Cell::new(0),
+        term_req: Cell::new(0),
         selected: RefCell::new(String::new()),
         selected_project: RefCell::new(String::new()),
         restoring: Cell::new(false),
@@ -3366,6 +3429,20 @@ fn do_compose_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: ComposeActi
     });
 }
 
+/// 容器终端**用的 shell**：自动（挨个试）还是**点名**。
+///
+/// ⚠️ **为什么分两种**（阶段 119）：界面上可以让用户**点名**要某个 shell
+///   （比如 `/bin/bash`）⇒ 点名的那个**用不了**时得**说清楚**
+///   （「这个容器里没有 /bin/bash」），**不能悄悄换一个**
+///   （悄悄换 = 用户以为自己在用 bash，其实是 sh ⇒ 脚本行为不一样）。
+#[derive(Clone, Debug)]
+enum ShellChoice {
+    /// 自动（挨个试 `/bin/sh` → `/bin/bash` → …）。
+    Auto,
+    /// 点名要某个 shell。
+    Named(String),
+}
+
 /// 打开**容器内终端**（`docker exec -it`；阶段 113）。
 ///
 /// ⚠️ **走共享连接**上的独立 exec 通道（不新增 SSH 连接）。
@@ -3373,12 +3450,47 @@ fn do_compose_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: ComposeActi
 ///    全都没有才报错（说清楚试了哪些）。
 /// ⚠️ **终端另开一个窗口**：容器详情区只有一小块 ⇒ 终端塞进去只有几行
 ///    （用户没法用）⇒ 单独一个窗口（跟「外观窗口」「凭据库管理器」一样）。
+/// ⚠️ **阶段 119**：窗口与终端控件**只建一次** ⇒ 「重连 / 换 shell」
+///    **复用**它们（不另开窗口、不重建控件 ⇒ 滚动缓冲也还在）。
 fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     // 已经在开着 ⇒ 别开第二个（远端会多一个孤儿 shell）。
     if ui.term_running.get() {
         ui.status.set_text(tr("容器终端已经开着（在另一个窗口里）"));
         return;
     }
+    *ui.term_name.borrow_mut() = name.to_string();
+    ensure_term_window(st, ui, name);
+    start_term_session(st, ui, name, ShellChoice::Auto);
+}
+
+/// **建容器终端的窗口**（第一次开时建；以后**复用**）。
+///
+/// ⚠️ **为什么复用**：重连 / 换 shell 时**不该**弹第二个窗口（用户以为
+///   界面出问题了）⇒ 窗口、工具条、搜索条、终端控件**都留着**。
+fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    // 窗口还**在屏幕上** ⇒ 复用（不用重建）。
+    let alive = ui
+        .term_win
+        .borrow()
+        .as_ref()
+        .map(|w| w.is_visible())
+        .unwrap_or(false);
+    if alive {
+        return;
+    }
+    // ⚠️ **旧的窗口已经关掉了**（里面的控件也跟着销毁了）⇒ 句柄**全丢掉**，
+    //    别攥着一个已销毁的控件（再用会炸）。
+    *ui.term_win.borrow_mut() = None;
+    ui.term_view.borrow_mut().take();
+    *ui.term_bar.borrow_mut() = None;
+    *ui.term_shell_combo.borrow_mut() = None;
+    *ui.term_search_bar.borrow_mut() = None;
+    *ui.term_find_entry.borrow_mut() = None;
+    ui.term_shell_items.borrow_mut().clear();
+    *ui.term_status.borrow_mut() = None;
+    *ui.term_reconnect_btn.borrow_mut() = None;
+    *ui.term_clear_btn.borrow_mut() = None;
+    *ui.term_search_btn.borrow_mut() = None;
 
     // ⚠️ **后端跟主终端一致**（用户在首选项里选了 ghostty ⇒ 容器终端也
     //    是 ghostty）⇒ 行为统一。
@@ -3389,19 +3501,130 @@ fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     let win = gtk::Window::new();
     win.set_title(Some(&trf!("容器终端：{n}", n = name)));
     win.set_default_size(900, 560);
+
     let status = gtk::Label::new(Some(tr("正在打开容器终端…")));
     status.set_xalign(0.0);
     status.set_margin_start(6);
     status.set_margin_end(6);
     status.set_margin_bottom(4);
     status.add_css_class("dim-label");
+
+    // ---- 工具条（阶段 119：切 shell / 重连 / 清屏 / 搜索）----
+    let shell_lbl = gtk::Label::new(Some(tr("Shell")));
+    let shell_combo = gtk::ComboBoxText::new();
+    // ⚠️ **第 0 项是「自动」**（挨个试）⇒ 默认行为跟以前一模一样。
+    let mut shell_items: Vec<String> = Vec::new();
+    shell_combo.append_text(tr("自动"));
+    shell_items.push(tr("自动").to_string());
+    for sh in docker::SHELL_CANDIDATES {
+        shell_combo.append_text(sh);
+        shell_items.push(sh.to_string());
+    }
+    shell_combo.set_active(Some(0));
+
+    let reconnect_btn = gtk::Button::with_label(tr("重连"));
+    reconnect_btn.set_tooltip_text(Some(tr("断开当前会话，用上面选的 shell 重新进入容器")));
+    let clear_btn = gtk::Button::with_label(tr("清屏"));
+    clear_btn.set_tooltip_text(Some(tr("清掉屏幕上的输出")));
+    let search_btn = gtk::ToggleButton::with_label(tr("搜索"));
+    search_btn.set_tooltip_text(Some(tr("在容器终端的输出里查找")));
+
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    bar.set_margin_start(6);
+    bar.set_margin_end(6);
+    bar.set_margin_top(4);
+    bar.set_margin_bottom(2);
+    bar.append(&shell_lbl);
+    bar.append(&shell_combo);
+    bar.append(&reconnect_btn);
+    bar.append(&clear_btn);
+    bar.append(&search_btn);
+
+    // ---- 搜索条（阶段 119）----
+    //
+    // ⚠️ 用的是**共用构件** `findbar`（跟主终端、编辑器同一套外观与按键
+    //    约定：Enter 下一个 / Shift+Enter 上一个 / Esc 关闭）。
+    let fb = crate::findbar::build(crate::findbar::FindOpts::minimal());
+    let search_entry = fb.find_entry.clone();
+    search_entry.set_placeholder_text(Some(tr("在容器终端中查找…")));
+    {
+        let term2 = term.clone();
+        search_entry.connect_changed(move |e| {
+            // ⚠️ 传**普通文本**（不是正则）：转义由后端做。
+            term2.search_set_pattern(Some(&e.text()));
+        });
+    }
+    {
+        let term2 = term.clone();
+        search_entry.connect_activate(move |_| {
+            if !term2.search_find_next() {
+                // 单结果时 next 失败再回绕上一个
+                term2.search_find_previous();
+            }
+        });
+    }
+    {
+        let term2 = term.clone();
+        fb.prev_btn.connect_clicked(move |_| {
+            term2.search_find_previous();
+        });
+        let term2 = term.clone();
+        fb.next_btn.connect_clicked(move |_| {
+            if !term2.search_find_next() {
+                term2.search_find_previous();
+            }
+        });
+    }
+    let search_bar = gtk::SearchBar::new();
+    search_bar.set_child(Some(&fb.root));
+    search_bar.set_show_close_button(true);
+    search_bar.connect_entry(&search_entry);
+
+    // 搜索条开关 ⇄ 工具条上的「搜索」按钮（两边状态要一致）。
+    {
+        let sb = search_bar.clone();
+        search_btn.connect_toggled(move |b| {
+            sb.set_search_mode(b.is_active());
+        });
+    }
+    {
+        let tb = search_btn.clone();
+        search_bar.connect_notify_local(Some("search-mode-enabled"), move |bar, _| {
+            // 搜索条自带的 ✕ 关掉时 ⇒ 按钮也要跟着取消（不然按钮还亮着）。
+            if !bar.is_search_mode() && tb.is_active() {
+                tb.set_active(false);
+            }
+        });
+    }
+    {
+        // Esc 关闭后焦点回终端（不然键盘输入还落在搜索框里）。
+        let term2 = term.clone();
+        search_bar.connect_notify_local(Some("search-mode-enabled"), move |bar, _| {
+            if !bar.is_search_mode() {
+                term2.grab_focus();
+            }
+        });
+    }
+
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.append(&bar);
+    vbox.append(&search_bar);
     vbox.append(&view);
     vbox.append(&status);
     win.set_child(Some(&vbox));
     win.present();
     // ⚠️ **记下窗口句柄**（测试钩子要能关掉它）。
     *ui.term_win.borrow_mut() = Some(win.clone());
+    *ui.term_bar.borrow_mut() = Some(bar);
+    *ui.term_shell_combo.borrow_mut() = Some(shell_combo.clone());
+    *ui.term_shell_items.borrow_mut() = shell_items;
+    *ui.term_search_bar.borrow_mut() = Some(search_bar.clone());
+    *ui.term_find_entry.borrow_mut() = Some(search_entry.clone());
+    *ui.term_status.borrow_mut() = Some(status.clone());
+    *ui.term_reconnect_btn.borrow_mut() = Some(reconnect_btn.clone());
+    *ui.term_clear_btn.borrow_mut() = Some(clear_btn.clone());
+    *ui.term_search_btn.borrow_mut() = Some(search_btn.clone());
+    *ui.term_view.borrow_mut() = Some(term);
 
     // ⚠️ **窗口关掉 ⇒ 远端那条 `docker exec` 也要收掉**（否则容器里会留下
     //    一个孤儿 shell 一直占着）。
@@ -3415,19 +3638,69 @@ fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
         });
     }
 
+    // ---- 工具条上的三个动作 ----
+    {
+        let u = Rc::downgrade(ui);
+        shell_combo.connect_changed(move |c| {
+            let Some(u) = u.upgrade() else { return };
+            let idx = c.active().unwrap_or(0);
+            if idx == 0 {
+                set_term_status(&u, tr("Shell：自动（挨个试 /bin/sh、/bin/bash…）"));
+            } else if let Some(sh) = docker::SHELL_CANDIDATES.get(idx as usize - 1) {
+                set_term_status(
+                    &u,
+                    &trf!("Shell：{s}（点「重连」生效）", s = *sh),
+                );
+            }
+        });
+    }
+    {
+        let stw = Rc::downgrade(st);
+        let uw = Rc::downgrade(ui);
+        reconnect_btn.connect_clicked(move |_| {
+            let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+            reconnect_terminal(&st, &u);
+        });
+    }
+    {
+        let uw = Rc::downgrade(ui);
+        clear_btn.connect_clicked(move |_| {
+            let Some(u) = uw.upgrade() else { return };
+            clear_term_screen(&u);
+        });
+    }
+
     // ⚠️ **尺寸同步不用自己写**：两个后端都自带 ——
     //    VTE 后端每 300ms 看一眼行列数（变了才发 window-change），
     //    ghostty 后端在 `set_term_size` 里发（内核与 pty 一起）。
+}
 
-    // ---- 后台：找 shell → 开通道 → 读循环 ----
+/// 起（重起）一条**容器内终端**通道。
+///
+/// ⚠️ **阶段 119 的顺序很重要**：**先把 shell 探出来**（探不到就报错，
+///    **旧的那条会话不受影响**）⇒ 再开新通道 ⇒ 再关旧通道。
+///    ⇒ 用户点错了 shell（容器里没有）⇒ 正在用的终端**不会被弄死**。
+fn start_term_session(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    name: &str,
+    choice: ShellChoice,
+) {
+    // ⚠️ **请求序号**（每次请求都加）：用来认出「这个请求已经过期了」
+    //   （用户连点两次「重连」⇒ 后一个说了算 ⇒ 前一个的通道要关掉）。
+    //   ⚠️ **会话代号 `term_gen` 这里不动** —— 它是「已经挂上去的会话」的
+    //   编号，只有**真的换会话**时才加 ⇒ 探 shell 失败时旧会话照旧显示。
+    let req = ui.term_req.get() + 1;
+    ui.term_req.set(req);
+
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let name = name.to_string();
-    let name2 = name.clone();
+    let name_bg = name.clone();
     // 事件通道：后台 → 主线程（终端控件**只能**在主线程上碰）。
     let (ev_tx, ev_rx) = async_channel::unbounded::<ShellEvent>();
     let (res_tx, res_rx) = async_channel::bounded::<
-        Result<crate::backend::shell::ShellChannel, String>,
+        Result<(crate::backend::shell::ShellChannel, String), String>,
     >(1);
     let rt = crate::backend::hub::runtime();
     rt.spawn(async move {
@@ -3438,21 +3711,28 @@ fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
                 return;
             }
         };
-        let shell = match docker::find_shell(&session, &name).await {
+        // ⚠️ **选 shell**：自动 ⇒ 挨个试；点名 ⇒ 只探那一个（用不了就报错）。
+        let shell = match choice {
+            ShellChoice::Auto => docker::find_shell(&session, &name_bg).await.map_err(|e| e.0),
+            ShellChoice::Named(sh) => {
+                docker::verify_shell(&session, &name_bg, &sh).await.map_err(|e| e.0)
+            }
+        };
+        let shell = match shell {
             Ok(s) => s,
             Err(e) => {
-                let _ = res_tx.send_blocking(Err(e.0));
+                let _ = res_tx.send_blocking(Err(e));
                 return;
             }
         };
-        let ch = match docker::open_exec_shell(&session, &name, &shell, 80, 24).await {
+        let ch = match docker::open_exec_shell(&session, &name_bg, &shell, 80, 24).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = res_tx.send_blocking(Err(e.0));
                 return;
             }
         };
-        let _ = res_tx.send_blocking(Ok(ch.clone()));
+        let _ = res_tx.send_blocking(Ok((ch.clone(), shell)));
         // 读循环：远程字节 → 主线程（终端控件在主线程 ⇒ 必须这么走）。
         while let Some(ev) = ch.next_event().await {
             if ev_tx.send(ev).await.is_err() {
@@ -3464,44 +3744,151 @@ fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     // ---- 主线程：拿到通道 ⇒ 交给终端控件 ----
     {
         let u = Rc::downgrade(ui);
-        let status2 = status.clone();
-        let term2 = term.clone();
         glib::MainContext::default().spawn_local(async move {
             match res_rx.recv().await {
-                Ok(Ok(chan)) => {
+                Ok(Ok((chan, shell))) => {
                     let Some(u) = u.upgrade() else { return };
-                    let chan2 = chan.clone();
-                    let st2 = status2.clone();
-                    let ok = term2.attach_shell(
-                        chan,
-                        ev_rx,
+                    // ⚠️ **过期了**（用户连点了两次「重连」）⇒ 把这条通道
+                    //    关掉（别在容器里留一个孤儿 shell）⇒ 忽略。
+                    if u.term_req.get() != req {
+                        chan.close();
+                        return;
+                    }
+                    // ⚠️ **旧的那条先关掉**（重连 ⇒ 容器里那个 shell 退出）。
+                    let was_running = u.term_running.get();
+                    close_term_channel(&u);
+                    let Some(view) = u.term_view.borrow().clone() else {
+                        // 没有控件（窗口已经被关了）⇒ 关掉这条通道。
+                        chan.close();
+                        return;
+                    };
+                    // ⚠️ **会话代号**（**真的换会话了**才加）⇒ 旧会话残留的
+                    //    数据从这一刻起全部丢掉（见 `term_gen` 的说明）。
+                    let generation = u.term_gen.get() + 1;
+                    u.term_gen.set(generation);
+                    // ⚠️ **清屏**：旧会话的输出对新会话**没有意义**
+                    //    （留着会让人以为「刚才那些命令是在新会话里跑的」）。
+                    view.reset(true, true);
+                    // 事件转发（**带代次检查** ⇒ 旧会话残留的数据丢掉）。
+                    let (out_tx, out_rx) = async_channel::unbounded::<ShellEvent>();
+                    {
+                        let uw = Rc::downgrade(&u);
+                        glib::MainContext::default().spawn_local(async move {
+                            while let Ok(ev) = ev_rx.recv().await {
+                                let Some(uu) = uw.upgrade() else { break };
+                                // 过期的一代 ⇒ 丢弃（并退出这条转发）。
+                                if uu.term_gen.get() != generation {
+                                    break;
+                                }
+                                if out_tx.send(ev).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    let status2 = u.term_status.borrow().clone();
+                    let ok = view.attach_shell(
+                        chan.clone(),
+                        out_rx,
                         Box::new(move |code| {
                             let msg = if code == 0 {
                                 tr("容器终端已退出").to_string()
                             } else {
                                 trf!("容器终端已退出（退出码 {c}）", c = code)
                             };
-                            st2.set_text(&msg);
+                            if let Some(s) = status2.as_ref() {
+                                s.set_text(&msg);
+                            }
                         }),
                     );
                     if !ok {
-                        status2.set_text(tr("当前终端后端不支持容器终端"));
+                        if let Some(s) = u.term_status.borrow().as_ref() {
+                            s.set_text(tr("当前终端后端不支持容器终端"));
+                        }
                         return;
                     }
-                    *u.term_chan.borrow_mut() = Some(chan2);
-                    *u.term_view.borrow_mut() = Some(term2.clone());
+                    *u.term_chan.borrow_mut() = Some(chan);
                     u.term_running.set(true);
-                    status2.set_text(&trf!(
-                        "容器终端：{n}（输入 exit 可以退出）",
-                        n = name2
-                    ));
+                    *u.term_shell.borrow_mut() = shell.clone();
+                    *u.term_name.borrow_mut() = name.clone();
+                    if was_running {
+                        u.term_reconnects.set(u.term_reconnects.get() + 1);
+                    }
+                    // 标题带上 shell（一眼看得出现在用的是哪个）。
+                    if let Some(w) = u.term_win.borrow().as_ref() {
+                        w.set_title(Some(&trf!("容器终端：{n}（{s}）", n = name, s = shell)));
+                    }
+                    set_term_status(
+                        &u,
+                        &trf!(
+                            "容器终端：{n}（shell：{s}，输入 exit 可以退出）",
+                            n = name,
+                            s = shell
+                        ),
+                    );
                 }
                 Ok(Err(msg)) => {
-                    status2.set_text(&msg);
+                    let Some(u) = u.upgrade() else { return };
+                    // ⚠️ **失败时旧会话还在**（探 shell 失败发生在关旧通道
+                    //    之前）⇒ 用户的终端**没被弄死**。
+                    set_term_status(&u, &msg);
                 }
                 Err(_) => {}
             }
         });
+    }
+}
+
+/// **只关通道**（**不动窗口 / 控件**）—— 重连、换 shell 时用。
+fn close_term_channel(ui: &Rc<DockerUi>) {
+    if let Some(ch) = ui.term_chan.borrow_mut().take() {
+        ch.close();
+    }
+    ui.term_running.set(false);
+}
+
+/// **重连**：断开当前会话，用下拉里选的 shell 重新进去。
+fn reconnect_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    let name = ui.term_name.borrow().clone();
+    if name.is_empty() {
+        set_term_status(ui, tr("容器终端还没打开"));
+        return;
+    }
+    let choice = current_shell_choice(ui);
+    set_term_status(ui, tr("正在重新连接…"));
+    start_term_session(st, ui, &name, choice);
+}
+
+/// 工具条下拉当前选的 shell（0 = 自动）。
+fn current_shell_choice(ui: &Rc<DockerUi>) -> ShellChoice {
+    let combo = ui.term_shell_combo.borrow();
+    let Some(c) = combo.as_ref() else {
+        return ShellChoice::Auto;
+    };
+    let idx = c.active().unwrap_or(0) as usize;
+    if idx == 0 {
+        return ShellChoice::Auto;
+    }
+    match docker::SHELL_CANDIDATES.get(idx - 1) {
+        Some(s) => ShellChoice::Named((*s).to_string()),
+        None => ShellChoice::Auto,
+    }
+}
+
+/// **清屏**：把终端画面擦干净（不动会话）。
+fn clear_term_screen(ui: &Rc<DockerUi>) {
+    let view = ui.term_view.borrow();
+    if let Some(t) = view.as_ref() {
+        // ⚠️ **软复位 + 清屏**（`hard=false`）⇒ 只是擦画面，
+        //    不用把整台终端重新初始化。
+        t.reset(false, true);
+    }
+}
+
+/// 改容器终端的状态文字（**没开窗口时什么都不做**）。
+fn set_term_status(ui: &Rc<DockerUi>, text: &str) {
+    if let Some(s) = ui.term_status.borrow().as_ref() {
+        s.set_text(text);
     }
 }
 
@@ -3513,9 +3900,11 @@ fn stop_terminal(ui: &Rc<DockerUi>) {
         return;
     }
     ui.term_closing.set(true);
-    if let Some(ch) = ui.term_chan.borrow_mut().take() {
-        ch.close();
-    }
+    close_term_channel(ui);
+    // ⚠️ **代次 +1** ⇒ 旧会话残留的事件全部丢掉（别再喂进终端控件）。
+    ui.term_gen.set(ui.term_gen.get() + 1);
+    // ⚠️ **请求序号 +1** ⇒ 还在路上的请求作废（它到了也没地方挂）。
+    ui.term_req.set(ui.term_req.get() + 1);
     // ⚠️ **控件句柄也要清掉**：窗口已经关了 ⇒ 那个控件已经被销毁 ⇒
     //    攥着它再用会炸。
     ui.term_view.borrow_mut().take();
@@ -4037,6 +4426,130 @@ pub fn term_window_open_for_test(st: &Rc<PanelState>) -> bool {
         .as_ref()
         .map(|w| w.is_visible())
         .unwrap_or(false)
+}
+
+/* ---------------- 阶段 119：容器终端工具条的测试钩子 ---------------- */
+
+/// 测试钩子：容器终端**工具条**上的东西（阶段 119）。
+///
+/// 返回 `(下拉里的选项, 工具条在不在屏幕上)`。
+///
+/// ⚠️ **为什么连选项一起返回**：光说「有个下拉」没用 ⇒ 得看得见**里面
+///   有什么**（自动 ＋ 四个候选）⇒ 用户才知道能选什么。
+pub fn term_toolbar_for_test(st: &Rc<PanelState>) -> (Vec<String>, bool, String) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return (Vec::new(), false, String::new());
+    };
+    let opts = ui.term_shell_items.borrow().clone();
+    let visible = ui
+        .term_bar
+        .borrow()
+        .as_ref()
+        .map(|b| b.is_visible())
+        .unwrap_or(false);
+    // ⚠️ **当前选中的那一项**从**真的下拉**里读（不是从我们自己记的
+    //    列表里读）⇒ 验的是「用户看见的那个」。
+    let active = ui
+        .term_shell_combo
+        .borrow()
+        .as_ref()
+        .and_then(|c| c.active_text())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    (opts, visible, active)
+}
+
+/// 测试钩子：**选**工具条下拉里的第几项（阶段 119；0 = 自动）。
+pub fn term_select_shell_for_test(st: &Rc<PanelState>, idx: u32) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let combo = ui.term_shell_combo.borrow();
+    if let Some(c) = combo.as_ref() {
+        c.set_active(Some(idx));
+    }
+}
+
+/// 测试钩子：点「重连」（阶段 119）。
+pub fn term_reconnect_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let btn = ui.term_reconnect_btn.borrow();
+    if let Some(b) = btn.as_ref() {
+        b.emit_clicked();
+    }
+}
+
+/// 测试钩子：点「清屏」（阶段 119）。
+pub fn term_clear_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let btn = ui.term_clear_btn.borrow();
+    if let Some(b) = btn.as_ref() {
+        b.emit_clicked();
+    }
+}
+
+/// 测试钩子：点「搜索」（阶段 119）⇒ 返回**搜索条现在是不是开着**。
+pub fn term_search_toggle_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let btn = ui.term_search_btn.borrow();
+    if let Some(b) = btn.as_ref() {
+        b.emit_clicked();
+    }
+    ui.term_search_bar
+        .borrow()
+        .as_ref()
+        .map(|s| s.is_search_mode())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：在容器终端的**搜索框里填词并找下一个**（阶段 119）。
+///
+/// 返回**找到没有**。
+pub fn term_search_for_test(st: &Rc<PanelState>, text: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    // ⚠️ **走真的输入框**（不是直接调后端）⇒ 顺带验「输入框 → 后端」
+    //    那根线**真的接上了**。
+    if let Some(e) = ui.term_find_entry.borrow().as_ref() {
+        e.set_text(text);
+    }
+    let view = ui.term_view.borrow();
+    match view.as_ref() {
+        // ⚠️ **跟界面上的行为一样**：next 找不到就回绕找 previous
+        //   （输出在**光标前面**时 next 找不到 ⇒ 界面也是这么兜的）。
+        Some(t) => t.search_find_next() || t.search_find_previous(),
+        None => false,
+    }
+}
+
+/// 测试钩子：容器终端**当前用的 shell**（阶段 119；空 = 还没建起来）。
+pub fn term_shell_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    ui.term_shell.borrow().clone()
+}
+
+/// 测试钩子：容器终端**重连过几次**（阶段 119）。
+///
+/// ⚠️ **为什么要有**：光看「屏幕上还有没有输出」分不清「重连了」与
+///   「没重连但输出还在」⇒ 要一个**外部可观察**的量。
+pub fn term_reconnects_for_test(st: &Rc<PanelState>) -> u32 {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.term_reconnects.get()).unwrap_or(0)
+}
+
+/// 测试钩子：容器终端的**状态文字**（阶段 119）。
+pub fn term_status_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    ui.term_status
+        .borrow()
+        .as_ref()
+        .map(|l| l.text().to_string())
+        .unwrap_or_default()
 }
 
 /// 测试钩子：**loading 动画**的状态（用户 2026-11-16）。

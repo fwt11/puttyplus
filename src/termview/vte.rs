@@ -103,10 +103,18 @@ pub fn paste_clipboard(term: &vte::Terminal) {
 ///
 /// ⚠️ VTE 的查找用的是**正则**（PCRE）⇒ 普通文本要先转义，
 /// 否则用户搜 `a.b` 会把 `a` + 任意字符 + `b` 也匹配上。
+///
+/// ⚠️⚠️ **必须用 `for_search`，不能用 `for_match`**（阶段 119 实测）：
+///    VTE 给正则分了**用途**（match / search）⇒ `vte_terminal_set_search_regex`
+///    会检查「这个正则是不是 search 用途」⇒ 用 `for_match` 建出来的
+///    **会被 VTE 当场拒收**（终端里刷一行
+///    `VTE-CRITICAL: assertion 'regex == nullptr ||
+///    _vte_regex_has_purpose(regex, Purpose::eSearch)' failed`）
+///    ⇒ **搜索永远搜不到东西**（Linux 主终端的 Ctrl+F 也一样废）。
 pub fn search_set_pattern(term: &vte::Terminal, pattern: Option<&str>) {
     let rx = pattern.map(|p| {
         let pat = regex_escape(p);
-        vte::Regex::for_match(&pat, 0).ok()
+        vte::Regex::for_search(&pat, 0).ok()
     });
     match rx {
         // 模式是空 ⇒ 取消查找（VTE 收 None）

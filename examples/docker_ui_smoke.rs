@@ -2136,6 +2136,300 @@ fn main() {
         }
     }
 
+    // ================= O 组：阶段 119 —— 容器终端的工具条 =================
+    //
+    // ⚠️ **对标 dbx**：容器终端还差「切 shell / 重连 / 清屏 / 搜索输出」
+    //   四样 ⇒ 这一组专测它们。
+    //
+    // ⚠️ **断言全落在「动作的结果」上**（不是「控件的属性」）：
+    //   - 切 shell ⇒ 容器里 `echo $0` 的回显要变成那个 shell；
+    //   - 换不存在的 shell ⇒ **中文报错** ＋ **正在用的终端不受影响**；
+    //   - 重连 ⇒ 命令还能跑 ＋ 远端**只留一个** docker exec；
+    //   - 清屏 ⇒ 屏幕上的字真的没了；
+    //   - 搜索 ⇒ 真的能找到屏幕上的历史输出。
+    {
+        let cs = dockerui::containers_for_test(&panel2.st);
+        let c0 = cs
+            .iter()
+            .find(|c| c.state == "running")
+            .or_else(|| cs.first())
+            .cloned();
+        if let Some(c0) = c0 {
+            let name = c0.name.clone();
+
+            // ---- 先探容器里**到底哪些 shell 能用**（⇒ 挑「有的」和「没有的」）----
+            //
+            // ⚠️ **为什么要探**：断言「切到 /bin/bash」得先知道容器里**有**
+            //   bash；断言「切到不存在的 shell 会报错」也得先知道哪个不存在
+            //   ⇒ 拿 `verify_shell`（阶段 119 新增的后端 API）探。
+            let probe = {
+                let keyfile_p = keyfile_f.clone();
+                let user_p = user.clone();
+                let name_p = name.clone();
+                hub::runtime().block_on(async move {
+                    let creds = hub::Creds {
+                        keyfile: Some(keyfile_p),
+                        ..Default::default()
+                    };
+                    let key = hub::ServerKey::new(HOST, port, &user_p);
+                    let Ok(shared) = hub::acquire(key, &creds).await else {
+                        return (None, None);
+                    };
+                    let mut have: Option<String> = None;
+                    let mut missing: Option<String> = None;
+                    for sh in docker::SHELL_CANDIDATES {
+                        // ⚠️ `/bin/sh` 跳过（它几乎一定在 ⇒ 探了也是白探）。
+                        if sh == "/bin/sh" {
+                            continue;
+                        }
+                        match docker::verify_shell(shared.session().as_ref(), &name_p, sh).await {
+                            Ok(_) => {
+                                if have.is_none() {
+                                    have = Some(sh.to_string());
+                                }
+                            }
+                            Err(_) => {
+                                if missing.is_none() {
+                                    missing = Some(sh.to_string());
+                                }
+                            }
+                        }
+                    }
+                    (have, missing)
+                })
+            };
+            let (have_shell, missing_shell) = probe;
+            println!(
+                "[信息] 容器 {name} 里能用的 shell={have_shell:?}、不能用的={missing_shell:?}"
+            );
+
+            // ---- 进容器（走工具条上的「进入容器」按钮 ⇒ 顺带验阶段 117 的入口）----
+            dockerui::stop_terminal_for_test(&panel2.st);
+            pump(300);
+            dockerui::select_container_for_test(&panel2.st, &name);
+            pump(200);
+            dockerui::enter_click_for_test(&panel2.st);
+            let mut waited = 0;
+            while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
+                pump(200);
+                waited += 1;
+            }
+            check!(
+                "㉓ 进容器后终端跑起来了",
+                dockerui::term_running_for_test(&panel2.st),
+                format!("等了 {waited} 次还没起来")
+            );
+
+            // ---- **工具条在**（切 shell / 重连 / 清屏 / 搜索）----
+            let (opts, bar_visible, active) = dockerui::term_toolbar_for_test(&panel2.st);
+            check!("㉓ 容器终端有工具条", bar_visible, "工具条不可见");
+            check!(
+                "㉓ 工具条上有 shell 下拉（自动 ＋ 四个候选）",
+                opts.len() == 5
+                    && opts[0] == "自动"
+                    && opts.contains(&"/bin/bash".to_string())
+                    && opts.contains(&"/bin/zsh".to_string()),
+                format!("下拉内容={opts:?}")
+            );
+            check!(
+                "㉓ 下拉默认是「自动」",
+                active == "自动",
+                format!("当前选中={active:?}")
+            );
+
+            // ---- **搜索**：屏幕上有历史输出 ⇒ 搜得到 ----
+            dockerui::term_send_for_test(&panel2.st, b"echo SEARCHMARK-119\n");
+            let mut w = 0;
+            let mut screen = String::new();
+            while w < 30 {
+                pump(200);
+                w += 1;
+                screen = dockerui::term_screen_for_test(&panel2.st);
+                if screen.contains("SEARCHMARK-119") {
+                    break;
+                }
+            }
+            check!(
+                "㉓ 搜索前屏幕上有那行输出",
+                screen.contains("SEARCHMARK-119"),
+                format!("屏幕上没有：\n{screen}")
+            );
+            let found = dockerui::term_search_for_test(&panel2.st, "SEARCHMARK-119");
+            check!("㉓ 能在容器终端的输出里搜到", found, "搜索没命中");
+            // ⚠️ **搜索条能开**（点「搜索」⇒ 搜索条出来）。
+            let bar_on = dockerui::term_search_toggle_for_test(&panel2.st);
+            check!("㉓ 点「搜索」能打开搜索条", bar_on, "搜索条没打开");
+            dockerui::term_search_toggle_for_test(&panel2.st); // 再点一下关掉
+
+            // ---- **清屏**：屏幕上的字真的没了 ----
+            dockerui::term_clear_for_test(&panel2.st);
+            pump(500);
+            let screen2 = dockerui::term_screen_for_test(&panel2.st);
+            check!(
+                "㉓ 点「清屏」后屏幕真的空了",
+                !screen2.contains("SEARCHMARK-119"),
+                format!("清屏后还在：\n{screen2}")
+            );
+
+            // ---- **重连**：同一个 shell 重开 ⇒ 命令照跑 ----
+            let rc0 = dockerui::term_reconnects_for_test(&panel2.st);
+            dockerui::term_reconnect_for_test(&panel2.st);
+            let mut w2 = 0;
+            while w2 < 40 && dockerui::term_reconnects_for_test(&panel2.st) == rc0 {
+                pump(200);
+                w2 += 1;
+            }
+            check!(
+                "㉓ 点「重连」真的重连了",
+                dockerui::term_reconnects_for_test(&panel2.st) > rc0,
+                format!("等了 {w2} 次重连次数还是 {rc0}")
+            );
+            dockerui::term_send_for_test(&panel2.st, b"echo RECONNECT-OK-119\n");
+            let mut w3 = 0;
+            let mut screen3 = String::new();
+            while w3 < 30 {
+                pump(200);
+                w3 += 1;
+                screen3 = dockerui::term_screen_for_test(&panel2.st);
+                if screen3.contains("RECONNECT-OK-119") {
+                    break;
+                }
+            }
+            check!(
+                "㉓ 重连后命令还能跑",
+                screen3.contains("RECONNECT-OK-119"),
+                format!("屏幕上没有：\n{screen3}")
+            );
+            check!(
+                "㉓ 重连后窗口还是那个（没另开一个）",
+                dockerui::term_window_open_for_test(&panel2.st),
+                "终端窗口不见了"
+            );
+
+            // ---- **换不存在的 shell** ⇒ 中文报错 ＋ **正在用的终端不受影响** ----
+            if let Some(bad) = missing_shell.clone() {
+                let idx = docker::SHELL_CANDIDATES
+                    .iter()
+                    .position(|s| *s == bad)
+                    .map(|i| i as u32 + 1)
+                    .unwrap_or(1);
+                dockerui::term_select_shell_for_test(&panel2.st, idx);
+                pump(300);
+                let rc1 = dockerui::term_reconnects_for_test(&panel2.st);
+                dockerui::term_reconnect_for_test(&panel2.st);
+                let mut w4 = 0;
+                while w4 < 30 {
+                    pump(200);
+                    w4 += 1;
+                    if dockerui::term_status_for_test(&panel2.st).contains("没有") {
+                        break;
+                    }
+                }
+                let st_msg = dockerui::term_status_for_test(&panel2.st);
+                check!(
+                    "㉓ 换一个容器里没有的 shell 会给出中文报错",
+                    st_msg.contains("没有") && st_msg.contains(&bad),
+                    format!("状态栏={st_msg:?}")
+                );
+                check!(
+                    "㉓ 换 shell 失败不会弄死正在用的终端",
+                    dockerui::term_running_for_test(&panel2.st)
+                        && dockerui::term_reconnects_for_test(&panel2.st) == rc1,
+                    "终端被弄死了"
+                );
+                // ⚠️ **旧终端还得能用**（不是「还开着」而已）。
+                dockerui::term_send_for_test(&panel2.st, b"echo STILL-ALIVE-119\n");
+                let mut w5 = 0;
+                let mut screen5 = String::new();
+                while w5 < 30 {
+                    pump(200);
+                    w5 += 1;
+                    screen5 = dockerui::term_screen_for_test(&panel2.st);
+                    if screen5.contains("STILL-ALIVE-119") {
+                        break;
+                    }
+                }
+                check!(
+                    "㉓ 换 shell 失败后旧终端还能用",
+                    screen5.contains("STILL-ALIVE-119"),
+                    format!("屏幕上没有：\n{screen5}")
+                );
+            }
+
+            // ---- **换成真有的 shell** ⇒ `echo $0` 要变成它 ----
+            if let Some(good) = have_shell.clone() {
+                let idx = docker::SHELL_CANDIDATES
+                    .iter()
+                    .position(|s| *s == good)
+                    .map(|i| i as u32 + 1)
+                    .unwrap_or(1);
+                dockerui::term_select_shell_for_test(&panel2.st, idx);
+                pump(300);
+                let rc2 = dockerui::term_reconnects_for_test(&panel2.st);
+                dockerui::term_reconnect_for_test(&panel2.st);
+                let mut w6 = 0;
+                while w6 < 40 && dockerui::term_reconnects_for_test(&panel2.st) == rc2 {
+                    pump(200);
+                    w6 += 1;
+                }
+                check!(
+                    "㉓ 换 shell 后重连次数加了",
+                    dockerui::term_reconnects_for_test(&panel2.st) > rc2,
+                    format!("等了 {w6} 次还是 {rc2}")
+                );
+                check!(
+                    "㉓ 换完之后用的就是那个 shell",
+                    dockerui::term_shell_for_test(&panel2.st) == good,
+                    format!("现在用的是 {:?}", dockerui::term_shell_for_test(&panel2.st))
+                );
+                // ⚠️ **由容器里的程序回答**（`echo $0`）⇒ 骗不了人。
+                dockerui::term_send_for_test(&panel2.st, b"echo $0\n");
+                let mut w7 = 0;
+                let mut screen7 = String::new();
+                while w7 < 30 {
+                    pump(200);
+                    w7 += 1;
+                    screen7 = dockerui::term_screen_for_test(&panel2.st);
+                    if screen7.contains("echo $0") {
+                        break;
+                    }
+                }
+                check!(
+                    "㉓ 容器里的 $0 就是选的那个 shell",
+                    screen7.contains(&good),
+                    format!("屏幕上没有 {good}：\n{screen7}")
+                );
+            }
+
+            // ---- 重连后远端**只留一个** docker exec（旧的被收掉了）----
+            let mut w8 = 0;
+            let mut procs = String::new();
+            while w8 < 20 {
+                procs = remote_procs(&opts_f, "docker exec");
+                let n = procs.lines().filter(|l| l.contains(&name)).count();
+                if n <= 1 {
+                    break;
+                }
+                pump(300);
+                w8 += 1;
+            }
+            let n_exec = procs.lines().filter(|l| l.contains(&name)).count();
+            check!(
+                "㉓ 重连后远端只留一个 docker exec（旧的收掉了）",
+                n_exec == 1,
+                format!("远端有 {n_exec} 个：\n{procs}")
+            );
+
+            // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张带工具条的容器终端。
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                shot(&format!("{base}-term-tools.png"));
+            }
+
+            dockerui::stop_terminal_for_test(&panel2.st);
+            pump(400);
+        }
+    }
+
         }
     }
     }

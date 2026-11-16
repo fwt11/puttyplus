@@ -521,6 +521,7 @@ pub async fn find_shell(session: &Handle<HostKeyHandler>, name: &str) -> Backend
         }
         last = out;
     }
+    // ⚠️ **先分类**（容器没运行 / 没权限 ⇒ 说那件事，别说「没有 shell」）。
     let low = last.to_ascii_lowercase();
     if low.contains("is not running") || low.contains("container is not running") {
         return Err(BackendError(
@@ -537,6 +538,48 @@ pub async fn find_shell(session: &Handle<HostKeyHandler>, name: &str) -> Backend
         "这个容器里没有可用的 shell（试过 {list}）",
         list = SHELL_CANDIDATES.join("、")
     )))
+}
+
+/// 探**用户点名**的某个 shell 在容器里能不能用（**不挨个试**）。
+///
+/// ⚠️ **为什么要有这个**（阶段 119）：界面上可以让用户**点名**要哪个
+///    shell（比如 `/bin/bash`）⇒ 点名的那个**不能用**时得说清楚
+///    （「这个容器里没有 /bin/bash」），**不能悄悄换一个**。
+///    （挨个试的 [`find_shell`] 是「自动」模式用的。）
+pub async fn verify_shell(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+    shell: &str,
+) -> BackendResult<String> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let (code, out) = run_cmd(session, &shell_probe_cmd(name, shell)).await?;
+    if code == 0 {
+        return Ok(shell.to_string());
+    }
+    Err(BackendError(shell_probe_error_msg(shell, &out)))
+}
+
+/// 探 shell 失败时**分类**成一句中文提示（**纯函数** ⇒ 能单测）。
+///
+/// ⚠️ **为什么要分类**：容器**没在运行** / **账号没权限** ⇒ 说「没有这个
+///   shell」是**误导** ⇒ 用户会照着错误提示去改 shell 名（越改越不对）。
+/// ⚠️ **「没有这个 shell」那条要给出「怎么办」**：把**能换的**列出来。
+pub fn shell_probe_error_msg(shell: &str, out: &str) -> String {
+    let low = out.to_ascii_lowercase();
+    if low.contains("is not running") || low.contains("container is not running") {
+        return tr("这个容器没有在运行（先启动它才能进终端）").to_string();
+    }
+    if low.contains("permission denied") || low.contains("docker.sock") {
+        return tr("当前账号没有访问 Docker 的权限（需要加入 docker 组，或改用有权限的账号登录）")
+            .to_string();
+    }
+    trf!(
+        "这个容器里没有 {sh}（可以换一个：{list}）",
+        sh = shell,
+        list = SHELL_CANDIDATES.join("、")
+    )
 }
 
 /// 开一条**容器内终端**通道（`docker exec -it`）。
@@ -2190,6 +2233,41 @@ mod tests {
         for s in ["/bin/bash", "/bin/ash", "/bin/zsh"] {
             assert!(SHELL_CANDIDATES.contains(&s), "候选里少了 {s}");
         }
+    }
+
+    /* ---------------- 阶段 119：点名要某个 shell ---------------- */
+
+    /// 点名的 shell **没有** ⇒ 报错要**点名说是哪个**、还要给出**能换的**。
+    #[test]
+    fn 点名的shell没有时报错说清楚() {
+        let m = shell_probe_error_msg("/bin/zsh", "OCI runtime exec failed: exec: \"/bin/zsh\": not found");
+        assert!(m.contains("/bin/zsh"), "报错里要点名是哪个 shell：{m}");
+        assert!(
+            m.contains("/bin/sh") && m.contains("/bin/bash"),
+            "报错要列出能换的：{m}"
+        );
+    }
+
+    /// ⚠️ **容器没在运行** ⇒ 别说「没有这个 shell」（用户会照着改 shell 名）。
+    #[test]
+    fn 容器没运行时说的是那件事() {
+        let m = shell_probe_error_msg("/bin/bash", "Error response from daemon: Container abc is not running");
+        assert!(
+            m.contains("没有在运行"),
+            "应当说容器没在运行：{m}"
+        );
+        assert!(!m.contains("/bin/bash"), "别扯到 shell 名上：{m}");
+    }
+
+    /// ⚠️ **账号没权限** ⇒ 同样单独说（这是**账号**的问题，不是 shell 的）。
+    #[test]
+    fn 没权限时说的是那件事() {
+        let m = shell_probe_error_msg("/bin/bash", "permission denied while trying to connect to the Docker daemon socket");
+        assert!(
+            m.contains("权限"),
+            "应当说权限问题：{m}"
+        );
+        assert!(!m.contains("/bin/bash"), "别扯到 shell 名上：{m}");
     }
 
     /* ---------------- 阶段 114：监控曲线 ---------------- */
