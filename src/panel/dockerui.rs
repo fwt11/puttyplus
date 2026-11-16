@@ -53,6 +53,8 @@ const PAGE_OVERVIEW: &str = "overview";
 const PAGE_LOGS: &str = "logs";
 /// 监控页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
 const PAGE_MONITOR: &str = "monitor";
+/// 文件页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
+const PAGE_FILES: &str = "files";
 
 /// 采样间隔（秒）：**阶段 114**。
 ///
@@ -230,6 +232,25 @@ pub struct DockerUi {
     images_busy: Cell<bool>,
     volumes_busy: Cell<bool>,
     networks_busy: Cell<bool>,
+    /// **「文件」页**（阶段 116）。
+    files: FilesUi,
+    /// 文件页**正在列的是哪个容器**（空 = 没选容器）。
+    files_name: RefCell<String>,
+    /// 文件页**当前目录**（远程 POSIX 路径）。
+    files_path: RefCell<String>,
+    /// 文件页**正在传**（上传 / 下载 ⇒ 不许再开一个）。
+    files_xfer: Cell<bool>,
+    /// 文件页**已经完成了几次传输**（上传 / 下载各算一次）。
+    ///
+    /// ⚠️ **给冒烟用的**：状态行会被刷新冲掉 ⇒ 冒烟没法靠它判断「传完了
+    ///   没有」⇒ 用一个**只增不减的计数**（每完成一次 +1）⇒ 冒烟比大小。
+    files_xfer_done: Cell<u64>,
+    /// 文件页**取列表的序号**（只认最新一次的结果）。
+    ///
+    /// ⚠️ **为什么需要**：用户连点目录时，**好几个请求同时在飞** ⇒ 谁先
+    ///   回来谁先上屏 ⇒ **旧结果会盖掉新结果**（看着像「刷新了但内容不对」）
+    ///   ⇒ 每次请求发一个递增序号 ⇒ 只认**序号最大**的那次。
+    files_seq: Cell<u64>,
     /// **最后一个采样点的原始行**（**带 ANSI** ⇒ 原样）。
     ///
     /// ⚠️ **为什么留原始行**：冒烟要能验证「**剥 ANSI 之后**解析出来的
@@ -308,6 +329,26 @@ enum Msg {
     Volumes(Result<Vec<docker::VolumeInfo>, String>),
     /// **网络列表**回来了（阶段 115）。
     Networks(Result<Vec<docker::NetInfo>, String>),
+    /// **文件列表**回来了（阶段 116）。
+    ///
+    /// ⚠️ 带上**容器名与目录** ⇒ 换了容器 / 换了目录以后，旧结果能认出来、
+    ///   丢掉（不然界面显示的是上一个目录的内容）。
+    Files {
+        name: String,
+        path: String,
+        /// **请求序号**（只认最新一次 ⇒ 旧结果不许盖掉新结果）。
+        seq: u64,
+        r: Result<Vec<docker::ContainerFile>, String>,
+    },
+    /// **上传 / 下载**的进度（阶段 116）。
+    FileProgress { msg: String },
+    /// **上传 / 下载**结束了（成功或失败）。
+    FileXferDone { msg: String },
+    /// **查看文件**的内容回来了（阶段 116）。
+    FileView {
+        path: String,
+        r: Result<String, String>,
+    },
 }
 
 /// 详情区的控件（阶段 110）。
@@ -360,9 +401,30 @@ struct MonitorUi {
     status: gtk::Label,
 }
 
-/// 监控曲线的数据（**共享**给四张图 ⇒ 外面套 `Rc<RefCell<…>>`）。
+/// 「文件」页的控件（**阶段 116**）。
 ///
-/// ⚠️ **为什么共享**：cairo 的绘制回调是**异步**被 GTK 调用的 ⇒ 它要能
+/// ⚠️ **容器里没有 SFTP** ⇒ 浏览 / 上传 / 下载全靠 `docker exec`
+///   （命令与解析见 [`crate::backend::docker`]）。
+struct FilesUi {
+    /// 整块（**只在文件页里显示**）。
+    root: gtk::Box,
+    /// **路径栏**（当前远程目录；回车 ⇒ 去这个目录）。
+    path: gtk::Entry,
+    /// 文件表（**平表**：名字 / 类型 / 大小 / 权限 ＋ 一个隐藏的类型键列）。
+    store: gtk::TreeStore,
+    /// 文件表。
+    view: gtk::TreeView,
+    /// 状态行（**列表**的状态：几个条目 / 出错原因）。
+    status: gtk::Label,
+    /// **传输状态行**（上传 / 下载的进度与结果）。
+    ///
+    /// ⚠️ **为什么不跟列表状态挤在一行**：列表结果**随时**会到（刷新、切
+    ///   目录）⇒ 挤在一行 ⇒ 传输刚报完「上传完成」就被「N 个条目」冲掉
+    ///   ⇒ 用户（和冒烟）根本看不到传完了没有。
+    xfer_status: gtk::Label,
+}
+
+/// 监控曲线的数据（**共享**给四张图 ⇒ 外面套 `Rc<RefCell<…>>`）。
 ///   拿到最新的点 ⇒ 得和界面共享同一份数据（`Rc<RefCell<…>>`）。
 ///
 /// ⚠️ **为什么 `Vec<(f64, f64)>`**：`(x, y)`；`x` 是**点的序号**（等间隔
@@ -1752,6 +1814,80 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     mon_root.append(&charts);
     mon_root.append(&mon_status);
 
+    // ---- 文件页（阶段 116）：路径栏 ＋ 文件表 ＋ 上传 / 下载 / 查看 ----
+    //
+    // ⚠️ **容器里没有 SFTP** ⇒ 一切靠 `docker exec`（见 `backend/docker.rs`）。
+    let f_path = gtk::Entry::new();
+    f_path.set_placeholder_text(Some(tr("容器里的目录")));
+    f_path.set_hexpand(true);
+    let f_up = gtk::Button::with_label(tr("上一级"));
+    let f_refresh = gtk::Button::with_label(tr("刷新"));
+    let f_upload = gtk::Button::with_label(tr("上传文件…"));
+    let f_uploaddir = gtk::Button::with_label(tr("上传目录…"));
+    let f_download = gtk::Button::with_label(tr("下载…"));
+    let f_view = gtk::Button::with_label(tr("查看…"));
+
+    let f_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    f_bar.set_margin_start(6);
+    f_bar.set_margin_end(6);
+    f_bar.set_margin_top(4);
+    f_bar.append(&f_path);
+    f_bar.append(&f_up);
+    f_bar.append(&f_refresh);
+
+    let f_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    f_actions.set_margin_start(6);
+    f_actions.set_margin_end(6);
+    f_actions.set_margin_top(2);
+    f_actions.append(&f_upload);
+    f_actions.append(&f_uploaddir);
+    f_actions.append(&f_download);
+    f_actions.append(&f_view);
+
+    let (f_store, f_view_tbl) = flat_table(
+        &[tr("名称"), tr("类型"), tr("大小"), tr("权限"), tr("类型键")],
+        &[220, 60, 100, 120, 80],
+        0,
+    );
+    // ⚠️ **最后一列是内部用的类型键**（"dir" / "file" …）⇒ 不给用户看。
+    if let Some(col) = f_view_tbl.columns().get(4) {
+        col.set_visible(false);
+    }
+    let f_scroll = gtk::ScrolledWindow::new();
+    f_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    f_scroll.set_vexpand(true);
+    f_scroll.set_hexpand(true);
+    f_scroll.set_child(Some(&f_view_tbl));
+
+    let f_status = gtk::Label::new(Some(""));
+    f_status.set_xalign(0.0);
+    f_status.set_margin_start(6);
+    f_status.set_margin_end(6);
+    f_status.set_margin_bottom(2);
+    f_status.add_css_class("dim-label");
+
+    // ⚠️ **传输状态另起一行**（别跟列表状态挤在一起 ⇒ 见 `FilesUi` 的说明）。
+    let f_xfer_status = gtk::Label::new(Some(""));
+    f_xfer_status.set_xalign(0.0);
+    f_xfer_status.set_margin_start(6);
+    f_xfer_status.set_margin_end(6);
+    f_xfer_status.set_margin_bottom(2);
+    f_xfer_status.add_css_class("dim-label");
+
+    let f_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    f_root.set_margin_start(6);
+    f_root.set_margin_end(6);
+    f_root.set_margin_bottom(6);
+    f_root.append(&f_bar);
+    f_root.append(&f_actions);
+    f_root.append(&f_scroll);
+    f_root.append(&f_xfer_status);
+    f_root.append(&f_status);
+
+    // ⚠️ **回调要用**（控件要搬进 `DockerUi`）⇒ 先留一份句柄。
+    let f_path_cb = f_path.clone();
+    let f_view_cb = f_view_tbl.clone();
+
     // ---- 详情区：概览 / 日志 / 监控 三页（**Stack**）----
     //
     // ⚠️ 用 **Stack**（不是两个盒子轮流 `set_visible`）⇒ 页面切换是 GTK
@@ -1768,6 +1904,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ⚠️ **阶段 114**：监控页（4 个指标卡 ＋ 4 张折线图）。
     let page_monitor = stack.add_named(&mon_root, Some(PAGE_MONITOR));
     page_monitor.set_title(tr("监控"));
+
+    // ⚠️ **阶段 116**：文件页（浏览 ＋ 上传 ＋ 下载）。
+    let page_files = stack.add_named(&f_root, Some(PAGE_FILES));
+    page_files.set_title(tr("文件"));
 
     let switcher = gtk::StackSwitcher::new();
     switcher.set_stack(Some(&stack));
@@ -1986,6 +2126,19 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         networks_store: networks_store.clone(),
         networks_view: networks_view.clone(),
         images_busy: Cell::new(false),
+        files: FilesUi {
+            root: f_root,
+            path: f_path,
+            store: f_store,
+            view: f_view_tbl,
+            status: f_status,
+            xfer_status: f_xfer_status,
+        },
+        files_name: RefCell::new(String::new()),
+        files_path: RefCell::new(String::new()),
+        files_xfer: Cell::new(false),
+        files_seq: Cell::new(0),
+        files_xfer_done: Cell::new(0),
         volumes_busy: Cell::new(false),
         networks_busy: Cell::new(false),
         term_chan: RefCell::new(None),
@@ -2036,6 +2189,54 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         u.networks_busy.set(false);
                         u.status.set_text(&msg);
                     }
+                    // ⚠️ **阶段 116**：文件列表 / 传输 / 查看。
+                    Msg::Files { name, path, seq, r } => {
+                        // ⚠️ **只认最新一次请求**（连点目录时旧结果会晚到
+                        //   ⇒ 不挡一下就会盖掉新结果）。
+                        if seq != u.files_seq.get() {
+                            continue;
+                        }
+                        // ⚠️ **只认「现在这个容器的这个目录」**：换了容器或
+                        //   换了目录以后，旧结果必须丢掉（不然界面上是上一个
+                        //   目录的内容）。
+                        if u.files_name.borrow().as_str() != name
+                            || u.files_path.borrow().as_str() != path
+                        {
+                            continue;
+                        }
+                        match r {
+                            Ok(v) => apply_files(&u, &v),
+                            Err(msg) => u.files.status.set_text(&msg),
+                        }
+                    }
+                    Msg::FileProgress { msg } => {
+                        u.files.status.set_text(&msg);
+                    }
+                    Msg::FileXferDone { msg } => {
+                        u.files_xfer.set(false);
+                        u.files_xfer_done.set(u.files_xfer_done.get() + 1);
+                        u.files.xfer_status.set_text(&msg);
+                        // ⚠️ **传完重新列一遍**（远端已经变了）。
+                        let name = u.selected.borrow().clone();
+                        if !name.is_empty() {
+                            let path = u.files_path.borrow().clone();
+                            if let Some(st) = stw.upgrade() {
+                                files_list(&st, &u, &name, &path);
+                            }
+                        }
+                    }
+                    Msg::FileView { path, r } => match r {
+                        Ok(text) => show_file_window(stw.upgrade().as_ref(), &path, &text),
+                        Err(msg) => {
+                            if let Some(st) = stw.upgrade() {
+                                crate::panel::dialogs::show_error(
+                                    st.topwin().as_ref(),
+                                    &tr("查看文件失败"),
+                                    &msg,
+                                );
+                            }
+                        }
+                    },
                     Msg::Detail { name, r } => {
                         // ⚠️ **只认当前选中的那个**：用户连着点了两个容器 ⇒
                         //    先回来的那个可能已经过时了 ⇒ 丢掉。
@@ -2056,6 +2257,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                                 if u.stat_page_visible() && !u.stat_running.get() {
                                     if let Some(st) = stw.upgrade() {
                                         start_stats(&st, &u, &name);
+                                    }
+                                }
+                                // ⚠️ **文件页正开着** ⇒ 同理（**阶段 116**）。
+                                if files_page_visible(&u) {
+                                    if let Some(st) = stw.upgrade() {
+                                        files_ensure(&st, &u, &name);
                                     }
                                 }
                             }
@@ -2321,6 +2528,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             let page = s.visible_child_name();
             let on_logs = page.as_deref() == Some(PAGE_LOGS);
             let on_monitor = page.as_deref() == Some(PAGE_MONITOR);
+            let on_files = page.as_deref() == Some(PAGE_FILES);
             if !on_logs {
                 stop_logs(&u);
             }
@@ -2339,7 +2547,247 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             if on_monitor && !u.stat_running.get() {
                 start_stats(&st, &u, &name);
             }
+            // ⚠️ **阶段 116**：切到「文件」页 ⇒ 列一次目录（换了容器 ⇒
+            //   回到根目录重新列）。
+            if on_files {
+                files_ensure(&st, &u, &name);
+            }
         });
+    }
+    // ================= 阶段 116：文件页 =================
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        // **双击目录 ⇒ 进入；双击文件 ⇒ 看内容**。
+        f_view_cb.connect_row_activated(move |_, _, _| {
+            let Some(u) = u.upgrade() else { return };
+            let Some(st) = stw.upgrade() else { return };
+            let container = u.selected.borrow().clone();
+            if container.is_empty() {
+                return;
+            }
+            let Some((name, kind)) = files_selected(&u) else { return };
+            let remote = files_remote_path(&u, &name);
+            if kind == "dir" {
+                files_goto(&st, &u, &container, &remote);
+            } else if kind == "file" {
+                files_view(&st, &u, &container, &remote);
+            }
+        });
+        // **「上一级」**
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            f_up.connect_clicked(move |_| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
+                let container = u.selected.borrow().clone();
+                if container.is_empty() {
+                    return;
+                }
+                let cur = u.files_path.borrow().clone();
+                if cur.is_empty() {
+                    return;
+                }
+                let parent = crate::util::path_parent(&cur);
+                files_goto(&st, &u, &container, &parent);
+            });
+        }
+        // **「刷新」**
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            f_refresh.connect_clicked(move |_| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
+                let container = u.selected.borrow().clone();
+                if container.is_empty() {
+                    return;
+                }
+                let cur = u.files_path.borrow().clone();
+                files_goto(&st, &u, &container, &cur);
+            });
+        }
+        // **路径栏回车 ⇒ 去那个目录**
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            f_path_cb.connect_activate(move |e| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
+                let container = u.selected.borrow().clone();
+                if container.is_empty() {
+                    return;
+                }
+                let p = e.text().trim().to_string();
+                if p.is_empty() {
+                    return;
+                }
+                files_goto(&st, &u, &container, &p);
+            });
+        }
+        // **「上传文件…」/「上传目录…」**
+        for (btn, is_dir) in [(f_upload, false), (f_uploaddir, true)] {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            btn.connect_clicked(move |_| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
+                let container = u.selected.borrow().clone();
+                if container.is_empty() {
+                    crate::panel::dialogs::show_error(
+                        st.topwin().as_ref(),
+                        &tr("先选一个容器"),
+                        &tr("选中一个容器之后才能上传文件"),
+                    );
+                    return;
+                }
+                let top = st.topwin();
+                let mut b = gtk::FileChooserNative::builder()
+                    .modal(true)
+                    .title(if is_dir {
+                        tr("选要上传的目录")
+                    } else {
+                        tr("选要上传的文件")
+                    })
+                    .action(if is_dir {
+                        gtk::FileChooserAction::SelectFolder
+                    } else {
+                        gtk::FileChooserAction::Open
+                    })
+                    .accept_label(tr("上传"))
+                    .cancel_label(tr("取消"));
+                if let Some(p) = top.as_ref() {
+                    b = b.transient_for(p);
+                }
+                let ch = b.build();
+                let st2 = Rc::clone(&st);
+                let u2 = Rc::clone(&u);
+                let container2 = container.clone();
+                ch.connect_response(move |c, r| {
+                    if r == gtk::ResponseType::Accept {
+                        if let Some(f) = c.file() {
+                            if let Some(p) = f.path() {
+                                let local = p.clone();
+                                let st3 = Rc::clone(&st2);
+                                let u3 = Rc::clone(&u2);
+                                let cname = container2.clone();
+                                let remote_dir = u2.files_path.borrow().clone();
+                                let fname = local
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                // ⚠️ **上传是写操作** ⇒ 二次确认（默认焦点在「取消」）。
+                                let msg = trf!(
+                                    "确定要把「{n}」上传到容器「{c}」的 {d} 吗？",
+                                    n = fname,
+                                    c = cname,
+                                    d = remote_dir
+                                );
+                                crate::panel::dialogs::confirm_title(
+                                    st3.topwin().as_ref(),
+                                    tr("请确认"),
+                                    &msg,
+                                    tr("上传"),
+                                    move |ok| {
+                                        if !ok {
+                                            return;
+                                        }
+                                        files_upload(&st3, &u3, &cname, &local);
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    c.destroy();
+                });
+                ch.show();
+            });
+        }
+        // **「下载…」**
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            f_download.connect_clicked(move |_| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
+                let container = u.selected.borrow().clone();
+                if container.is_empty() {
+                    crate::panel::dialogs::show_error(
+                        st.topwin().as_ref(),
+                        &tr("先选一个容器"),
+                        &tr("选中一个容器之后才能下载文件"),
+                    );
+                    return;
+                }
+                let Some((name, kind)) = files_selected(&u) else {
+                    crate::panel::dialogs::show_error(
+                        st.topwin().as_ref(),
+                        &tr("先选一个条目"),
+                        &tr("先在列表里选中一个条目，再点「下载…」"),
+                    );
+                    return;
+                };
+                let remote = files_remote_path(&u, &name);
+                let is_dir = kind == "dir";
+                let top = st.topwin();
+                let mut b = gtk::FileChooserNative::builder()
+                    .modal(true)
+                    .title(tr("选下载到哪个目录"))
+                    .action(gtk::FileChooserAction::SelectFolder)
+                    .accept_label(tr("下载"))
+                    .cancel_label(tr("取消"));
+                if let Some(p) = top.as_ref() {
+                    b = b.transient_for(p);
+                }
+                let ch = b.build();
+                let st2 = Rc::clone(&st);
+                let u2 = Rc::clone(&u);
+                let container2 = container.clone();
+                ch.connect_response(move |c, r| {
+                    if r == gtk::ResponseType::Accept {
+                        if let Some(f) = c.file() {
+                            if let Some(p) = f.path() {
+                                files_download(&st2, &u2, &container2, &remote, &p);
+                            }
+                        }
+                    }
+                    c.destroy();
+                });
+                ch.show();
+            });
+        }
+        // **「查看…」**
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            f_view.connect_clicked(move |_| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(st) = stw.upgrade() else { return };
+                let container = u.selected.borrow().clone();
+                if container.is_empty() {
+                    return;
+                }
+                let Some((name, kind)) = files_selected(&u) else {
+                    crate::panel::dialogs::show_error(
+                        st.topwin().as_ref(),
+                        &tr("先选一个条目"),
+                        &tr("先在列表里选中一个文件，再点「查看…」"),
+                    );
+                    return;
+                };
+                if kind == "dir" {
+                    crate::panel::dialogs::show_error(
+                        st.topwin().as_ref(),
+                        &tr("看不了目录"),
+                        &tr("目录请用「下载…」整个拉下来"),
+                    );
+                    return;
+                }
+                let remote = files_remote_path(&u, &name);
+                files_view(&st, &u, &container, &remote);
+            });
+        }
     }
     // **暂停 / 继续**
     //
@@ -4089,6 +4537,383 @@ fn apply_networks(ui: &Rc<DockerUi>, v: &[docker::NetInfo]) {
             .set(&row, &[(0u32, &x.name), (1u32, &x.driver), (2u32, &x.scope)]);
     }
     ui.status.set_text(&trf!("共 {n} 个网络", n = v.len()));
+}
+
+/* ---------------- 阶段 116：文件页 ---------------- */
+
+/// 文件类型 → **稳定的键**（内部用；显示用 `tr(kind.label())`）。
+///
+/// ⚠️ **为什么不直接用中文标签**：标签会随语言变（`tr` 会翻成英文）⇒
+///   拿它做判断 ⇒ 英文界面下判断全错 ⇒ 这里用**不翻译的键**。
+fn file_kind_key(k: docker::FileKind) -> &'static str {
+    match k {
+        docker::FileKind::Dir => "dir",
+        docker::FileKind::File => "file",
+        docker::FileKind::Link => "link",
+        docker::FileKind::Other => "other",
+        docker::FileKind::Unknown => "unknown",
+    }
+}
+
+/// 填**文件表** ＋ 更新状态行（阶段 116）。
+fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
+    ui.files.store.clear();
+    for f in v {
+        let name = f.name.clone();
+        let kind_label = tr(f.kind.label()).to_string();
+        let size = crate::util::human_size(f.size);
+        let perms = f.perms.clone();
+        let key = file_kind_key(f.kind).to_string();
+        let row = ui.files.store.append(None);
+        ui.files.store.set(
+            &row,
+            &[
+                (0u32, &name),
+                (1u32, &kind_label),
+                (2u32, &size),
+                (3u32, &perms),
+                (4u32, &key),
+            ],
+        );
+    }
+    ui.files.status.set_text(&trf!("{n} 个条目", n = v.len()));
+}
+
+/// 当前选中的行（**名字 ＋ 类型键**）。
+fn files_selected(ui: &Rc<DockerUi>) -> Option<(String, String)> {
+    let sel = ui.files.view.selection();
+    let (model, iter) = sel.selected()?;
+    let name: String = model.get(&iter, 0);
+    let kind: String = model.get(&iter, 4);
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, kind))
+}
+
+/// 选中条目的**远程绝对路径**。
+fn files_remote_path(ui: &Rc<DockerUi>, name: &str) -> String {
+    let dir = ui.files_path.borrow().clone();
+    if dir.is_empty() {
+        return format!("/{name}");
+    }
+    format!("{}/{name}", dir.trim_end_matches('/'))
+}
+
+/// **文件页是不是正开着**。
+fn files_page_visible(ui: &Rc<DockerUi>) -> bool {
+    ui.stack.visible_child_name().as_deref() == Some(PAGE_FILES)
+}
+
+/// 切到文件页时：**没列过 / 换了容器** ⇒ 列一次（**阶段 116**）。
+fn files_ensure(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str) {
+    if container.is_empty() {
+        return;
+    }
+    let same = ui.files_name.borrow().as_str() == container
+        && !ui.files_path.borrow().is_empty();
+    if same {
+        return;
+    }
+    files_goto(st, ui, container, "/");
+}
+
+/// 去某个目录（**改路径栏 ＋ 重新列**）。
+fn files_goto(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, path: &str) {
+    *ui.files_name.borrow_mut() = container.to_string();
+    *ui.files_path.borrow_mut() = path.to_string();
+    ui.files.path.set_text(path);
+    files_list(st, ui, container, path);
+}
+
+/// 列目录（**后台** ⇒ 结果回主线程）。
+///
+/// ⚠️ **不靠 busy 标志挡重复请求**：用户连点目录时，后到的旧结果必须
+///   能被认出来丢掉（见消息循环里的「路径一样吗」判断）⇒ 请求照发，
+///   旧结果自己会被扔掉。
+fn files_list(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, path: &str) {
+    ui.files.status.set_text(&tr("正在读取远程目录…"));
+    // ⚠️ **请求序号**：只认最新一次（旧的晚到 ⇒ 盖掉新的 ⇒ 看着像刷新坏了）。
+    let seq = ui.files_seq.get() + 1;
+    ui.files_seq.set(seq);
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let container = container.to_string();
+    let path = path.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => docker::list_dir(&session, &container, &path)
+                .await
+                .map_err(|e| e.0),
+            Err(e) => Err(e),
+        };
+        let _ = tx.send_blocking(Msg::Files {
+            name: container,
+            path,
+            seq,
+            r,
+        });
+    });
+}
+
+/// **上传**（后台 ⇒ 进度 / 结果回主线程）。
+fn files_upload(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    container: &str,
+    local: &std::path::Path,
+) {
+    if ui.files_xfer.get() {
+        return;
+    }
+    let remote_dir = ui.files_path.borrow().clone();
+    if remote_dir.is_empty() {
+        return;
+    }
+    ui.files_xfer.set(true);
+    ui.files.xfer_status.set_text(&tr("正在上传…"));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let container = container.to_string();
+    let local = local.to_path_buf();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => {
+                let tx2 = tx.clone();
+                // ⚠️ **进度限流 100ms**（每 32KB 一块 ⇒ 不限流会把消息
+                //   通道塞爆 ⇒ 主线程被拖死）。
+                let last = std::sync::Mutex::new(std::time::Instant::now());
+                let prog: docker::XferProgress = std::sync::Arc::new(move |n: u64| {
+                    {
+                        let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+                        if g.elapsed() < std::time::Duration::from_millis(100) {
+                            return;
+                        }
+                        *g = std::time::Instant::now();
+                    }
+                    let _ = tx2.send_blocking(Msg::FileProgress {
+                        msg: trf!("正在上传… 已传 {n} 字节", n = n),
+                    });
+                });
+                docker::upload_from(&session, &container, &local, &remote_dir, &prog)
+                    .await
+                    .map_err(|e| e.0)
+            }
+            Err(e) => Err(e),
+        };
+        let msg = match r {
+            Ok(()) => tr("上传完成").to_string(),
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::FileXferDone { msg });
+    });
+}
+
+/// **下载**（后台 ⇒ 进度 / 结果回主线程）。
+fn files_download(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    container: &str,
+    remote: &str,
+    local_dir: &std::path::Path,
+) {
+    if ui.files_xfer.get() {
+        return;
+    }
+    ui.files_xfer.set(true);
+    ui.files.xfer_status.set_text(&tr("正在下载…"));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let container = container.to_string();
+    let remote = remote.to_string();
+    let local_dir = local_dir.to_path_buf();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => {
+                let tx2 = tx.clone();
+                let last = std::sync::Mutex::new(std::time::Instant::now());
+                let prog: docker::XferProgress = std::sync::Arc::new(move |n: u64| {
+                    {
+                        let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+                        if g.elapsed() < std::time::Duration::from_millis(100) {
+                            return;
+                        }
+                        *g = std::time::Instant::now();
+                    }
+                    let _ = tx2.send_blocking(Msg::FileProgress {
+                        msg: trf!("正在下载… 已收 {n} 字节", n = n),
+                    });
+                });
+                docker::download_to(&session, &container, &remote, &local_dir, &prog)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.0)
+            }
+            Err(e) => Err(e),
+        };
+        let msg = match r {
+            Ok(()) => tr("下载完成").to_string(),
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::FileXferDone { msg });
+    });
+}
+
+/// **查看**文件内容（**只读**，最多 256 KB）。
+fn files_view(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, remote: &str) {
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let container = container.to_string();
+    let remote = remote.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = match shared_session(&opts, pw).await {
+            Ok(session) => {
+                docker::read_file(&session, &container, &remote, 256 * 1024)
+                    .await
+                    .map_err(|e| e.0)
+            }
+            Err(e) => Err(e),
+        };
+        let _ = tx.send_blocking(Msg::FileView { path: remote, r });
+    });
+}
+
+/// 弹一个**只读**的文本窗口（看文件内容用）。
+fn show_file_window(st: Option<&Rc<PanelState>>, path: &str, content: &str) {
+    let win = gtk::Window::builder()
+        .title(tr("查看文件"))
+        .default_width(760)
+        .default_height(520)
+        .build();
+    if let Some(st) = st {
+        if let Some(top) = st.topwin().as_ref() {
+            win.set_transient_for(Some(top));
+        }
+    }
+    let title = gtk::Label::new(Some(path));
+    title.set_xalign(0.0);
+    title.set_margin_start(8);
+    title.set_margin_end(8);
+    title.set_margin_top(6);
+    title.add_css_class("heading");
+    let view = gtk::TextView::new();
+    view.set_editable(false);
+    view.set_monospace(true);
+    view.buffer().set_text(content);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_child(Some(&view));
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    root.append(&title);
+    root.append(&scroll);
+    win.set_child(Some(&root));
+    win.present();
+}
+
+/* ---------------- 阶段 116：测试钩子 ---------------- */
+
+/// 测试钩子：切到「文件」页（**真的切** ＋ 列目录）。
+pub fn files_show_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.stack.set_visible_child_name(PAGE_FILES);
+    let name = ui.selected.borrow().clone();
+    if name.is_empty() {
+        return;
+    }
+    files_ensure(st, ui, &name);
+}
+
+/// 测试钩子：去**某个目录**（阶段 116；冒烟要传到容器的 /tmp 里）。
+pub fn files_goto_for_test(st: &Rc<PanelState>, path: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let name = ui.selected.borrow().clone();
+    if name.is_empty() {
+        return;
+    }
+    files_goto(st, ui, &name, path);
+}
+
+/// 测试钩子：文件表的行（**名字 / 类型 / 大小 / 权限**）。
+pub fn files_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String, String, String)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    let model = ui.files.store.clone();
+    if let Some(mut iter) = model.iter_first() {
+        loop {
+            let g = |c: i32| -> String { model.get(&iter, c) };
+            out.push((g(0), g(1), g(2), g(3)));
+            if !model.iter_next(&mut iter) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 测试钩子：文件页**当前目录**。
+pub fn files_path_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.files_path.borrow().clone())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：文件页**已经完成了几次传输**（每完成一次 +1）。
+pub fn files_xfer_done_for_test(st: &Rc<PanelState>) -> u64 {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.files_xfer_done.get()).unwrap_or(0)
+}
+
+/// 测试钩子：文件页**传输状态行**（上传 / 下载的进度与结果）。
+pub fn files_xfer_status_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.files.xfer_status.text().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：文件页**状态行**。
+pub fn files_status_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.files.status.text().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：**上传**一个本地文件（阶段 116；冒烟用真上传）。
+pub fn files_upload_for_test(st: &Rc<PanelState>, local: &std::path::Path) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let container = ui.selected.borrow().clone();
+    if container.is_empty() {
+        return;
+    }
+    files_upload(st, ui, &container, local);
+}
+
+/// 测试钩子：**下载**一个远程条目（阶段 116；冒烟用真下载）。
+pub fn files_download_for_test(
+    st: &Rc<PanelState>,
+    remote: &str,
+    local_dir: &std::path::Path,
+) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let container = ui.selected.borrow().clone();
+    if container.is_empty() {
+        return;
+    }
+    files_download(st, ui, &container, remote, local_dir);
 }
 
 /* ---------------- 阶段 115：测试钩子 ---------------- */

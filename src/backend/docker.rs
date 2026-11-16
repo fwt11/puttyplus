@@ -1335,6 +1335,472 @@ pub async fn list_networks(session: &Handle<HostKeyHandler>) -> BackendResult<Ve
     Ok(parse_networks(&out))
 }
 
+/* ---------------- 阶段 116：容器内文件浏览 + 上传 + 下载 ---------------- */
+
+/// 列目录的命令（`docker exec` 跑 `ls -lA`）。
+///
+/// ⚠️ **为什么是 `ls -lA`**：容器里**没有 SFTP** ⇒ 只能 `docker exec`。
+///   - `-l`（长格式）⇒ 拿得到**大小**和**类型**（权限串第一个字符）；
+///   - `-A`（**不是** `-a`）⇒ 列出**隐藏文件**，但**不含** `.` 与 `..`；
+///   - ⚠️ **时间字段不解析**（各 locale 的格式不一样：`Nov 15 19:33` /
+///     `2024-11-15 19:33:06` / `Nov 15 2024` 都出现过）⇒ 界面不显示时间。
+/// ⚠️ **不套 `sh -c`**：`docker exec` 直接把参数交给容器里的 `ls`
+///   ⇒ **没有嵌套引号的问题**（路径里的引号只需要 `sh_quote` 一次）。
+pub fn list_dir_cmd(container: &str, path: &str) -> String {
+    format!(
+        "docker exec {c} ls -lA -- {p} 2>&1",
+        c = crate::backend::checksum::sh_quote(container),
+        p = crate::backend::checksum::sh_quote(path),
+    )
+}
+
+/// 读文件内容的命令（`docker exec` 跑 `cat`）。
+///
+/// ⚠️ **大小限制在客户端做**（先看目录列表里的大小，太大就不读）⇒
+///   远端不会白吐几百兆。
+pub fn read_file_cmd(container: &str, path: &str) -> String {
+    format!(
+        "docker exec {c} cat {p} 2>&1",
+        c = crate::backend::checksum::sh_quote(container),
+        p = crate::backend::checksum::sh_quote(path),
+    )
+}
+
+/// **上传**的命令（本地 → 容器）：**`docker cp` 的归档流模式**。
+///
+/// ⚠️ **`docker cp - 容器:目录`** ⇒ **从 stdin 读 tar 归档** ⇒ 落到那个
+///   目录里。
+/// ⚠️ **目标必须是目录**（docker 的规定，2026-11-16 实测）：给文件路径会报
+///   「destination ... must be a directory」⇒ **文件名由 tar 归档里的路径
+///   决定** ⇒ 上传一个文件 ⇒ tar 里有 `名字` ⇒ 落到 `<目录>/<名字>`。
+/// ⚠️ **不套 pty** ⇒ 字节流是原样的（pty 会把 `\n` 翻成 `\r\n` ⇒ 二进制就废了）。
+pub fn cp_upload_cmd(container: &str, dir: &str) -> String {
+    // ⚠️ **整段引号包住**（`容器:路径` 是**一个**参数 ⇒ 一个词）⇒ 名字或
+    //   路径里有空格/分号都不会被拆开、更不会被执行。
+    let target = format!("{container}:{}/", dir.trim_end_matches('/'));
+    format!(
+        "docker cp - {t}",
+        t = crate::backend::checksum::sh_quote(&target),
+    )
+}
+
+/// **下载**的命令（容器 → 本地）：**`docker cp` 的归档流模式**。
+///
+/// ⚠️ **`docker cp 容器:路径 -`** ⇒ **往 stdout 写 tar 归档** ⇒ 本地解开
+///   就得到 `<本地目录>/<名字>`（归档的根就是 basename ⇒ 不用 strip）。
+/// ⚠️ **stderr 必须隔离**（`2>/dev/null`）⇒ 报错信息不会混进归档流里
+///   （混进去 ⇒ 本地 tar 解不开 ⇒ 下载白费）。
+pub fn cp_download_cmd(container: &str, path: &str) -> String {
+    // ⚠️ **整段引号包住**（同 `cp_upload_cmd`）。
+    let target = format!("{container}:{path}");
+    format!(
+        "docker cp {t} - 2>/dev/null",
+        t = crate::backend::checksum::sh_quote(&target),
+    )
+}
+
+/// 容器里一个文件的**类型**。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FileKind {
+    /// 目录（`-d`）。
+    Dir,
+    /// 普通文件（`-`）。
+    File,
+    /// 符号链接（`-l`）。
+    Link,
+    /// 其它（字符设备 / 块设备 / 管道 / socket）。
+    Other,
+    /// **不是目录条目**（解析失败 ⇒ 多半是错误信息）。
+    #[default]
+    Unknown,
+}
+
+impl FileKind {
+    /// 界面上的**中文名**。
+    pub fn label(self) -> &'static str {
+        match self {
+            FileKind::Dir => "目录",
+            FileKind::File => "文件",
+            FileKind::Link => "链接",
+            FileKind::Other => "其它",
+            FileKind::Unknown => "未知",
+        }
+    }
+}
+
+/// 容器里的一个文件（阶段 116）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerFile {
+    /// **名字**（不含目录）。
+    pub name: String,
+    /// 大小（字节；目录是 0）。
+    pub size: u64,
+    /// 类型。
+    pub kind: FileKind,
+    /// 权限串（如 `drwxr-xr-x`）。
+    pub perms: String,
+}
+
+impl ContainerFile {
+    /// 这个条目的**远端绝对路径**（拼在目录路径后面）。
+    pub fn join(&self, dir: &str) -> String {
+        if dir.ends_with('/') {
+            format!("{dir}{}", self.name)
+        } else {
+            format!("{dir}/{}", self.name)
+        }
+    }
+}
+
+/// 解析 `ls -lA` 的输出 ⇒ 文件列表（**纯函数**）。
+///
+/// ⚠️ **一行怎么读**（`ls -l` 的字段）：
+/// ```text
+/// -rw-r--r-- 1 root root  1234 Nov 15 19:33 my file.txt
+/// drwxr-xr-x 2 root root  4096 Nov 15 19:33 subdir
+/// ```
+/// - 第 1 个字段 = **权限串**（第 1 个字符 ⇒ 类型：`d` 目录 / `-` 文件 /
+///   `l` 链接）；
+/// - 第 5 个字段 = **大小**；
+/// - 第 9 个字段起 = **名字**（日期是 3 段 ⇒ 名字从第 9 段开始 ⇒
+///   **名字里有空格也不怕**）。
+/// ⚠️ **符号链接**：`name -> target` ⇒ 只取 `->` 之前的名字。
+/// ⚠️ **认不出来就丢掉**（docker 的错误信息混在 stdout 里 ⇒ 不能当数据）。
+pub fn parse_ls(out: &str) -> Vec<ContainerFile> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        // ⚠️ **至少 9 段**（权限 + 链接数 + 属主 + 属组 + 大小 + 日期 3 段 + 名字）
+        if f.len() < 9 {
+            continue;
+        }
+        let perms = f[0];
+        // ⚠️ **权限串的合法字符**：`-dlcbps` 开头
+        let kind = match perms.chars().next() {
+            Some('d') => FileKind::Dir,
+            Some('-') => FileKind::File,
+            Some('l') => FileKind::Link,
+            Some(c) if "cbps".contains(c) => FileKind::Other,
+            _ => continue,
+        };
+        let size: u64 = match f[4].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // ⚠️ **名字**：第 9 段起全部（含空格）⇒ 再去掉 ` -> 目标`。
+        let name_all = f[8..].join(" ");
+        let name = match name_all.find(" -> ") {
+            Some(i) => name_all[..i].to_string(),
+            None => name_all,
+        };
+        let name = name.trim_matches('"').to_string();
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
+        v.push(ContainerFile {
+            name,
+            size,
+            kind,
+            perms: perms.to_string(),
+        });
+    }
+    v
+}
+
+/// 列容器里的一个目录（阶段 116）。
+///
+/// ⚠️ 走**共享连接**上的 exec 通道（不是新连接）⇒ 一台服务器仍然只有
+///   一条 SSH 连接。
+pub async fn list_dir(
+    session: &Handle<HostKeyHandler>,
+    container: &str,
+    path: &str,
+) -> BackendResult<Vec<ContainerFile>> {
+    if !valid_name(container) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let (code, out) = run_cmd(session, &list_dir_cmd(container, path)).await?;
+    let files = parse_ls(&out);
+    if code != 0 || files.is_empty() {
+        // ⚠️ **一行都没解析出来** ⇒ 多半是错误信息（容器没跑 / 没权限 /
+        //   容器里没有 ls……）⇒ 翻成中文。
+        return Err(BackendError(classify_failure(&out)));
+    }
+    Ok(files)
+}
+
+/// 读容器里的一个文件（阶段 116）。
+///
+/// ⚠️ `max_bytes`：**超了就不读**（免得远端白吐几百兆）⇒ 返回错误说明
+///   文件太大。
+pub async fn read_file(
+    session: &Handle<HostKeyHandler>,
+    container: &str,
+    path: &str,
+    max_bytes: u64,
+) -> BackendResult<String> {
+    if !valid_name(container) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let (code, out) = run_cmd(session, &read_file_cmd(container, path)).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    if out.len() as u64 > max_bytes {
+        return Err(BackendError(
+            trf!(
+                "文件太大（{n} 字节），没读进来（上限 {m} 字节）",
+                n = out.len(),
+                m = max_bytes
+            ),
+        ));
+    }
+    Ok(out)
+}
+
+/* ---------------- 阶段 116：上传 / 下载（流式） ---------------- */
+
+/// 进度回调的类型（**跨线程** ⇒ 要 `Send + Sync`）。
+pub type XferProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
+
+/// **多久没有进展就判定卡住**（秒）。
+///
+/// ⚠️ **为什么要有看门狗**：远端命令要是**不退出**（比如 `cat >` 一直没
+///   收到 EOF）⇒ 等待方会**永远挂着** ⇒ 界面上一直显示「正在上传…」⇒
+///   而且**再也传不了别的**（那个「正在传」的标志一直不清）⇒ 必须能
+///   自己发现「卡住了」并报出来。
+pub const XFER_STALL_SECS: u64 = 120;
+
+/// 现在的毫秒数（判「多久没进展」用）。
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 把远端（容器）的一个流**写进本地文件**（**私有辅助**）。
+///
+/// ⚠️ **退出码非 0 ⇒ 失败**（`docker exec` 的退出码 = 里面命令的退出码）。
+/// ⚠️ **stderr 已经隔离**（命令里写了 `2>/dev/null`）⇒ 不会把错误信息
+///   混进数据流里。
+async fn stream_to_file(
+    session: &Handle<HostKeyHandler>,
+    cmd: &str,
+    dest: &std::path::Path,
+    progress: &XferProgress,
+) -> BackendResult<u64> {
+    use std::io::Write;
+    let ch = ShellChannel::open_exec(session, cmd, 80, 24, false).await?;
+    let mut f = std::fs::File::create(dest)
+        .map_err(|e| BackendError(trf!("写本地文件失败：{e}", e = e)))?;
+    let mut total: u64 = 0;
+    // ⚠️ **看门狗**：多久没进展就判「卡住」（见 `XFER_STALL_SECS`）。
+    let last = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_millis()));
+    let last2 = std::sync::Arc::clone(&last);
+    let user = std::sync::Arc::clone(progress);
+    let wrapped: XferProgress = std::sync::Arc::new(move |n: u64| {
+        last2.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+        user(n);
+    });
+    loop {
+        let ev = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ch.next_event(),
+        )
+        .await
+        {
+            Ok(Some(ev)) => ev,
+            Ok(None) => break,
+            Err(_) => {
+                let idle = now_millis() - last.load(std::sync::atomic::Ordering::Relaxed);
+                if idle > XFER_STALL_SECS * 1000 {
+                    return Err(BackendError(tr("传输卡住了（长时间没有进展）").to_string()));
+                }
+                continue;
+            }
+        };
+        match ev {
+            ShellEvent::Data(b) => {
+                f.write_all(&b)
+                    .map_err(|e| BackendError(trf!("写本地文件失败：{e}", e = e)))?;
+                total += b.len() as u64;
+                wrapped(total);
+            }
+            ShellEvent::Exit(code) => {
+                if code != 0 {
+                    return Err(BackendError(
+                        trf!("下载失败（远程命令退出码 {c}）", c = code),
+                    ));
+                }
+                break;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// **下载**：把容器里的文件/目录下载到**本地目录** `local_dir`。
+///
+/// ⚠️ **走 `docker cp` 的归档流**：远端 `docker cp <容器>:<路径> -` ⇒
+///   stdout 就是一个 tar 归档 ⇒ 落本地临时文件 ⇒ 本地 `tar -xf` 解开。
+/// ⚠️ **归档的根就是 basename** ⇒ 解到 `local_dir` ⇒ 得到
+///   `local_dir/<名字>`（**文件与目录都一样** ⇒ 不用 strip-components）。
+/// ⚠️ **返回传输的字节数**（进度用）。
+pub async fn download_to(
+    session: &Handle<HostKeyHandler>,
+    container: &str,
+    remote_path: &str,
+    local_dir: &std::path::Path,
+    progress: &XferProgress,
+) -> BackendResult<u64> {
+    if !valid_name(container) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let name = crate::util::path_basename(remote_path).to_string();
+    if name.is_empty() {
+        return Err(BackendError(tr("这个条目没有名字").to_string()));
+    }
+    // ⚠️ **归档先落本地临时文件**（流式解包要自己写 tar 解析器 ⇒ 不值当）。
+    let tmp = local_dir.join(format!(".{name}.pp-cp.tar"));
+    let total = match stream_to_file(
+        session,
+        &cp_download_cmd(container, remote_path),
+        &tmp,
+        progress,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            // ⚠️ **失败也要清掉临时文件**（不然本地攒一堆垃圾）。
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    let out = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&tmp)
+        .arg("-C")
+        .arg(local_dir)
+        .output()
+        .map_err(|e| BackendError(trf!("本机没有 tar 命令，解不开：{e}", e = e)))?;
+    let _ = std::fs::remove_file(&tmp);
+    if !out.status.success() {
+        return Err(BackendError(trf!(
+            "解开下载的内容失败：{e}",
+            e = String::from_utf8_lossy(&out.stderr).trim().to_string()
+        )));
+    }
+    Ok(total)
+}
+
+/// **上传**：把**本地**的文件/目录传到容器的 `remote_dir` 目录下。
+///
+/// ⚠️ **走 `docker cp` 的归档流**：本地 `tar -cf - -C <父> <名字>` ⇒ 字节流
+///   直接喂给远端 `docker cp - 容器:<目录>/` 的 stdin ⇒ Docker 自己解包。
+/// ⚠️ **本地不落临时文件**（直接把 tar 的 stdout 喂进通道）⇒ 大目录也不会
+///   把本地磁盘撑爆。
+/// ⚠️ **进度**：按**已写出去的字节数**报（归档字节数）。
+pub async fn upload_from(
+    session: &Handle<HostKeyHandler>,
+    container: &str,
+    local_src: &std::path::Path,
+    remote_dir: &str,
+    progress: &XferProgress,
+) -> BackendResult<()> {
+    if !valid_name(container) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let name = local_src
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Err(BackendError(tr("这个本地条目没有名字").to_string()));
+    }
+    // ⚠️ **本地打成 tar 归档**：`docker cp` 的 stdin 模式**只认 tar**
+    //   （文件与目录都行 ⇒ tar 那一层不用分情况）。
+    let parent = local_src.parent().unwrap_or(std::path::Path::new("."));
+    let mut child = std::process::Command::new("tar")
+        .arg("-cf")
+        .arg("-")
+        .arg("-C")
+        .arg(parent)
+        .arg(&name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| BackendError(trf!("本机没有 tar 命令，打不了包：{e}", e = e)))?;
+    let reader = child
+        .stdout
+        .take()
+        .ok_or_else(|| BackendError(tr("本地打包失败：拿不到 tar 的输出").to_string()))?;
+
+    let ch = ShellChannel::open_exec(
+        session,
+        &cp_upload_cmd(container, remote_dir),
+        80,
+        24,
+        false,
+    )
+    .await?;
+    // ⚠️ **看门狗**：多久没进展就判「卡住」（见 `XFER_STALL_SECS`）。
+    let last = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_millis()));
+    let last2 = std::sync::Arc::clone(&last);
+    let user = std::sync::Arc::clone(progress);
+    let wrapped: XferProgress = std::sync::Arc::new(move |n: u64| {
+        last2.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+        user(n);
+    });
+    ch.send_reader_and_eof(reader, 32 * 1024, wrapped);
+
+    // ⚠️ **等退出码**（EOF 不算结束 ⇒ 见 `next_event` 的说明）。
+    let mut code = 0;
+    let mut stalled = false;
+    loop {
+        let ev = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ch.next_event(),
+        )
+        .await
+        {
+            Ok(Some(ev)) => ev,
+            Ok(None) => break,
+            Err(_) => {
+                let idle = now_millis() - last.load(std::sync::atomic::Ordering::Relaxed);
+                if idle > XFER_STALL_SECS * 1000 {
+                    stalled = true;
+                    break;
+                }
+                continue;
+            }
+        };
+        if let ShellEvent::Exit(c) = ev {
+            code = c;
+            break;
+        }
+    }
+    // ⚠️ **tar 自己也要正常退出**（否则归档是截断的 ⇒ docker 那边会报错）。
+    let tar_ok = matches!(child.wait(), Ok(st) if st.success());
+    if stalled {
+        return Err(BackendError(tr("传输卡住了（长时间没有进展）").to_string()));
+    }
+    if !tar_ok {
+        return Err(BackendError(tr("本地打包失败（tar 没能正常结束）").to_string()));
+    }
+    if code != 0 {
+        return Err(BackendError(
+            trf!("上传失败（远程命令退出码 {c}）", c = code),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1939,5 +2405,124 @@ mod tests {
         let nets = super::parse_networks("a|b\n");
         assert!(nets.is_empty(), "字段不够的行不该被当成网络：{nets:?}");
     }
+
+
+    /* ---------------- 阶段 116：容器内文件浏览 ---------------- */
+
+    #[test]
+    fn 列目录命令走docker_exec() {
+        let c = super::list_dir_cmd("web", "/etc");
+        assert!(c.contains("docker exec"), "应当走 docker exec：{c}");
+        assert!(c.contains("ls -lA"), "应当是 ls -lA：{c}");
+        assert!(c.contains("'/etc'"), "路径要引号包住：{c}");
+    }
+
+    #[test]
+    fn 容器名与路径都防注入() {
+        // ⚠️ 名字带引号/分号 ⇒ 必须被引号包住 ⇒ 不能拼成命令
+        let c = super::list_dir_cmd("a'; touch /tmp/pwned; echo '", "/tmp/x");
+        let expect = "'a'\\''; touch /tmp/pwned; echo '\\''";
+        assert!(c.contains(expect), "容器名没转义：{c}");
+        assert!(c.contains("'/tmp/x'"), "路径没转义：{c}");
+    }
+
+    #[test]
+    fn ls输出能解析() {
+        let out = "total 8\n\
+-rw-r--r-- 1 root root  1234 Nov 15 19:33 config.yaml\n\
+drwxr-xr-x 2 root root  4096 Nov 15 19:30 conf.d\n";
+        let v = super::parse_ls(out);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "config.yaml");
+        assert_eq!(v[0].size, 1234);
+        assert_eq!(v[0].kind, super::FileKind::File);
+        assert_eq!(v[0].perms, "-rw-r--r--");
+        assert_eq!(v[1].name, "conf.d");
+        assert_eq!(v[1].kind, super::FileKind::Dir);
+    }
+
+    #[test]
+    fn 文件名里有空格也不怕() {
+        let out = "-rw-r--r-- 1 root root   42 Nov 15 19:33 my notes.txt\n";
+        let v = super::parse_ls(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "my notes.txt");
+    }
+
+    #[test]
+    fn 符号链接只取名字() {
+        let out = "lrwxrwxrwx 1 root root    7 Nov 15 19:33 link.txt -> /etc/real.txt\n";
+        let v = super::parse_ls(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "link.txt");
+        assert_eq!(v[0].kind, super::FileKind::Link);
+    }
+
+    #[test]
+    fn 错误信息不当文件() {
+        // docker 的错误信息混在 stdout 里 ⇒ 不能当数据
+        let v = super::parse_ls("Error: No such container: web\n");
+        assert!(v.is_empty(), "错误信息不该被当成文件：{v:?}");
+        let v2 = super::parse_ls("total 0\n");
+        assert!(v2.is_empty(), "表头不该被当成文件：{v2:?}");
+    }
+
+    #[test]
+    fn 文件类型有中文名() {
+        assert_eq!(super::FileKind::Dir.label(), "目录");
+        assert_eq!(super::FileKind::File.label(), "文件");
+        assert_eq!(super::FileKind::Link.label(), "链接");
+    }
+
+    #[test]
+    fn 路径拼接不丢分隔符() {
+        let f = super::ContainerFile {
+            name: "a.txt".into(),
+            ..Default::default()
+        };
+        assert_eq!(f.join("/etc"), "/etc/a.txt");
+        assert_eq!(f.join("/etc/"), "/etc/a.txt");
+    }
+
+    #[test]
+    fn 上传走cp归档流目标是目录() {
+        // ⚠️ **`docker cp -` 的目标必须是目录**（文件名由 tar 决定）。
+        let u = super::cp_upload_cmd("web", "/tmp/dir");
+        assert!(u.starts_with("docker cp - "), "上传应当走 docker cp：{u}");
+        assert!(
+            u.contains("'web:/tmp/dir/'"),
+            "目标应当是「容器:目录/」（整段一个词）：{u}"
+        );
+    }
+
+    #[test]
+    fn 下载走cp归档流且隔离stderr() {
+        // ⚠️ **stderr 必须隔离**（`2>/dev/null`）⇒ 报错不会混进归档流
+        //   （混进去 ⇒ 本地 tar 解不开 ⇒ 下载白费）。
+        let d = super::cp_download_cmd("web", "/etc/conf.d");
+        assert!(d.contains("docker cp "), "下载应当走 docker cp：{d}");
+        assert!(
+            d.contains("'web:/etc/conf.d'"),
+            "路径没写对（应当整段一个词）：{d}"
+        );
+        assert!(d.contains(" - "), "应当输出到 stdout：{d}");
+        assert!(d.contains("2>/dev/null"), "stderr 必须隔离：{d}");
+    }
+
+    #[test]
+    fn 下载上传命令防注入() {
+        // ⚠️ **容器名与路径都来自界面**（路径栏是用户能改的）⇒ 必须转义。
+        let d = super::cp_download_cmd("a'; touch /tmp/pwned; echo '", "/tmp/x");
+        assert!(
+            d.contains("'a'\\''; touch /tmp/pwned; echo '\\'':/tmp/x'"),
+            "容器名没转义（应当整段一个词）：{d}"
+        );
+        let u = super::cp_upload_cmd("web", "/tmp/a b.txt");
+        assert!(
+            u.contains("'web:/tmp/a b.txt/'"),
+            "路径没转义（应当整段一个词）：{u}"
+        );
+    }
+
 
 }

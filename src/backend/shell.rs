@@ -236,6 +236,58 @@ impl ShellChannel {
         });
     }
 
+    /// **流式写**（上传用）：从 `reader` 读一块、写一块，**顺序保证**，
+    /// 写完**发 EOF**（⇒ 远端收到 EOF ⇒ `cat >` / `tar -xf -` 才算结束）。
+    ///
+    /// ⚠️ **为什么不能一块一块 `send()`**：`send` 每次都 `spawn` 一个任务 ⇒
+    ///   那些任务**并发**执行 ⇒ **顺序不保证** ⇒ 大文件会写乱（tar 直接
+    ///   坏掉 ⇒ 远端解出来是垃圾）。
+    /// ⚠️ **为什么在同一个任务里同步读**：`Read::read` 是阻塞的 ⇒ 用
+    ///   `spawn_blocking` 得把 reader 搬进闭包（`&mut` 借用过不去）⇒
+    ///   直接同步读，**占住一个 worker 线程**（多线程 runtime ⇒ 可接受），
+    ///   好处是**内存恒定**（不会把整个文件读进内存）。
+    /// ⚠️ **进度回调**：每写一块报一次**累计字节数**（跨线程 ⇒ 要 `Send`）。
+    ///   用 `Arc` 包一层 ⇒ 回调本身可以 `'static`（要进 spawn 的闭包里）。
+    pub fn send_reader_and_eof<R>(
+        &self,
+        mut reader: R,
+        chunk_size: usize,
+        progress: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+    ) where
+        R: std::io::Read + Send + 'static,
+    {
+        use std::io::Read;
+        let write = Arc::clone(&self.write);
+        let chunk_size = chunk_size.max(1024);
+        self.rt.spawn(async move {
+            let mut buf = vec![0u8; chunk_size];
+            let mut sent: u64 = 0;
+            loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                // ⚠️ **写失败就停**（远端已经退出 ⇒ 再写就是往死通道里塞）。
+                if write.data(&buf[..n]).await.is_err() {
+                    break;
+                }
+                sent += n as u64;
+                progress(sent);
+            }
+            // ⚠️ **必须发 EOF**（不是 close）：远端读到 EOF 才会结束
+            //   （`cat >` / `tar -xf -` 等的就是它）。
+            // ⚠️ **为什么不能只 close**：russh 的 `close()` 发的是
+            //   **CHANNEL_CLOSE**（拆通道）⇒ **不带 EOF** ⇒ 远端的 `cat`
+            //   永远等不到输入结束 ⇒ **命令不退出** ⇒ 没有 exit-status ⇒
+            //   调用方**永远等不到退出码**（实测踩过：上传完文件却一直
+            //   显示「正在上传…」）。
+            let _ = write.eof().await;
+        });
+    }
+
     /// **窗口尺寸变了** ⇒ 告诉远程（`window_change`）。
     ///
     /// ⚠️ 不发的话，远程会一直按最初的尺寸排版 ⇒ 画面看着正常其实

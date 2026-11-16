@@ -247,6 +247,31 @@ fn remote_images_line(opts: &ConnOptions) -> String {
     })
 }
 
+/// 远端跑一条命令，拿回输出（**独立对照**用）。
+///
+/// ⚠️ **命令自己写**（不复用 `docker::` 里的命令构造器）⇒ 否则就是
+///   「程序跟程序自己比」＝同义反复（阶段 115 踩过这个道理）。
+fn remote_cmd(opts: &ConnOptions, cmd: &str) -> String {
+    let keyfile = opts.keyfile.clone().unwrap_or_default();
+    let user = opts.user.clone();
+    let host = opts.host.clone();
+    let port = opts.port;
+    hub::runtime().block_on(async move {
+        let creds = hub::Creds {
+            keyfile: Some(keyfile),
+            ..Default::default()
+        };
+        let key = hub::ServerKey::new(&host, port, &user);
+        let Ok(shared) = hub::acquire(key, &creds).await else {
+            return String::new();
+        };
+        let (_, out) = docker::run_cmd(shared.session().as_ref(), cmd)
+            .await
+            .unwrap_or((0, String::new()));
+        out
+    })
+}
+
 fn main() {
     // ⚠️ **别碰用户的真实配置**。
     let settings_ini = std::env::temp_dir().join(format!("pp-docker-smoke-{}.ini", std::process::id()));
@@ -1673,6 +1698,270 @@ fn main() {
             !sel.is_empty() && conts.iter().any(|r| r.0 == sel),
             format!("选中={sel} 容器行={conts:?}")
         );
+    }
+    // ================= M 组：阶段 116 —— 文件浏览 ＋ 上传 ＋ 下载 =================
+    //
+    // ⚠️ 复用 **F / G / K / L 组那个面板**（panel2）：它已经真连上了 ⇒ 这里
+    //   切到「文件」页就能拿到**真数据**（这台机器上真的有容器）。
+    {
+        let sel = dockerui::selected_for_test(&panel2.st);
+        check!(
+            "㉑ 有选中的容器（文件页要看它的目录）",
+            !sel.is_empty(),
+            "没选中容器"
+        );
+        if sel.is_empty() {
+            println!("[信息] 没有选中的容器 ⇒ 跳过文件页的检查");
+        } else {
+            // ---- 切到「文件」页 ⇒ 列根目录 ----
+            dockerui::files_show_for_test(&panel2.st);
+            let mut waited = 0;
+            while waited < 30 && dockerui::files_rows_for_test(&panel2.st).is_empty() {
+                pump(300);
+                waited += 1;
+            }
+            let rows = dockerui::files_rows_for_test(&panel2.st);
+            println!(
+                "[信息] 容器 {sel} 的根目录：{} 个条目，前几个 {:?}",
+                rows.len(),
+                &rows.iter().take(3).collect::<Vec<_>>()
+            );
+            check!(
+                "㉑ 文件表有行了",
+                !rows.is_empty(),
+                format!("等了 {waited} 次还是空的")
+            );
+            check!(
+                "㉑ 文件行的名字与类型不是空的",
+                rows.iter().any(|r| !r.0.trim().is_empty() && !r.1.trim().is_empty()),
+                format!("{rows:?}")
+            );
+            // ---- **独立对照**：界面第一行 vs 远端 `ls -A` 的第一行 ----
+            //
+            // ⚠️ **用 `ls -A`（一行一个名字）**：这样对照的是**名字本身**，
+            //   不用跟程序自己的字段解析较劲（那样两边一起错就抵消了）。
+            let remote_names = remote_cmd(&opts_f, &format!("docker exec {sel} ls -A -- / 2>/dev/null"));
+            let remote_first = remote_names
+                .lines()
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty())
+                .unwrap_or("")
+                .to_string();
+            let ui_first = rows.first().map(|r| r.0.clone()).unwrap_or_default();
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                shot(&format!("{base}-files.png"));
+            }
+            check!(
+                "㉑ 界面第一行与远端 ls -A 的第一个条目对得上",
+                !remote_first.is_empty() && ui_first == remote_first,
+                format!("界面={ui_first:?} 远端={remote_first:?}（原文={remote_names:?}）")
+            );
+
+            // ---- **真上传**：本地造文件 ⇒ 传到容器的 /tmp ⇒ 远端一字不差 ----
+            let tmp_dir = std::env::temp_dir().join(format!("pp-116-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            let _ = std::fs::create_dir_all(&tmp_dir);
+            let local_file = tmp_dir.join("pp-upload-116.txt");
+            let content = "puttyplus-stage-116-upload-check";
+            std::fs::write(&local_file, content).expect("造本地文件");
+            // 传到容器的 **/tmp**（先切目录；别往容器根目录扔东西）。
+            dockerui::files_goto_for_test(&panel2.st, "/tmp");
+            let mut waited2 = 0;
+            while waited2 < 20 && dockerui::files_path_for_test(&panel2.st) != "/tmp" {
+                pump(200);
+                waited2 += 1;
+            }
+            check!(
+                "㉑ 切到容器的 /tmp 了",
+                dockerui::files_path_for_test(&panel2.st) == "/tmp",
+                format!("当前目录={:?}", dockerui::files_path_for_test(&panel2.st))
+            );
+            // ⚠️ **用计数器等**（状态行会被列表刷新冲掉 ⇒ 靠不住）。
+            let seq0 = dockerui::files_xfer_done_for_test(&panel2.st);
+            dockerui::files_upload_for_test(&panel2.st, &local_file);
+            let mut waited3 = 0;
+            while waited3 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq0 {
+                pump(300);
+                waited3 += 1;
+            }
+            let up_status = dockerui::files_xfer_status_for_test(&panel2.st);
+            check!(
+                "㉑ 上传完成了",
+                up_status.contains("上传完成"),
+                format!("状态行={up_status:?}（等了 {waited3} 次）")
+            );
+            // ---- **独立对照**：远端真的收到这个文件，内容一字不差 ----
+            let remote_cat = remote_cmd(
+                &opts_f,
+                &format!("docker exec {sel} cat /tmp/pp-upload-116.txt 2>/dev/null"),
+            );
+            check!(
+                "㉑ 远端容器里的文件内容与本地一字不差",
+                remote_cat.trim() == content,
+                format!("远端={remote_cat:?} 本地={content:?}")
+            );
+            // ---- 传完之后**列表里要能看到它**（刷新逻辑）----
+            let mut waited4 = 0;
+            while waited4 < 20
+                && !dockerui::files_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == "pp-upload-116.txt")
+            {
+                pump(300);
+                waited4 += 1;
+            }
+            check!(
+                "㉑ 上传完的文件出现在文件表里",
+                dockerui::files_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == "pp-upload-116.txt"),
+                format!("文件表={:?}", dockerui::files_rows_for_test(&panel2.st))
+            );
+
+            // ---- **真下载**：把刚传上去的文件拉回本地 ⇒ 内容要对 ----
+            let dl_dir = tmp_dir.join("dl");
+            let _ = std::fs::create_dir_all(&dl_dir);
+            let seq1 = dockerui::files_xfer_done_for_test(&panel2.st);
+            dockerui::files_download_for_test(&panel2.st, "/tmp/pp-upload-116.txt", &dl_dir);
+            let mut waited5 = 0;
+            while waited5 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq1 {
+                pump(300);
+                waited5 += 1;
+            }
+            let dl_status = dockerui::files_xfer_status_for_test(&panel2.st);
+            check!(
+                "㉑ 下载完成了",
+                dl_status.contains("下载完成"),
+                format!("状态行={dl_status:?}（等了 {waited5} 次）")
+            );
+            let got = std::fs::read_to_string(dl_dir.join("pp-upload-116.txt")).unwrap_or_default();
+            check!(
+                "㉑ 下载回来的文件内容与传上去的一字不差",
+                got.trim() == content,
+                format!("下载回来的={got:?} 原件={content:?}")
+            );
+
+            // ================= 二进制往返（用户 2026-11-16 提问） =================
+            //
+            // ⚠️ **这条是「二进制能不能传」的证据**：文件里塞满 0x00~0xFF
+            //   ⇒ 上传再下载 ⇒ **字节完全一样**才算过。
+            {
+                let bin_file = tmp_dir.join("pp-bin-116.bin");
+                let mut bytes: Vec<u8> = Vec::with_capacity(8192);
+                for i in 0..8192u32 {
+                    bytes.push((i % 256) as u8);
+                }
+                std::fs::write(&bin_file, &bytes).expect("造二进制文件");
+                let seq2 = dockerui::files_xfer_done_for_test(&panel2.st);
+                dockerui::files_upload_for_test(&panel2.st, &bin_file);
+                let mut waited6 = 0;
+                while waited6 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq2 {
+                    pump(300);
+                    waited6 += 1;
+                }
+                let bin_status = dockerui::files_xfer_status_for_test(&panel2.st);
+                check!(
+                    "㉑ 二进制文件上传完成了",
+                    bin_status.contains("上传完成"),
+                    format!("状态行={bin_status:?}")
+                );
+                // 远端大小对得上（**独立对照**）
+                let remote_size = remote_cmd(
+                    &opts_f,
+                    // ⚠️ **不能写 `< /tmp/...`**：那个重定向是**服务器**的 shell
+                    //   做的（读服务器的文件，不是容器里的）⇒ 必须让容器里的
+                    //   wc 自己读参数。
+                    &format!("docker exec {sel} wc -c /tmp/pp-bin-116.bin 2>/dev/null"),
+                );
+                // ⚠️ **wc 的输出是「大小 文件名」** ⇒ 只取**第一个字段**。
+                let remote_bytes = remote_size.split_whitespace().next().unwrap_or("");
+                check!(
+                    "㉑ 远端二进制文件大小与本地一致",
+                    remote_bytes == bytes.len().to_string(),
+                    format!("远端={remote_size:?} 本地={}", bytes.len())
+                );
+                // 下载回来 ⇒ 字节完全一样
+                let bin_dl = tmp_dir.join("bindl");
+                let _ = std::fs::create_dir_all(&bin_dl);
+                let seq3 = dockerui::files_xfer_done_for_test(&panel2.st);
+                dockerui::files_download_for_test(&panel2.st, "/tmp/pp-bin-116.bin", &bin_dl);
+                let mut waited7 = 0;
+                while waited7 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq3 {
+                    pump(300);
+                    waited7 += 1;
+                }
+                let back = std::fs::read(bin_dl.join("pp-bin-116.bin")).unwrap_or_default();
+                check!(
+                    "㉑ 二进制文件下载回来与原件字节完全一样",
+                    back == bytes,
+                    format!("原件 {} 字节，回来 {} 字节（首字节 {:?}）", bytes.len(), back.len(), back.first())
+                );
+            }
+
+            // ================= 目录往返 =================
+            //
+            // ⚠️ **目录走 `docker cp`** ⇒ 容器里**不需要有 tar** ⇒ distroless
+            //   镜像也能用 ⇒ 这条验的就是「目录结构原样搬过去」。
+            {
+                let dir_src = tmp_dir.join("pp-dir-116");
+                let _ = std::fs::create_dir_all(dir_src.join("sub"));
+                std::fs::write(dir_src.join("sub").join("inner.txt"), "inner-content")
+                    .expect("造目录里的文件");
+                let seq4 = dockerui::files_xfer_done_for_test(&panel2.st);
+                dockerui::files_upload_for_test(&panel2.st, &dir_src);
+                let mut waited8 = 0;
+                while waited8 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq4 {
+                    pump(300);
+                    waited8 += 1;
+                }
+                let dir_status = dockerui::files_xfer_status_for_test(&panel2.st);
+                check!(
+                    "㉑ 目录上传完成了",
+                    dir_status.contains("上传完成"),
+                    format!("状态行={dir_status:?}")
+                );
+                // 远端：子目录里的文件在不在、内容对不对
+                let remote_inner = remote_cmd(
+                    &opts_f,
+                    &format!(
+                        "docker exec {sel} cat /tmp/pp-dir-116/sub/inner.txt 2>/dev/null"
+                    ),
+                );
+                check!(
+                    "㉑ 目录上传后容器里的子文件内容对",
+                    remote_inner.trim() == "inner-content",
+                    format!("远端={remote_inner:?}")
+                );
+                // 下载回来 ⇒ 结构与内容都对
+                let dir_dl = tmp_dir.join("dirdl");
+                let _ = std::fs::create_dir_all(&dir_dl);
+                let seq5 = dockerui::files_xfer_done_for_test(&panel2.st);
+                dockerui::files_download_for_test(&panel2.st, "/tmp/pp-dir-116", &dir_dl);
+                let mut waited9 = 0;
+                while waited9 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq5 {
+                    pump(300);
+                    waited9 += 1;
+                }
+                let back_inner = std::fs::read_to_string(
+                    dir_dl.join("pp-dir-116").join("sub").join("inner.txt"),
+                )
+                .unwrap_or_default();
+                check!(
+                    "㉑ 目录下载回来结构与内容都对",
+                    back_inner.trim() == "inner-content",
+                    format!("下载回来的={back_inner:?}（目录={:?}）", dir_dl)
+                );
+            }
+
+            // ---- 收尾：把测试文件从容器里删掉（别留垃圾）----
+            let _ = remote_cmd(
+                &opts_f,
+                &format!(
+                    "docker exec {sel} sh -c 'rm -f /tmp/pp-upload-116.txt /tmp/pp-bin-116.bin; rm -rf /tmp/pp-dir-116' 2>/dev/null"
+                ),
+            );
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
     }
         }
     }
