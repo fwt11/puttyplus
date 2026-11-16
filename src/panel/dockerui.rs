@@ -61,7 +61,17 @@ const PAGE_MONITOR: &str = "monitor";
 const STATS_INTERVAL: f64 = 2.0;
 
 /// 曲线上保留多少个点（2 秒一个 ⇒ 60 个 = **2 分钟**的窗口）。
-const STATS_POINTS: usize = 60;
+pub const STATS_POINTS: usize = 60;
+
+/// **顶层分段**（阶段 115）：容器 / 镜像 / 卷 / 网络。
+///
+/// ⚠️ **跟详情区的三个子页不是一回事**：详情区那三个（概览 / 日志 /
+///   监控）是**选中某个容器之后**才有的；这四个是**顶层**（先选看什么，
+///   再看细节）。
+pub const SEG_CONTAINERS: &str = "containers";
+pub const SEG_IMAGES: &str = "images";
+pub const SEG_VOLUMES: &str = "volumes";
+pub const SEG_NETWORKS: &str = "networks";
 
 /// 表格的列（**顺序 = `TreeStore` 的列顺序**）。
 const COL_NAME: usize = 0;
@@ -194,6 +204,32 @@ pub struct DockerUi {
     stat_stop: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
     /// 监控流**是不是在跑**。
     stat_running: Cell<bool>,
+    /// **顶层分段**（阶段 115）：容器 / 镜像 / 卷 / 网络 四页。
+    seg: gtk::Stack,
+    /// 四个**分段按钮**（点谁切谁）。
+    seg_buttons: RefCell<Vec<(gtk::ToggleButton, &'static str)>>,
+    /// **当前分段**（阶段 115）。
+    seg_current: Cell<&'static str>,
+    /// **镜像表**（阶段 115）。
+    ///
+    /// ⚠️ **用 TreeStore（平表）**：项目里读表值统一走 `model.get(&it, col)`
+    ///   （跟容器表一个写法）⇒ 三张新表也用树表（只是不建子行）。
+    images_store: gtk::TreeStore,
+    images_view: gtk::TreeView,
+    /// **卷表**（阶段 115）。
+    volumes_store: gtk::TreeStore,
+    volumes_view: gtk::TreeView,
+    /// **网络表**（阶段 115）。
+    networks_store: gtk::TreeStore,
+    networks_view: gtk::TreeView,
+    /// 三个分段**各自**的「正在取」标志（阶段 115）。
+    ///
+    /// ⚠️ **为什么不跟容器共用一个 `busy`**：容器正在刷新时，用户切到
+    ///   「镜像」页 ⇒ 镜像那次取数会被 `busy` 挡掉 ⇒ 用户干等 ⇒
+    ///   ⇒ 每个分段各管各的。
+    images_busy: Cell<bool>,
+    volumes_busy: Cell<bool>,
+    networks_busy: Cell<bool>,
     /// **最后一个采样点的原始行**（**带 ANSI** ⇒ 原样）。
     ///
     /// ⚠️ **为什么留原始行**：冒烟要能验证「**剥 ANSI 之后**解析出来的
@@ -266,6 +302,12 @@ enum Msg {
         name: String,
         msg: String,
     },
+    /// **镜像列表**回来了（阶段 115）。
+    Images(Result<Vec<docker::ImageInfo>, String>),
+    /// **卷列表**回来了（阶段 115）。
+    Volumes(Result<Vec<docker::VolumeInfo>, String>),
+    /// **网络列表**回来了（阶段 115）。
+    Networks(Result<Vec<docker::NetInfo>, String>),
 }
 
 /// 详情区的控件（阶段 110）。
@@ -1401,6 +1443,66 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     scroll.set_hexpand(true);
     scroll.set_child(Some(&view));
 
+    // ---- 阶段 115：镜像 / 卷 / 网络 三张表 ----
+    //
+    // ⚠️ **平表（ListStore）**：这三样都没有层级 ⇒ 不用 TreeStore。
+    let (images_store, images_view) = flat_table(
+        &[
+            tr("仓库"),
+            tr("标签"),
+            tr("ID"),
+            tr("大小"),
+            tr("创建时间"),
+        ],
+        &[130, 100, 90, 90, 170],
+        4,
+    );
+    let (volumes_store, volumes_view) =
+        flat_table(&[tr("名称"), tr("驱动")], &[220, 140], 0);
+    let (networks_store, networks_view) =
+        flat_table(&[tr("名称"), tr("驱动"), tr("范围")], &[220, 140, 100], 0);
+
+    let images_root = flat_page(&images_view);
+    let volumes_root = flat_page(&volumes_view);
+    let networks_root = flat_page(&networks_view);
+
+    // ---- 阶段 115：顶层的四个分段（容器 / 镜像 / 卷 / 网络）----
+    //
+    // ⚠️ **用 ToggleButton ＋ group**：点一个别的自动取消 ⇒ 表现像
+    //   「分段按钮」而不是「四个复选框」。
+    let seg_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    seg_bar.set_margin_start(6);
+    seg_bar.set_margin_end(6);
+    seg_bar.set_margin_top(4);
+    let mut seg_buttons: Vec<(gtk::ToggleButton, &'static str)> = Vec::new();
+    {
+        let mut group: Option<gtk::ToggleButton> = None;
+        for (label, key) in [
+            (tr("容器"), SEG_CONTAINERS),
+            (tr("镜像"), SEG_IMAGES),
+            (tr("卷"), SEG_VOLUMES),
+            (tr("网络"), SEG_NETWORKS),
+        ] {
+            let b = gtk::ToggleButton::new();
+            b.set_label(label);
+            b.add_css_class("flat");
+            match &group {
+                Some(g) => b.set_group(Some(g)),
+                None => group = Some(b.clone()),
+            }
+            b.set_active(key == SEG_CONTAINERS);
+            seg_bar.append(&b);
+            seg_buttons.push((b, key));
+        }
+    }
+    // ⚠️ **全局刷新按钮**：分段切换后，容器页工具条里的那个刷新按钮就
+    //   看不见了 ⇒ 每个分段都要能刷新（图标按钮**统一走 a11y::icon_button**）。
+    let seg_refresh = crate::a11y::icon_button("view-refresh-symbolic");
+    seg_refresh.set_tooltip_text(Some(tr("刷新")));
+    seg_refresh.add_css_class("flat");
+    seg_refresh.set_valign(gtk::Align::Center);
+    seg_bar.append(&seg_refresh);
+
     // ---- loading 动画（用户 2026-11-16）----
     //
     // ⚠️ **为什么要有**：打开容器界面后要走 SSH 去远端跑 `docker ps`
@@ -1756,8 +1858,20 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     paned.set_end_child(Some(&detail_box));
     paned.set_position(360);
 
+    // ---- 阶段 115：顶层四页（容器 / 镜像 / 卷 / 网络）----
+    //
+    // ⚠️ **容器那一整套**（工具条 + 表格 + 详情区）整体变成「容器」子页。
+    let seg_stack = gtk::Stack::new();
+    seg_stack.set_vexpand(true);
+    seg_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    let _ = seg_stack.add_named(&paned, Some(SEG_CONTAINERS));
+    let _ = seg_stack.add_named(&images_root, Some(SEG_IMAGES));
+    let _ = seg_stack.add_named(&volumes_root, Some(SEG_VOLUMES));
+    let _ = seg_stack.add_named(&networks_root, Some(SEG_NETWORKS));
+
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    page.append(&paned);
+    page.append(&seg_bar);
+    page.append(&seg_stack);
     page.append(&status);
 
     // ---- 外层：给**编辑区**留一个落点（阶段 113 之后）----
@@ -1862,6 +1976,18 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         stat_stop: RefCell::new(None),
         stat_running: Cell::new(false),
         stat_last_raw: RefCell::new(None),
+        seg: seg_stack.clone(),
+        seg_buttons: RefCell::new(seg_buttons.clone()),
+        seg_current: Cell::new(SEG_CONTAINERS),
+        images_store: images_store.clone(),
+        images_view: images_view.clone(),
+        volumes_store: volumes_store.clone(),
+        volumes_view: volumes_view.clone(),
+        networks_store: networks_store.clone(),
+        networks_view: networks_view.clone(),
+        images_busy: Cell::new(false),
+        volumes_busy: Cell::new(false),
+        networks_busy: Cell::new(false),
         term_chan: RefCell::new(None),
         term_running: Cell::new(false),
         term_win: RefCell::new(None),
@@ -1883,6 +2009,33 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 match r {
                     Msg::List(Ok(info)) => u.apply(&info),
                     Msg::List(Err(msg)) => u.fail(&msg),
+                    // ⚠️ **阶段 115**：三个新分段的结果。
+                    //    ⚠️ **失败时只改状态行**（不清容器表）⇒ 切回容器页
+                    //    还能看到原来的列表。
+                    Msg::Images(Ok(v)) => {
+                        u.images_busy.set(false);
+                        apply_images(&u, &v);
+                    }
+                    Msg::Images(Err(msg)) => {
+                        u.images_busy.set(false);
+                        u.status.set_text(&msg);
+                    }
+                    Msg::Volumes(Ok(v)) => {
+                        u.volumes_busy.set(false);
+                        apply_volumes(&u, &v);
+                    }
+                    Msg::Volumes(Err(msg)) => {
+                        u.volumes_busy.set(false);
+                        u.status.set_text(&msg);
+                    }
+                    Msg::Networks(Ok(v)) => {
+                        u.networks_busy.set(false);
+                        apply_networks(&u, &v);
+                    }
+                    Msg::Networks(Err(msg)) => {
+                        u.networks_busy.set(false);
+                        u.status.set_text(&msg);
+                    }
                     Msg::Detail { name, r } => {
                         // ⚠️ **只认当前选中的那个**：用户连着点了两个容器 ⇒
                         //    先回来的那个可能已经过时了 ⇒ 丢掉。
@@ -2297,6 +2450,47 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     }
     // **双击项目行 = 展开/收起**（点箭头是 GTK 自带的，这里多给一种手势）。
     //
+    // ---- 阶段 115：分段切换 ----
+    //
+    // ⚠️ **切过去就取一次数据**（懒加载）⇒ 用户不用先点「刷新」。
+    // ⚠️ **group 里切换会发两次 `toggled`**（旧的变 false、新的变 true）
+    //   ⇒ 只在 `is_active()` 时才动手。
+    {
+        for (btn, key) in seg_buttons.clone() {
+            // ⚠️ **每个按钮各自一份弱引用**：弱引用不是 Copy ⇒ 在循环里
+            //   clone 一份（循环外的那份 move 进第一个闭包就废了）。
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            // ⚠️ **闭包捕获一份克隆**：按钮本身还要留着去 `connect_toggled`
+            //   ⇒ 直接 move 进闭包就把它借走了（编译不过）。
+            let btn_c = btn.clone();
+            btn.connect_toggled(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                if !btn_c.is_active() {
+                    return;
+                }
+                u.seg_current.set(key);
+                u.seg.set_visible_child_name(key);
+                refresh_segment(&st, &u);
+            });
+        }
+        // ⚠️ **刷新按钮**：刷**当前分段**（不是永远刷容器）。
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        seg_refresh.connect_clicked(move |_| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return;
+            };
+            match u.seg_current.get() {
+                SEG_IMAGES => refresh_images(&st, &u),
+                SEG_VOLUMES => refresh_volumes(&st, &u),
+                SEG_NETWORKS => refresh_networks(&st, &u),
+                _ => {}
+            }
+        });
+    }
     // ⚠️ GTK4 的 `row_activated` 是**双击**才发的（单击不发）⇒
     //    单击项目行不会误触发。
     {
@@ -2332,7 +2526,9 @@ fn start_auto(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
             return glib::ControlFlow::Break;
         };
         if u.auto.is_active() {
-            refresh(&st, &u);
+            // ⚠️ **阶段 115**：自动刷新刷的是**当前分段**（在镜像页就别
+            //   去刷容器了 ⇒ 少一条远端命令）。
+            refresh_segment(&st, &u);
         }
         glib::ControlFlow::Continue
     });
@@ -3714,4 +3910,264 @@ mod tests {
             _ => panic!("第 1 行应当是项目行"),
         }
     }
+}
+
+
+/* ---------------- 阶段 115：镜像 / 卷 / 网络（前端） ---------------- */
+
+/// 建一张**平表**（列标题 + 列宽）⇒ 返回 `(ListStore, TreeView)`。
+///
+/// ⚠️ **为什么不用树表**：镜像 / 卷 / 网络都没有层级 ⇒ 平表就够。
+/// ⚠️ **第一列 expand**：名字列拉宽，其余给下限（跟容器表一个脾气）。
+fn flat_table(
+    titles: &[&str],
+    widths: &[i32],
+    expand_col: usize,
+) -> (gtk::TreeStore, gtk::TreeView) {
+    let types: Vec<glib::Type> = titles.iter().map(|_| glib::Type::STRING).collect();
+    let store = gtk::TreeStore::new(&types);
+    let view = gtk::TreeView::new();
+    view.set_model(Some(&store));
+    for (i, t) in titles.iter().enumerate() {
+        let r = gtk::CellRendererText::new();
+        r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let col = gtk::TreeViewColumn::new();
+        col.set_title(t);
+        col.set_resizable(true);
+        col.pack_start(&r, false);
+        // ⚠️ **必须显式绑 "text"**（跟容器表同一个坑：不绑就是一片空白）。
+        col.add_attribute(&r, "text", i as i32);
+        col.set_min_width(widths[i]);
+        // ⚠️ **哪一列展开**：镜像表是「创建时间」（最容易被截断的那列）⇒
+        //   展开它，别让「仓库」占满宽度把时间挤成「2026-11-15 19:33…」。
+        if i == expand_col {
+            col.set_expand(true);
+        }
+        view.append_column(&col);
+    }
+    (store, view)
+}
+
+/// 把一张表包进**能滚动的页面**（表格占满 + 上下留白）。
+fn flat_page(view: &gtk::TreeView) -> gtk::Box {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_hexpand(true);
+    scroll.set_child(Some(view));
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_margin_bottom(6);
+    root.append(&scroll);
+    root
+}
+
+/// 刷新**当前分段**（阶段 115）。
+///
+/// ⚠️ **自动刷新也走这里** ⇒ 在镜像页就别去刷容器（少一条远端命令）。
+fn refresh_segment(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    match ui.seg_current.get() {
+        SEG_IMAGES => refresh_images(st, ui),
+        SEG_VOLUMES => refresh_volumes(st, ui),
+        SEG_NETWORKS => refresh_networks(st, ui),
+        _ => refresh(st, ui),
+    }
+}
+
+/// 刷新**镜像**（阶段 115）。
+fn refresh_images(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    if ui.images_busy.get() {
+        return; // 上一次还没回来 ⇒ 不叠加
+    }
+    ui.images_busy.set(true);
+    ui.status.set_text(&tr("正在读取远程镜像…"));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = fetch_images(&opts, pw).await;
+        let _ = tx.send_blocking(Msg::Images(r));
+    });
+}
+
+/// 刷新**卷**（阶段 115）。
+fn refresh_volumes(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    if ui.volumes_busy.get() {
+        return;
+    }
+    ui.volumes_busy.set(true);
+    ui.status.set_text(&tr("正在读取远程卷…"));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = fetch_volumes(&opts, pw).await;
+        let _ = tx.send_blocking(Msg::Volumes(r));
+    });
+}
+
+/// 刷新**网络**（阶段 115）。
+fn refresh_networks(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    if ui.networks_busy.get() {
+        return;
+    }
+    ui.networks_busy.set(true);
+    ui.status.set_text(&tr("正在读取远程网络…"));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let r = fetch_networks(&opts, pw).await;
+        let _ = tx.send_blocking(Msg::Networks(r));
+    });
+}
+
+/// 后台取**镜像列表**（走**共享连接** ⇒ 不新增 SSH 连接）。
+async fn fetch_images(
+    opts: &crate::args::ConnOptions,
+    pw: Option<String>,
+) -> Result<Vec<docker::ImageInfo>, String> {
+    let session = shared_session(opts, pw).await?;
+    docker::list_images(&session).await.map_err(|e| e.0)
+}
+
+/// 后台取**卷列表**（走**共享连接**）。
+async fn fetch_volumes(
+    opts: &crate::args::ConnOptions,
+    pw: Option<String>,
+) -> Result<Vec<docker::VolumeInfo>, String> {
+    let session = shared_session(opts, pw).await?;
+    docker::list_volumes(&session).await.map_err(|e| e.0)
+}
+
+/// 后台取**网络列表**（走**共享连接**）。
+async fn fetch_networks(
+    opts: &crate::args::ConnOptions,
+    pw: Option<String>,
+) -> Result<Vec<docker::NetInfo>, String> {
+    let session = shared_session(opts, pw).await?;
+    docker::list_networks(&session).await.map_err(|e| e.0)
+}
+
+/// 填**镜像表** ＋ 更新状态行（阶段 115）。
+fn apply_images(ui: &Rc<DockerUi>, v: &[docker::ImageInfo]) {
+    ui.images_store.clear();
+    for i in v {
+        let row = ui.images_store.append(None);
+        ui.images_store.set(
+            &row,
+            &[
+                (0u32, &i.repository),
+                (1u32, &i.tag),
+                (2u32, &i.id),
+                (3u32, &i.size),
+                (4u32, &i.created),
+            ],
+        );
+    }
+    ui.status.set_text(&trf!("共 {n} 个镜像", n = v.len()));
+}
+
+/// 填**卷表** ＋ 更新状态行（阶段 115）。
+fn apply_volumes(ui: &Rc<DockerUi>, v: &[docker::VolumeInfo]) {
+    ui.volumes_store.clear();
+    for x in v {
+        let row = ui.volumes_store.append(None);
+        ui.volumes_store.set(&row, &[(0u32, &x.name), (1u32, &x.driver)]);
+    }
+    ui.status.set_text(&trf!("共 {n} 个卷", n = v.len()));
+}
+
+/// 填**网络表** ＋ 更新状态行（阶段 115）。
+fn apply_networks(ui: &Rc<DockerUi>, v: &[docker::NetInfo]) {
+    ui.networks_store.clear();
+    for x in v {
+        let row = ui.networks_store.append(None);
+        ui.networks_store
+            .set(&row, &[(0u32, &x.name), (1u32, &x.driver), (2u32, &x.scope)]);
+    }
+    ui.status.set_text(&trf!("共 {n} 个网络", n = v.len()));
+}
+
+/* ---------------- 阶段 115：测试钩子 ---------------- */
+
+/// 测试钩子：切到某个**顶层分段**（阶段 115）。
+///
+/// ⚠️ **真的切**（改可见子页 ＋ 触发取数）⇒ 冒烟能验「切过去就有数据」。
+pub fn seg_show_for_test(st: &Rc<PanelState>, seg: &'static str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    ui.seg_current.set(seg);
+    ui.seg.set_visible_child_name(seg);
+    // ⚠️ **同时把按钮状态对上**（不然界面上高亮的还是「容器」）。
+    for (btn, key) in ui.seg_buttons.borrow().iter() {
+        btn.set_active(*key == seg);
+    }
+    refresh_segment(st, ui);
+}
+
+/// 测试钩子：当前是哪个**顶层分段**（阶段 115）。
+pub fn seg_current_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.seg_current.get().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：**镜像表**的行（阶段 115）。
+pub fn images_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String, String, String, String)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    // ⚠️ **ListStore 自己没有 `iter()`/`value()`** ⇒ 走 **TreeModel**
+    //   接口（ListStore 也是 TreeModel）⇒ `iter_first` + `iter_next`。
+    let model = ui.images_store.clone();
+    if let Some(mut iter) = model.iter_first() {
+        loop {
+            let g = |c: i32| -> String { model.get(&iter, c) };
+            out.push((g(0), g(1), g(2), g(3), g(4)));
+            if !model.iter_next(&mut iter) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 测试钩子：**卷表**的行（阶段 115）。
+pub fn volumes_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    let model = ui.volumes_store.clone();
+    if let Some(mut iter) = model.iter_first() {
+        loop {
+            let g = |c: i32| -> String { model.get(&iter, c) };
+            out.push((g(0), g(1)));
+            if !model.iter_next(&mut iter) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 测试钩子：**网络表**的行（阶段 115）。
+pub fn networks_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String, String)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    let model = ui.networks_store.clone();
+    if let Some(mut iter) = model.iter_first() {
+        loop {
+            let g = |c: i32| -> String { model.get(&iter, c) };
+            out.push((g(0), g(1), g(2)));
+            if !model.iter_next(&mut iter) {
+                break;
+            }
+        }
+    }
+    out
 }

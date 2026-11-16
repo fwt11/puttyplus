@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1893] = [
+pub static EN: [(&str, &str); 1903] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -299,6 +299,7 @@ pub static EN: [(&str, &str); 1893] = [
     ("从左侧建一个连接就能开工", "Create a connection on the left to get started"),
     ("从文件面板拖一个文件过去，或在文件菜单里选「传输…」。", "Drag a file over from the file panel, or pick \"Transfer…\" in the File menu."),
     ("从最近中移除", "Remove from recent"),
+    ("仓库", "Repository"),
     ("代理命令启动失败（{expanded}）: {e}", "Failed to start the proxy command ({expanded}): {e}"),
     ("代理命令无 stderr", "The proxy command has no stderr"),
     ("代理命令无 stdin", "The proxy command has no stdin"),
@@ -386,8 +387,11 @@ pub static EN: [(&str, &str); 1893] = [
     ("全部完成：{v0}", "All done: {v0}"),
     ("全部替换", "Replace all"),
     ("全隐藏", "Hide all"),
+    ("共 {n} 个卷", "{n} volumes in total"),
     ("共 {n} 个容器", "{n} containers in total"),
     ("共 {n} 个容器（远程 Docker {v}）", "{n} containers in total (remote Docker {v})"),
+    ("共 {n} 个网络", "{n} networks in total"),
+    ("共 {n} 个镜像", "{n} images in total"),
     ("共享连接建立失败", "Failed to establish the shared connection"),
     ("关", "Off"),
     ("关于 PuTTYPlus", "About PuTTYPlus"),
@@ -551,6 +555,7 @@ pub static EN: [(&str, &str); 1893] = [
     ("单元格详情…", "Cell details…"),
     ("单向镜像：只把本地推向远程，不拉取、不合并冲突。\n两边类型不同（一目录一文件）的路径一律不动，列在预览里等你处理。", "One-way mirror: only the local side is pushed to the remote, nothing is pulled and conflicts are not merged.\nPaths whose type differs (a directory on one side, a file on the other) are never touched; they are listed in the preview for you to handle."),
     ("占用空间", "Space used"),
+    ("卷", "Volumes"),
     ("历史已清空", "The history has been cleared"),
     ("历史：看跑过的 SQL（双击一条把它填回编辑器）", "History: the SQL that has been run (double-click one to put it back into the editor)"),
     ("压缩留白，同屏显示更多文件行", "Compact spacing, fit more file rows on screen"),
@@ -1278,7 +1283,10 @@ pub static EN: [(&str, &str); 1893] = [
     ("正在统计总行数…", "Counting total rows…"),
     ("正在读取 {v0}…", "Reading {v0}…"),
     ("正在读取表结构…", "Reading the table structure…"),
+    ("正在读取远程卷…", "Reading volumes from the remote server…"),
     ("正在读取远程容器…", "Reading remote containers…"),
+    ("正在读取远程网络…", "Reading networks from the remote server…"),
+    ("正在读取远程镜像…", "Reading images from the remote server…"),
     ("正在读定义…", "Reading the definition…"),
     ("正在读表结构…", "Reading the table structure…"),
     ("正在载入", "Loading"),
@@ -1551,6 +1559,7 @@ pub static EN: [(&str, &str); 1893] = [
     ("自增当前值", "Current auto-increment value"),
     ("自定义", "Custom"),
     ("若该 .ppk 有口令保护请输入（没有就留空）：", "Enter the passphrase if this .ppk is protected (leave it empty if it is not):"),
+    ("范围", "Scope"),
     ("获取 {path} 属性失败: {e}", "Failed to get the attributes of {path}: {e}"),
     ("获取 {rpath} 属性失败: {e}", "Failed to get the attributes of {rpath}: {e}"),
     ("获取本地 {lpath} 失败: {e}", "Failed to stat the local {lpath}: {e}"),
@@ -1868,6 +1877,7 @@ pub static EN: [(&str, &str); 1893] = [
     ("首选项 — PuTTYPlus", "Preferences — PuTTYPlus"),
     ("首选项…", "Preferences…"),
     ("首页：回到第一页", "Home: back to the first page"),
+    ("驱动", "Driver"),
     ("高对比", "High contrast"),
     ("高对比（黑底白字），投影与弱视场景", "High contrast (black on white), for projectors and low vision"),
     ("高级", "Advanced"),

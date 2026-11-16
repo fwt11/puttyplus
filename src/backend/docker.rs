@@ -1174,6 +1174,167 @@ pub async fn run_compose_action(
     Ok(action.past_label().to_string())
 }
 
+/* ---------------- 阶段 115：镜像 / 卷 / 网络（只读列表） ---------------- */
+
+/// 镜像列表命令。
+///
+/// ⚠️ **只列本地镜像**（`docker images` 不带 `-a` 之外的参数就是本地）⇒
+///   跟 dbx 的镜像页一致（用户要的是「这台机器上有哪些镜像」）。
+/// ⚠️ `{{.Repository}}` 与 `{{.Tag}}` 分开取 ⇒ 界面能分别显示「仓库」与
+///   「标签」两列（悬空镜像是 `<none>` / `<none>`）。
+pub fn images_cmd() -> String {
+    "docker images --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Size}}|{{.CreatedAt}}' 2>&1"
+        .to_string()
+}
+
+/// 卷列表命令（**本地卷**）。
+pub fn volumes_cmd() -> String {
+    "docker volume ls --format '{{.Name}}|{{.Driver}}' 2>&1".to_string()
+}
+
+/// 网络列表命令。
+///
+/// ⚠️ **会把默认网络也列出来**（`bridge` / `host` / `none`）⇒ 这是
+///   docker 的事实 ⇒ 照实显示（用户要看到全貌）。
+pub fn networks_cmd() -> String {
+    "docker network ls --format '{{.Name}}|{{.Driver}}|{{.Scope}}' 2>&1".to_string()
+}
+
+/// 一个镜像（阶段 115）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageInfo {
+    /// 仓库名（如 `postgis/postgis`；悬空镜像是 `<none>`）。
+    pub repository: String,
+    /// 标签（如 `17-3.5`；悬空镜像是 `<none>`）。
+    pub tag: String,
+    /// 镜像 ID（前 12 位）。
+    pub id: String,
+    /// 大小（docker 的原文，如 `1.23GB`）。
+    pub size: String,
+    /// 创建时间（docker 的原文，如 `3 days ago`）。
+    pub created: String,
+}
+
+/// 一个卷（阶段 115）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VolumeInfo {
+    /// 卷名。
+    pub name: String,
+    /// 驱动（如 `local`）。
+    pub driver: String,
+}
+
+/// 一个网络（阶段 115）。
+///
+/// ⚠️ **别跟容器详情里的 `NetworkInfo` 混**：那个是这个容器挂上去的
+///   网络（IP / 网关）；这个是 docker 的**网络对象**。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetInfo {
+    /// 网络名。
+    pub name: String,
+    /// 驱动（如 `bridge` / `overlay`）。
+    pub driver: String,
+    /// 范围（`local` / `swarm`）。
+    pub scope: String,
+}
+
+/// 解析 `docker images` 的输出 ⇒ 镜像列表（**纯函数**）。
+///
+/// ⚠️ **行数不够就丢掉**：docker 出错时也会往 stdout 吐东西 ⇒ 别把
+///   错误信息当成一行镜像。
+pub fn parse_images(out: &str) -> Vec<ImageInfo> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(SEP).collect();
+        if f.len() < 5 {
+            continue;
+        }
+        v.push(ImageInfo {
+            repository: f[0].trim().to_string(),
+            tag: f[1].trim().to_string(),
+            id: f[2].trim().to_string(),
+            size: f[3].trim().to_string(),
+            created: f[4].trim().to_string(),
+        });
+    }
+    v
+}
+
+/// 解析 `docker volume ls` 的输出 ⇒ 卷列表（**纯函数**）。
+pub fn parse_volumes(out: &str) -> Vec<VolumeInfo> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(SEP).collect();
+        if f.len() < 2 {
+            continue;
+        }
+        v.push(VolumeInfo {
+            name: f[0].trim().to_string(),
+            driver: f[1].trim().to_string(),
+        });
+    }
+    v
+}
+
+/// 解析 `docker network ls` 的输出 ⇒ 网络列表（**纯函数**）。
+pub fn parse_networks(out: &str) -> Vec<NetInfo> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(SEP).collect();
+        if f.len() < 3 {
+            continue;
+        }
+        v.push(NetInfo {
+            name: f[0].trim().to_string(),
+            driver: f[1].trim().to_string(),
+            scope: f[2].trim().to_string(),
+        });
+    }
+    v
+}
+
+/// 取**镜像列表**（阶段 115）。
+///
+/// ⚠️ 走**共享连接**上的 exec 通道（不是新连接）⇒ 一台服务器仍然只有
+///   一条 SSH 连接。
+pub async fn list_images(session: &Handle<HostKeyHandler>) -> BackendResult<Vec<ImageInfo>> {
+    let (code, out) = run_cmd(session, &images_cmd()).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    Ok(parse_images(&out))
+}
+
+/// 取**卷列表**（阶段 115）。
+pub async fn list_volumes(session: &Handle<HostKeyHandler>) -> BackendResult<Vec<VolumeInfo>> {
+    let (code, out) = run_cmd(session, &volumes_cmd()).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    Ok(parse_volumes(&out))
+}
+
+/// 取**网络列表**（阶段 115）。
+pub async fn list_networks(session: &Handle<HostKeyHandler>) -> BackendResult<Vec<NetInfo>> {
+    let (code, out) = run_cmd(session, &networks_cmd()).await?;
+    if code != 0 {
+        return Err(BackendError(classify_failure(&out)));
+    }
+    Ok(parse_networks(&out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1708,4 +1869,75 @@ mod tests {
         assert!((p2.cpu - 3.0).abs() < 0.001, "CPU 不对：{}", p2.cpu);
         assert!((p2.net_rx - 2000.0).abs() < 0.001, "速率不对：{}", p2.net_rx);
     }
+
+    /* ---------------- 阶段 115：镜像 / 卷 / 网络 ---------------- */
+
+    #[test]
+    fn 镜像命令列出五个字段() {
+        let c = super::images_cmd();
+        assert!(c.contains("docker images"), "应当是 docker images：{c}");
+        assert!(c.contains("{{.Repository}}"), "应当带仓库：{c}");
+        assert!(c.contains("{{.Tag}}"), "应当带标签：{c}");
+        assert!(c.contains("{{.Size}}"), "应当带大小：{c}");
+        assert!(c.contains("{{.CreatedAt}}"), "应当带创建时间：{c}");
+    }
+
+    #[test]
+    fn 卷命令和网络命令对() {
+        let v = super::volumes_cmd();
+        assert!(v.contains("docker volume ls"), "应当是 docker volume ls：{v}");
+        assert!(v.contains("{{.Name}}"), "应当带名字：{v}");
+        let n = super::networks_cmd();
+        assert!(n.contains("docker network ls"), "应当是 docker network ls：{n}");
+        assert!(n.contains("{{.Driver}}"), "应当带驱动：{n}");
+        assert!(n.contains("{{.Scope}}"), "应当带范围：{n}");
+    }
+
+    #[test]
+    fn 镜像行能解析() {
+        let out = "postgis/postgis|17-3.5|34548bd0e2f1|1.23GB|3 days ago\n";
+        let v = super::parse_images(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].repository, "postgis/postgis");
+        assert_eq!(v[0].tag, "17-3.5");
+        assert_eq!(v[0].id, "34548bd0e2f1");
+        assert_eq!(v[0].size, "1.23GB");
+        assert_eq!(v[0].created, "3 days ago");
+    }
+
+    #[test]
+    fn 悬空镜像也认() {
+        // docker 对没有仓库/标签的镜像给 `<none>`
+        let out = "<none>|<none>|abc123def456|88.8MB|2 weeks ago\n";
+        let v = super::parse_images(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].repository, "<none>");
+        assert_eq!(v[0].tag, "<none>");
+    }
+
+    #[test]
+    fn 卷行和网络行能解析() {
+        let v = super::parse_volumes("myproj_pgdata|local\nother|local\n");
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "myproj_pgdata");
+        assert_eq!(v[0].driver, "local");
+        let n = super::parse_networks("bridge|bridge|local\nmyproj_default|bridge|local\n");
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].name, "bridge");
+        assert_eq!(n[0].driver, "bridge");
+        assert_eq!(n[0].scope, "local");
+        assert_eq!(n[1].name, "myproj_default");
+    }
+
+    #[test]
+    fn 坏行丢掉() {
+        // docker 报错时也会往 stdout 吐东西 ⇒ 字段不够的行不能当成数据
+        let v = super::parse_images("Cannot connect to the Docker daemon\n");
+        assert!(v.is_empty(), "错误信息不该被当成镜像：{v:?}");
+        let vols = super::parse_volumes("bad\n");
+        assert!(vols.is_empty(), "字段不够的行不该被当成卷：{vols:?}");
+        let nets = super::parse_networks("a|b\n");
+        assert!(nets.is_empty(), "字段不够的行不该被当成网络：{nets:?}");
+    }
+
 }

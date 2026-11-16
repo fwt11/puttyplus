@@ -215,6 +215,38 @@ fn remote_log_procs(opts: &ConnOptions) -> String {
     remote_procs(opts, "docker logs")
 }
 
+/// 远端 `docker images` 的第一行（**独立对照**用）。
+///
+/// ⚠️ **为什么要自己再跑一遍**：界面上的镜像名如果**解析错位**了，光看
+///   「有行、字段非空」**抓不住**（都非空）⇒ 得拿**远端原文**对一遍。
+/// ⚠️ **命令自己写**（不复用 `docker::images_cmd`）⇒ 否则就是「程序跟
+///   程序自己比」＝同义反复。
+fn remote_images_line(opts: &ConnOptions) -> String {
+    let keyfile = opts.keyfile.clone().unwrap_or_default();
+    let user = opts.user.clone();
+    let host = opts.host.clone();
+    let port = opts.port;
+    hub::runtime().block_on(async move {
+        let creds = hub::Creds {
+            keyfile: Some(keyfile),
+            ..Default::default()
+        };
+        let key = hub::ServerKey::new(&host, port, &user);
+        let Ok(shared) = hub::acquire(key, &creds).await else {
+            return String::new();
+        };
+        let cmd = "docker images --format '{{.Repository}}|{{.Tag}}' 2>&1";
+        let (_, out) = docker::run_cmd(shared.session().as_ref(), cmd)
+            .await
+            .unwrap_or((0, String::new()));
+        out.lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    })
+}
+
 fn main() {
     // ⚠️ **别碰用户的真实配置**。
     let settings_ini = std::env::temp_dir().join(format!("pp-docker-smoke-{}.ini", std::process::id()));
@@ -1534,9 +1566,118 @@ fn main() {
                 leftover.is_empty(),
                 format!("远端还挂着：{leftover}")
             );
+    // ================= L 组：阶段 115 —— 镜像 / 卷 / 网络 =================
+    //
+    // ⚠️ 复用 **F / G / K 组那个面板**（panel2）：它已经真连上了 ⇒ 这里
+    //   切分段就能拿到**真数据**（这台机器上真的有镜像 / 卷 / 网络）。
+    {
+        // ---- 切到「镜像」页 ----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_IMAGES);
+        check!(
+            "⑳ 切到镜像页了",
+            dockerui::seg_current_for_test(&panel2.st) == "images",
+            format!("当前分段={}", dockerui::seg_current_for_test(&panel2.st))
+        );
+        let mut waited = 0;
+        while waited < 30 && dockerui::images_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            waited += 1;
+        }
+        let imgs = dockerui::images_rows_for_test(&panel2.st);
+        println!("[信息] 镜像 {} 个：{:?}", imgs.len(), &imgs.first());
+        check!(
+            "⑳ 镜像表有行了",
+            !imgs.is_empty(),
+            format!("等了 {waited} 次还是空的")
+        );
+        // ⚠️ **内容也要对**：仓库与大小都不能是空的
+        //   ⇒ 抓「解析错位/字段对不上」这类退化（光看「有行」抓不住）。
+        check!(
+            "⑳ 镜像行的仓库与大小不是空的",
+            imgs.iter().any(|r| !r.0.trim().is_empty() && !r.3.trim().is_empty()),
+            format!("{imgs:?}")
+        );
+        // ---- **独立对照**：界面第一行 vs 远端原文 ----
+        //
+        // ⚠️ 这条才抓得住「**解析错位**」（仓库/标签/大小 串了列）：
+        //   光看「非空」抓不住（都非空）⇒ 得跟远端原文对。
+        let remote_line = remote_images_line(&opts_f);
+        let remote_first = remote_line.split('|').next().unwrap_or("").to_string();
+        let ui_first = imgs.first().map(|r| r.0.clone()).unwrap_or_default();
+        check!(
+            "⑳ 界面第一行镜像与远端原文对得上",
+            !remote_first.is_empty() && ui_first == remote_first,
+            format!("界面={ui_first:?} 远端={remote_first:?}（整行={remote_line:?}）")
+        );
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            shot(&format!("{base}-images.png"));
+        }
+
+        // ---- 切到「卷」页 ----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_VOLUMES);
+        let mut waited2 = 0;
+        while waited2 < 30 && dockerui::volumes_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            waited2 += 1;
+        }
+        let vols = dockerui::volumes_rows_for_test(&panel2.st);
+        println!("[信息] 卷 {} 个：{:?}", vols.len(), &vols.first());
+        check!(
+            "⑳ 卷表有行了",
+            !vols.is_empty(),
+            format!("等了 {waited2} 次还是空的")
+        );
+        check!(
+            "⑳ 卷行的名字与驱动不是空的",
+            vols.iter().any(|r| !r.0.trim().is_empty() && !r.1.trim().is_empty()),
+            format!("{vols:?}")
+        );
+
+        // ---- 切到「网络」页 ----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_NETWORKS);
+        let mut waited3 = 0;
+        while waited3 < 30 && dockerui::networks_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            waited3 += 1;
+        }
+        let nets = dockerui::networks_rows_for_test(&panel2.st);
+        println!("[信息] 网络 {} 个：{:?}", nets.len(), &nets.first());
+        check!(
+            "⑳ 网络表有行了",
+            !nets.is_empty(),
+            format!("等了 {waited3} 次还是空的")
+        );
+        check!(
+            "⑳ 网络行的名字与范围不是空的",
+            nets.iter().any(|r| !r.0.trim().is_empty() && !r.2.trim().is_empty()),
+            format!("{nets:?}")
+        );
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            shot(&format!("{base}-networks.png"));
+        }
+
+        // ---- 切回「容器」页 ⇒ **容器列表还在**（别把容器表弄丢了）----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_CONTAINERS);
+        pump(500);
+        let conts = dockerui::model_rows_for_test(&panel2.st);
+        check!(
+            "⑳ 切回容器页，容器列表还在",
+            !conts.is_empty(),
+            "容器表空了（切分段把容器列表弄丢了？）"
+        );
+        // ⚠️ **不要硬编码容器名**（换台机器/换个容器就假红）⇒ 改成看
+        //   「程序记着的那个选中项还在不在」。
+        let sel = dockerui::selected_for_test(&panel2.st);
+        check!(
+            "⑳ 切回容器页，原来选中的容器还在",
+            !sel.is_empty() && conts.iter().any(|r| r.0 == sel),
+            format!("选中={sel} 容器行={conts:?}")
+        );
+    }
         }
     }
     }
+
 
     let n_fail = FAILS.with(|f| f.borrow().len());    if n_fail == 0 {
         println!("docker_ui_smoke: 全部通过");
