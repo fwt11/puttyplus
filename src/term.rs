@@ -527,6 +527,14 @@ impl TermInner {
     fn on_session_ended(&self, status: i32) {
         self.autofeed_on.set(false);
         self.child_alive.set(false);
+        // ⚠️ **阶段 125**：会话断了（网络断了 / 远端关机 / ssh 退出）⇒
+        //   **光标停止闪烁**。
+        //   不停的话：终端成了幅"死画面"却还在闪 ⇒ 用户以为还能输入、
+        //   以为程序卡住了（PuTTY 的做法：断开后光标停止闪烁）。
+        //
+        // ⚠️ **恢复时回"默认"（不是 `On`）** ⇒ 用户在系统里关了闪烁，
+        //   我们不会硬给他闪回来（见 `TermView::set_cursor_blink`）。
+        self.term.set_cursor_blink(Some(false));
         // asciicast v3 的 `x` 事件：会话退出码（回放时看得出是正常退出还是出错退出）
         if let Some(r) = self.rec.borrow_mut().as_mut() {
             r.rec.exit(status as i64);
@@ -2811,6 +2819,9 @@ fn spawn_term_inproc_ex(
                 }
                 inner_cb.banner_re.set_visible(false);
                 inner_cb.sync_banner_visibility();
+                // ⚠️ **阶段 125**：会话回来了 ⇒ **光标恢复闪烁**
+                //   （回"默认" ⇒ 跟着系统，不是硬闪）。
+                inner_cb.term.set_cursor_blink(None);
                 // 会话就绪钩子（「在此处打开终端」靠它发 `cd`）
                 // ⚠️ **没有 pty** ⇒ 没有本地行规程 ⇒ 不必等 raw。
                 inner_cb.reconnecting.set(false);
@@ -3076,6 +3087,8 @@ fn spawn_term(inner: &Rc<TermInner>) {
                 // 新会话起来了，「会话已结束」条收起来
                 inner_cb.banner_re.set_visible(false);
                 inner_cb.sync_banner_visibility();
+                // ⚠️ **阶段 125**：新会话 ⇒ **光标恢复闪烁**（回"默认"）。
+                inner_cb.term.set_cursor_blink(None);
                 // 会话就绪钩子（「在此处打开终端」靠它发 `cd`）
                 // ⚠️ 先 take 出来再调：闭包里若又碰这个 RefCell 会死锁。
                 //

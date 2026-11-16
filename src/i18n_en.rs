@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1887] = [
+pub static EN: [(&str, &str); 1893] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1289,6 +1289,7 @@ pub static EN: [(&str, &str); 1887] = [
     ("正在连接…", "Connecting…"),
     ("正在连接…（验证地址与密码）", "Connecting… (verifying the address and the password)"),
     ("正在连接数据库…", "Connecting to the database…"),
+    ("正在采样…", "Sampling…"),
     ("正在重试刚才那条查询…", "Retrying the previous query…"),
     ("每页取多少行（改了会重新查）", "How many rows to fetch per page (changing this re-queries)"),
     ("比较方式", "Comparison"),
@@ -1381,6 +1382,9 @@ pub static EN: [(&str, &str); 1887] = [
     ("监听地址获取失败: {e}", "Failed to get the listen address: {e}"),
     ("监听地址（默认 127.0.0.1）", "Listen address (default 127.0.0.1)"),
     ("监听端口", "Listen port"),
+    ("监控", "Monitoring"),
+    ("监控采样已结束", "The monitoring stream has ended"),
+    ("监控采样已结束（退出码 {c}）", "The monitoring stream has ended (exit code {c})"),
     ("目录", "Directory"),
     ("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {lsrc}", "The directory is too deep (more than {MAX_DEPTH} levels), aborted: {lsrc}"),
     ("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {path}", "The directory is too deep (more than {MAX_DEPTH} levels), aborted: {path}"),
@@ -1427,6 +1431,7 @@ pub static EN: [(&str, &str); 1887] = [
     ("确认主密码", "Confirm the master password"),
     ("确认关闭", "Confirm closing"),
     ("确认新主密码", "Confirm the new master password"),
+    ("磁盘", "Disk"),
     ("私钥", "Private key"),
     ("私钥 — PuTTYPlus", "Private keys — PuTTYPlus"),
     ("私钥文件", "Private key file"),
@@ -1534,6 +1539,7 @@ pub static EN: [(&str, &str); 1887] = [
     ("缩小", "Zoom out"),
     ("缩小字号", "Decrease the font size"),
     ("缩小字号 (Ctrl+-)", "Decrease the font size (Ctrl+-)"),
+    ("网络", "Network"),
     ("网络与端口", "Network and ports"),
     ("网络模式：{m}", "Network mode: {m}"),
     ("网络：{name}（{ip}，网关 {gw}）", "Network: {name} ({ip}, gateway {gw})"),

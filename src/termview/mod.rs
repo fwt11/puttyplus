@@ -78,6 +78,24 @@ pub enum TermView {
     Ghostty(GhosttyView),
 }
 
+/// **光标闪烁的状态**（跨后端统一）。
+///
+/// ⚠️ **为什么要有它**：会话断了（网络断了）之后，终端就是一幅"死画面"
+///   ⇒ 光标还在闪 ⇒ 用户以为还能输入、以为程序卡住了。
+///   （PuTTY 的做法：断开后窗口变灰、光标**停止闪烁**。）
+///
+/// ⚠️ **默认不是 `On`**：默认是「**跟着系统**」（`gtk-cursor-blink`）
+///   ⇒ 用户在系统里关了闪烁，我们就不该硬闪。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorBlink {
+    /// 跟着系统/默认（系统开了才闪）。
+    Default,
+    /// 强制闪。
+    On,
+    /// 强制**不**闪。
+    Off,
+}
+
 /// 终端字体（**字体名 + 字号**）⇒ Pango 字体描述。
 ///
 /// ## 为什么放在这一层
@@ -252,6 +270,33 @@ impl TermView {
                 // ⚠️ 字体规则与 VTE 后端**共用一份**（见 `font_description`）。
                 v.set_font(crate::termview::font_description(font_size));
             }
+        }
+    }
+
+    /// **光标要不要闪**（`None` = 恢复默认 ⇒ 跟着系统）。
+    ///
+    /// ⚠️ **干什么用**：会话断了（网络断了）之后，终端就是一幅"死画面"
+    ///   ⇒ 光标还在闪 ⇒ 用户以为还能输入、以为程序卡住了
+    ///   （PuTTY 的做法：断开后光标**停止闪烁**）。
+    ///
+    /// ⚠️ **恢复时用 `None`**（不是 `Some(true)`）⇒ 回到"跟着系统"的
+    ///   默认状态 ⇒ 用户在系统里关了闪烁，我们不会硬给他闪回来。
+    pub fn set_cursor_blink(&self, on: Option<bool>) {
+        match self {
+            #[cfg(target_os = "linux")]
+            TermView::Vte(t) => vte::set_cursor_blink(t, on),
+            #[cfg(feature = "ghostty")]
+            TermView::Ghostty(v) => v.set_cursor_blink(on),
+        }
+    }
+
+    /// **光标闪烁的当前状态**（读回来 ⇒ 冒烟/单测能断言）。
+    pub fn cursor_blink(&self) -> CursorBlink {
+        match self {
+            #[cfg(target_os = "linux")]
+            TermView::Vte(t) => vte::cursor_blink(t),
+            #[cfg(feature = "ghostty")]
+            TermView::Ghostty(v) => v.cursor_blink(),
         }
     }
 

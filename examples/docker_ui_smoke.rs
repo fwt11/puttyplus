@@ -1110,7 +1110,7 @@ fn main() {
         let page2 = dockerui::page_for_test(&panel2.st).expect("应当有容器页");
         let win2 = gtk::Window::new();
         win2.set_title(Some("docker 日志冒烟"));
-        win2.set_default_size(1000, 620);
+        win2.set_default_size(1000, 900);
         win2.set_child(Some(&page2));
         win2.present();
         pump(200);
@@ -1302,6 +1302,19 @@ fn main() {
                 leftover.is_empty(),
                 format!("远端还挂着：{leftover}")
             );
+            // ---- 关掉终端 ⇒ **窗口也得关掉**（阶段 125 修的真 bug）----
+            //
+            // ⚠️ 以前只把窗口**句柄** take 掉、窗口本身还在 ⇒ 用户关掉
+            //   容器页签后，屏幕上留着个**死终端窗口**（还盖住别的窗口）。
+            check!(
+                "⑯ 关掉终端后窗口也关掉了",
+                !dockerui::term_window_open_for_test(&panel2.st),
+                "终端窗口还开着（关掉容器页签后会留在屏幕上）"
+            );
+            // ⚠️ **关掉终端窗口**：它盖在容器面板上面 ⇒ 后面截的图就拍不到
+            //   容器页（更拍不到监控页）。
+            dockerui::close_terminal_window_for_test(&panel2.st);
+            pump(200);
         }
     }
 
@@ -1394,6 +1407,134 @@ fn main() {
             !small_v2 && !big_v2,
             format!("小转圈可见={small_v2} 大转圈可见={big_v2}")
         );
+        // ⚠️ **关掉这个窗口**：它盖在 F/G/K 组那个面板上面 ⇒ 后面截的图
+        //   就只能拍到它（拍不到监控页）。
+        win3.close();
+    }
+
+    // ================= K 组：阶段 114 —— 监控曲线（真连真容器） =================
+    //
+    // ⚠️ 复用 **F / G 组那个面板**（panel2）：它已经真连上了、也已经选中了
+    //   一个运行中的容器 ⇒ 这里直接切到「监控」页就能起流。
+    {
+        let cs = dockerui::containers_for_test(&panel2.st);
+        let c0 = cs
+            .iter()
+            .find(|c| c.state == "running")
+            .or_else(|| cs.first())
+            .cloned();
+        if let Some(c0) = c0 {
+            let name = c0.name.clone();
+            println!("[信息] 监控页看的是容器：{name}");
+            // ---- 切到监控页 ⇒ 起流 ----
+            dockerui::monitor_show_page_for_test(&panel2.st);
+            let mut waited = 0;
+            while waited < 40 && !dockerui::stat_running_for_test(&panel2.st) {
+                pump(200);
+                waited += 1;
+            }
+            check!(
+                "⑲ 监控流起来了",
+                dockerui::stat_running_for_test(&panel2.st),
+                format!("等了 {waited} 次还没起来")
+            );
+            // ---- 等点（**2 秒一个点** ⇒ 至少等 4~5 秒）----
+            let mut waited2 = 0;
+            while waited2 < 40 && dockerui::stat_points_for_test(&panel2.st).0 == 0 {
+                pump(200);
+                waited2 += 1;
+            }
+            let (cpu_n, net_n) = dockerui::stat_points_for_test(&panel2.st);
+            check!(
+                "⑲ 曲线上真的有点了",
+                cpu_n > 0 && net_n > 0,
+                format!("CPU {cpu_n} 点 / 网络 {net_n} 点（等了 {waited2} 次）")
+            );
+            // ---- 再等几个点 ⇒ **曲线真的画出来了**（一个点画不出线）----
+            //
+            // ⚠️ **为什么多等**：折线要 ≥2 个点才画得出线 ⇒ 等 3 个点，
+            //   截图里才看得见「曲线」而不是四个空框。
+            let mut waited_pts = 0;
+            while waited_pts < 30 && dockerui::stat_points_for_test(&panel2.st).0 < 3 {
+                pump(300);
+                waited_pts += 1;
+            }
+            let (cpu_n3, _) = dockerui::stat_points_for_test(&panel2.st);
+            check!(
+                "⑲ 曲线攒够了点（能画出线）",
+                cpu_n3 >= 3,
+                format!("CPU 只有 {cpu_n3} 点（等了 {waited_pts} 次）")
+            );
+            // ---- 指标卡有当前值 ----
+            let (cpu, mem, net, blk) = dockerui::stat_values_for_test(&panel2.st);
+            println!("[信息] 指标卡：CPU {cpu}｜内存 {mem}｜网络 {net}｜磁盘 {blk}");
+            check!(
+                "⑲ 指标卡有当前值",
+                cpu.contains('%') && net.contains("B/s"),
+                format!("CPU={cpu} 网络={net}")
+            );
+            // ---- 剥 ANSI 后解析出来的值要跟**原始行**对得上 ----
+            //
+            // ⚠️ **为什么必须跟原始行对照**：`docker stats` 的持续模式
+            //   带 ANSI（`\x1b[H`…）⇒ 忘了剥 ⇒ 解析出来的 CPU **全是 0**
+            //   ⇒ 光看「指标卡有当前值」**抓不住**（0.00% 也是"有值"）
+            //   ⇒ 得拿**原始行**做对照才抓得住。
+            let raw = dockerui::stat_last_raw_for_test(&panel2.st).unwrap_or_default();
+            check!(
+                "⑲ 拿到了原始采样行",
+                !raw.is_empty(),
+                "没拿到原始行（钩子空）"
+            );
+            check!(
+                "⑲ 原始行确实带 ANSI（所以必须剥）",
+                raw.contains('\u{1b}'),
+                format!("原始行：{raw:?}")
+            );
+            // 独立地从原始行里取 CPU 数字（**不复用程序里的解析**）
+            // ⇒ 免得「程序和程序自己比」变成同义反复。
+            let cpu_field = raw.split('|').next().unwrap_or("");
+            let digits: String = cpu_field
+                .trim_end_matches('%')
+                .trim()
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let expect = digits
+                .parse::<f64>()
+                .ok()
+                .map(|v| format!("{v:.2}%"))
+                .unwrap_or_default();
+            check!(
+                "⑲ 指标卡 CPU 与原始行一致（说明 ANSI 剥对了）",
+                !expect.is_empty() && cpu == expect,
+                format!("卡片={cpu} 原始行推出来的={expect}（原始={raw:?}）")
+            );
+            // 截一张（曲线真的画出来了才好看）。
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                shot(&format!("{base}-monitor.png"));
+            }
+            // ---- 切走 ⇒ 远端不许留孤儿 `docker stats` ----
+            dockerui::monitor_show_overview_for_test(&panel2.st);
+            let mut waited3 = 0;
+            let mut leftover = String::new();
+            while waited3 < 20 {
+                leftover = remote_procs(&opts_f, "docker stats");
+                if leftover.is_empty() {
+                    break;
+                }
+                pump(300);
+                waited3 += 1;
+            }
+            check!(
+                "⑲ 切走后远端没有残留的 docker stats 进程",
+                leftover.is_empty(),
+                format!("远端还挂着：{leftover}")
+            );
+        }
     }
     }
 

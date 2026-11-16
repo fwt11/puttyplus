@@ -20,6 +20,7 @@
 use gtk::prelude::*;
 use puttyplus::args::ConnOptions;
 use puttyplus::term::TermPane;
+use puttyplus::termview::CursorBlink;
 use vte4::TerminalExt;
 
 /// 跑 GTK 主循环 ms 毫秒（例子没法进 app.run()，只能自己泵）。
@@ -122,6 +123,21 @@ fn main() {
     );
     println!("[3] 「会话已结束 · 点此重新连接」条已出现");
 
+    // 3.5) ⚠️ **阶段 125**：会话结束（网络断了也一样）⇒ **光标停闪**。
+    //
+    //   症状（用户 2026-11-16 报）：网络断了，终端成了一幅"死画面"，
+    //   **光标还在闪** ⇒ 用户以为还能输入、以为程序卡住了
+    //   （PuTTY 的做法：断开后光标停止闪烁）。
+    //
+    //   ⚠️ **断言的是外部可观测的量**（VTE 的 `cursor-blink-mode` 属性）
+    //   ⇒ 把 `set_cursor_blink` 那行删掉，这条必红。
+    assert_eq!(
+        pane.terminal().cursor_blink(),
+        CursorBlink::Off,
+        "会话结束后光标还在闪（终端已经是死画面了）"
+    );
+    println!("[3.5] 会话结束后光标已停止闪烁");
+
     // 4) 点它 → 重建会话
     pane.reconnect_term();
     // 重建后终端是清过屏的，等新的提示符出来
@@ -132,6 +148,17 @@ fn main() {
         "重连成功后「会话已结束」条没收起来"
     );
     println!("[4] 已重建会话，「会话已结束」条收起");
+
+    // 4.5) ⚠️ **阶段 125**：重连成功 ⇒ **光标恢复闪烁**（回"默认"）。
+    //
+    //   ⚠️ **恢复的是"默认"而不是"强制闪"** ⇒ 用户在系统里关了闪烁，
+    //   我们不会硬给他闪回来（断言只看「不再是 Off」）。
+    assert_ne!(
+        pane.terminal().cursor_blink(),
+        CursorBlink::Off,
+        "重连成功后光标还是不让闪"
+    );
+    println!("[4.5] 重连后光标已恢复闪烁");
 
     // 5) 重建后的终端真的还能用（跑一条命令看输出）
     pane.terminal().feed_child(b"echo PP_RECONNECT_OK_9527\n");

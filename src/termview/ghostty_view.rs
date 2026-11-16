@@ -167,6 +167,12 @@ struct State {
     /// 画一帧时从快照里记下来，闪烁定时器读它——**定时器不去借内核**
     /// （term/render 的 RefCell 在 draw 里被占着，别跟定时器抢）。
     kernel_blink: Cell<bool>,
+    /// **强制不闪**（会话断了 ⇒ 光标停闪，阶段 125）。
+    ///
+    /// ⚠️ **为什么不能直接用 `kernel_blink`**：那个字段是**内核说的**
+    ///   （DECSCUSR / DECSET 12）⇒ 远程随时能改回来 ⇒ 断线后远程发一条
+    ///   序列就能让光标重新闪 ⇒ 所以另开一个「应用层强制」开关。
+    blink_forced_off: Cell<bool>,
     /// 闪烁定时器。输入到来（敲键 / 粘贴 / 拿回焦点）时**摘掉重排**：
     /// 先实心一个相位，再从头开始闪。闭包只抓弱引用 ⇒ 控件销毁后
     /// 定时器自己 Break 收摊，不成环。
@@ -281,10 +287,12 @@ impl State {
                     return glib::ControlFlow::Break;
                 };
                 // 该闪的场合：系统开了闪烁 + 内核允许（DECSCUSR 没关）
+                // + **应用层没强制关**（会话断了 ⇒ 阶段 125）
                 // + 控件有焦点 + 可见。不满足 ⇒ 保持**实心**（稳态光标，
                 // VTE 对无焦点/被远端要求稳态时的做法）。
                 let should_blink = enabled
                     && st.kernel_blink.get()
+                    && !st.blink_forced_off.get()
                     && area.has_focus()
                     && area.is_visible();
                 if should_blink {
@@ -464,6 +472,7 @@ impl GhosttyView {
             preedit: RefCell::new(String::new()),
             cursor_on: Cell::new(true),
             kernel_blink: Cell::new(true),
+            blink_forced_off: Cell::new(false),
             blink_src: RefCell::new(None),
             pty: RefCell::new(None),
             shell: RefCell::new(None),
@@ -502,6 +511,29 @@ impl GhosttyView {
     /// 控件本体（塞进容器用）。
     pub fn widget(&self) -> &gtk::Widget {
         self.area.upcast_ref::<gtk::Widget>()
+    }
+
+    /// **光标要不要闪**（`None` = 恢复默认 ⇒ 跟着系统）。
+    ///
+    /// ⚠️ **干什么用**：会话断了（网络断了）之后，终端是幅"死画面"⇒ 光标
+    ///   还在闪 ⇒ 用户以为还能输入（PuTTY 的做法：断开后光标停止闪烁）。
+    ///
+    /// ⚠️ **ghostty 没有「强制闪」这档**：闪不闪是**系统设置**说了算 ⇒
+    ///   `Some(true)` 只是「恢复默认」（不是硬要闪）。
+    pub fn set_cursor_blink(&self, on: Option<bool>) {
+        self.state.blink_forced_off.set(on == Some(false));
+        // ⚠️ **重排闪烁定时器** ⇒ 光标**马上实心**（不然要等一个相位
+        //   才停下来 ⇒ 用户看着像"没反应"）。
+        self.state.reset_blink();
+    }
+
+    /// 读回**当前的光标闪烁状态**（跨后端统一的那个枚举）。
+    pub fn cursor_blink(&self) -> crate::termview::CursorBlink {
+        if self.state.blink_forced_off.get() {
+            crate::termview::CursorBlink::Off
+        } else {
+            crate::termview::CursorBlink::Default
+        }
     }
 
     /// **滚动视口**（`lines` **负数往回看**＝看更早的内容）。

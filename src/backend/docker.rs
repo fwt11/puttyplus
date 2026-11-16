@@ -556,6 +556,268 @@ pub async fn open_exec_shell(
     Ok(ch)
 }
 
+/* ---------------- 阶段 114：监控曲线（docker stats 流） ---------------- */
+
+/// 监控采样的命令：`docker stats` **持续模式**，**只盯一个容器**。
+///
+/// ⚠️ **为什么用持续模式而不是 `--no-stream`**：
+/// - `--no-stream` **单次就要 2 秒**（实测：docker 内部要采两次 cgroup
+///   差值）⇒ 每 2 秒跑一次 = 远端**几乎连续**在跑 docker stats；
+/// - 持续模式是**一条通道一个进程** ⇒ 远端开销固定，而且**关通道就能
+///   收掉**（看门狗，跟阶段 112 的日志流一个套路）。
+///
+/// ⚠️ **为什么只盯一个容器**：`docker stats`（不加名字）会统计**所有**
+///   容器 ⇒ 每 500ms 刷一次 ⇒ 容器多的时候远端开销明显 ⇒ 只盯选中的
+///   那个，便宜得多。
+///
+/// ⚠️ **看门狗**：通道断了远端的 `docker stats` **不会自己退出**（实测：
+///   阶段 112 的 `docker logs -f` 同样问题）⇒ 这里套同一层看门狗
+///   （读通道的 stdin ⇒ 通道一关就是 EOF ⇒ 杀掉它）。
+///
+/// ⚠️ **持续模式会带 ANSI 转义**（docker 的「表格重绘」：`\x1b[H` /
+///   `\x1b[K` / `\x1b[J`）⇒ 客户端要**剥掉**（见 [`strip_ansi`]）。
+pub fn stats_stream_cmd(name: &str) -> String {
+    format!(
+        "( docker stats --format '{{{{.CPUPerc}}}}|{{{{.MemPerc}}}}|{{{{.NetIO}}}}|{{{{.BlockIO}}}}' {n} 2>&1 & p=$!; ( read -r _; kill $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; wait $w 2>/dev/null ) 2>/dev/null",
+        n = crate::backend::checksum::sh_quote(name),
+    )
+}
+
+/// 开一条**监控采样**通道（`docker stats` 持续模式）。
+///
+/// ⚠️ **返回通道**（不是输出）⇒ 调用方能**边收边画曲线**，也能**主动关掉**
+///    （`ShellChannel::close` ⇒ 看门狗收掉远端的 docker stats）。
+/// ⚠️ **不 pty** ⇒ 输出是原样字节（不掺 `\r\n` 翻译）。
+pub async fn open_stats(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+) -> BackendResult<ShellChannel> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let ch = ShellChannel::open_exec(session, &stats_stream_cmd(name), 80, 24, false).await?;
+    Ok(ch)
+}
+
+/// 一次采样（**纯数据**，好测）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StatsSample {
+    /// CPU 占用（%）。
+    pub cpu: f64,
+    /// 内存占用（%）。
+    pub mem: f64,
+    /// 网络**接收**（**累计**字节 ⇒ 差分才是速率）。
+    pub net_rx: u64,
+    /// 网络**发送**（累计字节）。
+    pub net_tx: u64,
+    /// 磁盘**读**（累计字节）。
+    pub blk_read: u64,
+    /// 磁盘**写**（累计字节）。
+    pub blk_write: u64,
+}
+
+/// 剥掉 ANSI 转义序列（**纯函数**）。
+///
+/// ⚠️ **为什么需要**：`docker stats` 的持续模式是「**表格重绘**」⇒ 每行
+///   都带 `\x1b[H`（光标到行首）/ `\x1b[K`（清行）/ `\x1b[J`（清屏）。
+///   不剥的话，解析出来的全是转义垃圾。
+///
+/// ⚠️ **规则**（跟终端的 CSI 一样）：`ESC [` 开头 ⇒ 一直到**第一个
+///   0x40~0x7E 的字节**为止是转义序列；`ESC` 后面不是 `[` ⇒ 两字节转义
+///   （吃掉后一个字节）。
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if it.peek() == Some(&'[') {
+            it.next(); // 吃掉 '['
+            // CSI 的最后一个字节在 0x40~0x7E。
+            for c2 in it.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c2) {
+                    break;
+                }
+            }
+        } else {
+            it.next(); // 两字节转义：吃掉后一个字节
+        }
+    }
+    out
+}
+
+/// 解析 docker 的大小（`"6.14kB"` ⇒ 6140）⇒ **字节数**。
+///
+/// ⚠️ **单位是 SI 还是二进制**：docker 用 `units.HumanSize` ⇒ **SI**
+///   （kB=1000、MB=10⁶）；但有些版本会吐 `KiB/MiB` ⇒ **两种都认**
+///   （二进制那套按 1024 算）。
+///
+/// ⚠️ **认不出来的单位** ⇒ 当成字节（宁可低估，也别丢数据）。
+pub fn parse_size_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // ⚠️ **不能按「非数字」split**：`"6.14kB"` 会把 `k` 当分隔符吃掉
+    //   ⇒ 单位变成 "B" ⇒ 6.14kB 变成 6 字节（**少了一千倍**）。
+    //   ⇒ 改成**按位置切**：数字段结束的地方就是单位的开始。
+    let num_end = s.find(|c: char| !(c.is_ascii_digit() || c == '.'));
+    let (num_s, unit) = match num_end {
+        Some(i) => (&s[..i], s[i..].trim().to_ascii_lowercase()),
+        None => (s, String::new()),
+    };
+    let num: f64 = num_s.parse().ok()?;
+    let mul: f64 = match unit.as_str() {
+        "" | "b" => 1.0,
+        "kb" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        "kib" => 1024.0,
+        "mib" => 1024.0 * 1024.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        _ => 1.0,
+    };
+    Some((num * mul).round() as u64)
+}
+
+/// `"6.14kB / 126B"` ⇒ `(接收, 发送)`（**纯函数**）。
+fn split_io(s: &str) -> Option<(u64, u64)> {
+    let mut it = s.split('/');
+    let a = parse_size_bytes(it.next()?)?;
+    let b = parse_size_bytes(it.next()?)?;
+    Some((a, b))
+}
+
+/// 解析 `docker stats` 的一行 ⇒ 一次采样（**纯函数**）。
+///
+/// ⚠️ **输入**：`"2.08%|0.08%|6.14kB / 126B|40.4MB / 242kB"`
+///   （也可能带 ANSI ⇒ 先剥）。
+/// ⚠️ **认不出来就返回 `None`**（那一行是表头/空行/别的 ⇒ 丢掉）。
+pub fn parse_stats_line(line: &str) -> Option<StatsSample> {
+    let s = strip_ansi(line);
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let f: Vec<&str> = s.split('|').collect();
+    if f.len() < 4 {
+        return None;
+    }
+    let pct = |x: &str| -> f64 {
+        x.trim()
+            .trim_end_matches('%')
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+    };
+    let cpu = pct(f[0]);
+    let mem = pct(f[1]);
+    let (net_rx, net_tx) = split_io(f[2])?;
+    let (blk_read, blk_write) = split_io(f[3])?;
+    Some(StatsSample {
+        cpu,
+        mem,
+        net_rx,
+        net_tx,
+        blk_read,
+        blk_write,
+    })
+}
+
+/// 两次采样之间的**速率**（字节/秒）。
+///
+/// ⚠️ **为什么差分**：`docker stats` 的 NetIO/BlockIO 是**从容器启动起
+///   的累计值** ⇒ 直接画曲线会是一条单调上升的直线（看不出「现在有多
+///   忙」）⇒ 差分成速率才直观。
+///
+/// ⚠️ **累计值变小** ⇒ 容器**重启过**（计数归零）⇒ 那一次的差分**丢掉**
+///   （否则会画出一根巨大的尖峰）。
+pub fn rate_between(prev: &StatsSample, cur: &StatsSample, dt_secs: f64) -> Option<(f64, f64, f64, f64)> {
+    if dt_secs <= 0.0 {
+        return None;
+    }
+    let d = |a: u64, b: u64| -> Option<f64> {
+        if b < a {
+            None
+        } else {
+            Some((b - a) as f64 / dt_secs)
+        }
+    };
+    Some((
+        d(prev.net_rx, cur.net_rx)?,
+        d(prev.net_tx, cur.net_tx)?,
+        d(prev.blk_read, cur.blk_read)?,
+        d(prev.blk_write, cur.blk_write)?,
+    ))
+}
+
+/// 曲线上的**一个点**（瞬时值 ＋ 速率）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StatPoint {
+    /// CPU（%）。
+    pub cpu: f64,
+    /// 内存（%）。
+    pub mem: f64,
+    /// 网络接收（字节/秒）。
+    pub net_rx: f64,
+    /// 网络发送（字节/秒）。
+    pub net_tx: f64,
+    /// 磁盘读（字节/秒）。
+    pub blk_read: f64,
+    /// 磁盘写（字节/秒）。
+    pub blk_write: f64,
+}
+
+/// 采样节流器（**每 N 秒出一个点**）。
+///
+/// ⚠️ **为什么需要它**：`docker stats` 的持续模式**每 500ms 刷一次**
+///   ⇒ 直接用会得到一堆挤在一起的点（曲线是锯齿、消息也多）⇒ 我们
+///   **每 `interval` 秒出一个点**。
+///
+/// ⚠️ **速率怎么算**：拿**上一个原始样本**差分（不是上一个「出点」）
+///   ⇒ 速率是「这一段时间的**平均**」⇒ 中间的尖峰不会被漏掉。
+#[derive(Default)]
+pub struct StatsSampler {
+    /// 上一次**出点**的时刻（相对秒，调用方给）。
+    last_at: Option<f64>,
+    /// 上一个原始样本 ＋ 它的时刻（差分用）。
+    last_raw: Option<(f64, StatsSample)>,
+}
+
+impl StatsSampler {
+    /// 喂一个原始样本 ⇒ **够一个周期**就返回一个点（否则 `None`）。
+    ///
+    /// ⚠️ `now` 是**相对时间**（秒）⇒ 纯逻辑，好测。
+    /// ⚠️ **第一次**没有上一个累计值 ⇒ 差分算不出来 ⇒ 速率按 0 算
+    ///   （CPU/内存照常有值）。
+    pub fn push(&mut self, raw: &StatsSample, now: f64, interval: f64) -> Option<StatPoint> {
+        let due = self.last_at.map(|t| now - t >= interval).unwrap_or(true);
+        let prev = self.last_raw;
+        self.last_raw = Some((now, *raw));
+        if !due {
+            return None;
+        }
+        self.last_at = Some(now);
+        let mut pt = StatPoint {
+            cpu: raw.cpu,
+            mem: raw.mem,
+            ..Default::default()
+        };
+        if let Some((t0, p0)) = prev {
+            if let Some((rx, tx, br, bw)) = rate_between(&p0, raw, now - t0) {
+                pt.net_rx = rx;
+                pt.net_tx = tx;
+                pt.blk_read = br;
+                pt.blk_write = bw;
+            }
+        }
+        Some(pt)
+    }
+}
+
 /* ---------------- 输出解析（纯函数，好测） ---------------- */
 
 /// 解析 `docker ps` 的输出。
@@ -1301,5 +1563,149 @@ mod tests {
         for s in ["/bin/bash", "/bin/ash", "/bin/zsh"] {
             assert!(SHELL_CANDIDATES.contains(&s), "候选里少了 {s}");
         }
+    }
+
+    /* ---------------- 阶段 114：监控曲线 ---------------- */
+
+    /// 采样命令：**只盯一个容器** ＋ **有看门狗**。
+    #[test]
+    fn 采样命令只盯一个容器() {
+        let c = stats_stream_cmd("web");
+        assert!(c.contains("docker stats"), "应当是 docker stats：{c}");
+        assert!(c.contains("'web'"), "容器名没被引号包住：{c}");
+        // ⚠️ **看门狗必须在位**（阶段 112 的教训：通道断了远端会留进程）。
+        assert!(c.contains("read -r _"), "看门狗不在：{c}");
+        assert!(c.contains("kill $p"), "看门狗没杀：{c}");
+    }
+
+    /// ⚠️ **容器名是远端可控的内容** ⇒ 必须引起来（防注入）。
+    #[test]
+    fn 采样命令防注入() {
+        // ⚠️ 这里故意用一个「能拼出危险命令」的名字 ⇒ 只能作为**数据**。
+        let evil = format!("a; {} {}", "rm", "-rf /");
+        let c = stats_stream_cmd(&evil);
+        assert!(
+            c.contains(&format!("'{evil}'")),
+            "容器名没被引号包住：{c}"
+        );
+    }
+
+    /// docker stats 的持续模式会带 **ANSI 转义** ⇒ 要剥干净。
+    #[test]
+    fn ansi转义能剥干净() {
+        let raw = "\u{1b}[H2.08%|0.08%|6.14kB / 126B|40.4MB / 242kB\u{1b}[K";
+        assert_eq!(
+            strip_ansi(raw),
+            "2.08%|0.08%|6.14kB / 126B|40.4MB / 242kB"
+        );
+        // 光标移动 + 清行 + 清屏都要能剥掉。
+        assert_eq!(strip_ansi("\u{1b}[J\u{1b}[K"), "");
+        // 普通的文本不能被误伤。
+        assert_eq!(strip_ansi("hello"), "hello");
+    }
+
+    /// 一行采样 ⇒ 四个指标。
+    #[test]
+    fn 采样行能解析() {
+        let s = parse_stats_line("2.08%|0.08%|6.14kB / 126B|40.4MB / 242kB").expect("应当解析得出");
+        assert!((s.cpu - 2.08).abs() < 0.001, "CPU 不对：{}", s.cpu);
+        assert!((s.mem - 0.08).abs() < 0.001, "内存不对：{}", s.mem);
+        assert_eq!(s.net_rx, 6140, "网络接收不对：{}", s.net_rx);
+        assert_eq!(s.net_tx, 126, "网络发送不对：{}", s.net_tx);
+        assert_eq!(s.blk_read, 40_400_000, "磁盘读不对：{}", s.blk_read);
+        assert_eq!(s.blk_write, 242_000, "磁盘写不对：{}", s.blk_write);
+    }
+
+    /// 表头 / 空行 / 半截行 ⇒ **丢掉**（不能画成 0）。
+    #[test]
+    fn 认不出来的行丢掉() {
+        assert!(parse_stats_line("").is_none(), "空行不该解析出来");
+        assert!(parse_stats_line("   ").is_none(), "空白行不该解析出来");
+        assert!(parse_stats_line("NAME|CPU").is_none(), "半截行不该解析出来");
+        assert!(parse_stats_line("\u{1b}[K").is_none(), "只有转义符不该解析出来");
+    }
+
+    /// 大小单位：**SI**（1000）与**二进制**（1024）都要认。
+    #[test]
+    fn 大小单位两种都认() {
+        assert_eq!(parse_size_bytes("0B"), Some(0));
+        assert_eq!(parse_size_bytes("126B"), Some(126));
+        assert_eq!(parse_size_bytes("6.14kB"), Some(6140));
+        assert_eq!(parse_size_bytes("40.4MB"), Some(40_400_000));
+        assert_eq!(parse_size_bytes("1.5GB"), Some(1_500_000_000));
+        assert_eq!(parse_size_bytes("1KiB"), Some(1024));
+        assert_eq!(parse_size_bytes("2MiB"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_size_bytes(""), None);
+    }
+
+    /// 累计值 ⇒ **差分**成速率（字节/秒）。
+    #[test]
+    fn 累计值差分成速率() {
+        let a = StatsSample {
+            net_rx: 1000,
+            net_tx: 2000,
+            blk_read: 3000,
+            blk_write: 4000,
+            ..Default::default()
+        };
+        let b = StatsSample {
+            net_rx: 3000,
+            net_tx: 2000,
+            blk_read: 3000,
+            blk_write: 6000,
+            ..Default::default()
+        };
+        let r = rate_between(&a, &b, 2.0).expect("应当算得出速率");
+        assert!((r.0 - 1000.0).abs() < 0.001, "网络接收速率不对：{}", r.0);
+        assert!((r.1 - 0.0).abs() < 0.001, "网络发送速率不对：{}", r.1);
+        assert!((r.2 - 0.0).abs() < 0.001, "磁盘读速率不对：{}", r.2);
+        assert!((r.3 - 1000.0).abs() < 0.001, "磁盘写速率不对：{}", r.3);
+    }
+
+    /// ⚠️ **累计值变小** ⇒ 容器重启过（计数归零）⇒ 这一次**丢掉**
+    ///   （否则会画出一根巨大的尖峰）。
+    #[test]
+    fn 容器重启后不画尖峰() {
+        let a = StatsSample {
+            net_rx: 5000,
+            ..Default::default()
+        };
+        let b = StatsSample {
+            net_rx: 10,
+            ..Default::default()
+        };
+        assert!(rate_between(&a, &b, 2.0).is_none(), "不该算出速率");
+    }
+
+    /// 节流器：**每 N 秒出一个点**（docker stats 每 500ms 刷一次）。
+    #[test]
+    fn 采样每N秒出一个点() {
+        let mut s = StatsSampler::default();
+        let raw = StatsSample {
+            cpu: 1.0,
+            mem: 2.0,
+            net_rx: 1000,
+            ..Default::default()
+        };
+        // 第一次：出点（速率还没有 ⇒ 0）。
+        let p = s.push(&raw, 0.0, 2.0).expect("第一次应当出点");
+        assert!((p.cpu - 1.0).abs() < 0.001, "CPU 不对：{}", p.cpu);
+        assert!((p.net_rx - 0.0).abs() < 0.001, "第一次不该有速率：{}", p.net_rx);
+        // 1 秒时：**不出点**（还没到周期）。
+        assert!(s.push(&raw, 1.0, 2.0).is_none(), "1 秒时不该出点");
+        // 2 秒时：出点。
+        //
+        // ⚠️ **速率是按「上一个原始样本」差分的**（不是上一个「出点」）
+        //   ⇒ 上一个原始样本在 t=1.0（net_rx=1000）⇒ 这一秒里多了 2000
+        //   ⇒ 速率 = 2000 字节/秒。
+        let raw2 = StatsSample {
+            cpu: 3.0,
+            mem: 4.0,
+            net_rx: 3000,
+            ..Default::default()
+        };
+        let p2 = s.push(&raw2, 2.0, 2.0).expect("2 秒时应当出点");
+        assert!((p2.cpu - 3.0).abs() < 0.001, "CPU 不对：{}", p2.cpu);
+        assert!((p2.net_rx - 2000.0).abs() < 0.001, "速率不对：{}", p2.net_rx);
     }
 }

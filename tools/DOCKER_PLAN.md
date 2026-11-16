@@ -255,9 +255,22 @@ let ch = ShellChannel::open_exec(session.as_ref(), &cmd, 80, 24, false).await?;
     马上可见）。
 - ⚠️ **文件面板不动**：它是会话级的一个 widget ⇒ 一直待在终端页里。
 
-### 阶段 114：监控曲线
+### 阶段 114：监控曲线 —— ✅ **2026-11-16 完成**
 
-- 每 2 秒采样 `docker stats --no-stream` ⇒ 4 个指标卡 + 4 张 cairo 折线图。
+- 详情区多第三个子页「监控」⇒ 4 个指标卡（CPU / 内存 / 网络 / 磁盘）＋ 4 张
+  cairo 折线图（每张图两条线：收 / 发）。
+- ⚠️ **采样方案改了**：原计划「每 2 秒跑一次 `docker stats --no-stream`」，
+  **实测 `--no-stream` 单次就要 2 秒**（docker 内部要采两次 cgroup 差值）⇒
+  等于远端**几乎连续**在跑 docker stats ⇒ 改成**持续模式**：
+  - `docker stats --format '<4 个字段>' <容器>`（**只盯选中的那一个**，
+    不统计全部容器）；
+  - **持续模式带 ANSI 转义**（表格重绘：`\x1b[H` / `\x1b[K` / `\x1b[J`）⇒
+    客户端要**剥掉**（`strip_ansi`，纯函数）；
+  - 客户端**每 2 秒出一个点**（`StatsSampler` 节流）⇒ 曲线才好看；
+  - 网络 / 磁盘是**从容器启动起的累计值** ⇒ **差分**才是速率（容器重启
+    计数归零 ⇒ 那一次差分丢掉，否则会画出一根巨大的尖峰）。
+- ⚠️ **切页即停**：日志页与监控页**两流互斥**（切走就停）⇒ 远端不留孤儿
+  `docker stats`；换容器 ⇒ 停旧流 ＋ 清曲线 ＋ 立刻起新流。
 
 ### 阶段 115：镜像 / 卷 / 网络
 
@@ -364,3 +377,24 @@ let ch = ShellChannel::open_exec(session.as_ref(), &cmd, 80, 24, false).await?;
   - **4 轮反向验证**（退掉 pty ⇒ 回显那条红；退掉 `ch.close()` ⇒ 远端残留
     那条红；退掉 `find_shell` 的挨个试 ⇒ 3 条红；退掉 EOF 的处理 ⇒ 退出码
     那条红；不登记编辑区宿主 ⇒ 2 条红；转圈永远不显示 ⇒ 2 条红）。
+
+- 2026-11-16：**阶段 114 完成**（监控曲线）＋ **阶段 125**（断网后光标停闪）。
+  - 阶段 114：后端 `stats_stream_cmd`（持续模式 ＋ 看门狗 ＋ 只盯一个容器）、
+    `open_stats`、`StatsSample` / `StatPoint` / `StatsSampler`、`strip_ansi`、
+    `parse_size_bytes`（⚠️ **必须按位置切单位**：按分隔符切会把 `6.14kB`
+    变成 6 字节 ⇒ 少了一千倍）、`parse_stats_line`、`rate_between`；
+    前端 `src/panel/dockerui.rs` 的「监控」页（4 指标卡 ＋ 4 张 cairo 折线图）
+    ＋ 日志/监控**两流互斥**；
+  - 阶段 125（用户 2026-11-16 报：「网络断了，但终端的光标仍然在闪」）：会话
+    一断（`on_session_ended`）⇒ **光标停止闪烁**；重连成功 ⇒ 恢复（回「默认」
+    ⇒ 跟着系统，不硬闪）。跨后端统一：`TermView::set_cursor_blink()` ＋
+    `CursorBlink` 枚举（VTE 用 `cursor-blink-mode`；ghostty 加「应用层强制
+    不闪」开关 ⇒ 远程 DECSCUSR 改不回来）；
+  - ⚠️ **顺手修了一个真 bug**：`stop_terminal` 以前只把窗口**句柄** take 掉、
+    **不关窗口** ⇒ 用户**关掉容器页签**后，容器终端窗口**留在屏幕上**（里面
+    是死终端）还**盖住**别的窗口 ⇒ 现在由 `stop_terminal` 负责关窗口
+    （带重入保护：窗口的 `close_request` 也会调它）；
+  - 单测 **832 passed / 0 failed**；冒烟 `docker_ui_smoke` 增 **K 组**（监控
+    9 条）＋ `term_reconnect_smoke` 增 2 条（断开停闪 / 重连恢复）—— 全绿；
+    CLI 契约 **PASS=73 FAIL=0**；Windows 交叉检查**零错误**；
+  - **8 轮反向验证**（详见 `tools/ROADMAP.md` 的「四之十八」「四之十九」）。

@@ -213,6 +213,35 @@ pub fn attach_shell_fake(
     true
 }
 
+/// **光标要不要闪**（`None` = 恢复默认 ⇒ 跟着系统的 `gtk-cursor-blink`）。
+///
+/// ⚠️ **干什么用**：会话断了（网络断了）之后，终端是幅"死画面"⇒ 光标
+///   还在闪 ⇒ 用户以为还能输入（PuTTY 的做法：断开后光标停止闪烁）。
+///
+/// ⚠️ **恢复默认用 `System` 而不是 `On`** ⇒ 用户在系统里关了闪烁，我们
+///   不会硬给他闪回来。
+pub fn set_cursor_blink(term: &vte::Terminal, on: Option<bool>) {
+    term.set_cursor_blink_mode(blink_mode(on));
+}
+
+/// 「要不要闪」⇒ VTE 的模式（**纯函数** ⇒ 好测）。
+pub fn blink_mode(on: Option<bool>) -> vte::CursorBlinkMode {
+    match on {
+        Some(true) => vte::CursorBlinkMode::On,
+        Some(false) => vte::CursorBlinkMode::Off,
+        None => vte::CursorBlinkMode::System,
+    }
+}
+
+/// 读回**当前的光标闪烁状态**（跨后端统一的那个枚举）。
+pub fn cursor_blink(term: &vte::Terminal) -> crate::termview::CursorBlink {
+    match term.cursor_blink_mode() {
+        vte::CursorBlinkMode::On => crate::termview::CursorBlink::On,
+        vte::CursorBlinkMode::Off => crate::termview::CursorBlink::Off,
+        _ => crate::termview::CursorBlink::Default,
+    }
+}
+
 /// 把普通文本转义成正则源码（只保留字母数字与下划线）。
 fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -243,5 +272,14 @@ mod tests {
         let pat = regex_escape("a.b");
         assert!(pat.contains("\\."));
         assert!(!pat.contains("a.b"));
+    }
+
+    #[test]
+    fn 光标闪烁模式映射正确() {
+        // ⚠️ **恢复默认必须是 `System`**（不是 `On`）⇒ 用户在系统里关了
+        //   闪烁，我们不能硬给他闪回来。
+        assert_eq!(blink_mode(Some(false)), vte::CursorBlinkMode::Off);
+        assert_eq!(blink_mode(Some(true)), vte::CursorBlinkMode::On);
+        assert_eq!(blink_mode(None), vte::CursorBlinkMode::System);
     }
 }
