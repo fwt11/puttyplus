@@ -648,11 +648,16 @@ fn main() {
         pump(300);
         let edits = panel.st.file_edits.borrow();
         assert_eq!(edits.len(), 1, "编辑器没建起来");
+        // ⚠️ **阶段 107 起编辑器不再占子页签**（它住终端列下面的「编辑区」）
+        // ⇒ 这里要问的是「**编辑区**里有没有它」，不是「页签里有没有它」。
+        // 旧断言问错了 ⇒ **Linux CI 从阶段 107（2026-11-15）起一直红在这一行**
+        // （Windows CI 没跑这个 example ⇒ 一直绿，掩盖了它）。
+        assert_eq!(sub.editor_count(), 1, "编辑区里应当有一个编辑器");
         assert!(
-            sub.has(edits[0].tab_id.get()),
-            "文件编辑器没挂到子标签上"
+            sub.editor_widget(edits[0].tab_id.get()).is_some(),
+            "编辑区里找不到这个编辑器"
         );
-        println!("file editor in sub tab: {}", edits[0].tab_id.get());
+        println!("file editor in editor area: {}", edits[0].tab_id.get());
         drop(edits);
         let _ = std::fs::remove_file(&f);
     }
