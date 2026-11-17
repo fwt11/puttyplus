@@ -109,6 +109,18 @@ fn main() {
     );
     println!("[4] 过滤「TXT」⇒ {hit:?}（不区分大小写 ✔）");
 
+    // 截图（可选）：PP_FILTER_SHOT=/tmp/x.png
+    //
+    // ⚠️ 窄面板里第一行本来就挤（标题 + 状态 + 传输按钮）⇒ 过滤框露出来
+    //   之后**状态文字会不会被挤没** ⇒ 只能靠眼睛看 ⇒ 留个截图口。
+    if let Ok(p) = std::env::var("PP_FILTER_SHOT") {
+        let _ = std::process::Command::new("/usr/bin/scrot")
+            .arg("-o")
+            .arg(&p)
+            .status();
+        println!("[4b] 截图：{p}");
+    }
+
     // ---- 5) 清空 ⇒ 全部回来 ----
     lp.filter_entry.set_text("");
     pump(400);
