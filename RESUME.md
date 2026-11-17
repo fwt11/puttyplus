@@ -15,6 +15,36 @@
 > ⚠️ **下面的第二节及以后是 2026-10-27 那轮的历史记录**（阶段 19/20 的收尾），
 > 留着是为了别把当时的坑忘了；**当前状态看第一节**。
 
+## 〇之二之一十七、最新进展（2026-11-17：发版 `v0.9.0`）
+
+- **发版**：`v0.8.0` 之后的全部（阶段 112/113/114/115/116/118/119/120/123/
+  124/125 ＋ 文件面板按文件名过滤 ＋ 编辑器/ghostty/退出码那一批修复）
+  **一起发成 `v0.9.0`**（2026-11-17 23:51；tag 已推远端 `refs/tags/v0.9.0`）。
+- **版本号三处一致**（发版链路的护栏）：
+  - `Cargo.toml` 的 `[package] version` → `0.9.0`
+  - `Cargo.lock` 里 `name = "puttyplus"` 那一段 → `0.9.0`
+  - `debian/changelog` 顶条 → `puttyplus (0.9.0-1) unstable; urgency=medium`
+    （⚠️ **deb 的包名与包版本来自这里**，不是 Cargo.toml）
+  - ⇒ `python3 tools/check_version.py v0.9.0` ⇒ 「版本号一致（…）：0.9.0」
+- **发布说明**：`docs/发布说明/v0.9.0.md`（正文用 `{{VERSION}}` 占位 ⇒
+  `release.yml` 生成 Release 正文时用 sed 注入实际版本号；**文件不存在 ⇒
+  workflow 直接失败** ⇒ 必须发版前写好）。
+- **命令**（顺序别乱）：
+  ```bash
+  python3 tools/check_version.py v0.9.0   # 三处一致
+  bash tools/cli_contract_check.sh        # PASS=73 FAIL=0
+  cargo build --release && cp target/release/puttyplus release/puttyplus
+  git add … && git commit -F /tmp/msg.txt && git push origin main
+  git tag -a v0.9.0 -m "…" && git push origin v0.9.0   # ← 触发 release.yml
+  ```
+- ⚠️ **push tag 触发的是 `release.yml`，不是 `ci.yml`**（`ci.yml` 只监听
+  `push: branches: [main]`）⇒ 查这次发版的 CI 要看 **Release** 那个
+  workflow（它编 amd64 + arm64 + Windows 三个，再建 Release 挂资产）。
+  ⇒ `ci.yml` / `ci-windows.yml` 是 push 到 main 时**另外**跑的。
+- ⚠️ **关机是「一次性指令」**（用户 2026-11-17 明确）：「如果本 tag 的 ci
+  正确完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行关机；失败就**不许
+  关**，把原因报给用户。
+
 ## 〇之二之一十六、最新进展（2026-11-17：文件面板按文件名过滤）
 
 - **起因**：用户 2026-11-17 连着提了四条「查找」相关的需求 ⇒ 「查找」这条线
@@ -678,8 +708,9 @@
 - **发布**：阶段 87 / 88 / 89 / 90 四样东西**一起发成 `v0.7.2`**
   （2026-11-14 20:44；tag 已推、Release 资产齐全：deb ×2 + tar.gz ×2 +
   Windows zip + SHA256SUMS）。
-  ⇒ ⚠️ **已更新（2026-11-15 22:58）**：阶段 106~122 这一批**已发成 `v0.8.0`**
-  （tag 已推远端）⇒ **下一个版本是 `v0.8.1`**（新功能仍走 `v0.9.0`）。
+  ⇒ ⚠️ **已更新（2026-11-17 23:52）**：阶段 112~125 ＋ 文件面板过滤这一批
+  **已发成 `v0.9.0`**（tag 已推远端）⇒ **下一个版本是 `v0.9.1`**
+  （新功能仍走 `v0.10.0`）。
 
 ## 〇之二之一二之二、台账清理（2026-11-14 晚：把过时的「没做 / 未开始」逐条核实一遍）
 

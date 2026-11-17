@@ -5152,6 +5152,33 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
   （`TreeModel has 14 columns but ... got 14`）⇒ **2026-11-15 起这个冒烟
   就是坏的**（CI 的 GUI 冒烟清单里没有它 ⇒ 一直没被发现）⇒ 补上那一列。
 
+## 四之二十八、2026-11-17：发版 `v0.9.0`
+
+- **发版**：`v0.8.0` 之后的全部（阶段 112/113/114/115/116/118/119/120/123/
+  124/125 ＋ 文件面板按文件名过滤 ＋ 编辑器/ghostty/退出码那一批修复）
+  **一起发成 `v0.9.0`**（2026-11-17 23:51；tag 已推远端 `refs/tags/v0.9.0`）。
+- **版本号三处一致**（发版链路的护栏）：
+  | 地方 | 值 |
+  |---|---|
+  | `Cargo.toml` 的 `[package] version` | `0.9.0` |
+  | `Cargo.lock` 里 `name = "puttyplus"` 那一段 | `0.9.0` |
+  | `debian/changelog` 顶条 | `puttyplus (0.9.0-1) unstable; urgency=medium` |
+  | git tag | `v0.9.0`（附注） |
+  ⇒ `python3 tools/check_version.py v0.9.0` ⇒ 「版本号一致：0.9.0」。
+  ⚠️ **deb 的包名与包版本来自 `debian/changelog`**，不是 Cargo.toml ⇒
+  两边对不上 ⇒ Release 里会出现「v0.9.0 的 Release 装着 0.8.0 的包」。
+- **发布说明**：`docs/发布说明/v0.9.0.md`（正文用 `{{VERSION}}` 占位 ⇒
+  `release.yml` 用 sed 注入实际版本号）⇒ ⚠️ **这个文件不存在 ⇒ workflow
+  直接失败**（宁可不发，也不要发一个说错版本的说明）⇒ 必须发版前写好。
+- ⚠️ **push tag 触发的是 `release.yml`，不是 `ci.yml`**（`ci.yml` 只监听
+  `push: branches: [main]`）⇒ 这次发版的 CI 是 **Release** 那个 workflow：
+  编 amd64 ＋ arm64 ＋ Windows 三个，再建 GitHub Release 挂资产
+  （deb ×2 ＋ tar.gz ×2 ＋ Windows zip ＋ SHA256SUMS）。
+  ⇒ `ci.yml` / `ci-windows.yml` 是 push 到 main 时**另外**跑的。
+- ⚠️ **关机是「一次性指令」**：用户 2026-11-17 说「如果本 tag 的 ci 正确
+  完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行；失败 ⇒ **不许关**，
+  把原因报给用户。
+
 ## 五、里程碑建议
 - M1（阶段 1 完成）：具备"可替代 MobaXterm 的 SSH 隧道"能力
 - M2（阶段 2 完成）：凭据与配置达标，可给团队推广
