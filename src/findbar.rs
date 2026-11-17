@@ -17,6 +17,7 @@
 //! 下标去 `iter_at_offset` 会定位到完全错误的位置（见 `find_matches`）。
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use gtk::gdk;
 use gtk::glib;
@@ -172,31 +173,59 @@ pub fn build(opts: FindOpts) -> FindBar {
 /// - Esc：关闭（调用方负责把焦点还给内容区）
 ///
 /// 这套约定跟终端查找条一致——两边共用一个构件，就不能让两边的回键行为不一样。
+///
+/// ⚠️ **为什么普通回车走「activate」信号、而不是按键控制器**：
+///
+/// GTK4 把按键事件**先**送给**焦点控件**——`GtkEntry` 内部那个 `GtkText`
+/// （焦点控件类型名就是 "GtkText"）。它处理完（插入字符 / 回车）就返回 TRUE
+/// ⇒ **冒泡阶段被跳过** ⇒ 装在 Entry 上的按键控制器（默认就是冒泡阶段）
+/// **永远收不到按键**（实测：打一个字进去，按键控制器一声不吭）。
+///
+/// - 普通回车 ⇒ 用 `GtkEntry` 自带的 **「activate」信号**（标准做法，
+///   终端的查找条 `term.rs` 一直就是这么做的 ⇒ 两边行为一致）；
+/// - Shift+回车 / Esc ⇒ 「activate」信号分不出来 ⇒ 仍要用按键控制器，
+///   但**必须用「捕获阶段」**（从根往下走 ⇒ 在焦点控件吃掉事件之前
+///   就交给我们；实测捕获阶段收得到，冒泡阶段收不到）。
 pub fn bind_entry_keys(
     entry: &gtk::Entry,
     on_next: impl FnMut() + 'static,
     on_prev: impl FnMut() + 'static,
     on_close: impl FnMut() + 'static,
 ) {
-    let ek = gtk::EventControllerKey::new();
     // ⚠️ GTK 的按键回调是 `Fn`（不是 `FnMut`），而被调用的动作是 `FnMut`
     // ——用 RefCell 包一层才能既"能改状态"又"能被 Fn 闭包调用"。
-    let next = RefCell::new(on_next);
-    let prev = RefCell::new(on_prev);
-    let close = RefCell::new(on_close);
+    // 三个动作要分给两个地方（activate 信号 + 按键控制器）⇒ 用 Rc 共享。
+    let next = Rc::new(RefCell::new(on_next));
+    let prev = Rc::new(RefCell::new(on_prev));
+    let close = Rc::new(RefCell::new(on_close));
+
+    // ① 普通回车 ⇒ Entry 自带的「activate」信号（下一个）
+    {
+        let next = next.clone();
+        entry.connect_activate(move |_| {
+            (next.borrow_mut())();
+        });
+    }
+
+    // ② Shift+回车 ⇒ 上一个；Esc ⇒ 关闭
+    let ek = gtk::EventControllerKey::new();
+    // ⚠️ **必须用捕获阶段**（理由见上面的说明）
+    ek.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let prev2 = prev.clone();
+    let close2 = close.clone();
     ek.connect_key_pressed(move |_, keyval, _code, mods| {
         let name = keyval.name();
         let name = name.as_deref().unwrap_or("");
         if name == "Return" || name == "KP_Enter" {
             if mods.contains(gdk::ModifierType::SHIFT_MASK) {
-                (prev.borrow_mut())();
-            } else {
-                (next.borrow_mut())();
+                (prev2.borrow_mut())();
+                return glib::Propagation::Stop;
             }
-            return glib::Propagation::Stop;
+            // 普通回车 ⇒ 交给「activate」信号（①）处理，别在这儿重复跳
+            return glib::Propagation::Proceed;
         }
         if name == "Escape" {
-            (close.borrow_mut())();
+            (close2.borrow_mut())();
             return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed

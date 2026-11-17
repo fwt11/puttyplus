@@ -657,6 +657,11 @@ impl TermPane {
             // Shift+Enter = 上一个
             let term2 = term.clone();
             let ek = gtk::EventControllerKey::new();
+            // ⚠️ **必须用捕获阶段**：GTK4 先把按键交给焦点控件
+            // （Entry 内部的 GtkText），它消费掉之后**冒泡阶段被跳过**
+            // ⇒ 装在 Entry 上的按键控制器（默认冒泡阶段）收不到任何按键。
+            // 详见 `findbar::bind_entry_keys` 的说明。
+            ek.set_propagation_phase(gtk::PropagationPhase::Capture);
             ek.connect_key_pressed(move |_k, keyval, _c, mods| {
                 if keyval.name().as_deref() == Some("Return")
                     && mods.contains(gdk::ModifierType::SHIFT_MASK)

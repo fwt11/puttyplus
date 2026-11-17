@@ -2173,6 +2173,43 @@ fn paste_clip(e: &Rc<FileEdit>) {
     update_cursor(e);
 }
 
+/// 跳到某个位置：**横向不乱动**，纵向照旧（居中）。
+///
+/// **症状**（用户 2026-11-17 报的）：查找时「被搜索的内容都跑到屏幕最左边了」
+/// ——整行的开头被顶出屏幕。
+///
+/// **根因**：`scroll_to_iter` 的 `use_align=true` + `x_offset=0`
+/// ⇒ 把匹配**对齐到视口左边**。实测：匹配在第 544 像素 ⇒ 视口变成 544..964
+/// ⇒ 行首那 544 像素全被顶没了。
+///
+/// **现在怎么做**（三步）：
+/// 1. 先用 GTK 自己的「最小滚动」（`use_align=false`）：匹配**已经在可视区里**
+///    就**一点都不动**；不在 ⇒ 只挪一点点把它带进来（不再顶到最左边）；
+/// 2. 纵向仍旧居中（老行为：`use_align=true` + `y_align=0.5`）；
+/// 3. 第 2 步会把横向也带到左边 ⇒ 把横向还回第 1 步的位置。
+///
+/// ⚠️ 调用前要**先把横向拉回用户自己的位置**（见 `select_match`）：
+/// `buffer.select_range` 本身可能就把视图带偏了。
+fn scroll_to_match(e: &Rc<FileEdit>, it: &mut gtk::TextIter) {
+    // ① 最小滚动：匹配已经在可视区里就完全不动
+    e.view.scroll_to_iter(it, 0.0, false, 0.0, 0.0);
+    // ② 记下横向位置（第 1 步可能动过）
+    let h = e.view.hadjustment().map(|a| a.value());
+    // ③ 纵向居中（老行为）
+    e.view.scroll_to_iter(it, 0.0, true, 0.0, 0.5);
+    // ④ 横向还回去 ⇒ **左右不动**
+    if let (Some(a), Some(v)) = (e.view.hadjustment(), h) {
+        a.set_value(v);
+    }
+}
+
+/// 把视图的横向位置拉回 `v`（找不到调整量就什么都不做）。
+fn restore_hscroll(e: &Rc<FileEdit>, v: Option<f64>) {
+    if let (Some(a), Some(v)) = (e.view.hadjustment(), v) {
+        a.set_value(v);
+    }
+}
+
 /// 跳转到指定行（1 起）。
 fn goto_line_no(e: &Rc<FileEdit>, line: i32) {
     let total = e.buffer.line_count().max(1);
@@ -2180,8 +2217,11 @@ fn goto_line_no(e: &Rc<FileEdit>, line: i32) {
     let Some(mut it) = e.buffer.iter_at_line_offset(line - 1, 0) else {
         return;
     };
+    // ⚠️ 放光标也可能把视图带偏 ⇒ 先记住用户自己的横向位置
+    let h_user = e.view.hadjustment().map(|a| a.value());
     e.buffer.place_cursor(&it);
-    e.view.scroll_to_iter(&mut it, 0.0, true, 0.0, 0.5);
+    restore_hscroll(e, h_user);
+    scroll_to_match(e, &mut it);
     update_cursor(e);
 }
 
@@ -2255,8 +2295,12 @@ fn select_match(e: &Rc<FileEdit>, idx: usize) {
     e.match_idx.set(idx as i32);
     let mut start = e.buffer.iter_at_offset(s);
     let end = e.buffer.iter_at_offset(t);
+    // ⚠️ 选中会改变光标位置 ⇒ GTK 可能顺手把视图滚一下 ⇒ 先记住用户自己的
+    // 横向位置，选完再拉回来（用户 2026-11-17：搜索时不要左右移动）。
+    let h_user = e.view.hadjustment().map(|a| a.value());
     e.buffer.select_range(&start, &end);
-    e.view.scroll_to_iter(&mut start, 0.0, true, 0.0, 0.5);
+    restore_hscroll(e, h_user);
+    scroll_to_match(e, &mut start);
     update_cursor(e);
     update_match_count(e);
 }
@@ -2482,6 +2526,40 @@ pub fn cursor_line(e: &Rc<FileEdit>) -> i32 {
 /// 「自动换行」开关。
 pub fn wrap_button(e: &FileEdit) -> gtk::ToggleButton {
     e.wrap_btn.clone()
+}
+
+/// **当前选中了第几个匹配**（-1 = 还没选中过）。
+///
+/// 干什么用：验「查找框里按回车 ⇒ 跳到下一个匹配」⇒ 序号得**往前走**。
+pub fn find_match_index(e: &FileEdit) -> i32 {
+    e.match_idx.get()
+}
+
+/// 查找条**开着吗**。
+pub fn find_open(e: &FileEdit) -> bool {
+    e.findbar.root.is_visible()
+}
+
+/// 窗口当前焦点在哪个控件上（冒烟诊断用：打印 GType 名）。
+pub fn focus_kind(e: &FileEdit) -> String {
+    gtk::prelude::GtkWindowExt::focus(&e.win)
+        .map(|w| w.type_().name().to_string())
+        .unwrap_or_else(|| "(无)".to_string())
+}
+
+/// **横向滚动**的位置（像素）。
+///
+/// 干什么用：验「跳到匹配时**不要左右动**」（用户 2026-11-17 报的：
+/// 「搜索的时候，被搜索的内容都跑到屏幕最左边了」）。
+pub fn find_hscroll(e: &FileEdit) -> f64 {
+    e.view.hadjustment().map(|a| a.value()).unwrap_or(0.0)
+}
+
+/// **手动设横向滚动**的位置（冒烟用：先把视图推到右边，再看跳匹配时动不动）。
+pub fn set_hscroll(e: &FileEdit, v: f64) {
+    if let Some(a) = e.view.hadjustment() {
+        a.set_value(v);
+    }
 }
 
 /// 查找条上的按钮（点**真按钮**，别直接调内部函数）。
