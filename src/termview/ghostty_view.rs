@@ -210,6 +210,11 @@ struct State {
     sel_cur: Cell<(f64, f64)>,
     /// 拖选期间的**自动滚动定时器**（阶段 122）。
     sel_timer: RefCell<Option<glib::SourceId>>,
+    /// **画了几帧**（冒烟/测试用：验「重画了没」）。
+    ///
+    /// 干什么用：ghostty 是**我们自绘**的 ⇒ 「搜完之后画面上要出现高亮」
+    /// 就必须**真的重画一帧** ⇒ 光看「搜索返回 true」不够 ⇒ 数帧数。
+    renders: Cell<u64>,
 }
 
 impl State {
@@ -231,9 +236,22 @@ impl State {
         let cb = self.out.borrow().clone();
         if let Some(cb) = cb {
             cb(bytes);
-            return;
+        } else {
+            self.write_to_child(bytes);
         }
-        self.write_to_child(bytes);
+        // ⚠️ **用户一有输入 ⇒ 视口回到底部**（VTE 同款）。
+        //
+        // 用户 2026-11-17 报的：「libvte 中，用户有输入时自动滚动到最底下，
+        // ghostty 中似乎还没有实现」。
+        //
+        // ⚠️ **为什么必须显式做**：内核的视口有「活动 / 历史」两态 ——
+        // 用户往上翻了历史之后，新来的输出**不会**把画面拽回底部
+        // （那是**故意**的：别打断用户读历史）⇒ 「回到底部」只能自己做。
+        {
+            let mut term = self.term.borrow_mut();
+            term.scroll_to_bottom();
+        }
+        self.queue_draw_self();
     }
 
     /// 重画（GTK 控件那边）。
@@ -484,6 +502,7 @@ impl GhosttyView {
             sel_dragging: Cell::new(false),
             sel_cur: Cell::new((0.0, 0.0)),
             sel_timer: RefCell::new(None),
+            renders: Cell::new(0),
         });
         // 控件上挂一份 State ⇒ 能从控件反查回后端句柄
         // （`TermView::from_widget` 要用）。
@@ -708,16 +727,29 @@ impl GhosttyView {
     /// 设置查找模式（**普通文本**，不是正则）。
     pub fn search_set_pattern(&self, text: Option<&str>) {
         self.state.term.borrow_mut().search_set_pattern(text);
+        // ⚠️ **搜索完必须重画**：ghostty 后端是**我们自绘**的 ⇒
+        // 不重画 ⇒ 匹配的高亮不会出现在屏幕上 ⇒ 用户看到的是「搜了没反应」
+        // （VTE 是控件自己画 ⇒ 不用管这件事）。
+        self.state.queue_draw_self();
     }
 
     /// 找下一个。
     pub fn search_find_next(&self) -> bool {
-        self.state.term.borrow_mut().search_find_next()
+        let ok = self.state.term.borrow_mut().search_find_next();
+        self.state.queue_draw_self();
+        ok
     }
 
     /// 找上一个。
     pub fn search_find_previous(&self) -> bool {
-        self.state.term.borrow_mut().search_find_previous()
+        let ok = self.state.term.borrow_mut().search_find_previous();
+        self.state.queue_draw_self();
+        ok
+    }
+
+    /// 当前查找到的匹配数（冒烟/测试用）。
+    pub fn search_match_count(&self) -> usize {
+        self.state.term.borrow().search_match_count()
     }
 
     /* ---------------- 剪贴板 ---------------- */
@@ -762,6 +794,10 @@ impl GhosttyView {
         crate::platform::clipboard::read_text(move |text| {
             if let Some(t) = text {
                 state.write_to_child(t.as_bytes());
+                // ⚠️ 粘贴也是**用户输入** ⇒ 视口回到底部（VTE 同款，
+                // 跟 `State::emit` 里那一条一个道理）。
+                state.term.borrow_mut().scroll_to_bottom();
+                state.queue_draw_self();
             }
         });
     }
@@ -931,6 +967,14 @@ impl GhosttyView {
     /// 触发内核重排（没有远程连接时无副作用）。
     pub fn render_to(&self, cr: &gtk::cairo::Context, width: f64, height: f64) {
         render_frame(&self.state, cr, width, height);
+    }
+
+    /// **画了几帧**（冒烟/测试用：验「重画了没」）。
+    ///
+    /// ⚠️ 数的是**真正画到屏幕上的帧**（GTK 的 draw 回调 ⇒ `render_to`）
+    /// ⇒ 「搜完画面上出现高亮」这件事能从这里看出来。
+    pub fn render_count(&self) -> u64 {
+        self.state.renders.get()
     }
 
     /// 这个控件**是不是一个自绘终端**。
@@ -1222,6 +1266,10 @@ impl GhosttyView {
 
 /// 画一帧：背景 → 网格 → 光标 → 预编辑。
 fn draw_frame(area: &gtk::DrawingArea, state: &Rc<State>, cr: &gtk::cairo::Context) {
+    // ⚠️ 计数放在**这里**（GTK 的 draw 回调）而不是 `render_to`：
+    // GTK 画帧走的是 `draw_frame` ⇒ `render_to` 那是冒烟手动渲到内存
+    // surface 用的另一条路（数它就数不到「屏幕真的重画了」）。
+    state.renders.set(state.renders.get() + 1);
     render_frame(state, cr, area.width() as f64, area.height() as f64);
 }
 

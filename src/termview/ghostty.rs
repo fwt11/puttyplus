@@ -236,6 +236,19 @@ impl GhosttyTerm {
             .scroll_viewport(ScrollViewport::Delta(delta as isize));
     }
 
+    /// 视口**回到底部**（贴着活动区）。
+    ///
+    /// 干什么用：用户 2026-11-17 报的「**libvte 中，用户一有输入就自动滚到
+    /// 最底下**，ghostty 中似乎还没有实现」⇒ 敲键 / 粘贴之后把视口拉回底部
+    /// （VTE 那边是「光标在哪儿、画面就跟到哪儿」⇒ 等价）。
+    ///
+    /// ⚠️ 内核的视口有「活动 / 历史」两态：用户往上翻了历史之后，
+    /// 新来的输出**不会**把画面拽回底部（那是**故意**的 ⇒ 别打断用户读历史）
+    /// ⇒ 所以「回到底部」必须**显式**做，不能指望输出自己带回来。
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_viewport(ScrollViewport::Bottom);
+    }
+
     /// 视口是不是**贴着底部**（= 没往上滚）。
     ///
     /// ⚠️ 内核报错了就当「贴着底部」（= 保守：别让界面显示成"滚上去了"）。
@@ -328,18 +341,45 @@ impl GhosttyTerm {
         let _ = self.search.set_needle(&self.term, needle);
         // 改 needle 之后要把搜索**跑起来**才知道有没有命中。
         let _ = self.search.run(&self.term);
+        // 换词了 ⇒ 之前那个高亮不再对应 ⇒ 重新装（装不上就撤掉）。
+        self.install_search_selection();
     }
 
     /// 找下一个（找到返回 true）。
     pub fn search_find_next(&mut self) -> bool {
         let _ = self.search.run(&self.term);
-        self.search.select_next(&self.term).unwrap_or(false)
+        let ok = self.search.select_next(&self.term).unwrap_or(false);
+        self.install_search_selection();
+        ok
     }
 
     /// 找上一个（找到返回 true）。
     pub fn search_find_previous(&mut self) -> bool {
         let _ = self.search.run(&self.term);
-        self.search.select_prev(&self.term).unwrap_or(false)
+        let ok = self.search.select_prev(&self.term).unwrap_or(false);
+        self.install_search_selection();
+        ok
+    }
+
+    /// 把当前匹配**装成终端的选区** ⇒ 我们的渲染会把它反白画出来。
+    ///
+    /// ⚠️ **为什么必须自己装**：内核的搜索只「记住」了选中的是哪个匹配
+    /// （`selected_match`），**并没有**把它设成终端的选区 ⇒ 不装的话：
+    /// 搜索「成功」了，屏幕上却一点变化都没有 ⇒ 用户以为没生效
+    /// （VTE 是控件自己画高亮 ⇒ 那边不用管这件事）。
+    ///
+    /// ⚠️ 顺带把内核的**视口滚动**也带上了：内核在选中匹配时会按滚动
+    /// 策略（默认 `IfNeeded` ⇒ 看不见才滚）把视口带过去 ⇒ 用户能看见匹配。
+    fn install_search_selection(&mut self) {
+        match self.search.selected_match(&self.term) {
+            Ok(Some(sel)) => {
+                let _ = self.term.set_selection(Some(&sel));
+            }
+            _ => {
+                // 没有匹配（或者清掉了查找词）⇒ 撤掉高亮。
+                let _ = self.term.set_selection(None);
+            }
+        }
     }
 
     /// 当前查找到的匹配数。
