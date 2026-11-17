@@ -1,7 +1,7 @@
 //! 单个文件面板（远程/本地）的 UI 构建、列表模型与拖拽（对应 C 版 pane_build /
 //! fill_model / fill_local_pane / pane_selected / drag 系列）。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::gdk;
@@ -83,6 +83,7 @@ pub fn is_link_perm(perm: &str) -> bool {
 }
 
 /// 列表的统一行数据（远程 SftpEntry 与本地目录项都转成这个再填充）。
+#[derive(Clone)]
 pub struct RowData {
     pub name: String,
     pub size: u64,
@@ -99,6 +100,19 @@ pub struct Pane {
     pub entry: gtk::Entry,
     pub toolbar: gtk::Box,
     pub show_hidden: Cell<bool>,
+    /// **文件名过滤词**（空 = 不过滤）。
+    ///
+    /// 干什么用：目录里文件多的时候，用户想只看**名字带某个词**的那些
+    /// （用户 2026-11-17 那一串「查找」需求的一部分）。
+    pub filter: RefCell<String>,
+    /// 上一次填充的**原始行**（过滤时重填用 ⇒ 不用再问远端一次）。
+    pub last_rows: RefCell<Vec<RowData>>,
+    /// 过滤框（**默认隐藏**；点 🔍 才露出来）。
+    pub filter_entry: gtk::Entry,
+    /// 「🔍」开关（显示 / 隐藏过滤框）。
+    pub filter_btn: gtk::ToggleButton,
+    /// 过滤重填的**去抖定时器**（打字很快 ⇒ 别每个键都重建整张表）。
+    pub filter_timer: RefCell<Option<glib::SourceId>>,
     /// **当前高亮的拖放目标行**（模型里的行下标；`None` = 没有高亮）。
     ///
     /// 干什么用（阶段 106）：拖动移动时要把「会移进哪个目录」画出来 ⇒
@@ -643,6 +657,10 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
     //    得搬回去，不然它会被这一下抹掉（用户 2026-11-10：得**看得见**
     //    「完成」慢慢消失，而不是目录一刷新就没了）。
     let terminal = collect_terminal(pane);
+    // ⚠️ **缓存原始行**：过滤时重填**用它** ⇒ 打字时**不用再问远端一次**
+    //   （缓存的是**没过滤过**的行 ⇒ 重填时过滤会重新算一遍）。
+    let filter = pane.filter.borrow().clone();
+    *pane.last_rows.borrow_mut() = rows.clone();
     pane.model.clear();
     // ⚠️ **这一批的大小文案**（列宽按最长的那个算 ⇒ 见 `apply_size_col_width`）。
     let mut size_texts: Vec<String> = Vec::new();
@@ -677,6 +695,13 @@ pub fn fill_model(pane: &Pane, show_hidden: bool, rows: Vec<RowData>) {
     }
     for r in rows {
         if r.hidden && !show_hidden {
+            continue;
+        }
+        // ⚠️ **文件名过滤**（用户在过滤框里敲的词）⇒ 不含的**不显示**。
+        //
+        // ⚠️ 「..」（进上级）**永远显示**：它是**导航**不是文件 ⇒
+        //    过滤开着的时候也得留着回上一级的路。
+        if !filter.is_empty() && !name_matches(&r.name, &filter) {
             continue;
         }
         // ⚠️ **软链用「链接」图标**（用户 2026-11-10：「链接用链接的图标，
@@ -889,7 +914,7 @@ pub fn entry_rows(entries: &[SftpEntry]) -> Vec<RowData> {
 
 /* ---------------- 面板构建 ---------------- */
 
-pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
+pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     let model = gtk::ListStore::new(&[
@@ -945,6 +970,27 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         b
     }
 
+    /* ---- 过滤框（默认藏起来；点 🔍 才出来）---- */
+    //
+    // ⚠️ **放在第一行**（跟状态文字同行）：第二行已经挤满了
+    //   （路径框 + 重连 + 主目录 + 刷新 + 隐藏 + 跟随 + 队列 + 镜像 + ⋯）
+    //   ⇒ 塞进去会把路径框挤没。
+    let filter_entry = gtk::Entry::new();
+    filter_entry.set_placeholder_text(Some(tr("按文件名过滤…")));
+    filter_entry.set_width_chars(10);
+    filter_entry.set_hexpand(false);
+    filter_entry.set_visible(false);
+    filter_entry.add_css_class("pp-path");
+    let filter_btn = gtk::ToggleButton::new();
+    {
+        let img = gtk::Image::from_icon_name("system-search-symbolic");
+        img.set_pixel_size(16);
+        filter_btn.set_child(Some(&img));
+        crate::a11y::watch_tooltip(&filter_btn);
+        filter_btn.set_tooltip_text(Some(tr("按文件名过滤")));
+        filter_btn.add_css_class("flat");
+    }
+
     /* ---- 第一行：面板名 + 连接状态 + 主传输动作 ---- */
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     header.set_margin_top(6);
@@ -991,6 +1037,9 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         let st2 = Rc::clone(st);
         transfer.connect_clicked(move |_| super::on_transfer_btn(&st2, remote));
     }
+    // 过滤框 + 🔍（放在传输按钮**前面** ⇒ 主操作按钮仍在最右）
+    header.append(&filter_entry);
+    header.append(&filter_btn);
     header.append(&transfer);
     box_.append(&header);
 
@@ -1352,13 +1401,18 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         cp.set_visible(cfg.perm);
     }
 
-    Pane {
+    let pane = Pane {
         remote,
         view,
         model,
         entry,
         toolbar,
         show_hidden: Cell::new(false),
+        filter: RefCell::new(String::new()),
+        last_rows: RefCell::new(Vec::new()),
+        filter_entry,
+        filter_btn,
+        filter_timer: RefCell::new(None),
         drop_row: Cell::new(None),
         status_lbl,
         col_size: cols.size,
@@ -1372,7 +1426,107 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Pane {
         sw,
         transfer_btn: transfer,
         full_redraws: std::cell::Cell::new(0),
+    };
+
+    let pane = Rc::new(pane);
+    wire_filter(&pane);
+    pane
+}
+
+/* ---------------- 按文件名过滤 ---------------- */
+
+/// 名字**含**过滤词吗（**不区分大小写**）。
+///
+/// - 空过滤词 ⇒ 全都算（没过滤）；
+/// - **子串**匹配 ⇒ 敲 "log" 能找到 "catalog.log" / "login.txt"
+///   （前缀匹配太窄，用户想找的是「名字里带这个词」）。
+///
+/// 纯函数（能单测）。
+pub fn name_matches(name: &str, filter: &str) -> bool {
+    let f = filter.trim();
+    if f.is_empty() {
+        return true;
     }
+    name.to_lowercase().contains(&f.to_lowercase())
+}
+
+/// 设过滤词并**立刻**重填列表。
+///
+/// ⚠️ **重填用的是缓存的原始行**（`last_rows`）⇒ **不用再问远端一次**
+/// ⇒ 打字时是本地过滤 ⇒ 不卡。
+pub fn apply_filter(pane: &Rc<Pane>, text: &str) {
+    *pane.filter.borrow_mut() = text.to_string();
+    let rows = pane.last_rows.borrow().clone();
+    fill_model(pane, pane.show_hidden.get(), rows);
+}
+
+/// 过滤框的**去抖重填**（打字很快 ⇒ 别每个键都重建整张表）。
+///
+/// ⚠️ 120ms：够跟手，又不至于一个词打 5 个字母就重建 5 遍整张表。
+const FILTER_DEBOUNCE_MS: u64 = 120;
+
+/// 把过滤框与 🔍 按钮的信号接上。
+fn wire_filter(pane: &Rc<Pane>) {
+    // 🔍 ⇒ 显示 / 隐藏过滤框。
+    //
+    // ⚠️ **隐藏时把过滤词清掉**（并且恢复完整列表）⇒
+    // 「关了按钮却还只剩几行」= 用户以为自己把文件弄丢了。
+    {
+        let p = Rc::clone(pane);
+        pane.filter_btn.connect_toggled(move |b| {
+            let on = b.is_active();
+            p.filter_entry.set_visible(on);
+            if on {
+                p.filter_entry.grab_focus();
+            } else {
+                p.filter_entry.set_text("");
+                apply_filter(&p, "");
+            }
+        });
+    }
+    // 过滤框打字 ⇒ 去抖重填。
+    {
+        let p = Rc::clone(pane);
+        pane.filter_entry.connect_changed(move |e| {
+            let text = e.text().to_string();
+            // 状态**立刻**更新（tooltip 上的匹配数）。
+            update_filter_hint(&p, &text);
+            // 重填去抖：上一次的定时器先撤掉。
+            if let Some(id) = p.filter_timer.borrow_mut().take() {
+                id.remove();
+            }
+            let p2 = Rc::clone(&p);
+            let id = glib::timeout_add_local_once(
+                std::time::Duration::from_millis(FILTER_DEBOUNCE_MS),
+                move || {
+                    *p2.filter_timer.borrow_mut() = None;
+                    apply_filter(&p2, &text);
+                },
+            );
+            *p.filter_timer.borrow_mut() = Some(id);
+        });
+    }
+}
+
+/// 过滤框的提示（tooltip 上写「N/M 项匹配」）。
+fn update_filter_hint(pane: &Rc<Pane>, text: &str) {
+    let f = text.trim();
+    if f.is_empty() {
+        pane.filter_entry.set_tooltip_text(Some(tr("按文件名过滤")));
+        return;
+    }
+    let total = pane.last_rows.borrow().len();
+    let hit = pane
+        .last_rows
+        .borrow()
+        .iter()
+        .filter(|r| name_matches(&r.name, f))
+        .count();
+    pane.filter_entry.set_tooltip_text(Some(&trf!(
+        "按文件名过滤：{hit}/{total} 项匹配",
+        hit = hit,
+        total = total
+    )));
 }
 
 /// **整表重画**（把整棵列表标脏 ⇒ 所有可见行下一帧都重画）。
@@ -1688,6 +1842,24 @@ fn install_context_menu(st: &Rc<PanelState>, remote: bool, view: &gtk::TreeView)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **文件名过滤**：子串 ＋ **不区分大小写**。
+    #[test]
+    fn 过滤是子串匹配_且不区分大小写() {
+        // 空过滤词 ⇒ 全都算（没过滤）
+        assert!(name_matches("anything", ""));
+        assert!(name_matches("anything", "   "));
+        // 子串
+        assert!(name_matches("catalog.log", "log"));
+        assert!(name_matches("login.txt", "log"));
+        // 不区分大小写（两个方向）
+        assert!(name_matches("README.md", "readme"));
+        assert!(name_matches("readme.md", "README"));
+        // 不匹配
+        assert!(!name_matches("main.rs", "log"));
+        // 前后空格**不算**（用户敲 " log " 不该一个都搜不到）
+        assert!(name_matches("catalog.log", " log "));
+    }
 
     /// 软链怎么认：权限串的首字符（`ls -l` 的规矩）。
     #[test]

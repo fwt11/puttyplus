@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 1997] = [
+pub static EN: [(&str, &str); 2000] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1044,6 +1044,9 @@ pub static EN: [(&str, &str); 1997] = [
     ("挂载", "Mounts"),
     ("按列类型转义生成条件，填进 WHERE 框（填完可以接着改，按回车查库）", "Build the condition with type-aware quoting and insert it into the WHERE box (edit it further, then press Enter to query)"),
     ("按哪一列排序（不选就不排序）", "Which column to sort by (nothing selected means no sorting)"),
+    ("按文件名过滤", "Filter by file name"),
+    ("按文件名过滤…", "Filter by file name…"),
+    ("按文件名过滤：{hit}/{total} 项匹配", "Filter by file name: {hit}/{total} matched"),
     ("按条目名匹配（不含路径），支持 * 与 ?。命中目录则整棵子树跳过。\n默认忽略 .git、node_modules、*.swp 之类；清空则什么都不忽略。", "Matches the entry name (without the path) and supports * and ?. A directory that matches skips its whole subtree.\nBy default .git, node_modules, *.swp and the like are ignored; clear the list to ignore nothing."),
     ("按钮上显示的名字", "The name shown on the button"),
     ("按键广播", "Key broadcast"),

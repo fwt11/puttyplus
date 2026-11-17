@@ -441,8 +441,8 @@ impl SftpPanel {
         *st.local_cwd.borrow_mut() = local;
 
         st.root.set_position(420); // 远程/本地 ≈ 55:45
-        let remote_pane = Rc::new(pane::build_pane(&st, true));
-        let local_pane = Rc::new(pane::build_pane(&st, false));
+        let remote_pane = pane::build_pane(&st, true);
+        let local_pane = pane::build_pane(&st, false);
         *st.remote_pane.borrow_mut() = Some(remote_pane);
         *st.local_pane.borrow_mut() = Some(local_pane);
 
