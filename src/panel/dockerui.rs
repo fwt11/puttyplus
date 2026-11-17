@@ -273,6 +273,26 @@ pub struct DockerUi {
     ///   （跟容器表一个写法）⇒ 三张新表也用树表（只是不建子行）。
     images_store: gtk::TreeStore,
     images_view: gtk::TreeView,
+    /// 镜像的**操作条**（阶段 120：推送 / 导出 / 打标签 / 删除）。
+    images_bar: gtk::Box,
+    /// 「推送」按钮（阶段 120）。
+    images_push_btn: gtk::Button,
+    /// 「导出…」按钮（阶段 120）。
+    images_export_btn: gtk::Button,
+    /// 「打标签…」按钮（阶段 120）。
+    images_tag_btn: gtk::Button,
+    /// 「删除」按钮（阶段 120）。
+    images_remove_btn: gtk::Button,
+    /// 操作条上的**提示标签**（当前选中的镜像）。
+    images_hint: gtk::Label,
+    /// **当前选中的镜像**（`仓库:标签`；空 = 没选）。
+    images_selected: RefCell<String>,
+    /// **镜像操作**的结果文字（**等列表刷新完再贴回状态行**）。
+    ///
+    /// ⚠️ **为什么留着**：操作做完会**重新列一遍镜像** ⇒ 刷新那条消息
+    ///   （「共 45 个镜像」）会把操作结果**冲掉** ⇒ 用户看不到「打标签
+    ///   成功」⇒ 结果得**刷新之后再贴回去**。
+    images_op_msg: RefCell<String>,
     /// **卷表**（阶段 115）。
     volumes_store: gtk::TreeStore,
     volumes_view: gtk::TreeView,
@@ -404,6 +424,11 @@ enum Msg {
         path: String,
         r: Result<String, String>,
     },
+    /// **镜像操作**的进度 / 结果（阶段 120）。
+    ///
+    /// ⚠️ **`done`**：进度消息**不刷新**列表（每 100ms 刷一次 ⇒ 远端被
+    ///    hammering）；只有**最后那条**才刷新。
+    ImageOp { msg: String, done: bool },
 }
 
 /// 详情区的控件（阶段 110）。
@@ -1596,7 +1621,31 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let (networks_store, networks_view) =
         flat_table(&[tr("名称"), tr("驱动"), tr("范围")], &[220, 140, 100], 0);
 
-    let images_root = flat_page(&images_view);
+    // ---- 阶段 120：镜像的**操作条**（推送 / 导出 / 打标签 / 删除）----
+    //
+    // ⚠️ **放在表格正上方**（不是详情区）⇒ 镜像段里也能一眼看到。
+    let images_push_btn = gtk::Button::with_label(tr("推送"));
+    images_push_btn.set_tooltip_text(Some(tr("把这个镜像推到仓库（docker push）")));
+    let images_export_btn = gtk::Button::with_label(tr("导出…"));
+    images_export_btn.set_tooltip_text(Some(tr("把镜像导出成本地的 tar 文件")));
+    let images_tag_btn = gtk::Button::with_label(tr("打标签…"));
+    images_tag_btn.set_tooltip_text(Some(tr("给这个镜像另打一个标签")));
+    let images_remove_btn = gtk::Button::with_label(tr("删除"));
+    images_remove_btn.set_tooltip_text(Some(tr("删除这个镜像（docker rmi）")));
+    let images_hint = gtk::Label::new(Some(tr("选中一个镜像才能操作")));
+    images_hint.set_xalign(0.0);
+    images_hint.add_css_class("dim-label");
+    let images_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    images_bar.set_margin_start(6);
+    images_bar.set_margin_end(6);
+    images_bar.set_margin_top(4);
+    images_bar.append(&images_push_btn);
+    images_bar.append(&images_export_btn);
+    images_bar.append(&images_tag_btn);
+    images_bar.append(&images_remove_btn);
+    images_bar.append(&images_hint);
+
+    let images_root = flat_page_with_bar(&images_view, Some(&images_bar));
     let volumes_root = flat_page(&volumes_view);
     let networks_root = flat_page(&networks_view);
 
@@ -2196,6 +2245,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         seg_current: Cell::new(SEG_CONTAINERS),
         images_store: images_store.clone(),
         images_view: images_view.clone(),
+        images_bar: images_bar.clone(),
+        images_push_btn: images_push_btn.clone(),
+        images_export_btn: images_export_btn.clone(),
+        images_tag_btn: images_tag_btn.clone(),
+        images_remove_btn: images_remove_btn.clone(),
+        images_hint: images_hint.clone(),
+        images_selected: RefCell::new(String::new()),
+        images_op_msg: RefCell::new(String::new()),
         volumes_store: volumes_store.clone(),
         volumes_view: volumes_view.clone(),
         networks_store: networks_store.clone(),
@@ -2241,6 +2298,69 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         last_action: RefCell::new(String::new()),
     });
 
+    // ---- 阶段 120：镜像的**操作条**接线 ----
+    {
+        // ⚠️ **选中变了** ⇒ 记住选中的是哪个镜像 ＋ 按钮跟着变。
+        {
+            let u = Rc::downgrade(&ui);
+            let view = images_view.clone();
+            view.connect_cursor_changed(move |v| {
+                let Some(u) = u.upgrade() else { return };
+                on_images_cursor_changed(&u, v);
+            });
+        }
+        // ⚠️ **四个动作**（**写操作都有二次确认**；导出不动远端 ⇒ 不问）。
+        {
+            let stw = Rc::downgrade(st);
+            let uw = Rc::downgrade(&ui);
+            ui.images_push_btn.connect_clicked(move |_| {
+                let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+                let image = u.images_selected.borrow().clone();
+                if image.is_empty() {
+                    return;
+                }
+                images_push(&st, &u, &image);
+            });
+        }
+        {
+            let stw = Rc::downgrade(st);
+            let uw = Rc::downgrade(&ui);
+            ui.images_export_btn.connect_clicked(move |_| {
+                let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+                let image = u.images_selected.borrow().clone();
+                if image.is_empty() {
+                    return;
+                }
+                images_export(&st, &u, &image);
+            });
+        }
+        {
+            let stw = Rc::downgrade(st);
+            let uw = Rc::downgrade(&ui);
+            ui.images_tag_btn.connect_clicked(move |_| {
+                let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+                let image = u.images_selected.borrow().clone();
+                if image.is_empty() {
+                    return;
+                }
+                images_tag(&st, &u, &image);
+            });
+        }
+        {
+            let stw = Rc::downgrade(st);
+            let uw = Rc::downgrade(&ui);
+            ui.images_remove_btn.connect_clicked(move |_| {
+                let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+                let image = u.images_selected.borrow().clone();
+                if image.is_empty() {
+                    return;
+                }
+                images_remove(&st, &u, &image);
+            });
+        }
+        update_images_actions(&ui);
+    }
+
     // 主线程接收循环（**弱引用** ⇒ 面板关了这条循环自己会结束）。
     {
         let u = Rc::downgrade(&ui);
@@ -2257,6 +2377,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     Msg::Images(Ok(v)) => {
                         u.images_busy.set(false);
                         apply_images(&u, &v);
+                        // ⚠️ **把操作结果贴回去**（刷新那条消息会冲掉它）。
+                        let op = u.images_op_msg.borrow().clone();
+                        if !op.is_empty() {
+                            u.status.set_text(&op);
+                            u.images_op_msg.borrow_mut().clear();
+                        }
                     }
                     Msg::Images(Err(msg)) => {
                         u.images_busy.set(false);
@@ -2296,6 +2422,19 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         match r {
                             Ok(v) => apply_files(&u, &v),
                             Err(msg) => u.files.status.set_text(&msg),
+                        }
+                    }
+                    // ⚠️ **阶段 120**：镜像操作的结果（进度 / 成功 / 失败）。
+                    Msg::ImageOp { msg, done } => {
+                        u.status.set_text(&msg);
+                        if done {
+                            // ⚠️ **结果先存着** ⇒ 等列表刷新完再贴回去
+                            //   （刷新那条「共 N 个镜像」会把结果冲掉）。
+                            *u.images_op_msg.borrow_mut() = msg;
+                            // ⚠️ **操作完了重新列一遍**（打标签 / 删除都改了远端）。
+                            if let Some(st) = stw.upgrade() {
+                                refresh_images(&st, &u);
+                            }
                         }
                     }
                     Msg::FileProgress { msg } => {
@@ -5020,6 +5159,15 @@ fn flat_table(
 
 /// 把一张表包进**能滚动的页面**（表格占满 + 上下留白）。
 fn flat_page(view: &gtk::TreeView) -> gtk::Box {
+    flat_page_with_bar(view, None)
+}
+
+/// 把一张表包进**能滚动的页面**（可选：表格上面加一条**操作条**）。
+///
+/// ⚠️ **为什么要有操作条**（阶段 120）：镜像段**没有详情区** ⇒ 推送 /
+///    导出 / 打标签 / 删除这些**行操作**得有个落脚的地方 ⇒ 放在表格
+///    正上方（选中哪一行就作用在哪一行）。
+fn flat_page_with_bar(view: &gtk::TreeView, bar: Option<&gtk::Box>) -> gtk::Box {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     scroll.set_vexpand(true);
@@ -5027,6 +5175,9 @@ fn flat_page(view: &gtk::TreeView) -> gtk::Box {
     scroll.set_child(Some(view));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_margin_bottom(6);
+    if let Some(b) = bar {
+        root.append(b);
+    }
     root.append(&scroll);
     root
 }
@@ -5123,7 +5274,12 @@ async fn fetch_networks(
 
 /// 填**镜像表** ＋ 更新状态行（阶段 115）。
 fn apply_images(ui: &Rc<DockerUi>, v: &[docker::ImageInfo]) {
+    // ⚠️ **保住选中**（阶段 120）：自动刷新每 7 秒来一次 ⇒ 每次都把选中
+    //    清掉的话，用户**根本点不到操作按钮**（按钮会跟着变灰）⇒
+    //    重建以后**按名字找回来**。
+    let keep = ui.images_selected.borrow().clone();
     ui.images_store.clear();
+    let mut found: Option<gtk::TreeIter> = None;
     for i in v {
         let row = ui.images_store.append(None);
         ui.images_store.set(
@@ -5136,8 +5292,27 @@ fn apply_images(ui: &Rc<DockerUi>, v: &[docker::ImageInfo]) {
                 (4u32, &i.created),
             ],
         );
+        if !keep.is_empty() && image_full_name(i) == keep {
+            found = Some(row);
+        }
     }
+    if let Some(it) = found {
+        ui.images_view.selection().select_iter(&it);
+    }
+    update_images_actions(ui);
     ui.status.set_text(&trf!("共 {n} 个镜像", n = v.len()));
+}
+
+/// 镜像的**完整名字**（`仓库:标签`；悬空镜像只有仓库）。
+///
+/// ⚠️ **为什么单独一个函数**：表格里是**仓库**与**标签**两列 ⇒ 命令要的是
+///    **一个**名字 ⇒ 拼法得**只有一处**（拼错了 docker 就说不认）。
+fn image_full_name(i: &docker::ImageInfo) -> String {
+    if i.tag.is_empty() || i.tag == "<none>" {
+        i.repository.clone()
+    } else {
+        format!("{}:{}", i.repository, i.tag)
+    }
 }
 
 /// 填**卷表** ＋ 更新状态行（阶段 115）。
@@ -5536,6 +5711,361 @@ pub fn files_download_for_test(
         return;
     }
     files_download(st, ui, &container, remote, local_dir);
+}
+
+/* ---------------- 阶段 120：镜像的操作（推送 / 导出 / 打标签 / 删除） ---------------- */
+
+/// 镜像表**选中变了** ⇒ 记住选中的是哪个 ＋ 更新操作条。
+///
+/// ⚠️ **为什么自己记**：GTK 的「选中」只是一行 ⇒ 得把它翻译成
+///    `docker` 认的**镜像名**（`仓库:标签`）⇒ 后面的命令才用得上。
+fn on_images_cursor_changed(ui: &Rc<DockerUi>, view: &gtk::TreeView) {
+    let mut name = String::new();
+    if let Some((model, iter)) = view.selection().selected() {
+        let repo: String = model.get(&iter, 0);
+        let tag: String = model.get(&iter, 1);
+        if !repo.is_empty() {
+            name = if tag.is_empty() || tag == "<none>" {
+                repo
+            } else {
+                format!("{repo}:{tag}")
+            };
+        }
+    }
+    *ui.images_selected.borrow_mut() = name;
+    update_images_actions(ui);
+}
+
+/// 刷新**镜像操作条**（选中哪个 ＋ 按钮能不能点）。
+fn update_images_actions(ui: &Rc<DockerUi>) {
+    let sel = ui.images_selected.borrow().clone();
+    let has = !sel.is_empty();
+    ui.images_push_btn.set_sensitive(has);
+    ui.images_export_btn.set_sensitive(has);
+    ui.images_tag_btn.set_sensitive(has);
+    ui.images_remove_btn.set_sensitive(has);
+    if has {
+        ui.images_hint.set_text(&sel);
+    } else {
+        ui.images_hint.set_text(tr("选中一个镜像才能操作"));
+    }
+}
+
+/// **推送**镜像（**写操作** ⇒ 二次确认）。
+fn images_push(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
+    let msg = trf!("确定要把镜像「{img}」推到仓库吗？", img = image);
+    let (st2, u2) = (st.clone(), ui.clone());
+    let image = image.to_string();
+    crate::panel::dialogs::confirm_title(
+        st.topwin().as_ref(),
+        tr("请确认"),
+        &msg,
+        tr("推送"),
+        move |ok| {
+            if !ok {
+                return;
+            }
+            run_image_push(&st2, &u2, &image);
+        },
+    );
+}
+
+/// **推送**的后台部分（远端跑 `docker push`）。
+fn run_image_push(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
+    ui.status.set_text(&trf!("正在推送镜像「{img}」…", img = image));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let image = image.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => match docker::push_image(&session, &image).await {
+                Ok(_) => trf!("镜像「{img}」推送完成", img = image),
+                Err(e) => e.0,
+            },
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::ImageOp { msg, done: true });
+    });
+}
+
+/// **导出**镜像到本地文件（`docker save` 的归档流）。
+///
+/// ⚠️ **不是写操作**（不动远端）⇒ 不用二次确认；但会**写本地文件**。
+fn images_export(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
+    let top = st.topwin();
+    let mut b = gtk::FileChooserNative::builder()
+        .modal(true)
+        .title(tr("把镜像导出到哪个文件"))
+        .action(gtk::FileChooserAction::Save)
+        .accept_label(tr("导出"))
+        .cancel_label(tr("取消"));
+    if let Some(p) = top.as_ref() {
+        b = b.transient_for(p);
+    }
+    let ch = b.build();
+    // ⚠️ **默认文件名**：镜像名里有 `/` 与 `:` ⇒ 换成 `_`（省得用户在
+    //    文件名里看到奇怪的东西）。
+    let mut def = image.replace('/', "_").replace(':', "_");
+    if !def.ends_with(".tar") {
+        def.push_str(".tar");
+    }
+    ch.set_current_name(&def);
+    let (st2, u2) = (st.clone(), ui.clone());
+    let image = image.to_string();
+    ch.connect_response(move |c, r| {
+        if r == gtk::ResponseType::Accept {
+            if let Some(f) = c.file() {
+                if let Some(p) = f.path() {
+                    run_image_export(&st2, &u2, &image, &p);
+                }
+            }
+        }
+        c.destroy();
+    });
+    ch.show();
+}
+
+/// **导出**的后台部分（远端跑 `docker save` ⇒ 归档流直接落本地文件）。
+fn run_image_export(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    image: &str,
+    dest: &std::path::Path,
+) {
+    ui.status.set_text(&trf!("正在导出镜像「{img}」…", img = image));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let image = image.to_string();
+    let dest = dest.to_path_buf();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => {
+                // ⚠️ **进度限流 100ms**（跟容器文件传输一个套路）⇒ 数字
+                //   每次都更新、界面通知变稀。
+                let tx2 = tx.clone();
+                let last = std::sync::Mutex::new(std::time::Instant::now());
+                let prog: docker::XferProgress = std::sync::Arc::new(move |n: u64| {
+                    {
+                        let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+                        if g.elapsed() < std::time::Duration::from_millis(100) {
+                            return;
+                        }
+                        *g = std::time::Instant::now();
+                    }
+                    let _ = tx2.send_blocking(Msg::ImageOp {
+                        msg: trf!("正在导出… 已收 {n} 字节", n = n),
+                        done: false,
+                    });
+                });
+                match docker::save_image_to(&session, &image, &dest, &prog).await {
+                    Ok(total) => trf!(
+                        "镜像「{img}」已导出到 {p}（{n} 字节）",
+                        img = image,
+                        p = dest.display().to_string(),
+                        n = total
+                    ),
+                    Err(e) => e.0,
+                }
+            }
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::ImageOp { msg, done: true });
+    });
+}
+
+/// **打标签**（**写操作** ⇒ 先问标签名、再二次确认）。
+fn images_tag(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
+    let (st2, u2) = (st.clone(), ui.clone());
+    let image = image.to_string();
+    crate::panel::dialogs::ask_text(
+        st.topwin().as_ref(),
+        tr("给镜像另打一个标签"),
+        "",
+        move |target| {
+            let Some(target) = target else { return };
+            let msg = trf!(
+                "确定要把镜像「{img}」打成「{t}」吗？",
+                img = image,
+                t = target
+            );
+            let (st3, u3) = (st2.clone(), u2.clone());
+            let image2 = image.clone();
+            crate::panel::dialogs::confirm_title(
+                st2.topwin().as_ref(),
+                tr("请确认"),
+                &msg,
+                tr("打标签"),
+                move |ok| {
+                    if !ok {
+                        return;
+                    }
+                    run_image_tag(&st3, &u3, &image2, &target);
+                },
+            );
+        },
+    );
+}
+
+/// **打标签**的后台部分（远端跑 `docker tag`）。
+fn run_image_tag(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str, target: &str) {
+    ui.status.set_text(&trf!("正在给镜像「{img}」打标签…", img = image));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let image = image.to_string();
+    let target = target.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => match docker::tag_image(&session, &image, &target).await {
+                Ok(()) => trf!("镜像「{img}」已经打上标签「{t}」", img = image, t = target),
+                Err(e) => e.0,
+            },
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::ImageOp { msg, done: true });
+    });
+}
+
+/// **删除**镜像（**写操作** ⇒ 二次确认）。
+fn images_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
+    let msg = trf!(
+        "确定要删除镜像「{img}」吗？（删了就没了）",
+        img = image
+    );
+    let (st2, u2) = (st.clone(), ui.clone());
+    let image = image.to_string();
+    crate::panel::dialogs::confirm_title(
+        st.topwin().as_ref(),
+        tr("请确认"),
+        &msg,
+        tr("删除"),
+        move |ok| {
+            if !ok {
+                return;
+            }
+            run_image_remove(&st2, &u2, &image);
+        },
+    );
+}
+
+/// **删除**的后台部分（远端跑 `docker rmi`）。
+fn run_image_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
+    ui.status.set_text(&trf!("正在删除镜像「{img}」…", img = image));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let image = image.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => match docker::remove_image(&session, &image).await {
+                Ok(()) => trf!("镜像「{img}」已删除", img = image),
+                Err(e) => e.0,
+            },
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::ImageOp { msg, done: true });
+    });
+}
+
+/* ---------------- 阶段 120：镜像操作的测试钩子 ---------------- */
+
+/// 测试钩子：镜像的**操作条**（阶段 120）。
+///
+/// 返回 `(四个按钮的文案, 能不能点, 当前选中的镜像)`。
+pub fn images_actions_for_test(st: &Rc<PanelState>) -> (Vec<String>, bool, String) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return (Vec::new(), false, String::new());
+    };
+    let labels = vec![
+        ui.images_push_btn.label().unwrap_or_default().to_string(),
+        ui.images_export_btn
+            .label()
+            .unwrap_or_default()
+            .to_string(),
+        ui.images_tag_btn.label().unwrap_or_default().to_string(),
+        ui.images_remove_btn
+            .label()
+            .unwrap_or_default()
+            .to_string(),
+    ];
+    let sensitive = ui.images_push_btn.is_sensitive();
+    (labels, sensitive, ui.images_selected.borrow().clone())
+}
+
+/// 测试钩子：**选中**镜像表里的第几行（阶段 120；0 = 第一行）。
+///
+/// ⚠️ **真的选中**（不是只记一个变量）⇒ 顺带验「选中 ⇒ 按钮变可点」
+///    那根线**真的接上了**。
+pub fn images_select_for_test(st: &Rc<PanelState>, idx: u32) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return String::new();
+    };
+    let path = gtk::TreePath::from_indices(&[idx as i32]);
+    gtk::prelude::TreeViewExt::set_cursor(&ui.images_view, &path, None, false);
+    ui.images_view.selection().select_path(&path);
+    ui.images_selected.borrow().clone()
+}
+
+/// 测试钩子：**打标签**（阶段 120；跳过对话框 ⇒ 直接跑）。
+pub fn images_tag_for_test(st: &Rc<PanelState>, target: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let image = ui.images_selected.borrow().clone();
+    if image.is_empty() {
+        return;
+    }
+    run_image_tag(st, ui, &image, target);
+}
+
+/// 测试钩子：**删除**镜像（阶段 120；跳过对话框 ⇒ 直接跑）。
+pub fn images_remove_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let image = ui.images_selected.borrow().clone();
+    if image.is_empty() {
+        return;
+    }
+    run_image_remove(st, ui, &image);
+}
+
+/// 测试钩子：**推送**镜像（阶段 120；跳过对话框 ⇒ 直接跑）。
+pub fn images_push_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let image = ui.images_selected.borrow().clone();
+    if image.is_empty() {
+        return;
+    }
+    run_image_push(st, ui, &image);
+}
+
+/// 测试钩子：**推送**一个**指定的**镜像名（阶段 120）。
+///
+/// ⚠️ **为什么要「指定名字」**：冒烟不能真往公共仓库推东西 ⇒ 用一个
+///    **不存在的镜像名** ⇒ docker 立刻失败 ⇒ 正好验「失败要给中文原因」。
+pub fn images_push_named_for_test(st: &Rc<PanelState>, image: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    run_image_push(st, ui, image);
+}
+
+/// 测试钩子：**导出**镜像到本地文件（阶段 120；跳过文件选择框 ⇒ 直接跑）。
+pub fn images_export_for_test(st: &Rc<PanelState>, dest: &std::path::Path) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let image = ui.images_selected.borrow().clone();
+    if image.is_empty() {
+        return;
+    }
+    run_image_export(st, ui, &image, dest);
 }
 
 /* ---------------- 阶段 115：测试钩子 ---------------- */

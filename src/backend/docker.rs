@@ -599,6 +599,184 @@ pub async fn open_exec_shell(
     Ok(ch)
 }
 
+/* ---------------- 阶段 120：镜像的操作（推送 / 导出 / 打标签 / 删除） ---------------- */
+
+/// 镜像的**推送**命令（`docker push`）。
+///
+/// ⚠️ **镜像名不是容器名**（里面有 `/`、`.`、`:`）⇒ 不能用 `valid_name`
+///    那个「只允许字母数字」的检查 ⇒ 一律 `sh_quote`（防注入）。
+pub fn image_push_cmd(image: &str) -> String {
+    format!(
+        "docker push {i}",
+        i = crate::backend::checksum::sh_quote(image)
+    )
+}
+
+/// 镜像的**打标签**命令（`docker tag <源> <目标>`）。
+pub fn image_tag_cmd(image: &str, target: &str) -> String {
+    format!(
+        "docker tag {i} {t}",
+        i = crate::backend::checksum::sh_quote(image),
+        t = crate::backend::checksum::sh_quote(target)
+    )
+}
+
+/// 镜像的**删除**命令（`docker rmi`）。
+pub fn image_remove_cmd(image: &str) -> String {
+    format!(
+        "docker rmi {i}",
+        i = crate::backend::checksum::sh_quote(image)
+    )
+}
+
+/// 镜像的**导出**命令（远端把 `docker save` 的归档**cat 到 stdout**）。
+///
+/// ⚠️⚠️ **docker save 不会往 stdout 写**（实测 docker 29.9.3，三种写法
+///    都被拒）：
+/// - `docker save <镜像> -` ⇒ `-` 被当成**镜像名** ⇒「invalid reference
+///   format」（docker 把 `-` 理解成另一个镜像）；
+/// - `docker save -o /dev/stdout <镜像>` ⇒「cannot write to a symbolic link
+///   directly」（它会检查目标是不是符号链接）；
+/// - `docker save -o <FIFO> <镜像>` ⇒「cannot write to a named pipe (FIFO)」。
+///
+/// ⇒ **只能先在远程落一个临时文件，再 `cat` 出来**（代价：远程要有一个
+///   镜像大小那么大的临时空间）。
+///
+/// ⚠️ **stderr 要单独收着**（`2>"$e"`）⇒ docker 的报错**不会混进归档流**
+///   （混进去 ⇒ 本地 tar 解不开 ⇒ 导出白费）；失败时再把那段报错
+///   **单独吐到 stderr**（⇒ 调用方能拿到「为什么失败」）。
+/// ⚠️ **临时文件用 `$$`（shell 的 pid）**⇒ 同一个用户同时导两个镜像也不会
+///   撞名；最后清掉（不留垃圾）。
+pub fn image_save_cmd(image: &str) -> String {
+    format!(
+        "t=/tmp/.pp-save-$$.tar; e=$t.err; if docker save -o \"$t\" {i} 2>\"$e\"; then cat \"$t\"; rc=0; else rc=1; cat \"$e\" >&2; fi; rm -f \"$t\" \"$e\"; exit $rc",
+        i = crate::backend::checksum::sh_quote(image)
+    )
+}
+
+/// 从 docker 的输出里**挑出最后一句有用的话**（纯函数 ⇒ 能单测）。
+///
+/// ⚠️ **为什么要挑**：docker 的报错**在最后**（前面是进度条，用 `\r` 刷的）
+///    ⇒ 直接把整段输出塞给用户 ⇒ 一屏乱码。
+/// ⚠️ **按 `\n` 与 `\r` 都切**：推送的进度是用 `\r` 刷的 ⇒ 只按 `\n` 切
+///    会把整段进度当成一句话。
+pub fn docker_last_line(out: &str) -> String {
+    out.split(['\n', '\r'])
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .last()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 镜像操作**失败**时的中文提示（纯函数 ⇒ 能单测）。
+///
+/// ⚠️ **失败要给「为什么」**：只说「推送失败」用户没法处理 ⇒ 把 docker
+///    说的最后一句带上。
+pub fn image_op_error_msg(what: &str, out: &str) -> String {
+    let line = docker_last_line(out);
+    if line.is_empty() {
+        trf!("{what}失败", what = what)
+    } else {
+        trf!("{what}失败：{line}", what = what, line = line)
+    }
+}
+
+/// **推送**一个镜像到仓库（`docker push`）。
+pub async fn push_image(
+    session: &Handle<HostKeyHandler>,
+    image: &str,
+) -> BackendResult<String> {
+    let (code, out) = run_cmd(session, &image_push_cmd(image)).await?;
+    if code == 0 {
+        Ok(out)
+    } else {
+        Err(BackendError(image_op_error_msg(tr("推送镜像"), &out)))
+    }
+}
+
+/// 给镜像**打标签**（`docker tag`）。
+pub async fn tag_image(
+    session: &Handle<HostKeyHandler>,
+    image: &str,
+    target: &str,
+) -> BackendResult<()> {
+    let (code, out) = run_cmd(session, &image_tag_cmd(image, target)).await?;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(BackendError(image_op_error_msg(tr("打标签"), &out)))
+    }
+}
+
+/// **删除**一个镜像（`docker rmi`）。
+pub async fn remove_image(
+    session: &Handle<HostKeyHandler>,
+    image: &str,
+) -> BackendResult<()> {
+    let (code, out) = run_cmd(session, &image_remove_cmd(image)).await?;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(BackendError(image_op_error_msg(tr("删除镜像"), &out)))
+    }
+}
+
+/// **导出**一个镜像到**本地文件**（`docker save` 的归档流）。
+///
+/// ⚠️ **不解析归档**：直接落盘（用户要的就是那个 tar）⇒ 本地想怎么用
+///    怎么用（`docker load < 文件` 就能导回去）。
+/// ⚠️ **返回字节数**（界面上要报「导出了多少」）。
+pub async fn save_image_to(
+    session: &Handle<HostKeyHandler>,
+    image: &str,
+    dest: &std::path::Path,
+    progress: &XferProgress,
+) -> BackendResult<u64> {
+    // ⚠️ **先写「同名临时文件」，成功了再改名** ⇒ 失败时**用户选的那个
+    //   文件一个字节都没动**（不然失败一次就把他原来的文件弄没了）。
+    let name = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = dest
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(format!(".{name}.pp-part"));
+    match stream_to_file(
+        session,
+        &image_save_cmd(image),
+        &tmp,
+        progress,
+        tr("导出镜像"),
+    )
+    .await
+    {
+        Ok(total) => {
+            // ⚠️ **改名**（跨设备时 rename 会失败 ⇒ 退回拷贝）。
+            if std::fs::rename(&tmp, dest).is_err() {
+                let _ = std::fs::copy(&tmp, dest);
+                let _ = std::fs::remove_file(&tmp);
+            }
+            Ok(total)
+        }
+        Err(e) => {
+            // ⚠️ **失败时临时文件里是 docker 的报错**（stderr 被并进了同一条
+            //   通道）⇒ 把它读出来当原因 ⇒ 别只说「退出码 1」。
+            let reason = std::fs::read_to_string(&tmp)
+                .ok()
+                .map(|t| docker_last_line(&t))
+                .unwrap_or_default();
+            let _ = std::fs::remove_file(&tmp);
+            if reason.is_empty() {
+                Err(e)
+            } else {
+                Err(BackendError(trf!("导出镜像失败：{line}", line = reason)))
+            }
+        }
+    }
+}
+
 /* ---------------- 阶段 114：监控曲线（docker stats 流） ---------------- */
 
 /// 监控采样的命令：`docker stats` **持续模式**，**只盯一个容器**。
@@ -1636,6 +1814,7 @@ async fn stream_to_file(
     cmd: &str,
     dest: &std::path::Path,
     progress: &XferProgress,
+    what: &str,
 ) -> BackendResult<u64> {
     use std::io::Write;
     let ch = ShellChannel::open_exec(session, cmd, 80, 24, false).await?;
@@ -1677,7 +1856,7 @@ async fn stream_to_file(
             ShellEvent::Exit(code) => {
                 if code != 0 {
                     return Err(BackendError(
-                        trf!("下载失败（远程命令退出码 {c}）", c = code),
+                        trf!("{what}失败（远程命令退出码 {c}）", what = what, c = code),
                     ));
                 }
                 break;
@@ -1715,6 +1894,7 @@ pub async fn download_to(
         &cp_download_cmd(container, remote_path),
         &tmp,
         progress,
+        tr("下载容器文件"),
     )
     .await
     {
@@ -2268,6 +2448,66 @@ mod tests {
             "应当说权限问题：{m}"
         );
         assert!(!m.contains("/bin/bash"), "别扯到 shell 名上：{m}");
+    }
+
+    /* ---------------- 阶段 120：镜像的操作 ---------------- */
+
+    /// docker 的输出里**最后一句**才是错误（前面是进度条）。
+    #[test]
+    fn 报错只取最后一句() {
+        let out = "The push refers to repository [docker.io/x/y]\n\
+                   5a3d1f2: preparing\n\
+                   denied: requested access to the resource is denied\n";
+        assert_eq!(
+            docker_last_line(out),
+            "denied: requested access to the resource is denied"
+        );
+        // ⚠️ **进度是用 \r 刷的** ⇒ 只按 \n 切会把整段进度当成一句话。
+        let prog = "Preparing\rDownloading 50%\rDownloading done\rmain: error: no space";
+        assert_eq!(docker_last_line(prog), "main: error: no space");
+        // ⚠️ **空输出** ⇒ 空字符串（别返回一堆空白）。
+        assert_eq!(docker_last_line("   \n  \n"), "");
+    }
+
+    /// 失败要给出**为什么**（不能只说「失败」）。
+    #[test]
+    fn 镜像操作失败要给原因() {
+        let m = image_op_error_msg(
+            "推送镜像",
+            "denied: requested access to the resource is denied",
+        );
+        assert!(m.contains("推送镜像"), "要说清是哪件事：{m}");
+        assert!(m.contains("denied"), "要带上 docker 说的原因：{m}");
+        // ⚠️ **没有输出时**也别留个空尾巴。
+        let m2 = image_op_error_msg("删除镜像", "");
+        assert_eq!(m2, "删除镜像失败");
+    }
+
+    /// 导出命令：docker save **不会往 stdout 写** ⇒ 只能先落远程临时文件再 cat。
+    #[test]
+    fn 导出命令先落临时文件再cat() {
+        let c = image_save_cmd("my/img:1");
+        assert!(c.contains("docker save"), "应当是 docker save：{c}");
+        assert!(c.contains("cat"), "要把归档 cat 出来：{c}");
+        // ⚠️ **stderr 要单独收着**（混进归档里 ⇒ tar 解不开）。
+        assert!(c.contains("2>"), "stderr 要单独收：{c}");
+        // ⚠️ docker **不接受**符号链接 / 管道（实测 docker 29.9.3）。
+        assert!(!c.contains("/dev/stdout"), "docker 不接受符号链接：{c}");
+        // ⚠️ 镜像名要引起来（镜像名里有 `/` 与 `:`）。
+        assert!(c.contains("'my/img:1'"), "镜像名没被引号包住：{c}");
+    }
+
+    /// ⚠️ **镜像名不是容器名**（里面有 `/`、`.`、`:`）⇒ 不能拿容器名那套
+    /// 「只允许字母数字」的检查去卡 ⇒ 一律引号包住。
+    #[test]
+    fn 镜像命令防注入() {
+        let c = image_push_cmd("a; rm -rf /");
+        assert!(c.contains("'a; rm -rf /'"), "镜像名没被引号包住：{c}");
+        let c2 = image_remove_cmd("a; rm -rf /");
+        assert!(c2.contains("'a; rm -rf /'"), "镜像名没被引号包住：{c2}");
+        let c3 = image_tag_cmd("a; rm -rf /", "b; rm -rf /");
+        assert!(c3.contains("'a; rm -rf /'"), "源镜像名没被引号包住：{c3}");
+        assert!(c3.contains("'b; rm -rf /'"), "目标标签没被引号包住：{c3}");
     }
 
     /* ---------------- 阶段 114：监控曲线 ---------------- */

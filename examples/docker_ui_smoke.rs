@@ -2430,6 +2430,191 @@ fn main() {
         }
     }
 
+    // ================= P 组：阶段 120 —— 镜像的操作（推送 / 导出 / 打标签 / 删除） =================
+    //
+    // ⚠️ **断言全落在「动作的结果」上**：
+    //   - 打标签 ⇒ 镜像表里**真的多了一行**；
+    //   - 删除 ⇒ 那一行**真的没了**；
+    //   - 导出 ⇒ 本地**真的落下一个 tar**（校验 tar 的魔数）；
+    //   - 推送失败 ⇒ **给出中文原因**（不是一句「失败」）。
+    {
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_IMAGES);
+        let mut waited = 0;
+        while waited < 30 && dockerui::images_rows_for_test(&panel2.st).is_empty() {
+            pump(200);
+            waited += 1;
+        }
+        let imgs = dockerui::images_rows_for_test(&panel2.st);
+        check!(
+            "㉔ 镜像表有行了",
+            !imgs.is_empty(),
+            format!("共 {} 行", imgs.len())
+        );
+
+        // ---- **操作条在**（四个按钮）----
+        let (labels, sensitive, sel0) = dockerui::images_actions_for_test(&panel2.st);
+        check!(
+            "㉔ 镜像段有操作条（推送 / 导出 / 打标签 / 删除）",
+            labels == vec!["推送", "导出…", "打标签…", "删除"],
+            format!("按钮={labels:?}")
+        );
+        check!(
+            "㉔ 没选镜像时按钮是灰的",
+            !sensitive && sel0.is_empty(),
+            format!("可点={sensitive} 选中={sel0:?}")
+        );
+
+        // ---- **选中一行** ⇒ 按钮变可点 ----
+        //
+        // ⚠️ **挑一个真有标签的行**（悬空镜像是 `<none>:<none>` ⇒ 没有
+        //   「仓库:标签」可看）。
+        let rows = dockerui::images_rows_for_test(&panel2.st);
+        let good = rows
+            .iter()
+            .position(|r| !r.1.is_empty() && r.1 != "<none>" && !r.0.is_empty());
+        if let Some(good) = good {
+            let picked = dockerui::images_select_for_test(&panel2.st, good as u32);
+            let (_, sensitive2, sel2) = dockerui::images_actions_for_test(&panel2.st);
+            check!(
+                "㉔ 选中镜像后按钮能点了",
+                sensitive2 && !sel2.is_empty(),
+                format!("可点={sensitive2} 选中={sel2:?}")
+            );
+            check!(
+                "㉔ 选中的镜像名是「仓库:标签」",
+                sel2.contains(':') && sel2 == picked,
+                format!("选中={sel2:?} 返回={picked:?}")
+            );
+
+            // ---- **打标签** ⇒ 镜像表里真的多了一行 ----
+            let tag_name = "pp-test-tag-120";
+            dockerui::images_tag_for_test(&panel2.st, tag_name);
+            let mut w2 = 0;
+            let mut tagged = false;
+            while w2 < 50 {
+                pump(200);
+                w2 += 1;
+                if dockerui::images_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == tag_name)
+                {
+                    tagged = true;
+                    break;
+                }
+            }
+            check!(
+                "㉔ 打标签后镜像表里多了那一行",
+                tagged,
+                "镜像表里没有 pp-test-tag-120"
+            );
+            check!(
+                "㉔ 打标签的结果写进了状态行",
+                dockerui::status_for_test(&panel2.st).contains("标签"),
+                format!("状态行={:?}", dockerui::status_for_test(&panel2.st))
+            );
+
+            // ---- **删除** ⇒ 那一行真的没了 ----
+            let idx_tag = dockerui::images_rows_for_test(&panel2.st)
+                .iter()
+                .position(|r| r.0 == tag_name)
+                .unwrap_or(0) as u32;
+            dockerui::images_select_for_test(&panel2.st, idx_tag);
+            let sel3 = dockerui::images_actions_for_test(&panel2.st).2;
+            check!(
+                "㉔ 选中了刚打的那个标签",
+                sel3.starts_with(tag_name),
+                format!("选中={sel3:?}")
+            );
+            dockerui::images_remove_for_test(&panel2.st);
+            let mut w3 = 0;
+            let mut gone = false;
+            while w3 < 50 {
+                pump(200);
+                w3 += 1;
+                if !dockerui::images_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == tag_name)
+                {
+                    gone = true;
+                    break;
+                }
+            }
+            check!("㉔ 删除后那一行没了", gone, "镜像表里还有 pp-test-tag-120");
+        }
+
+        // ---- **导出** ⇒ 本地真的落下一个 tar ----
+        //
+        // ⚠️ **挑最小的那个镜像**（导出的是整个镜像 ⇒ 别导 1GB 的）。
+        let rows = dockerui::images_rows_for_test(&panel2.st);
+        let mut best: Option<(usize, u64)> = None;
+        for (i, r) in rows.iter().enumerate() {
+            if r.1.is_empty() || r.1 == "<none>" {
+                continue;
+            }
+            if let Some(sz) = docker::parse_size_bytes(&r.3) {
+                if best.map(|(_, b)| sz < b).unwrap_or(true) {
+                    best = Some((i, sz));
+                }
+            }
+        }
+        if let Some((i, _)) = best {
+            dockerui::images_select_for_test(&panel2.st, i as u32);
+            let out = std::path::Path::new("/tmp/pp-img-120.tar");
+            let _ = std::fs::remove_file(out);
+            dockerui::images_export_for_test(&panel2.st, out);
+            // ⚠️ **等文件大小稳住**（还在写的时候大小会变）。
+            let mut w4 = 0;
+            let mut last_size = 0u64;
+            let mut stable = 0;
+            while w4 < 80 {
+                pump(300);
+                w4 += 1;
+                let sz = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+                if sz > 0 && sz == last_size {
+                    stable += 1;
+                    if stable >= 3 {
+                        break;
+                    }
+                } else {
+                    stable = 0;
+                }
+                last_size = sz;
+            }
+            let sz = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+            check!("㉔ 导出后本地真的有文件", sz > 0, format!("大小={sz}"));
+            // ⚠️ **是 tar 吗**：tar 的魔数在第 257 字节（"ustar"）。
+            let magic_ok = std::fs::read(out)
+                .map(|b| {
+                    b.len() > 262 && &b[257..262] == b"ustar"
+                })
+                .unwrap_or(false);
+            check!("㉔ 导出的文件是 tar 归档", magic_ok, "第 257 字节不是 ustar");
+            let _ = std::fs::remove_file(out);
+        } else {
+            println!("[信息] 没有能解析大小的镜像 ⇒ 跳过导出这条");
+        }
+
+        // ---- **推送失败** ⇒ 给出中文原因 ----
+        //
+        // ⚠️ **用不存在的镜像名**（不能真往公共仓库推东西 ⇒ 后果不可逆）。
+        dockerui::images_push_named_for_test(&panel2.st, "pp-nonexistent-image-120");
+        let mut w5 = 0;
+        let mut msg = String::new();
+        while w5 < 50 {
+            pump(200);
+            w5 += 1;
+            msg = dockerui::status_for_test(&panel2.st);
+            if msg.contains("推送") && msg.contains("失败") {
+                break;
+            }
+        }
+        check!(
+            "㉔ 推送失败会给出中文原因",
+            msg.contains("推送") && msg.contains("失败") && msg.len() > 8,
+            format!("状态行={msg:?}")
+        );
+    }
+
         }
     }
     }
