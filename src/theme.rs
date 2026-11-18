@@ -929,6 +929,7 @@ const COMPONENTS: &str = r#"
   background-color: @pp_card;
   border: 1px solid @pp_border;
   border-radius: 10px;
+  padding: 10px 12px;
 }
 /* 状态药丸：底色 = 状态色往**面板色**混 0.84（与 Rust 侧 pill_bg_hex 同一
    口径——药丸多落在面板底上；徽章那族用的是窗底，不混着用）。

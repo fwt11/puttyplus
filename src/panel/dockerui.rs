@@ -908,6 +908,9 @@ fn grid_kv_text(grid: &gtk::Grid) -> String {
 }
 
 /// 建一张**键值表**卡片（标题 ＋ 「键 | 值」的表）。
+///
+/// 美化·地基 3/5：卡片挂 `.pp-card`（圆角 + 边框 + 卡片面色）⇒
+/// 概览页从「四坨文字」变成真正意义上的**四张卡**。
 fn mk_kv_card(title: &str) -> (gtk::Box, gtk::Grid) {
     let head = gtk::Label::new(Some(title));
     head.set_xalign(0.0);
@@ -923,6 +926,7 @@ fn mk_kv_card(title: &str) -> (gtk::Box, gtk::Grid) {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
     b.set_hexpand(true);
     b.set_vexpand(true);
+    b.add_css_class("pp-card");
     b.append(&head);
     b.append(&sw);
     (b, grid)
@@ -2289,6 +2293,20 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             } else {
                 let r = gtk::CellRendererText::new();
                 r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                // ⚠️ **数字列右对齐 + 技术值等宽**（美化·地基 3/5）：
+                //    CPU/内存右对齐 ⇒ 数量级一眼对齐（左对齐时 9.5% 和
+                //    50.8% 的"50"对不齐，扫起来费劲）；ID/端口等宽 ⇒
+                //    `200f9d6b` 这种十六进制值在比例字体里数错位。
+                match i {
+                    COL_CPU | COL_MEM => {
+                        gtk::prelude::CellRendererExt::set_alignment(&r, 1.0, 0.5);
+                        col.set_alignment(1.0);
+                    }
+                    COL_ID | COL_PORTS => {
+                        r.set_family(Some("monospace"));
+                    }
+                    _ => {}
+                }
                 col.pack_start(&r, false);
                 col.add_attribute(&r, "text", i as i32);
                 if i == COL_NAME {
@@ -2382,11 +2400,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         ],
         &[130, 100, 90, 90, 170],
         4,
+        // ID 是十六进制 ⇒ 等宽；大小右对齐（美化·地基 3/5）
+        &[ColStyle::Normal, ColStyle::Normal, ColStyle::Mono, ColStyle::Num, ColStyle::Normal],
     );
     let (volumes_store, volumes_view) =
-        flat_table(&[tr("名称"), tr("驱动")], &[220, 140], 0);
+        flat_table(&[tr("名称"), tr("驱动")], &[220, 140], 0, &[ColStyle::Normal; 2]);
     let (networks_store, networks_view) =
-        flat_table(&[tr("名称"), tr("驱动"), tr("范围")], &[220, 140, 100], 0);
+        flat_table(&[tr("名称"), tr("驱动"), tr("范围")], &[220, 140, 100], 0, &[ColStyle::Normal; 3]);
 
     // ---- 阶段 120：镜像的**操作条**（推送 / 导出 / 打标签 / 删除）----
     //
@@ -2816,6 +2836,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         //   ⇒ 120px 不够 ⇒ 会被截成「目录　属主读写／…」。
         &[220, 60, 100, 250, 80],
         0,
+        // 大小右对齐（美化·地基 3/5；跟文件面板的大列同一口径）
+        &[ColStyle::Normal, ColStyle::Normal, ColStyle::Num, ColStyle::Normal, ColStyle::Normal],
     );
     // ⚠️ **最后一列是内部用的类型键**（"dir" / "file" …）⇒ 不给用户看。
     if let Some(col) = f_view_tbl.columns().get(4) {
@@ -6497,10 +6519,24 @@ mod tests {
 ///
 /// ⚠️ **为什么不用树表**：镜像 / 卷 / 网络都没有层级 ⇒ 平表就够。
 /// ⚠️ **第一列 expand**：名字列拉宽，其余给下限（跟容器表一个脾气）。
+/// 一列的**样式**（美化·地基 3/5）：普通 / 数字（右对齐）/ 等宽（技术值）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColStyle {
+    Normal,
+    Num,
+    Mono,
+}
+
+/// 建一张**平表**（ListStore + TreeView；镜像 / 卷 / 网络 / 容器文件共用）。
+///
+/// `styles` 按列给样式（缺省 = Normal）：ID 这类十六进制技术值给
+/// [`ColStyle::Mono`]（比例字体数错位），大小这类数值给
+/// [`ColStyle::Num`]（右对齐，数量级一眼对齐）。
 fn flat_table(
     titles: &[&str],
     widths: &[i32],
     expand_col: usize,
+    styles: &[ColStyle],
 ) -> (gtk::TreeStore, gtk::TreeView) {
     let types: Vec<glib::Type> = titles.iter().map(|_| glib::Type::STRING).collect();
     let store = gtk::TreeStore::new(&types);
@@ -6512,6 +6548,16 @@ fn flat_table(
         let col = gtk::TreeViewColumn::new();
         col.set_title(t);
         col.set_resizable(true);
+        match styles.get(i).copied().unwrap_or(ColStyle::Normal) {
+            ColStyle::Num => {
+                gtk::prelude::CellRendererExt::set_alignment(&r, 1.0, 0.5);
+                col.set_alignment(1.0);
+            }
+            ColStyle::Mono => {
+                r.set_family(Some("monospace"));
+            }
+            ColStyle::Normal => {}
+        }
         col.pack_start(&r, false);
         // ⚠️ **必须显式绑 "text"**（跟容器表同一个坑：不绑就是一片空白）。
         col.add_attribute(&r, "text", i as i32);
