@@ -112,9 +112,68 @@ pub fn notifications() -> EmptyState {
     )
 }
 
+/// 容器工作台：**一台容器都没有**。
+pub fn docker_empty() -> EmptyState {
+    EmptyState::new(
+        tr("这台服务器上没有容器"),
+        tr("用 docker compose 起一个，或先去「镜像」页看看有哪些可用的镜像。"),
+        Cta {
+            label: tr("刷新"),
+            icon: "view-refresh-symbolic",
+        },
+    )
+}
+
+/// 容器工作台：**取不到容器**（连不上 / 没权限 / 没装 docker）。
+///
+/// ⚠️ **为什么按后端的错误分类给不同标题**：最常见的三个「第一分钟错误」
+///   ——远端没装 docker、当前账号不在 docker 组、docker 守护进程没起
+///   ——在界面上**长得一模一样** ⇒ 用户只能猜 ⇒ 标题说清楚是哪一种。
+pub fn docker_error(kind: DockerErrorKind, msg: &str) -> EmptyState {
+    let title = match kind {
+        DockerErrorKind::NoDocker => tr("这台服务器上没有 Docker"),
+        DockerErrorKind::NoPermission => tr("没有访问 Docker 的权限"),
+        DockerErrorKind::NotRunning => tr("Docker 服务没有运行"),
+        DockerErrorKind::TooOld => tr("Docker 版本太老"),
+        DockerErrorKind::Other => tr("取不到容器"),
+    };
+    EmptyState::new(
+        title,
+        msg,
+        Cta {
+            label: tr("重试"),
+            icon: "view-refresh-symbolic",
+        },
+    )
+}
+
+/// 容器工作台的错误**分类**（决定空态的标题）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DockerErrorKind {
+    /// 远端没装 docker。
+    NoDocker,
+    /// 当前账号不在 docker 组。
+    NoPermission,
+    /// docker 守护进程没起。
+    NotRunning,
+    /// docker 版本太老（模板不支持）。
+    TooOld,
+    /// 认不出来。
+    Other,
+}
+
 /// 全应用声明过的空态（单元测试照这份清单断言）。
 pub fn all_empty_states() -> Vec<EmptyState> {
-    vec![sidebar(), keys(true), queue(), notifications()]
+    vec![
+        sidebar(),
+        keys(true),
+        queue(),
+        notifications(),
+        docker_empty(),
+        // ⚠️ **错态也要有解释**（测试钩子照这条断言「解释不许是空的」）
+        //   ⇒ 这里给一条真会出现的说明。
+        docker_error(DockerErrorKind::Other, "远程执行 docker 命令失败"),
+    ]
 }
 
 /* ---------------- 构件 ---------------- */
@@ -124,6 +183,36 @@ pub fn all_empty_states() -> Vec<EmptyState> {
 /// 返回 (容器, 主 CTA 按钮) —— 主按钮的句柄给调用方接点击回调
 /// （也带 CSS 类 `pp-empty-primary`，冒烟能定位）。
 pub fn build(s: &EmptyState) -> (gtk::Box, gtk::Button) {
+    let d = build_dynamic(s);
+    (d.root, d.primary)
+}
+
+/// 一个**文案可以改**的空态（标题 / 解释会变）。
+///
+/// ⚠️ **为什么要有**：容器工作台的空态有三种（空的 / 连不上 / 没权限）
+///   ⇒ 标题与解释要**按错误类型换** ⇒ 一次性的 [`build`] 不够用
+///   （重建的话主 CTA 的点击回调也要重接 ⇒ 麻烦且容易漏）。
+pub struct DynamicEmptyState {
+    /// 整块（挂到界面上的那个）。
+    pub root: gtk::Box,
+    /// 主 CTA（调用方接点击回调）。
+    pub primary: gtk::Button,
+    /// 标题。
+    pub title: gtk::Label,
+    /// 解释。
+    pub desc: gtk::Label,
+}
+
+impl DynamicEmptyState {
+    /// **换文案**（标题 + 解释；主 CTA 的文字不变）。
+    pub fn set_texts(&self, title: &str, desc: &str) {
+        self.title.set_text(title);
+        self.desc.set_text(desc);
+    }
+}
+
+/// 造一个**文案可改**的空态。
+pub fn build_dynamic(s: &EmptyState) -> DynamicEmptyState {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
     box_.set_halign(gtk::Align::Center);
     box_.set_valign(gtk::Align::Center);
@@ -150,7 +239,12 @@ pub fn build(s: &EmptyState) -> (gtk::Box, gtk::Button) {
     }
     box_.append(&row);
 
-    (box_, primary)
+    DynamicEmptyState {
+        root: box_,
+        primary,
+        title,
+        desc,
+    }
 }
 
 /// CTA 按钮（图标 + 文字）。

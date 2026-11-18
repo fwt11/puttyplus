@@ -1222,6 +1222,124 @@ pub fn state_label(state: &str) -> &'static str {
     }
 }
 
+/// docker 的**状态原文** ⇒ **中文**（UI 审查 2026-11-18 D14）。
+///
+/// ⚠️ **为什么**：项目规矩是**用户可见文案全中文**。状态列已经翻了，
+///   「详情」列却直接把 docker 的原文摆出来（`Up 13 hours (healthy)` /
+///   `Exited (2) 4 days ago`）⇒ 半中半英 ⇒ 认不出来。
+///
+/// ⚠️ **翻不出来就原样返回**（别吞信息）。
+pub fn status_detail_zh(status: &str) -> String {
+    let s = status.trim();
+    if s.is_empty() {
+        return tr("—").to_string();
+    }
+    // ---- "Exited (2) 4 days ago" ----
+    if let Some(rest) = s.strip_prefix("Exited") {
+        let rest = rest.trim();
+        let (code, tail) = split_paren(rest);
+        let mut out = match code {
+            Some(c) => trf!("已退出（退出码 {c}）", c = c),
+            None => tr("已退出").to_string(),
+        };
+        if !tail.is_empty() {
+            out = trf!("{o} · {t}", o = out, t = duration_zh(&tail));
+        }
+        return out;
+    }
+    // ---- "Restarting (1) 5 seconds ago" ----
+    if let Some(rest) = s.strip_prefix("Restarting") {
+        let rest = rest.trim();
+        let (code, tail) = split_paren(rest);
+        let mut out = match code {
+            Some(c) => trf!("正在重启（退出码 {c}）", c = c),
+            None => tr("正在重启").to_string(),
+        };
+        if !tail.is_empty() {
+            out = trf!("{o} · {t}", o = out, t = duration_zh(&tail));
+        }
+        return out;
+    }
+    // ---- "Up 13 hours (healthy)" ----
+    if let Some(rest) = s.strip_prefix("Up") {
+        let rest = rest.trim();
+        let (health, dur) = split_tail_paren(rest);
+        let mut out = trf!("已运行 {d}", d = duration_zh(&dur));
+        if let Some(h) = health {
+            let hz = match h.as_str() {
+                "healthy" => tr("健康"),
+                "unhealthy" => tr("不健康"),
+                "health: starting" | "starting" => tr("健康检查中"),
+                _ => h.as_str(),
+            };
+            out = trf!("{o}（{h}）", o = out, h = hz);
+        }
+        return out;
+    }
+    // ---- 单词状态 ----
+    match s {
+        "Created" => tr("已创建").to_string(),
+        "Paused" => tr("已暂停").to_string(),
+        "Dead" => tr("已失效").to_string(),
+        "Removing" => tr("正在删除").to_string(),
+        "Removal In Progress" => tr("正在删除").to_string(),
+        "Running" => tr("运行中").to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// 拆掉 `"(code) 尾巴"` ⇒ `(Some("code"), "尾巴")`。
+///
+/// ⚠️ **没有括号** ⇒ `(None, 整串)`。
+fn split_paren(s: &str) -> (Option<String>, String) {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix('(') {
+        if let Some((inner, tail)) = rest.split_once(')') {
+            let tail = tail.trim();
+            return (Some(inner.trim().to_string()), tail.to_string());
+        }
+    }
+    (None, t.to_string())
+}
+
+/// 拆掉**结尾**的 `"(code)"` ⇒ `(Some("code"), 剩下的)`。
+///
+/// ⚠️ **没有括号** ⇒ `(None, 整串)`。
+fn split_tail_paren(s: &str) -> (Option<String>, String) {
+    let t = s.trim();
+    if t.ends_with(')') {
+        if let Some(i) = t.rfind('(') {
+            let inner = t[i + 1..t.len() - 1].trim().to_string();
+            let head = t[..i].trim().to_string();
+            return (Some(inner), head);
+        }
+    }
+    (None, t.to_string())
+}
+
+/// 时长 ⇒ **中文**（`"13 hours"` ⇒ `"13 小时"`；`"4 days ago"` ⇒ `"4 天"`）。
+///
+/// ⚠️ **认不出来就原样返回**。
+fn duration_zh(s: &str) -> String {
+    let t = s.trim();
+    let t = t.strip_suffix("ago").unwrap_or(t).trim();
+    let mut it = t.split_whitespace();
+    let (Some(num), Some(unit)) = (it.next(), it.next()) else {
+        return t.to_string();
+    };
+    let u = match unit {
+        "second" | "seconds" => tr("秒"),
+        "minute" | "minutes" => tr("分钟"),
+        "hour" | "hours" => tr("小时"),
+        "day" | "days" => tr("天"),
+        "week" | "weeks" => tr("周"),
+        "month" | "months" => tr("个月"),
+        "year" | "years" => tr("年"),
+        _ => return t.to_string(),
+    };
+    trf!("{n} {u}", n = num, u = u)
+}
+
 /// 把 docker 的报错翻成**中文 + 怎么办**。
 ///
 /// ⚠️ **不自动 sudo**：远程权限不足时擅自 sudo 会要密码、还会留痕迹 ⇒
@@ -2825,6 +2943,31 @@ drwxr-xr-x 2 root root  4096 Nov 15 19:30 conf.d\n";
         );
         assert!(d.contains(" - "), "应当输出到 stdout：{d}");
         assert!(d.contains("2>/dev/null"), "stderr 必须隔离：{d}");
+    }
+
+    /// ⚠️ **详情列必须翻成中文**（UI 审查 D14）：项目规矩是用户可见文案
+    ///   全中文 ⇒ 不能把 docker 的原文摆到界面上。
+    #[test]
+    fn 状态原文翻成中文() {
+        let up = super::status_detail_zh("Up 13 hours (healthy)");
+        assert!(!up.contains("Up"), "不该还留着英文原文：{up}");
+        assert!(!up.contains("healthy"), "健康状态也该翻：{up}");
+        assert!(up.contains("小时"), "时长要翻成中文：{up}");
+
+        let exited = super::status_detail_zh("Exited (2) 4 days ago");
+        assert!(exited.contains('2'), "退出码要留着：{exited}");
+        assert!(!exited.contains("Exited"), "不该还留着英文原文：{exited}");
+        assert!(exited.contains("天"), "天数要翻成中文：{exited}");
+
+        let created = super::status_detail_zh("Created");
+        assert!(!created.contains("Created"), "单词状态也要翻：{created}");
+    }
+
+    /// ⚠️ **认不出来就原样给**（别吞信息）。
+    #[test]
+    fn 认不出来的状态原样给() {
+        assert_eq!(super::status_detail_zh(""), "—");
+        assert_eq!(super::status_detail_zh("Weird State"), "Weird State");
     }
 
     #[test]

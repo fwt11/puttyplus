@@ -1203,3 +1203,60 @@ section/popover`：
 验证：`cargo check --release` 通过；菜单模型是纯 `gio::Menu` 声明，编译期
 不会校验 action 名，靠人工核对 action 注册表与菜单项。顶栏菜单在无窗口
 管理器的 Xvfb 下不会弹出（`PopoverMenuBar` 要求窗口 active），真机另行核对。
+
+---
+
+## 20. 硬规矩：cairo 自绘的控件**必须**取主题色（2026-11-18 补）
+
+### 20.1 为什么立这条规矩
+
+§7 的 P0 已经把「状态色不许写死 hex」落地了（`theme::State` ＋
+`state_hex_for()`），**2026-10-18 那轮审查**也把「没有设计令牌」列为 §S1
+的第一条。⇒ 但 **v0.9.0 的容器工作台（2026-11-18 审查）又犯了一遍**：
+
+```rust
+// ❌ src/panel/dockerui.rs（v0.9.0）
+cr.set_source_rgb(1.0, 1.0, 1.0);   // 写死白底
+cr.set_source_rgb(0.62, 0.62, 0.62); // 写死边框灰
+```
+
+⇒ 暗色主题下监控曲线是**四个白盒子**（`docs/UI_REVIEW_2026-11-18-容器界面.md`
+D1）。
+
+### 20.2 根因：cairo 自绘的东西**不过 CSS**
+
+`theme.rs` 那套主题是**一张 CSS provider** ⇒ **只对走 CSS 的控件生效**。
+而 `gtk::DrawingArea` ＋ `set_draw_func` 是**自己拿 cairo 画**的 ⇒
+**CSS 完全管不到它** ⇒ 里面的每一个颜色都得**自己去主题令牌里取**。
+
+⇒ 于是就有了这条**硬规矩**：
+
+> **cairo 自绘的控件（`DrawingArea` / 任何 `set_draw_func`）里的每一个
+> 颜色，都必须从 `theme::` 的语义色入口取；不许出现 RGB 常量。**
+> 并且**每次重画都重新取** ⇒ 切主题时它才跟着变。
+
+现成的入口（`src/theme.rs`）：
+
+| 要什么 | 用哪个 |
+|---|---|
+| 面板底色 | `theme::panel_hex()` |
+| 正文色 | `theme::fg_hex()` |
+| 次要文字色 | `theme::dim_hex()` |
+| 语义色（绿/黄/红） | `theme::state_hex(State::Ok/Warn/Err)` |
+| 折线图的曲线色 | `theme::chart_series_hexes()`（4 条，按主题各一套） |
+| 折线图的网格 / 坐标轴 | `theme::chart_grid_hex()` / `theme::chart_axis_hex()` |
+
+⇒ **取值时机**：在**绘制回调里**取（每次重画都取一次）⇒ 切主题不用重建控件。
+
+### 20.3 怎么防再犯
+
+- **开工前**逐条过 `docs/UI_CHECKLIST.md`（§0 颜色与主题）；
+- **代码层**：`grep -n "set_source_rgb\|set_source_rgba\|from_rgb" src/`
+  ⇒ 命中的地方**只允许**是「从主题取到 RGB 之后传给 cairo」的那一行；
+- **审阅层**：新界面（尤其是自绘控件）**必须**在暗色 / 高对比两套主题下
+  各截一张图。
+
+### 20.4 已修
+
+容器工作台（v0.9.1）：新增 `theme::chart_series_hexes()` 等四个入口 ＋
+`dockerui::ChartPalette`（绘制时取色）⇒ 暗色主题下曲线不再是白盒子。
