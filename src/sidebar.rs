@@ -106,6 +106,12 @@ pub struct Sidebar {
     /// `TreeViewColumn` **不是 Widget** ⇒ 控件树里走不到 ⇒
     /// 冒烟没法量"图标与文字之间留没留空隙"。
     icon_renderer: gtk::CellRendererPixbuf,
+    /// 行右键菜单的弹层与菜单主体（**建一次、反复用**）——测试钩子。
+    ///
+    /// ⚠️ 为什么要存着：弹层是 `set_parent` 挂到树上的 ⇒ **不进容器的
+    /// children 链** ⇒ 从控件树里找不到它 ⇒ 冒烟没法量"菜单弹到哪儿了"
+    /// （这正是「数据库连接行的右键菜单点了没反应」那个坑的要害）。
+    row_menu: RefCell<Option<(gtk::Popover, gtk::Box)>>,
     tabs: Rc<Tabs>,
 }
 
@@ -495,6 +501,7 @@ impl Sidebar {
             empty_box,
             tree_sw: sw.clone(),
             icon_renderer: r_icon.clone(),
+            row_menu: RefCell::new(None),
             tabs,
         });
         LIVE.with(|l| l.borrow_mut().push(Rc::downgrade(&sb)));
@@ -993,18 +1000,35 @@ impl Sidebar {
         let pop = crate::menu::popover(&self.view);
         let vb = crate::menu::body();
         pop.set_child(Some(&vb));
+        // 存着给冒烟用（弹层不进 children 链 ⇒ 从控件树里找不到）。
+        *self.row_menu.borrow_mut() = Some((pop.clone(), vb.clone()));
 
         let gesture = gtk::GestureClick::new();
         gesture.set_button(3);
-        let view = self.view.clone();
         let sb = Rc::clone(self);
 
         gesture.connect_pressed(move |g, _n, x, y| {
             if g.current_button() != 3 {
                 return;
             }
-            // 右键先选中指针下的行（文件面板同款惯例）
-            if let Some((Some(path), _, _, _)) = view.path_at_pos(x as i32, y as i32) {
+            sb.show_row_menu(x as i32, y as i32);
+        });
+        self.view.add_controller(gesture);
+    }
+
+    /// 在**树的坐标** (x, y) 处弹出那一行的右键菜单。
+    ///
+    /// ⚠️ **手势与冒烟走同一条路**（`open_row_menu_at` 也调它）⇒ 冒烟
+    ///    量到的就是**真弹层**，不是"另写一遍的模拟"。
+    fn show_row_menu(self: &Rc<Self>, x: i32, y: i32) {
+        let Some((pop, vb)) = self.row_menu.borrow().clone() else {
+            return;
+        };
+        let sb = Rc::clone(self);
+        let view = self.view.clone();
+        // 右键先选中指针下的行（文件面板同款惯例）
+            let pap = view.path_at_pos(x, y);
+            if let Some((Some(path), _, _, _)) = pap {
                 let sel = view.selection();
                 if !sel.path_is_selected(&path) {
                     sel.unselect_all();
@@ -1330,9 +1354,21 @@ impl Sidebar {
                 vb.append(&b);
             }
 
+            // ⚠️ **锚点矩形必须用「弹层父控件」的坐标系**：弹层是
+            // `set_parent(&self.view)` 挂在**树**上的 ⇒ `set_pointing_to`
+            // 的矩形按**树**的坐标解释。
+            //
+            // ⛔ 以前这里算的是**侧栏盒子**（`sb.widget`）的坐标 ⇒ 平白
+            // 差了「树顶 ↔ 侧栏顶」那一百来像素 ⇒ 菜单被顶到**行的下面
+            // 很远的地方**。数据库连接都排在树的最底下 ⇒ 锚点落到屏幕外
+            // ⇒ GTK 把弹层 SHOW 之后**立刻关掉**（实测日志：popover SHOW
+            // 紧接着 popover CLOSED）⇒ 用户看着就是「右键菜单根本不弹 /
+            // 点了任何项都没反应」。
+            //
+            // 手势的 (x, y) 本来就是**树**的坐标（手势挂在树上）⇒ 直接用。
             let pos = sb
                 .view
-                .compute_point(&sb.widget, &gtk::graphene::Point::new(x as f32, y as f32));
+                .compute_point(&sb.view, &gtk::graphene::Point::new(x as f32, y as f32));
             if let Some(p) = pos {
                 pop.set_pointing_to(Some(&gdk::Rectangle::new(
                     p.x() as i32,
@@ -1342,8 +1378,51 @@ impl Sidebar {
                 )));
             }
             pop.popup();
-        });
-        self.view.add_controller(gesture);
+    }
+
+    /// 在**树的坐标** (x, y) 处弹出那一行的右键菜单——**测试钩子**。
+    ///
+    /// ⚠️ 与右键手势**同一条路**（都调 [`Self::show_row_menu`]）⇒ 冒烟
+    ///    验的就是真弹层。
+    pub fn open_row_menu_at(self: &Rc<Self>, x: i32, y: i32) {
+        self.show_row_menu(x, y);
+    }
+
+    /// 行右键菜单的弹层——测试钩子（弹层不进 children 链 ⇒ 找不到）。
+    pub fn row_menu_popover(&self) -> Option<gtk::Popover> {
+        self.row_menu.borrow().as_ref().map(|(p, _)| p.clone())
+    }
+
+    /// 某一行在**树坐标系**里的位置——测试用。
+    ///
+    /// ⚠️ 这是**树自己的坐标**（视口内、已扣掉滚动量）⇒ 可以直接喂给
+    ///    [`Self::open_row_menu_at`]（那也是树坐标）。
+    pub fn row_area(&self, path: &gtk::TreePath) -> gdk::Rectangle {
+        self.view.background_area(Some(path), None)
+    }
+
+    /// 把某一行**滚到视口底部**——测试用。
+    ///
+    /// ⚠️ 为什么需要：数据库连接都排在树的最底下 ⇒ 只有把树滚到底，
+    ///    那几行才真的贴着窗口底边 ⇒ 「菜单被顶到屏幕外」那个坑才复现。
+    pub fn scroll_row_to_bottom(&self, path: &gtk::TreePath) {
+        self.view.scroll_to_cell(Some(path), None, true, 1.0, 0.0);
+    }
+
+    /// 树上**数据库连接行**的路径（**过滤器模型**的）——测试用。
+    ///
+    /// ⚠️ 给的是**过滤器模型**的路径（视图的模型）⇒ 可以直接喂给
+    ///    `TreeView::get_background_area` 量它在屏幕上的位置。
+    pub fn db_row_paths(&self) -> Vec<gtk::TreePath> {
+        let mut out = Vec::new();
+        for i in 0.. {
+            let path = gtk::TreePath::from_indices(&[i]);
+            if self.filter.iter(&path).is_none() {
+                break;
+            }
+            collect_db_paths(&self.filter, &self.store, &path, &mut out);
+        }
+        out
     }
 
     /// 会话树里的数据库连接节点（`(名称, 摘要)`）——测试用。
@@ -1594,6 +1673,36 @@ pub fn db_profiles_for(e: &ConnEntry) -> Vec<(String, String, String)> {
 /// 两层深），只走一层看不到数据库节点。
 fn collect_db_rows(store: &gtk::TreeStore, path: &gtk::TreePath, out: &mut Vec<(String, String)>) {
     collect_rows(store, path, 3, out)
+}
+
+/// 按**路径**递归收集**过滤器模型**里 kind==3（数据库连接）的行路径。
+///
+/// ⚠️ 给的是**过滤器模型**的路径（视图用的那个模型）⇒ 可以直接喂给
+///    `TreeView::get_background_area` 量它在屏幕上的位置。
+///
+/// **为什么按路径走，不用 `iter_next`**：见 [`collect_db_rows`] 的说明。
+fn collect_db_paths(
+    filter: &gtk::TreeModelFilter,
+    store: &gtk::TreeStore,
+    path: &gtk::TreePath,
+    out: &mut Vec<gtk::TreePath>,
+) {
+    if let Some(child) = filter.convert_path_to_child_path(path) {
+        if let Some(it) = store.iter(&child) {
+            if store.get::<i32>(&it, COL_KIND) == 3 {
+                out.push(path.clone());
+            }
+        }
+    }
+    for i in 0.. {
+        let mut cp = path.clone();
+        cp.append_index(i);
+        // 过滤掉的子节点在过滤器模型里**不存在** ⇒ iter 返回 None
+        if filter.iter(&cp).is_none() {
+            break;
+        }
+        collect_db_paths(filter, store, &cp, out);
+    }
 }
 
 /// 按路径递归收集树里 kind==4（端口转发）的行（阶段 56）。

@@ -259,7 +259,15 @@ jobs:
           export PUTTYPLUS_RECENT_INI="$HOME/recent.ini"
           export PUTTYPLUS_VAULT="$HOME/credentials.vault"
           rc=0
-          for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke; do
+          # ⚠️ **侧栏/数据库那三个也在名单里**：
+          #   - `sidebar_rowmenu_pos_smoke`：右键菜单的**弹层位置**（用户
+          #     2026-11-18 报「点数据库连接那一行，菜单点了没反应」⇒ 根因是
+          #     锚点算错坐标系 ⇒ 菜单被顶到屏幕外被 GTK 关掉）；
+          #   - `dbedit_remember_smoke`：「编辑这个数据库连接」不许把
+          #     `remember=true` 抹掉（抹了 ⇒ 库里的密码成孤儿）；
+          #   - `sidebar_menu_smoke`：侧栏右键菜单的**清单**与点击分派一致。
+          for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
+                     sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then
