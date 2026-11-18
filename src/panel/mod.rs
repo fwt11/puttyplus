@@ -29,6 +29,8 @@ pub mod mirrorui;
 pub mod moveop;
 pub mod namecell;
 pub mod pane;
+/// **状态药丸单元格**（美化·地基 2/5）——容器表的状态列。
+pub mod pillcell;
 pub mod pulse;
 pub mod quickcmd;
 pub mod queue;

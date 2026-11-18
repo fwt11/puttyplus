@@ -646,6 +646,80 @@ fn main() {
             format!("刷新后 web/db 消失了：{shown2:?}")
         );
 
+        // ================= UI 审查 2026-11-18：排序（D4） =================
+        //
+        // ⚠️ **为什么这条要紧**：CPU / 内存两列明晃晃摆在那儿 ⇒ 用户
+        //   唯一能做的就是用眼睛扫 ⇒ **按数值**排序是「找最占资源的容器」
+        //   的唯一途径。
+        //
+        // ⚠️ **判据用「顺序」而不是「调了几次函数」** ⇒ 与实现无关。
+        {
+            // 灌一批 CPU 差别很大的容器（字符串排序会看错的那种）。
+            //
+            // ⚠️ **都做成独立容器**（compose 字段清空）⇒ 四个都是**顶层行**
+            //   ⇒ 排序结果直接能比（compose 的容器是**子行**，排在父行下面）。
+            let mut r1: Vec<puttyplus::backend::docker::ContainerInfo> = fake_containers()
+                .into_iter()
+                .map(|mut c| {
+                    c.compose = String::new();
+                    c.compose_files = String::new();
+                    c.compose_dir = String::new();
+                    c
+                })
+                .collect();
+            r1[0].cpu = "9.5%".into(); // solo-a
+            r1[1].cpu = "50.8%".into(); // web
+            r1[2].cpu = "1.2%".into(); // solo-b
+            r1[3].cpu = "30.0%".into(); // db
+            dockerui::set_rows_for_test(&panel.st, r1);
+            pump(200);
+            // 按 CPU **降序**排。
+            let sorted = dockerui::sort_by_for_test(&panel.st, 4, false);
+            println!("[信息] 按 CPU 降序后的顶层行：{sorted:?}");
+            check!(
+                "⑨ CPU 列能排序，且是**按数值**排（不是按字符串）",
+                sorted.len() == 4
+                    && sorted[0] == "web" // 50.8%
+                    && sorted[1] == "db" // 30.0%
+                    && sorted[2] == "solo-a" // 9.5%
+                    && sorted[3] == "solo-b", // 1.2%
+                format!("按 CPU 降序是：{sorted:?}（web=50.8% / db=30.0% / solo-a=9.5% / solo-b=1.2%）")
+            );
+            // ⚠️ **字符串排序正好相反** ⇒ 这条断言真抓得住退化。
+            check!(
+                "⑨ 对照组：字符串排序会把 9.5% 排在 50.8% 前面（所以不能按字符串排）",
+                "9.5%".cmp("50.8%") == std::cmp::Ordering::Greater,
+                "对照组失效了"
+            );
+        }
+
+        // ================= UI 审查 2026-11-18：空态（D6） =================
+        {
+            // 一个容器都没有 ⇒ 列表区**不该**是一块空白 ⇒ 要有空态。
+            dockerui::set_rows_for_test(&panel.st, Vec::new());
+            pump(200);
+            check!(
+                "⑨ 列表空了 ⇒ 显示空态（不是一块空白）",
+                dockerui::empty_state_visible_for_test(&panel.st),
+                "列表空了却什么也没显示"
+            );
+            // ⚠️ **标题要说清「是什么」**（用户可见文案）。
+            let t = dockerui::empty_state_title_for_test(&panel.st);
+            check!(
+                "⑨ 空态有标题",
+                !t.is_empty(),
+                "空态没有标题"
+            );
+            // 放回正常数据 ⇒ 空态收起来。
+            dockerui::set_rows_for_test(&panel.st, fake_containers());
+            pump(200);
+            check!(
+                "⑨ 有数据了 ⇒ 空态收起来",
+                !dockerui::empty_state_visible_for_test(&panel.st),
+                "有数据了还挂着空态"
+            );
+        }
+
         // 挂上子标签（数据到手 ⇒ 页面出现）
         //
         // ⚠️ 先把页面从测试窗口上摘下来：真实程序里页面归子标签管，
@@ -750,9 +824,16 @@ fn main() {
         );
         let title = dockerui::detail_title_for_test(&panel.st);
         check!(
-            "⑨ 标题写着容器名和状态",
-            title.contains("web") && title.contains("运行中"),
+            "⑨ 标题写着容器名",
+            title.contains("web"),
             format!("标题是 {title:?}")
+        );
+        // 状态搬进了药丸（美化·地基 2/5）：文字 + 档位类都要在
+        let (pill_text, pill_classes) = dockerui::detail_pill_for_test(&panel.st);
+        check!(
+            "⑨ 状态药丸写着运行中且挂了绿档类",
+            pill_text.contains("运行中") && pill_classes.iter().any(|c| c == "pp-pill-ok"),
+            format!("药丸是 {pill_text:?}，类是 {pill_classes:?}")
         );
         let cfg = dockerui::detail_card_for_test(&panel.st, "config");
         check!(
@@ -773,9 +854,11 @@ fn main() {
             format!("挂载卡片是：\n{mnt}")
         );
         let env = dockerui::detail_card_for_test(&panel.st, "env");
+        // ⚠️ **概览页现在是「键 | 值」的表**（UI 审查 D9）⇒ 环境变量是
+        //   `PATH` 与 `/usr/bin` **两格**，不再是一行 `PATH=/usr/bin`。
         check!(
-            "⑨ 环境变量卡片有内容",
-            env.contains("PATH=/usr/bin"),
+            "⑨ 环境变量卡片有内容（键与值两格）",
+            env.contains("PATH") && env.contains("/usr/bin"),
             format!("环境变量卡片是：\n{env}")
         );
         check!(

@@ -174,7 +174,11 @@ pub fn contrast_ratio(a: &str, b: &str) -> f64 {
 }
 
 /// 把前景色往背景色混（`t` = 往背景混的比例：0 = 原色，1 = 全背景）。
-fn mix_hex(fg: &str, bg: &str, t: f64) -> String {
+///
+/// **pub**：药丸底色（[`pill_bg_hex`]）这类「cairo/Pango 自绘要 hex」的
+/// 场景也用同一套混法——CSS 里 `mix()` 与这里必须一个口径，不然
+/// widget 药丸与表格药丸差一档色。
+pub fn mix_hex(fg: &str, bg: &str, t: f64) -> String {
     let (Some(f), Some(b)) = (parse_hex_rgb(fg), parse_hex_rgb(bg)) else {
         return fg.to_string();
     };
@@ -285,6 +289,19 @@ pub fn chip_bg_hex() -> String {
             .map(|(fg, bg, _)| mix_hex(&fg, &bg, 0.86))
             .unwrap_or_else(|| "#e4e8ec".into()),
     }
+}
+
+/// 状态药丸的**底色**（`#rrggbb`）＝状态色往**面板底色**混 0.84。
+///
+/// 给 **cairo/Pango 自绘**的药丸单元格用（容器表的状态列，CSS 够不着；
+/// `pillcell.rs`）。CSS 那边的 `.pp-pill-ok/-warn/-err` 是同一配方
+/// （`mix(@pp_xx, @pp_panel, 0.84)`）⇒ widget 药丸与表格药丸一个口径。
+///
+/// ⚠️ **药丸上的字必须用正文色**（[`fg_hex()`]），不能用状态色/次要色：
+/// 与徽章（[`chip_bg_hex`]）同理——次要色压这种淡底只有 ~4.1:1，
+/// 正文色压上去恒 ≥ 4.5:1（单测 `状态药丸的对比度够_aa` 钉着）。
+pub fn pill_bg_hex(s: State) -> String {
+    mix_hex(state_hex(s), &panel_hex(), 0.84)
 }
 
 fn system_fg_bg() -> Option<(String, String, String)> {
@@ -913,17 +930,20 @@ const COMPONENTS: &str = r#"
   border: 1px solid @pp_border;
   border-radius: 10px;
 }
-/* 状态药丸：底色 = 状态色往背景混 0.84（跟 .pp-chip-ok/-warn/-err 同配方
-   ⇒ 对比度由 @pp_fg 守住，WCAG 单测钉着）。圆点由渲染器自画（pillcell.rs），
-   CSS 这层只管"胶囊"的形状。 */
+/* 状态药丸：底色 = 状态色往**面板色**混 0.84（与 Rust 侧 pill_bg_hex 同一
+   口径——药丸多落在面板底上；徽章那族用的是窗底，不混着用）。
+   文字用 @pp_fg ⇒ 对比度由 fg 守住，WCAG 单测钉着。圆点由渲染器自画
+   （pillcell.rs），CSS 这层只管"胶囊"的形状。 */
 .pp-pill {
   border-radius: 999px;
   padding: 1px 9px;
   color: @pp_fg;
 }
-.pp-pill-ok   { background-color: mix(@pp_ok,   @pp_bg, 0.84); }
-.pp-pill-warn { background-color: mix(@pp_warn, @pp_bg, 0.84); }
-.pp-pill-err  { background-color: mix(@pp_err,  @pp_bg, 0.82); }
+.pp-pill-ok   { background-color: mix(@pp_ok,   @pp_panel, 0.84); }
+.pp-pill-warn { background-color: mix(@pp_warn, @pp_panel, 0.84); }
+.pp-pill-err  { background-color: mix(@pp_err,  @pp_panel, 0.82); }
+/* 灰档：已停止 / compose 父行——中性徽章底（不是错误，别染红）。 */
+.pp-pill-dim  { background-color: @pp_chip; }
 /* 键帽：快捷键提示用（欢迎页、空态）。等宽 + 淡底 + 细边框 ⇒ 一眼是"按这个键"。 */
 .pp-kbd {
   font-family: monospace;
@@ -2339,6 +2359,33 @@ mod tests {
                 css.contains(".pp-hint { font-size: 11pt"),
                 "{t:?}：说明文字的字号还是 10pt（10pt 在小屏上偏小）"
             );
+        }
+    }
+
+    /// 状态药丸：底色与上面的字必须读得清（美化·地基 2/5）。
+    ///
+    /// ⚠️ 药丸底色 = 状态色往面板底混 0.84 ⇒ **字不能用状态色**
+    /// （底和字是同一个色系，对比度只有 ~1.1:1）⇒ 必须用正文色。
+    /// 三档状态 × 三套固定主题全查一遍。
+    #[test]
+    fn 状态药丸的对比度够_aa() {
+        // 「跟随系统」没有显示服务时 panel_hex 走兜底 ⇒ 只查固定主题。
+        // 直接拨线程局部的 CURRENT（不碰 set_theme：那会写 settings.ini）
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+            CURRENT.with(|c| c.set(t));
+            let fg = fg_hex();
+            for s in State::ALL {
+                let bg = pill_bg_hex(s);
+                let c = contrast_ratio(&fg, &bg);
+                assert!(
+                    c >= CONTRAST_AA,
+                    "{t:?} 的药丸底色 {bg}（状态 {s:?}）上的字 {fg} 只有 {c:.2}:1"
+                );
+                // 灰档（Dim）由 pillcell 用 mix_hex 现算，同样要够
+                let dim_bg = mix_hex(&dim_hex(), &panel_hex(), 0.84);
+                let c = contrast_ratio(&fg, &dim_bg);
+                assert!(c >= CONTRAST_AA, "{t:?} 的灰药丸底色 {dim_bg} 上的字只有 {c:.2}:1");
+            }
         }
     }
 }

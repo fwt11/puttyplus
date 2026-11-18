@@ -34,7 +34,7 @@
 //!    在每帧重画（项目踩过「整表重画把主线程拖死」的坑，见 AGENTS.md）。
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -55,6 +55,8 @@ const PAGE_LOGS: &str = "logs";
 const PAGE_MONITOR: &str = "monitor";
 /// 文件页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
 const PAGE_FILES: &str = "files";
+/// **容器终端页**在 `Stack` 里的名字（UI 审查 D19：终端搬进容器页了）。
+const PAGE_TERM: &str = "term";
 
 /// 采样间隔（秒）：**阶段 114**。
 ///
@@ -84,7 +86,16 @@ const COL_CPU: usize = 4;
 const COL_MEM: usize = 5;
 const COL_STATE: usize = 6;
 const COL_DETAIL: usize = 7;
-const N_COLS: usize = 8;
+/// **状态列的 markup**（带色点的那一份；**界面上已不再显示**）。
+///
+/// 历史包袱：UI 审查 D8 时代状态列靠 Pango markup 画「绿点 + 文字」，
+/// 文字（`COL_STATE`）与 markup（`COL_STATE_MK`）分成两列。美化·地基 2/5
+/// 之后状态列改用**药丸渲染器**（颜色由 `pill_state_of` 现取，跟主题走）
+/// ⇒ 这一列**没人读了**，但 TreeStore 的列结构是按位置取值的
+/// （`model.get(iter, 8)`）⇒ 摘掉这一列要挪 N_COLS 后面所有列号，
+/// 没那份必要 ⇒ 先留着，注释说明它已退役。
+const COL_STATE_MK: usize = 8;
+const N_COLS: usize = 9;
 
 /// 过滤：全部 / 运行中 / 已停止。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +126,24 @@ pub struct DockerUi {
     view: gtk::TreeView,
     /// 状态行（错误 / 提示）。
     status: gtk::Label,
+    /// **每个分段各自**的状态文字（UI 审查 D7）。
+    ///
+    /// ⚠️ **为什么不能只有一行**：状态行是**整页共用**的 ⇒ 切到「文件」页
+    ///   底部还挂着「正在读取远程容器…」⇒ **上一段的状态污染下一段**。
+    ///   ⇒ 每个分段各存一份，底部那行**只显示当前分段**的。
+    status_text: RefCell<HashMap<&'static str, String>>,
+    /// **空态 / 错态**那块（UI 审查 D6）。
+    ///
+    /// ⚠️ **为什么不能只有「一张空表 + 底部一行小灰字」**：远端没装 docker、
+    ///   当前账号不在 docker 组、docker 守护进程没起 —— 这三个**长得
+    ///   一模一样** ⇒ 用户只能猜 ⇒ 这里给**分类过的标题 + 解释 + 重试**。
+    empty: crate::emptystate::DynamicEmptyState,
+    /// 搜索框（**键盘 `/` 要能聚焦到它** ⇒ 留个句柄）。
+    search_entry: gtk::SearchEntry,
+    /// 底部那行**右侧的提示**（「双击容器行可进入 shell」）。
+    hint: gtk::Label,
+    /// **行的右键菜单**（UI 审查 D5）。
+    row_menu: RefCell<Option<gtk::Popover>>,
     /// 「上次刷新 hh:mm:ss」。
     last: gtk::Label,
     /// 自动刷新开关。
@@ -188,20 +217,22 @@ pub struct DockerUi {
     /// ⚠️ 窗口关掉时**要清掉**（`stop_terminal`）⇒ 不然这里攥着一个
     ///    已经被销毁的控件 ⇒ 用它会炸。
     term_view: RefCell<Option<crate::termview::TermView>>,
-    /// 容器内终端的**窗口**（测试钩子用来关掉它）。
+    /// 容器内终端的**落点**（详情区里的「终端」页；**懒建**）。
     ///
-    /// ⚠️ **为什么留着**：冒烟要截「监控页」的图 ⇒ 得先把**盖在上面的
-    ///   终端窗口**关掉（截图拍的是整屏）。
-    term_win: RefCell<Option<gtk::Window>>,
+    /// ⚠️ **为什么是页面而不是窗口**（UI 审查 D19）：编辑器都搬进容器页
+    ///   了（阶段 124）⇒ 终端还留在外面不一致；而且那个窗口**没有
+    ///   transient parent**（可能落在主窗后面）。
+    term_slot: RefCell<Option<gtk::Box>>,
+    /// 终端页**建好了没有**（建过就复用 ⇒ 滚动缓冲不丢）。
+    term_page_ready: Cell<bool>,
     /// **正在关**容器内终端（**重入保护**，阶段 125）。
     ///
-    /// ⚠️ **为什么需要**：窗口的 `close_request` 也会调 `stop_terminal`
-    ///   ⇒ 而 `stop_terminal` 现在要**关窗口** ⇒ 不挡一下就是
-    ///   「自己调自己」（窗口 → stop_terminal → 关窗口 → 窗口 → …）。
+    /// ⚠️ **为什么需要**：「关闭终端」按钮与页签关闭钩子都会调
+    ///   `stop_terminal` ⇒ 不挡一下就是「自己调自己」。
     term_closing: Cell<bool>,
     /// 容器终端的**工具条**（阶段 119：切 shell / 重连 / 清屏 / 搜索）。
     ///
-    /// ⚠️ **为什么放在终端窗口里**：这几个操作**只对容器终端**有意义
+    /// ⚠️ **为什么放在终端页里**：这几个操作**只对容器终端**有意义
     ///   ⇒ 放到容器页的工具条上会让人以为「能对选中的容器做」
     ///   （其实那个容器可能压根没开终端）。
     term_bar: RefCell<Option<gtk::Box>>,
@@ -288,7 +319,17 @@ pub struct DockerUi {
     /// **当前选中的镜像**（`仓库:标签`；空 = 没选）。
     images_selected: RefCell<String>,
     /// **镜像操作**的结果文字（**等列表刷新完再贴回状态行**）。
+    /// **三个分段的完整列表**（筛选时要用 ⇒ 表格只放**筛出来的**）。
     ///
+    /// ⚠️ **为什么留着完整列表**：UI 审查 D12 指出镜像 / 卷 / 网络三页
+    ///   **一点筛选都没有** ⇒ 本机 44 个镜像里 30 个是同一个 tag 的重复。
+    images_all: RefCell<Vec<docker::ImageInfo>>,
+    volumes_all: RefCell<Vec<docker::VolumeInfo>>,
+    networks_all: RefCell<Vec<docker::NetInfo>>,
+    /// 三个分段**各自的搜索词**。
+    images_query: RefCell<String>,
+    volumes_query: RefCell<String>,
+    networks_query: RefCell<String>,
     /// ⚠️ **为什么留着**：操作做完会**重新列一遍镜像** ⇒ 刷新那条消息
     ///   （「共 45 个镜像」）会把操作结果**冲掉** ⇒ 用户看不到「打标签
     ///   成功」⇒ 结果得**刷新之后再贴回去**。
@@ -435,13 +476,19 @@ enum Msg {
 struct DetailUi {
     /// 整块（**没选容器时不显示**）。
     root: gtk::Box,
-    /// 标题（「详情：web（运行中）」）。
+    /// 标题（「详情：web」；**状态单独用药丸**，见下）。
     title: gtk::Label,
-    /// 四张卡片的正文。
-    config: gtk::Label,
-    net: gtk::Label,
-    mount: gtk::Label,
-    env: gtk::Label,
+    /// 状态药丸（美化·地基 2/5）：胶囊底 + 状态档位色，
+    /// 替代标题里的「（运行中）」——形状比括号里的字好扫。
+    pill: gtk::Label,
+    /// 四张卡片的正文（**键值表**：每张一个 `Grid`）。
+    ///
+    /// ⚠️ **为什么是 Grid 不是 Label**（UI 审查 D9）：一坨自动换行的文本
+    ///   ⇒ 键与值对不齐、内容一多就互相裁。
+    config: gtk::Grid,
+    net: gtk::Grid,
+    mount: gtk::Grid,
+    env: gtk::Grid,
     /// 「启动」「停止」「重启」三个按钮（**写操作 ⇒ 点了要二次确认**）。
     btn_start: gtk::Button,
     btn_stop: gtk::Button,
@@ -557,40 +604,155 @@ impl MonitorData {
     }
 }
 
+/// 一张图要用的**颜色**（**全部从主题取**，不写死 RGB）。
+///
+/// ⚠️ **为什么单独一个结构**（UI 审查 2026-11-18 D1）：cairo 自绘的东西
+///   **不过 CSS** ⇒ `theme.rs` 那套主题对它**完全无效** ⇒ 以前写死的
+///   `set_source_rgb(1.0, 1.0, 1.0)`（白底）在暗色主题下就是四个白盒子。
+///   ⇒ 颜色得**自己从主题令牌里取**。
+///
+/// ⚠️ **每次重画都重新取** ⇒ 切主题后曲线**跟着变**（不用重开界面）。
+#[derive(Clone, Copy)]
+struct ChartPalette {
+    /// 底色（面板底色）。
+    bg: (f64, f64, f64),
+    /// 边框色。
+    border: (f64, f64, f64),
+    /// 网格线色。
+    grid: (f64, f64, f64),
+    /// 坐标轴文字色。
+    text: (f64, f64, f64),
+    /// 四条曲线的颜色（按顺序取）。
+    series: [(f64, f64, f64); 4],
+}
+
+impl ChartPalette {
+    /// **从当前主题取一套颜色**。
+    fn current() -> Self {
+        let hexes = crate::theme::chart_series_hexes();
+        let mut series = [(0.0, 0.0, 0.0); 4];
+        for (i, h) in hexes.iter().enumerate() {
+            series[i] = hex_rgb(h);
+        }
+        let grid = crate::theme::chart_grid_hex();
+        Self {
+            bg: hex_rgb(&crate::theme::panel_hex()),
+            border: hex_rgb(&grid),
+            grid: hex_rgb(&grid),
+            text: hex_rgb(&crate::theme::chart_axis_hex()),
+            series,
+        }
+    }
+}
+
+/// `#rrggbb` ⇒ cairo 用的 RGB（0..1）。
+fn hex_rgb(hex: &str) -> (f64, f64, f64) {
+    match gtk::gdk::RGBA::parse(hex) {
+        Ok(c) => (
+            f64::from(c.red()),
+            f64::from(c.green()),
+            f64::from(c.blue()),
+        ),
+        Err(_) => (0.0, 0.0, 0.0),
+    }
+}
+
+/// 纵轴的**量程**（UI 审查 D3：曲线冲顶是 5% 还是 50%？得看刻度）。
+///
+/// - `fixed`：百分比类的图**固定量程**（CPU / 内存固定 0..100 ⇒ 曲线高度
+///   就是百分比，不用猜）；
+/// - 网络 / 磁盘是**自动量程** ⇒ 取观测最大值，再**向上取整**到一个好看的
+///   数（`nice_max`）⇒ 刻度上的数字才读得懂（`20M` 而不是 `20971520`）。
+fn chart_max(series: &[(&[(f64, f64)], (f64, f64, f64))], fixed: Option<f64>) -> f64 {
+    let mut observed = 0.0f64;
+    for (pts, _) in series {
+        for (_, v) in pts.iter() {
+            if v.is_finite() && *v > observed {
+                observed = *v;
+            }
+        }
+    }
+    match fixed {
+        Some(f) => f.max(observed).max(1.0),
+        None => nice_max(observed),
+    }
+}
+
+/// 把一个数**向上取整**到一个好看的刻度（1 / 2 / 5 × 10ⁿ）。
+fn nice_max(v: f64) -> f64 {
+    if !(v > 0.0) || !v.is_finite() {
+        return 1.0;
+    }
+    let exp = v.log10().floor();
+    let base = 10f64.powf(exp);
+    let m = v / base;
+    let step = if m <= 1.0 {
+        1.0
+    } else if m <= 2.0 {
+        2.0
+    } else if m <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    // ⚠️ **至少 1**：刻度上的数字是整数（`fmt_axis`）⇒ 量程小于 1 的话
+    //   顶端那个刻度会显示成「0」⇒ 用户以为图是空的。
+    (step * base).max(1.0)
+}
+
+/// 纵轴刻度的**文字**（**短**：轴上只放得下几个字符）。
+fn fmt_axis(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    let a = v.abs();
+    if a >= 1e9 {
+        format!("{:.1}G", v / 1e9)
+    } else if a >= 1e6 {
+        format!("{:.1}M", v / 1e6)
+    } else if a >= 1e3 {
+        format!("{:.0}K", v / 1e3)
+    } else {
+        format!("{v:.0}")
+    }
+}
+
 /// 画一张折线图（**纯绘图**：cairo + 点集 ⇒ 好测好读**）。
 ///
 /// ⚠️ `series`：每条 = (点集, 颜色 RGB)。
-/// ⚠️ **纵轴自动量程**：取所有线的最大值（至少 1 ⇒ 不然全是 0 时线贴在底
-///   上看不见）。
-/// ⚠️ **横轴**：按点数归一化（等间隔 ⇒ 不用管 x 的绝对值）。
+/// ⚠️ **纵轴自动量程**（或固定量程）：见 [`chart_max`]。
+/// ⚠️ **纵轴有刻度**（UI 审查 D3）：顶端标**最大值**、底端标 **0** ⇒
+///   用户不用猜「这条线冲顶是多少」。
 fn draw_chart(
     cr: &gtk::cairo::Context,
     w: i32,
     h: i32,
     series: &[(&[(f64, f64)], (f64, f64, f64))],
-    unit: &str,
+    fixed: Option<f64>,
+    pal: &ChartPalette,
 ) {
     let (ww, hh) = (f64::from(w), f64::from(h));
     if ww < 20.0 || hh < 20.0 {
         return;
     }
-    let pad_l = 6.0;
-    let pad_r = 6.0;
+    // ⚠️ **左边留出刻度的位置**（不然「100」会压在曲线上）。
+    let pad_l = 32.0;
+    let pad_r = 8.0;
     let pad_t = 6.0;
-    let pad_b = 14.0;
+    let pad_b = 12.0;
     let plot_w = (ww - pad_l - pad_r).max(1.0);
     let plot_h = (hh - pad_t - pad_b).max(1.0);
 
-    // 背景 + 边框
-    cr.set_source_rgb(1.0, 1.0, 1.0);
+    // 背景 + 边框（**主题色**，不再是写死的白底）
+    cr.set_source_rgb(pal.bg.0, pal.bg.1, pal.bg.2);
     let _ = cr.rectangle(0.5, 0.5, ww - 1.0, hh - 1.0);
     let _ = cr.fill_preserve();
-    cr.set_source_rgb(0.62, 0.62, 0.62);
+    cr.set_source_rgb(pal.border.0, pal.border.1, pal.border.2);
     let _ = cr.set_line_width(1.0);
     let _ = cr.stroke();
 
     // 网格（三条横线）
-    cr.set_source_rgba(0.75, 0.75, 0.75, 0.45);
+    cr.set_source_rgba(pal.grid.0, pal.grid.1, pal.grid.2, 0.45);
     for i in 1..=3 {
         let y = pad_t + plot_h * (i as f64) / 4.0;
         let _ = cr.move_to(pad_l, y);
@@ -598,15 +760,8 @@ fn draw_chart(
     }
     let _ = cr.stroke();
 
-    // 纵轴量程：所有线的最大值（至少 1）
-    let mut max_y = 1.0f64;
-    for (pts, _) in series {
-        for (_, v) in pts.iter() {
-            if v.is_finite() && *v > max_y {
-                max_y = *v;
-            }
-        }
-    }
+    // 纵轴量程
+    let max_y = chart_max(series, fixed);
 
     // 曲线
     for (pts, color) in series {
@@ -629,11 +784,327 @@ fn draw_chart(
         let _ = cr.stroke();
     }
 
-    // 单位（**ASCII** ⇒ cairo 的玩具文字接口能用）
-    cr.set_source_rgb(0.35, 0.35, 0.35);
-    let _ = cr.set_font_size(10.0);
-    let _ = cr.move_to(pad_l, hh - 4.0);
-    let _ = cr.show_text(unit);
+    // 纵轴刻度（**ASCII** ⇒ cairo 的玩具文字接口能用）：
+    // 顶端 = 最大值、底端 = 0。
+    cr.set_source_rgb(pal.text.0, pal.text.1, pal.text.2);
+    let _ = cr.set_font_size(9.0);
+    let _ = cr.move_to(3.0, pad_t + 8.0);
+    let _ = cr.show_text(&fmt_axis(max_y));
+    let _ = cr.move_to(3.0, hh - 3.0);
+    let _ = cr.show_text("0");
+}
+
+/// 内存列：`"52.84MiB / 63.00GiB"` ⇒ `"8.4% · 52.84MiB / 63.00GiB"`。
+///
+/// ⚠️ **为什么要加百分比**（UI 审查 D21）：监控指标卡给的是**百分比**
+///   （`8.4%`），表格给的是**绝对值** ⇒ 同一个量两个单位 ⇒ 用户没法
+///   对照 ⇒ 表格也带上百分比（限值认不出来时才只给绝对值）。
+fn mem_with_pct(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let Some((used, limit)) = t.split_once('/') else {
+        return t.to_string();
+    };
+    let u = parse_size_bytes(used);
+    let l = parse_size_bytes(limit);
+    if !(l > 0.0) {
+        return t.to_string();
+    }
+    let pct = u / l * 100.0;
+    // ⚠️ **`trf!` 只认 `{名字}`**（不带格式说明）⇒ `{p:.1}` 不会被替换 ⇒
+    //   界面上会露出「{p:.1}%」这种原文 ⇒ 数字**先用 `format!` 打好**。
+    let pct_text = format!("{pct:.1}%");
+    format!("{pct_text} · {t}")
+}
+
+/// 字节数 ⇒ **docker 同款**的大小写法（`59.3MiB` / `62.6GiB`）。
+///
+/// ⚠️ **为什么不用 `util::human_size`**（UI 审查 D21）：那个函数除以 1024
+///   却写 `KB/MB/GB`（十进制名字配二进制数字），跟子行里 docker 自己的
+///   `MiB/GiB` **对不上** ⇒ 同一列里父行「59.3 MB」、子行「59.3MiB」
+///   ⇒ 同一个量两种单位 ⇒ 用户以为差了一截 ⇒ 这里统一成 docker 的写法。
+fn human_size_bin(n: f64) -> String {
+    const UNIT: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut v = n;
+    let mut u: i32 = -1;
+    while v >= 1024.0 && u < 4 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u < 0 {
+        return format!("{n:.0} B");
+    }
+    format!("{v:.1}{}", UNIT[u as usize])
+}
+
+/// 后端给的中文错误 ⇒ **分类**（决定空态的标题）。
+///
+/// ⚠️ **为什么要有**（UI 审查 D6）：最常见的三个「第一分钟错误」——
+///   远端没装 docker、当前账号不在 docker 组、docker 守护进程没起——
+///   在界面上**长得一模一样** ⇒ 用户只能猜 ⇒ 按分类给不同标题。
+fn classify_docker_error(msg: &str) -> crate::emptystate::DockerErrorKind {
+    use crate::emptystate::DockerErrorKind as K;
+    if msg.contains("权限") {
+        K::NoPermission
+    } else if msg.contains("守护进程") || msg.contains("服务没有运行") || msg.contains("连不上") {
+        K::NotRunning
+    } else if msg.contains("没有找到 docker") || msg.contains("没装 Docker") {
+        K::NoDocker
+    } else if msg.contains("太老") {
+        K::TooOld
+    } else {
+        K::Other
+    }
+}
+
+/// 一张卡片的**键值对**（UI 审查 D9）。
+///
+/// ⚠️ **为什么不是一坨文本**：概览页以前是「标题 Label + 一个可换行的纯
+///   文本 Label」⇒ 一行里挤着 `镜像：xxx 状态：xxx …` ⇒ **键与值对不
+///   齐**，内容一多就**互相裁**（截图里「运行用户：root」被下面那行压掉
+///   一半）⇒ 现在是**真的键值表**（每行：键 | 值）。
+type Kv = Vec<(String, String)>;
+
+/// 键值表 ⇒ **纯文本**（测试钩子与空态用）。
+fn kv_text(kv: &Kv) -> String {
+    kv.iter()
+        .map(|(k, v)| {
+            if k.is_empty() {
+                v.clone()
+            } else {
+                trf!("{k}：{v}", k = k, v = v)
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+/// 从键值表里**读回**纯文本（测试钩子用：界面是 Grid ⇒ 没有 `text` 属性）。
+fn grid_kv_text(grid: &gtk::Grid) -> String {
+    let mut cells: Vec<String> = Vec::new();
+    let mut child = grid.first_child();
+    while let Some(c) = child {
+        if let Some(l) = c.downcast_ref::<gtk::Label>() {
+            cells.push(l.text().to_string());
+        }
+        child = c.next_sibling();
+    }
+    // 每两格一组：键 | 值。
+    let mut lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < cells.len() {
+        let k = cells[i].clone();
+        let v = cells.get(i + 1).cloned().unwrap_or_default();
+        if k.is_empty() {
+            lines.push(v);
+        } else {
+            lines.push(trf!("{k}：{v}", k = k, v = v));
+        }
+        i += 2;
+    }
+    lines.join("\n")
+}
+
+/// 建一张**键值表**卡片（标题 ＋ 「键 | 值」的表）。
+fn mk_kv_card(title: &str) -> (gtk::Box, gtk::Grid) {
+    let head = gtk::Label::new(Some(title));
+    head.set_xalign(0.0);
+    head.add_css_class("heading");
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(12);
+    grid.set_row_spacing(4);
+    grid.set_hexpand(true);
+    let sw = gtk::ScrolledWindow::new();
+    sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    sw.set_child(Some(&grid));
+    sw.set_vexpand(true);
+    let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    b.set_hexpand(true);
+    b.set_vexpand(true);
+    b.append(&head);
+    b.append(&sw);
+    (b, grid)
+}
+
+/// 往键值表里**填内容**（先清空再填 ⇒ 不会越填越多）。
+fn fill_kv(grid: &gtk::Grid, kv: &Kv) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    for (i, (k, v)) in kv.iter().enumerate() {
+        let kl = gtk::Label::new(Some(k));
+        kl.set_xalign(0.0);
+        kl.add_css_class("dim-label");
+        kl.set_valign(gtk::Align::Start);
+        let vl = gtk::Label::new(Some(v));
+        vl.set_xalign(0.0);
+        vl.set_yalign(0.0);
+        vl.set_wrap(true);
+        vl.set_selectable(true);
+        vl.set_hexpand(true);
+        grid.attach(&kl, 0, i as i32, 1, 1);
+        grid.attach(&vl, 1, i as i32, 1, 1);
+    }
+}
+
+/// 一列的**排序方式**（UI 审查 D4）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortKind {
+    /// 纯文字（按字典序）。
+    Text,
+    /// 百分比（`"1.0%"` ⇒ 1.0）。
+    Percent,
+    /// 字节（`"52.84MiB / 63.00GiB"` ⇒ 已用的字节数）。
+    Bytes,
+}
+
+/// 数值列的**排序键**。
+///
+/// ⚠️ **为什么不能按字符串排**（UI 审查 D4）：`"9.5%"` 按字典序排在
+///   `"50.8%"` **前面** ⇒ 「找最占资源的容器」全看错 ⇒ CPU / 内存
+///   **必须按数值**排。
+fn sort_key(s: &str, kind: SortKind) -> f64 {
+    match kind {
+        SortKind::Text => 0.0,
+        SortKind::Percent => {
+            let t = s.trim().trim_end_matches('%').trim();
+            t.parse::<f64>().unwrap_or(0.0)
+        }
+        SortKind::Bytes => parse_size_bytes(s),
+    }
+}
+
+/// `"52.84MiB / 63.00GiB"` ⇒ **已用**的字节数（第一个数）。
+fn parse_size_bytes(s: &str) -> f64 {
+    let first = s.split('/').next().unwrap_or("").trim();
+    let mut num = String::new();
+    let mut unit = String::new();
+    for ch in first.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+        } else if ch.is_ascii_alphabetic() {
+            unit.push(ch);
+        }
+        if !num.is_empty() && !unit.is_empty() {
+            break;
+        }
+    }
+    let v: f64 = num.parse().unwrap_or(0.0);
+    // ⚠️ docker 用的是 `MiB` / `GiB`（1024 进制），但也有人写 `MB` ⇒
+    //   两种都认（`MiB` 与 `MB` 在 docker 里是同一个意思）。
+    let u = unit.to_ascii_uppercase();
+    let u = u.strip_suffix('B').unwrap_or(&u).to_string();
+    let u = u.strip_suffix('I').unwrap_or(&u).to_string();
+    let mul = match u.as_str() {
+        "" => 1.0,
+        "K" => 1024.0,
+        "M" => 1024.0 * 1024.0,
+        "G" => 1024.0f64.powi(3),
+        "T" => 1024.0f64.powi(4),
+        "P" => 1024.0f64.powi(5),
+        _ => 1.0,
+    };
+    v * mul
+}
+
+/// docker 状态原文 ⇒ **药丸档位**（**纯函数**，便于单测）。
+///
+/// - 运行中 ⇒ 绿；已暂停 / 重启中 ⇒ 黄；已失效 ⇒ 红；
+/// - 已停止 / 已创建 ⇒ **灰**（不是错误，只是没在跑）；
+/// - 其它（compose 父行的「1/3 运行中」摘要、空串）⇒ 灰（不假装有状态）。
+///
+/// ⚠️ `state_markup` 与状态药丸渲染器**共用这一个映射**——两处各写一份
+///    迟早漂移（点的颜色跟药丸的底色对不上）。
+fn pill_state_of(state: &str) -> crate::panel::pillcell::PillState {
+    use crate::panel::pillcell::PillState;
+    match state {
+        "running" => PillState::Ok,
+        "paused" | "restarting" => PillState::Warn,
+        "dead" => PillState::Err,
+        _ => PillState::Dim,
+    }
+}
+
+/// 药丸要显示的**文字**（**纯函数**，便于单测）。
+///
+/// docker 的六种状态原文翻成中文（[`docker::state_label`]）；**翻不出的**
+/// （compose 父行的「1/3 运行中」摘要）**原样显示**——那本身就是中文，
+/// 比「状态未知」有信息量得多。
+fn pill_text_of(state: &str) -> String {
+    const RAW: [&str; 6] = ["running", "exited", "created", "paused", "restarting", "dead"];
+    if RAW.contains(&state) {
+        docker::state_label(state).to_string()
+    } else {
+        state.to_string()
+    }
+}
+
+/// 状态列的**带色点 markup**（UI 审查 D8）。
+///
+/// ⚠️ **颜色走 `theme::state_hex`**（项目规矩：语义色不许写死 RGB）。
+/// - 运行中 ⇒ 绿点；
+/// - 已暂停 / 重启中 ⇒ 黄点；
+/// - 已失效 ⇒ 红点；
+/// - 已停止 / 已创建 ⇒ **灰点**（不是错误，只是没在跑）。
+fn state_markup(state: &str) -> String {
+    use crate::theme::{state_hex, State};
+    let color: String = match pill_state_of(state) {
+        crate::panel::pillcell::PillState::Ok => state_hex(State::Ok).to_string(),
+        crate::panel::pillcell::PillState::Warn => state_hex(State::Warn).to_string(),
+        crate::panel::pillcell::PillState::Err => state_hex(State::Err).to_string(),
+        crate::panel::pillcell::PillState::Dim => crate::theme::dim_hex(),
+    };
+    let label = docker::state_label(state);
+    format!("<span foreground=\"{c}\">●</span> {t}", c = color, t = label)
+}
+
+/// 图例里的**色块**（**跟着主题走** ⇒ 切主题不用重建图例）。
+fn mk_swatch(idx: usize) -> gtk::DrawingArea {
+    let d = gtk::DrawingArea::new();
+    d.set_content_width(10);
+    d.set_content_height(10);
+    d.set_valign(gtk::Align::Center);
+    d.set_draw_func(move |_a, cr, w, h| {
+        let pal = ChartPalette::current();
+        let c = pal.series[idx % pal.series.len()];
+        cr.set_source_rgb(c.0, c.1, c.2);
+        let _ = cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
+        let _ = cr.fill();
+    });
+    d
+}
+
+/// 建一张图的**整块**（**标题 ＋ 画布 ＋ 图例**）。
+///
+/// ⚠️ **为什么要标题与图例**（UI 审查 D3）：一屏四个裸框 ⇒ 用户得靠猜
+///   「哪张是 CPU」「橙线是收还是发」⇒ 标题说清楚，图例说清楚哪条线是谁。
+fn mk_chart_box(
+    title: &str,
+    chart: &gtk::DrawingArea,
+    legend: &[(&str, usize)],
+) -> gtk::Box {
+    let head = gtk::Label::new(Some(title));
+    head.set_xalign(0.0);
+    head.add_css_class("heading");
+    let b = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    b.set_hexpand(true);
+    b.append(&head);
+    b.append(chart);
+    if !legend.is_empty() {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        row.set_margin_start(2);
+        row.set_margin_bottom(2);
+        for (name, idx) in legend {
+            row.append(&mk_swatch(*idx));
+            let l = gtk::Label::new(Some(name));
+            l.set_xalign(0.0);
+            row.append(&l);
+        }
+        b.append(&row);
+    }
+    b
 }
 
 /// 把字节/秒变成**人能读**的字符串（`B/s` / `KB/s` / `MB/s`）。
@@ -671,6 +1142,8 @@ struct LogUi {
     btn_clear: gtk::Button,
     /// 「自动跟随」开关（默认开）。
     follow: gtk::Switch,
+    /// **「折行」开关**（UI 审查 D10；默认关 ⇒ 用横向滚动看全文）。
+    wrap: gtk::ToggleButton,
     /// 状态行（「正在接收…」「已结束」「出错原因」）。
     status: gtk::Label,
 }
@@ -779,6 +1252,9 @@ impl DockerUi {
         //    ⇒ 用 `restoring` 把这段「假的光标变化」挡掉。
         self.restoring.set(true);
         self.model.clear();
+        // ⚠️ **展开状态等**整表建完**再恢复**：开了排序以后，追加一行会
+        //   **重排** ⇒ 中途算出来的行号会变 ⇒ 展开会落到别的行上。
+        let mut to_expand: Vec<String> = Vec::new();
         for node in Self::group(rows) {
             match node {
                 Node::Solo(c) => {
@@ -786,19 +1262,25 @@ impl DockerUi {
                     self.set_container_row(&it, &c);
                 }
                 Node::Project { name, items } => {
-                    // 父行：项目名 + 「N 个容器」。
+                    // 父行：项目名 + 摘要。
                     let it = self.model.append(None);
-                    self.set_project_row(&it, &name, items.len());
+                    self.set_project_row(&it, &name, &items);
                     for c in items {
                         let sub = self.model.append(Some(&it));
                         self.set_container_row(&sub, &c);
                     }
-                    // 之前是展开的 ⇒ 展开回来。
+                    // 之前是展开的 ⇒ 等会儿展开回来。
                     if expanded.contains(&name) {
-                        let path = self.model.path(&it);
-                        self.view.expand_row(&path, false);
+                        to_expand.push(name);
                     }
                 }
+            }
+        }
+        // ⚠️ **整表建完了再展开**（见上面的说明）。
+        for name in to_expand {
+            if let Some(it) = self.project_iter(&name) {
+                let path = self.model.path(&it);
+                self.view.expand_row(&path, false);
             }
         }
         // 恢复选中（**程序性** ⇒ 不触发重新取详情）。
@@ -821,6 +1303,15 @@ impl DockerUi {
     /// 写一个容器行。
     fn set_container_row(&self, it: &gtk::TreeIter, c: &ContainerInfo) {
         let state = c.state_label().to_string();
+        let mk = state_markup(&c.state);
+        // ⚠️ **详情列翻成中文**（UI 审查 D14）：项目规矩是用户可见文案
+        //   全中文 ⇒ 不能把 docker 的原文（`Up 13 hours (healthy)`）摆出来。
+        let detail = docker::status_detail_zh(&c.status);
+        // ⚠️ **内存列带上百分比**（UI 审查 D21）：表格给的是**绝对值**
+        //   （`52.84MiB / 63.00GiB`），监控指标卡给的是**百分比**
+        //   （`8.4%`）⇒ 同一个量两个单位 ⇒ 用户没法对照 ⇒ 这里把
+        //   百分比**也算出来**放进去（限值认不出来时才只给绝对值）。
+        let mem = mem_with_pct(&c.mem);
         self.model.set(
             it,
             &[
@@ -829,28 +1320,77 @@ impl DockerUi {
                 (COL_IMAGE as u32, &c.image),
                 (COL_PORTS as u32, &c.ports),
                 (COL_CPU as u32, &c.cpu),
-                (COL_MEM as u32, &c.mem),
+                (COL_MEM as u32, &mem),
                 (COL_STATE as u32, &state),
-                (COL_DETAIL as u32, &c.status),
+                (COL_DETAIL as u32, &detail),
+                (COL_STATE_MK as u32, &mk),
             ],
         );
     }
 
     /// 写一个项目行（父行）。
-    fn set_project_row(&self, it: &gtk::TreeIter, name: &str, n: usize) {
-        let cnt = trf!("{n} 个容器", n = n);
+    ///
+    /// ⚠️ **父行不是一行空格**（UI 审查 D16）：以前 ID / 镜像 / 端口 /
+    ///   CPU / 内存 全空 ⇒ 一行里 5 个空格 + 2 个词 ⇒ 扫起来很跳 ⇒
+    ///   现在给一份**摘要**（镜像个数 / CPU 合计 / 内存合计 / 几个在跑）。
+    fn set_project_row(&self, it: &gtk::TreeIter, name: &str, items: &[ContainerInfo]) {
+        let n = items.len();
+        let running = items.iter().filter(|c| c.state == "running").count();
+        // 镜像：去重后列出（最多两个，多了写「N 个镜像」）。
+        let mut imgs: Vec<String> = Vec::new();
+        for c in items {
+            if !c.image.is_empty() && !imgs.contains(&c.image) {
+                imgs.push(c.image.clone());
+            }
+        }
+        let img_text = if imgs.is_empty() {
+            String::new()
+        } else if imgs.len() == 1 {
+            imgs[0].clone()
+        } else {
+            trf!("{n} 个镜像", n = imgs.len())
+        };
+        // CPU：合计（各容器的百分比加起来）。
+        let cpu_sum: f64 = items
+            .iter()
+            .map(|c| sort_key(&c.cpu, SortKind::Percent))
+            .sum();
+        let cpu_text = if n == 0 {
+            String::new()
+        } else {
+            // ⚠️ **同 `mem_with_pct`**：`trf!` 不认 `{v:.1}` ⇒ 用 `format!`。
+            // ⚠️ **小数位跟子行一样**（`docker stats` 给的是两位）：同一列里
+            //   父行「0.00%」、子行「0.0%」会让人以为是两个不同的量。
+            format!("{cpu_sum:.2}%")
+        };
+        // 内存：合计（按字节加）。
+        let mem_sum: f64 = items.iter().map(|c| parse_size_bytes(&c.mem)).sum();
+        let mem_text = if n == 0 {
+            String::new()
+        } else {
+            // ⚠️ **同子行的单位写法**（`MiB`/`GiB`）⇒ 父行子行能直接比。
+            human_size_bin(mem_sum)
+        };
+        let cnt = trf!("{r}/{n} 运行中", r = running, n = n);
         let kind = tr("compose 项目").to_string();
+        // ⚠️ **父行没有自己的状态** ⇒ 色点用「灰」（不假装它在跑）。
+        let mk = format!(
+            "<span foreground=\"{c}\">●</span> {t}",
+            c = crate::theme::dim_hex(),
+            t = trf!("{n} 个容器", n = n)
+        );
         self.model.set(
             it,
             &[
                 (COL_NAME as u32, &name.to_string()),
                 (COL_ID as u32, &String::new()),
-                (COL_IMAGE as u32, &String::new()),
+                (COL_IMAGE as u32, &img_text),
                 (COL_PORTS as u32, &String::new()),
-                (COL_CPU as u32, &String::new()),
-                (COL_MEM as u32, &String::new()),
+                (COL_CPU as u32, &cpu_text),
+                (COL_MEM as u32, &mem_text),
                 (COL_STATE as u32, &cnt),
                 (COL_DETAIL as u32, &kind),
+                (COL_STATE_MK as u32, &mk),
             ],
         );
     }
@@ -868,15 +1408,45 @@ impl DockerUi {
         }
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
         self.last.set_text(&trf!("上次刷新 {t}", t = now));
-        let msg = trf!(
-            "共 {n} 个容器（远程 Docker {v}）",
-            n = info.containers.len(),
-            v = info.version
-        );
-        self.status.set_text(&msg);
+        // ⚠️ **数字要对**（UI 审查 D7a）：以前写的是**过滤前**的总数 ⇒
+        //   点「运行中」只剩 1 行，底栏还写着「共 2 个容器」⇒ 现在写成
+        //   「显示 N / 共 M」。
+        let total = info.containers.len();
+        let msg = if shown.len() == total {
+            trf!(
+                "共 {n} 个容器（远程 Docker {v}）",
+                n = total,
+                v = info.version
+            )
+        } else {
+            trf!(
+                "显示 {s} / 共 {n} 个容器（远程 Docker {v}）",
+                s = shown.len(),
+                n = total,
+                v = info.version
+            )
+        };
+        self.set_segment_status(SEG_CONTAINERS, &msg);
+        // ⚠️ **空态**：一个容器都没有 ⇒ 给「这台服务器上没有容器」；
+        //   有东西 ⇒ 藏起来。
+        self.sync_empty_state(shown.is_empty());
         // ⚠️ **放最后**：大转圈要不要消失，取决于「列表空不空」⇒ 得等
         //   列表填好了再判断（见 `set_loading` 的说明）。
         self.set_loading(false);
+    }
+
+    /// **空态**：列表空了 ⇒ 显示「这台服务器上没有容器」；不空 ⇒ 藏起来。
+    ///
+    /// ⚠️ **为什么单独一个函数**：填表有三条路（刷新 / 过滤 / 测试灌数据）
+    ///   ⇒ 空态得**三处都对** ⇒ 别复制三份。
+    fn sync_empty_state(&self, empty: bool) {
+        if empty {
+            let st = crate::emptystate::docker_empty();
+            self.empty.set_texts(&st.title, &st.desc);
+            self.empty.root.set_visible(true);
+        } else {
+            self.empty.root.set_visible(false);
+        }
     }
 
     /// 失败：清空表格 + 说清楚为什么（**中文 + 怎么办**）。
@@ -884,7 +1454,39 @@ impl DockerUi {
         self.model.clear();
         self.containers.borrow_mut().clear();
         self.set_loading(false);
-        self.status.set_text(msg);
+        self.set_segment_status(SEG_CONTAINERS, msg);
+        // ⚠️ **错态**：不是「一张空表 + 底部一行小灰字」，而是
+        //   **标题 + 解释 + 重试**（UI 审查 D6）⇒ 三种最常见的错误
+        //   （没装 docker / 没权限 / 守护进程没起）**长得不一样**。
+        let kind = classify_docker_error(msg);
+        let st = crate::emptystate::docker_error(kind, msg);
+        self.empty.set_texts(&st.title, &st.desc);
+        self.empty.root.set_visible(true);
+    }
+
+    /// 设置**某个分段**的状态文字（UI 审查 D7）。
+    ///
+    /// ⚠️ **底部那行只显示当前分段的** ⇒ 切到「镜像」页就不会还挂着
+    ///   「正在读取远程容器…」（上一段的状态污染下一段）。
+    fn set_segment_status(&self, seg: &'static str, text: &str) {
+        self.status_text
+            .borrow_mut()
+            .insert(seg, text.to_string());
+        if self.seg_current.get() == seg {
+            self.status.set_text(text);
+        }
+    }
+
+    /// **切换分段** ⇒ 底部那行跟着换成新分段的状态。
+    fn sync_status_line(&self) {
+        let seg = self.seg_current.get();
+        let text = self
+            .status_text
+            .borrow()
+            .get(seg)
+            .cloned()
+            .unwrap_or_default();
+        self.status.set_text(&text);
     }
 
     /// **loading 动画**的开关（用户 2026-11-16）。
@@ -915,6 +1517,11 @@ impl DockerUi {
         } else {
             self.spin_big.stop();
         }
+        // ⚠️ **正在加载时藏掉空态**（UI 审查 D6）：大转圈与空态**同时**
+        //   出现会打架（一个说「正在加载」、一个说「没有容器」）。
+        if loading {
+            self.empty.root.set_visible(false);
+        }
     }
 
     /// 按「过滤 + 搜索」筛一遍。
@@ -944,11 +1551,42 @@ impl DockerUi {
         let rows = self.containers.borrow().clone();
         let shown = self.filter_rows(&rows);
         self.rebuild(&shown);
-        self.status.set_text(&trf!("共 {n} 个容器", n = shown.len()));
+        // ⚠️ **数字要对**（UI 审查 D7a）：过滤后写「显示 N / 共 M」。
+        let total = rows.len();
+        let msg = if shown.len() == total {
+            trf!("共 {n} 个容器", n = total)
+        } else {
+            trf!("显示 {s} / 共 {n} 个容器", s = shown.len(), n = total)
+        };
+        self.set_segment_status(SEG_CONTAINERS, &msg);
+        // ⚠️ **过滤后空了** ⇒ 也给空态（不然又是一块空白）。
+        self.sync_empty_state(shown.is_empty());
+    }
+
+    /// **关掉行的右键菜单**（点完菜单项之后）。
+    fn close_row_menu(&self) {
+        if let Some(p) = self.row_menu.borrow().as_ref() {
+            p.popdown();
+        }
+    }
+
+    /// 当前选中容器的 **ID**（复制 ID 那个菜单项用）。
+    fn selected_container_id(&self) -> String {
+        let (path, _col) = gtk::prelude::TreeViewExt::cursor(&self.view);
+        let Some(path) = path else {
+            return String::new();
+        };
+        let Some(it) = self.model.iter(&path) else {
+            return String::new();
+        };
+        // 项目行（有子行）不是容器 ⇒ 没有自己的 ID。
+        if self.model.iter_children(Some(&it)).is_some() {
+            return String::new();
+        }
+        self.model.get(&it, COL_ID as i32)
     }
 
     /// 表格**模型**里的全部行（**冒烟测试读它**）。
-    ///
     /// 返回 `(名字, 是不是项目行, 是不是顶层行)`，**按模型顺序**
     /// （先父行后子行）。
     ///
@@ -1075,27 +1713,57 @@ impl DockerUi {
         // ⚠️ **顺手记下选中的容器**（阶段 112 修的 bug）：消息循环拿它比对
         //    「这条结果是不是现在选的那个」⇒ 它必须**一直是对的**。
         *self.selected.borrow_mut() = d.name.clone();
-        self.detail
-            .title
-            .set_text(&trf!("详情：{n}（{s}）", n = d.name, s = d.state_label()));
-        self.detail.config.set_text(&detail_config_text(d));
-        self.detail.net.set_text(&detail_net_text(d));
-        self.detail.mount.set_text(&detail_mount_text(d));
-        self.detail.env.set_text(&detail_env_text(d));
+        self.detail.title.set_text(&trf!("详情：{n}", n = d.name));
+        // 状态药丸：文字 + 档位类（同一个 label 反复用 ⇒ 先摘干净再挂）
+        let pill = &self.detail.pill;
+        pill.set_text(d.state_label());
+        pill.set_visible(true);
+        for c in ["pp-pill-ok", "pp-pill-warn", "pp-pill-err", "pp-pill-dim"] {
+            pill.remove_css_class(c);
+        }
+        pill.add_css_class(
+            match pill_state_of(&d.status) {
+                crate::panel::pillcell::PillState::Ok => "pp-pill-ok",
+                crate::panel::pillcell::PillState::Warn => "pp-pill-warn",
+                crate::panel::pillcell::PillState::Err => "pp-pill-err",
+                crate::panel::pillcell::PillState::Dim => "pp-pill-dim",
+            },
+        );
+        fill_kv(&self.detail.config, &detail_config_kv(d));
+        fill_kv(&self.detail.net, &detail_net_kv(d));
+        fill_kv(&self.detail.mount, &detail_mount_kv(d));
+        fill_kv(&self.detail.env, &detail_env_kv(d));
         // 按钮：运行中只能停/重启；停了才能启动。
         self.detail.btn_start.set_sensitive(!d.is_running());
         self.detail.btn_stop.set_sensitive(d.is_running());
         self.detail.btn_restart.set_sensitive(true);
+        // ⚠️ **灰按钮要说明「为什么不能点」**（UI 审查 D15）：以前运行中的
+        //   容器「启动」是灰的 ⇒ 用户只能猜 ⇒ 现在 tooltip 说清楚。
+        if d.is_running() {
+            self.detail.btn_start.set_tooltip_text(Some(tr(
+                "容器正在运行，不用再启动（先「停止」才能启动）",
+            )));
+            self.detail.btn_stop.set_tooltip_text(Some(tr("停止这个容器")));
+        } else {
+            self.detail.btn_start.set_tooltip_text(Some(tr("启动这个容器")));
+            self.detail.btn_stop.set_tooltip_text(Some(tr(
+                "容器没有在运行，不用停（先「启动」才能停）",
+            )));
+        }
+        self.detail.btn_restart.set_tooltip_text(Some(tr("重启这个容器")));
         self.detail.root.set_visible(true);
     }
 
     /// 详情取失败 ⇒ 说清楚为什么（**别静默**）。
     fn detail_error(&self, msg: &str) {
         self.detail.title.set_text(tr("取不到容器详情"));
-        self.detail.config.set_text(msg);
-        self.detail.net.set_text("");
-        self.detail.mount.set_text("");
-        self.detail.env.set_text("");
+        // 取不到详情 ⇒ 没有状态可说 ⇒ 药丸收起来（别挂着上一个容器的状态）
+        self.detail.pill.set_visible(false);
+        // ⚠️ **错态也放进键值表**（第一行是原因，其余留空）。
+        fill_kv(&self.detail.config, &vec![(String::new(), msg.to_string())]);
+        fill_kv(&self.detail.net, &Kv::new());
+        fill_kv(&self.detail.mount, &Kv::new());
+        fill_kv(&self.detail.env, &Kv::new());
         self.detail.root.set_visible(true);
     }
 
@@ -1158,6 +1826,12 @@ impl DockerUi {
         self.detail.proj_info.set_text(&project_info_text(&sum));
         // 「编辑」要 compose 文件 ⇒ 没有文件就禁用（别给用户一个点不动的按钮）。
         self.detail.btn_edit.set_sensitive(!sum.files.is_empty());
+        // ⚠️ **灰按钮要说明「为什么不能点」**（UI 审查 D15）。
+        self.detail.btn_edit.set_tooltip_text(Some(if sum.files.is_empty() {
+            tr("这个项目没有记录 compose 配置文件路径 ⇒ 没法编辑")
+        } else {
+            tr("编辑这个项目的 compose 文件")
+        }));
         self.detail.proj_root.set_visible(true);
         self.detail.root.set_visible(false);
     }
@@ -1321,97 +1995,115 @@ fn fmt_time(s: &str) -> String {
 }
 
 /// 「运行配置」卡片。
-fn detail_config_text(d: &ContainerDetail) -> String {
-    let mut v: Vec<String> = Vec::new();
-    v.push(trf!("镜像：{x}", x = d.image));
+/// 「运行配置」卡片（**键值对**）。
+fn detail_config_kv(d: &ContainerDetail) -> Kv {
+    let mut v: Kv = Vec::new();
+    v.push((tr("镜像").to_string(), d.image.clone()));
     let mut st = d.state_label().to_string();
     if !d.health.is_empty() && d.health != "none" {
         st = trf!("{s}（{h}）", s = st, h = d.health);
     }
-    v.push(trf!("状态：{s}", s = st));
-    v.push(trf!("创建时间：{t}", t = fmt_time(&d.created)));
-    v.push(trf!("启动时间：{t}", t = fmt_time(&d.started_at)));
-    v.push(trf!("退出时间：{t}", t = fmt_time(&d.finished_at)));
+    v.push((tr("状态").to_string(), st));
+    v.push((tr("创建时间").to_string(), fmt_time(&d.created)));
+    v.push((tr("启动时间").to_string(), fmt_time(&d.started_at)));
+    v.push((tr("退出时间").to_string(), fmt_time(&d.finished_at)));
     if !d.exit_code.is_empty() {
-        v.push(trf!("退出码：{c}", c = d.exit_code));
+        v.push((tr("退出码").to_string(), d.exit_code.clone()));
     }
-    v.push(trf!("重启策略：{p}", p = d.restart_policy));
+    v.push((tr("重启策略").to_string(), d.restart_policy.clone()));
     if !d.restart_count.is_empty() {
-        v.push(trf!("重启次数：{c}", c = d.restart_count));
+        v.push((tr("重启次数").to_string(), d.restart_count.clone()));
     }
-    v.push(trf!(
-        "运行用户：{u}",
-        u = if d.user.is_empty() {
-            tr("root")
+    v.push((
+        tr("运行用户").to_string(),
+        if d.user.is_empty() {
+            tr("root").to_string()
         } else {
-            d.user.as_str()
-        }
+            d.user.clone()
+        },
     ));
-    v.push(trf!("工作目录：{w}", w = d.workdir));
+    v.push((tr("工作目录").to_string(), d.workdir.clone()));
     if !d.command.is_empty() {
-        v.push(trf!("命令：{c}", c = d.command));
+        v.push((tr("命令").to_string(), d.command.clone()));
     }
-    v.join("\n")
+    v
 }
 
-/// 「网络与端口」卡片。
-fn detail_net_text(d: &ContainerDetail) -> String {
-    let mut v: Vec<String> = Vec::new();
-    v.push(trf!("网络模式：{m}", m = d.network_mode));
+/// 「网络与端口」卡片（**键值对**）。
+fn detail_net_kv(d: &ContainerDetail) -> Kv {
+    let mut v: Kv = Vec::new();
+    v.push((tr("网络模式").to_string(), d.network_mode.clone()));
     for n in d.networks.iter() {
-        v.push(trf!(
-            "网络：{name}（{ip}，网关 {gw}）",
-            name = n.name,
-            ip = n.ip,
-            gw = n.gateway
+        v.push((
+            tr("网络").to_string(),
+            trf!(
+                "{name}（{ip}，网关 {gw}）",
+                name = n.name,
+                ip = n.ip,
+                gw = n.gateway
+            ),
         ));
     }
     for p in d.ports.iter() {
         if p.host_port.is_empty() {
-            v.push(trf!("端口：{c}（未发布）", c = p.container));
+            v.push((
+                tr("端口").to_string(),
+                trf!("{c}（未发布）", c = p.container),
+            ));
         } else {
-            v.push(trf!(
-                "端口：{c} → {ip}:{hp}",
-                c = p.container,
-                ip = p.host_ip,
-                hp = p.host_port
+            v.push((
+                tr("端口").to_string(),
+                trf!(
+                    "{c} → {ip}:{hp}",
+                    c = p.container,
+                    ip = p.host_ip,
+                    hp = p.host_port
+                ),
             ));
         }
     }
     if v.len() == 1 {
-        v.push(tr("（没有网络信息）").to_string());
+        v.push((String::new(), tr("（没有网络信息）").to_string()));
     }
-    v.join("\n")
+    v
 }
 
-/// 「挂载」卡片。
-fn detail_mount_text(d: &ContainerDetail) -> String {
+/// 「挂载」卡片（**键值对**）。
+fn detail_mount_kv(d: &ContainerDetail) -> Kv {
     if d.mounts.is_empty() {
-        return tr("（没有挂载）").to_string();
+        return vec![(String::new(), tr("（没有挂载）").to_string())];
     }
-    let mut v: Vec<String> = Vec::new();
+    let mut v: Kv = Vec::new();
     for m in d.mounts.iter() {
-        v.push(trf!(
-            "{kind}：{src} → {dst}（{rw}）",
-            kind = m.kind,
-            src = m.source,
-            dst = m.dest,
-            rw = if m.rw == "true" {
-                tr("可写")
-            } else {
-                tr("只读")
-            }
+        v.push((
+            m.kind.clone(),
+            trf!(
+                "{src} → {dst}（{rw}）",
+                src = m.source,
+                dst = m.dest,
+                rw = if m.rw == "true" {
+                    tr("可写")
+                } else {
+                    tr("只读")
+                }
+            ),
         ));
     }
-    v.join("\n")
+    v
 }
 
-/// 「环境变量」卡片。
-fn detail_env_text(d: &ContainerDetail) -> String {
+/// 「环境变量」卡片（**键值对**：`KEY` | `VALUE`）。
+fn detail_env_kv(d: &ContainerDetail) -> Kv {
     if d.env.is_empty() {
-        return tr("（没有环境变量）").to_string();
+        return vec![(String::new(), tr("（没有环境变量）").to_string())];
     }
-    d.env.join("\n")
+    d.env
+        .iter()
+        .map(|e| match e.split_once('=') {
+            Some((k, v)) => (k.to_string(), v.to_string()),
+            None => (e.clone(), String::new()),
+        })
+        .collect()
 }
 
 /// 一个 compose 项目的**汇总**（阶段 111）。
@@ -1498,11 +2190,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let auto = gtk::Switch::new();
     auto.set_valign(gtk::Align::Center);
 
-    // ⚠️ 图标按钮**统一走 `a11y::icon_button`**（AGENTS.md 的 lint 钉死了）。
-    let refresh_btn = crate::a11y::icon_button("view-refresh-symbolic");
-    refresh_btn.set_tooltip_text(Some(tr("刷新")));
-    refresh_btn.add_css_class("flat");
-
     let spin = gtk::Spinner::new();
     spin.set_size_request(16, 16);
     spin.set_valign(gtk::Align::Center);
@@ -1526,18 +2213,36 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     bar.set_margin_end(6);
     bar.set_margin_top(4);
     bar.set_margin_bottom(4);
-    bar.append(&search);
-    bar.append(&f_all);
-    bar.append(&f_run);
-    bar.append(&f_stop);
-    bar.append(&last);
-    bar.append(&auto_lbl);
-    bar.append(&auto);
+    // ⚠️ **工具条拆成两组**（UI 审查 D13）：以前一行塞了 11 个控件
+    //   ⇒ 搜索框 `hexpand` 把右边的全推走 ⇒ 窗口一窄就溢出（Box 不换行）。
+    //   ⇒ 左组「筛选」可伸缩、右组「操作」保持自然宽度 ⇒ 窄窗口时
+    //   被压扁的是**搜索框**，操作按钮永远看得见。
+    let filter_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    filter_group.set_hexpand(true);
+    filter_group.append(&search);
+    filter_group.append(&f_all);
+    filter_group.append(&f_run);
+    filter_group.append(&f_stop);
+
+    let action_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    action_group.append(&auto_lbl);
+    action_group.append(&auto);
     // ⚠️ loading 动画的小转圈（用户 2026-11-16）。
-    bar.append(&spin);
-    // ⚠️ **阶段 117**：「进入容器」在刷新按钮**前面**（它是主操作之一）。
-    bar.append(&btn_enter);
-    bar.append(&refresh_btn);
+    action_group.append(&spin);
+    // ⚠️ **阶段 117**：「进入容器」是主操作之一 ⇒ 放在操作组。
+    action_group.append(&btn_enter);
+
+    bar.append(&filter_group);
+    // ⚠️ **分组之间画一根竖线**（一眼看得出哪里是筛选、哪里是操作）。
+    let sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    sep.set_valign(gtk::Align::Center);
+    sep.set_margin_start(2);
+    sep.set_margin_end(2);
+    bar.append(&sep);
+    bar.append(&action_group);
+    // ⚠️ **不再放第二个刷新按钮**（UI 审查 D13）：分段栏右边那个 ↻ 刷的
+    //   就是当前分段（在容器段里跟这里那个是同一件事）⇒ 两个刷新按钮
+    //   干同一件事，用户不知道该点哪个 ⇒ 只留分段栏那个。
 
     // ---- 表格（**树形**）----
     let types: Vec<glib::Type> = (0..N_COLS).map(|_| glib::Type::STRING).collect();
@@ -1560,40 +2265,102 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             tr("详情"),
         ];
         for (i, t) in titles.iter().enumerate() {
-            let r = gtk::CellRendererText::new();
-            r.set_ellipsize(gtk::pango::EllipsizeMode::End);
             let col = gtk::TreeViewColumn::new();
             col.set_title(t);
             col.set_resizable(true);
-            col.pack_start(&r, false);
-            // ⚠️ **必须显式绑定 "text"**：GTK4 的 `pack_start` 只把渲染器塞进列，
-            //    **不会**把这一列的文本喂给它 ⇒ 不绑就是一片空白（列头还在，
-            //    看着像「查出来是空的」）。项目里 `panel/dbgrid.rs` 踩过同一个坑。
-            col.add_attribute(&r, "text", i as i32);
-            // ⚠️ **列宽**：不设下限的话，GTK 按内容自动分配 ⇒「详情」列的
-            //    长文本会把「名称/镜像」挤成「s…」「im…」（用户一眼看不到
-            //    容器叫啥）⇒ 名称/详情两列 **expand**，其余给**下限**。
+            // ⚠️ **渲染器按列挑**：状态列用「药丸」（美化·地基 2/5）——胶囊底
+            //    + 色点 + 文字，一屏扫下来先看到的是**形状**；其余列用文字。
+            //
+            // ⚠️ **必须显式喂数据**：GTK4 的 `pack_start` 只把渲染器塞进列，
+            //    **不会**自己把这一列的文本喂给它 ⇒ 不绑就是一片空白（列头
+            //    还在，看着像「查出来是空的」）。项目里 `panel/dbgrid.rs`
+            //    踩过同一个坑。药丸走 `cell_data_func`，文字走 `add_attribute`。
+            if i == COL_STATE {
+                let pr = crate::panel::pillcell::PillCellRenderer::new();
+                col.pack_start(&pr, false);
+                col.set_cell_data_func(&pr, move |_col, cell, model, iter| {
+                    let raw: String = model.get(iter, COL_STATE as i32);
+                    let p = cell
+                        .downcast_ref::<crate::panel::pillcell::PillCellRenderer>()
+                        .expect("状态列的渲染器必须是 PillCellRenderer");
+                    p.set_text(pill_text_of(&raw));
+                    p.set_state(pill_state_of(&raw));
+                });
+            } else {
+                let r = gtk::CellRendererText::new();
+                r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                col.pack_start(&r, false);
+                col.add_attribute(&r, "text", i as i32);
+                if i == COL_NAME {
+                    name_renderer = Some(r.clone());
+                }
+            }
+            // ⚠️ **列宽**（UI 审查 D18）：以前 ID 80px ⇒ 12 位 ID 被截成
+            //   `200f9d6b…`；端口 100px ⇒ `127.0.0.1:54…`；内存固定 80px ⇒
+            //   `50.76MiB /…`；而半句英文的「详情」列却占 170px+ 且 expand。
+            //   ⇒ 现在：ID 给足（12 位）、端口给足、内存给足（带百分比）、
+            //   **详情列不再 expand**（内容已经是中文的短句 ⇒ 固定宽度就够）。
             match i {
                 COL_NAME => {
-                    col.set_min_width(170);
+                    col.set_min_width(180);
                     col.set_expand(true);
                 }
-                COL_ID => col.set_min_width(80),
-                COL_IMAGE => col.set_min_width(130),
-                COL_PORTS => col.set_min_width(100),
-                COL_CPU => col.set_fixed_width(60),
-                COL_MEM => col.set_fixed_width(80),
-                COL_STATE => col.set_fixed_width(90),
-                COL_DETAIL => {
-                    col.set_min_width(170);
-                    col.set_expand(true);
-                }
+                COL_ID => col.set_min_width(110),
+                COL_IMAGE => col.set_min_width(140),
+                COL_PORTS => col.set_min_width(150),
+                COL_CPU => col.set_min_width(70),
+                COL_MEM => col.set_min_width(150),
+                COL_STATE => col.set_min_width(110),
+                COL_DETAIL => col.set_min_width(160),
                 _ => {}
             }
-            if i == COL_NAME {
-                name_renderer = Some(r.clone());
-            }
+            // ⚠️ **每一列都能排序**（UI 审查 D4）：给列头一个排序 id ⇒
+            //   用户点列头就能排序（GTK 会自己画排序箭头）。
+            //   ⚠️ **默认不排**（不调 `set_sort_column_id`）⇒ 保持
+            //   `docker ps` 原来的顺序，不擅自改用户的视图。
+            col.set_sort_column_id(i as i32);
             view.append_column(&col);
+        }
+    }
+    // ---- 排序函数（UI 审查 D4）----
+    //
+    // ⚠️ **每个列都要注册**：GTK 不知道没注册的列该怎么排 ⇒ 点了没反应。
+    // ⚠️ **CPU / 内存按数值排**（不是字符串）：`"9.5%"` 按字典序排在
+    //   `"50.8%"` **前面** ⇒ 「找最占资源的容器」会看错。
+    {
+        for (col, kind) in [
+            (COL_NAME, SortKind::Text),
+            (COL_ID, SortKind::Text),
+            (COL_IMAGE, SortKind::Text),
+            (COL_PORTS, SortKind::Text),
+            (COL_CPU, SortKind::Percent),
+            (COL_MEM, SortKind::Bytes),
+            (COL_STATE, SortKind::Text),
+            (COL_DETAIL, SortKind::Text),
+        ] {
+            model.set_sort_func(
+                gtk::SortColumn::Index(col as u32),
+                move |m, a, b| {
+                    let sa: String = m.get(a, col as i32);
+                    let sb: String = m.get(b, col as i32);
+                    match kind {
+                        SortKind::Text => match sa.cmp(&sb) {
+                            std::cmp::Ordering::Less => gtk::Ordering::Smaller,
+                            std::cmp::Ordering::Greater => gtk::Ordering::Larger,
+                            std::cmp::Ordering::Equal => gtk::Ordering::Equal,
+                        },
+                        _ => {
+                            let ka = sort_key(&sa, kind);
+                            let kb = sort_key(&sb, kind);
+                            match ka.partial_cmp(&kb) {
+                                Some(std::cmp::Ordering::Less) => gtk::Ordering::Smaller,
+                                Some(std::cmp::Ordering::Greater) => gtk::Ordering::Larger,
+                                _ => gtk::Ordering::Equal,
+                            }
+                        }
+                    }
+                },
+            );
         }
     }
     let scroll = gtk::ScrolledWindow::new();
@@ -1635,19 +2402,44 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let images_hint = gtk::Label::new(Some(tr("选中一个镜像才能操作")));
     images_hint.set_xalign(0.0);
     images_hint.add_css_class("dim-label");
+    // ⚠️ **搜索框**（UI 审查 D12）：容器页有，镜像 / 卷 / 网络三页以前
+    //   **一点筛选都没有** ⇒ 镜像一多就只能肉眼扫。
+    let images_search = gtk::SearchEntry::new();
+    images_search.set_placeholder_text(Some(tr("搜索镜像")));
+    images_search.set_hexpand(true);
     let images_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     images_bar.set_margin_start(6);
     images_bar.set_margin_end(6);
     images_bar.set_margin_top(4);
+    images_bar.append(&images_search);
     images_bar.append(&images_push_btn);
     images_bar.append(&images_export_btn);
     images_bar.append(&images_tag_btn);
     images_bar.append(&images_remove_btn);
     images_bar.append(&images_hint);
 
+    // 卷 / 网络两页：只加一条搜索栏。
+    let volumes_search = gtk::SearchEntry::new();
+    volumes_search.set_placeholder_text(Some(tr("搜索卷")));
+    volumes_search.set_hexpand(true);
+    let volumes_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    volumes_bar.set_margin_start(6);
+    volumes_bar.set_margin_end(6);
+    volumes_bar.set_margin_top(4);
+    volumes_bar.append(&volumes_search);
+
+    let networks_search = gtk::SearchEntry::new();
+    networks_search.set_placeholder_text(Some(tr("搜索网络")));
+    networks_search.set_hexpand(true);
+    let networks_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    networks_bar.set_margin_start(6);
+    networks_bar.set_margin_end(6);
+    networks_bar.set_margin_top(4);
+    networks_bar.append(&networks_search);
+
     let images_root = flat_page_with_bar(&images_view, Some(&images_bar));
-    let volumes_root = flat_page(&volumes_view);
-    let networks_root = flat_page(&networks_view);
+    let volumes_root = flat_page_with_bar(&volumes_view, Some(&volumes_bar));
+    let networks_root = flat_page_with_bar(&networks_view, Some(&networks_bar));
 
     // ---- 阶段 115：顶层的四个分段（容器 / 镜像 / 卷 / 网络）----
     //
@@ -1704,6 +2496,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let table_overlay = gtk::Overlay::new();
     table_overlay.set_child(Some(&scroll));
     table_overlay.add_overlay(&spin_big);
+    // ⚠️ **空态 / 错态**（UI 审查 D6）：列表空的时候不是「一块空白」，
+    //   而是「标题 + 解释 + 重试」⇒ 远端没装 docker / 没权限 / 守护进程
+    //   没起，**三者的文案不一样** ⇒ 用户一眼知道该做什么。
+    let empty = crate::emptystate::build_dynamic(&crate::emptystate::docker_empty());
+    empty.root.set_visible(false);
+    table_overlay.add_overlay(&empty.root);
 
     // ---- 详情区（阶段 110：选中容器才显示）----
     //
@@ -1733,37 +2531,23 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     d_row.set_margin_start(8);
     d_row.set_margin_end(8);
     d_row.set_margin_top(4);
+    // 状态药丸（美化·地基 2/5）：状态从标题的括号里搬出来，给个胶囊形状。
+    // 档位类（pp-pill-ok/-warn/-err/-dim）由 apply_detail 按状态现挂。
+    let d_pill = gtk::Label::new(None);
+    d_pill.add_css_class("pp-pill");
+    d_pill.set_valign(gtk::Align::Center);
     d_row.append(&d_title);
+    d_row.append(&d_pill);
     d_row.append(&d_start);
     d_row.append(&d_stop);
     d_row.append(&d_restart);
     d_row.append(&d_term);
 
-    // 一张卡片 = 标题 + 正文（正文自己能滚 ⇒ 内容再多也不撑破版面）。
-    let mk_card = |title: &str| -> (gtk::Box, gtk::Label) {
-        let head = gtk::Label::new(Some(title));
-        head.set_xalign(0.0);
-        head.add_css_class("heading");
-        let body = gtk::Label::new(Some(""));
-        body.set_xalign(0.0);
-        body.set_yalign(0.0);
-        body.set_wrap(true);
-        body.set_selectable(true);
-        let sw = gtk::ScrolledWindow::new();
-        sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        sw.set_child(Some(&body));
-        sw.set_vexpand(true);
-        let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        b.set_hexpand(true);
-        b.set_vexpand(true);
-        b.append(&head);
-        b.append(&sw);
-        (b, body)
-    };
-    let (c_config, card_config) = mk_card(tr("运行配置"));
-    let (c_net, card_net) = mk_card(tr("网络与端口"));
-    let (c_mount, card_mount) = mk_card(tr("挂载"));
-    let (c_env, card_env) = mk_card(tr("环境变量"));
+    // 一张卡片 = 标题 + **键值表**（UI 审查 D9：不是一坨自动换行的文本）。
+    let (c_config, card_config) = mk_kv_card(tr("运行配置"));
+    let (c_net, card_net) = mk_kv_card(tr("网络与端口"));
+    let (c_mount, card_mount) = mk_kv_card(tr("挂载"));
+    let (c_env, card_env) = mk_kv_card(tr("环境变量"));
 
     let grid = gtk::Grid::new();
     grid.set_column_spacing(8);
@@ -1804,6 +2588,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     log_follow.set_active(true);
     let log_clear = gtk::Button::with_label(tr("清空"));
     log_clear.add_css_class("flat");
+    // ⚠️ **「折行」开关**（UI 审查 D10）：默认**不折行**（折行会把时间戳
+    //   和正文拆开）⇒ 但长行的尾巴就这么没了 ⇒ 给个开关，想看全就打开。
+    let log_wrap = gtk::ToggleButton::with_label(tr("折行"));
+    log_wrap.set_tooltip_text(Some(tr("长行折成两行显示（默认关闭，用横向滚动看全文）")));
+    // ⚠️ **「复制全部」**（UI 审查 D10）：长行看不见 ⇒ 至少能整段复制走。
+    let log_copy = gtk::Button::with_label(tr("复制全部"));
+    log_copy.set_tooltip_text(Some(tr("把当前显示的全部日志复制到剪贴板")));
+    log_copy.add_css_class("flat");
 
     let log_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     log_bar.set_margin_start(6);
@@ -1813,10 +2605,15 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     log_bar.append(&log_pause);
     log_bar.append(&log_follow_lbl);
     log_bar.append(&log_follow);
+    log_bar.append(&log_wrap);
+    log_bar.append(&log_copy);
     log_bar.append(&log_clear);
 
     let log_scroll = gtk::ScrolledWindow::new();
-    log_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    // ⚠️ **横向滚动条常显**（UI 审查 D10）：以前 `Automatic` ⇒ 内容不够长
+    //   时滚动条**整个消失** ⇒ 用户根本不知道右边还有内容 ⇒ 长行尾巴
+    //   看着像「被截断了」。
+    log_scroll.set_policy(gtk::PolicyType::Always, gtk::PolicyType::Automatic);
     log_scroll.set_child(Some(&log_view));
     log_scroll.set_vexpand(true);
 
@@ -1847,34 +2644,35 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         let data = Rc::downgrade(&monitor_data);
         let d = gtk::DrawingArea::new();
         d.set_hexpand(true);
-        d.set_vexpand(true);
-        d.set_content_height(120);
+        // ⚠️ **不 vexpand**：这张图在**滚动容器**里（见下面的 `mon_scroll`）
+        //   ⇒ vexpand 会让它被拉得比内容还高 ⇒ 监控页越撑越高。
+        d.set_vexpand(false);
+        d.set_content_height(108);
         d.set_draw_func(move |_a, cr, w, h| {
             // ⚠️ **回调只抓弱引用**（AGENTS.md 红线：不然引用环 ⇒ 面板释放不掉）。
             let Some(data) = data.upgrade() else { return };
             let d = data.borrow();
-            // 几条线的颜色（**固定**，别每次算）。
-            const BLUE: (f64, f64, f64) = (0.20, 0.45, 0.85);
-            const GREEN: (f64, f64, f64) = (0.20, 0.65, 0.35);
-            const ORANGE: (f64, f64, f64) = (0.85, 0.45, 0.15);
-            const PURPLE: (f64, f64, f64) = (0.55, 0.35, 0.70);
-            const GRAY: (f64, f64, f64) = (0.45, 0.45, 0.45);
+            // ⚠️ **颜色从主题取**（UI 审查 D1）⇒ 暗色主题下不再是白底。
+            let pal = ChartPalette::current();
+            // ⚠️ **量程**：百分比固定 0..100；网络 / 磁盘自动（取整到好看的数）。
             match kind {
-                0 => draw_chart(cr, w, h, &[(&d.cpu, BLUE)], "%"),
-                1 => draw_chart(cr, w, h, &[(&d.mem, GREEN)], "%"),
+                0 => draw_chart(cr, w, h, &[(&d.cpu, pal.series[0])], Some(100.0), &pal),
+                1 => draw_chart(cr, w, h, &[(&d.mem, pal.series[1])], Some(100.0), &pal),
                 2 => draw_chart(
                     cr,
                     w,
                     h,
-                    &[(&d.net_rx, ORANGE), (&d.net_tx, PURPLE)],
-                    "B/s",
+                    &[(&d.net_rx, pal.series[2]), (&d.net_tx, pal.series[3])],
+                    None,
+                    &pal,
                 ),
                 _ => draw_chart(
                     cr,
                     w,
                     h,
-                    &[(&d.blk_read, GRAY), (&d.blk_write, BLUE)],
-                    "B/s",
+                    &[(&d.blk_read, pal.series[0]), (&d.blk_write, pal.series[1])],
+                    None,
+                    &pal,
                 ),
             }
         });
@@ -1900,10 +2698,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
 
     // ⚠️ **变量名加 `m` 前缀**：详情区那边也有 `card_net` / `card_env`
     //   之类 ⇒ 同名会互相覆盖（编译器只报类型不匹配，不报「覆盖」）。
-    let (mcard_cpu, val_cpu) = mk_card(tr("CPU"));
-    let (mcard_mem, val_mem) = mk_card(tr("内存"));
-    let (mcard_net, val_net) = mk_card(tr("网络"));
-    let (mcard_blk, val_blk) = mk_card(tr("磁盘"));
+    // ⚠️ **标题写清楚单位**（UI 审查 D21）：表格的「内存」列给的是
+    //   **绝对值 + 百分比**（`8.4% · 52.84MiB / 63.00GiB`）⇒ 这里的
+    //   「内存使用率」（百分比）就能跟它**对照** ⇒ 同一个量、单位一致。
+    let (mcard_cpu, val_cpu) = mk_card(tr("CPU 使用率"));
+    let (mcard_mem, val_mem) = mk_card(tr("内存使用率"));
+    let (mcard_net, val_net) = mk_card(tr("网络吞吐"));
+    let (mcard_blk, val_blk) = mk_card(tr("磁盘吞吐"));
     let cards = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     cards.append(&mcard_cpu);
     cards.append(&mcard_mem);
@@ -1914,13 +2715,47 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let chart_mem = mk_chart(1);
     let chart_net = mk_chart(2);
     let chart_blk = mk_chart(3);
+    // ⚠️ **每张图都有标题与图例**（UI 审查 D3）：一屏四个裸框 ⇒ 用户得靠
+    //   猜「哪张是 CPU」「橙线是收还是发」。
     let charts = gtk::Grid::new();
     charts.set_row_spacing(6);
     charts.set_column_spacing(6);
-    charts.attach(&chart_cpu, 0, 0, 1, 1);
-    charts.attach(&chart_mem, 1, 0, 1, 1);
-    charts.attach(&chart_net, 0, 1, 1, 1);
-    charts.attach(&chart_blk, 1, 1, 1, 1);
+    charts.attach(
+        &mk_chart_box(tr("CPU 使用率"), &chart_cpu, &[]),
+        0,
+        0,
+        1,
+        1,
+    );
+    charts.attach(
+        &mk_chart_box(tr("内存使用率"), &chart_mem, &[]),
+        1,
+        0,
+        1,
+        1,
+    );
+    charts.attach(
+        &mk_chart_box(
+            tr("网络吞吐（字节/秒）"),
+            &chart_net,
+            &[(tr("接收"), 2), (tr("发送"), 3)],
+        ),
+        0,
+        1,
+        1,
+        1,
+    );
+    charts.attach(
+        &mk_chart_box(
+            tr("磁盘吞吐（字节/秒）"),
+            &chart_blk,
+            &[(tr("读取"), 0), (tr("写入"), 1)],
+        ),
+        1,
+        1,
+        1,
+        1,
+    );
 
     let mon_status = gtk::Label::new(Some(""));
     mon_status.set_xalign(0.0);
@@ -1936,6 +2771,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     mon_root.append(&cards);
     mon_root.append(&charts);
     mon_root.append(&mon_status);
+    // ⚠️ **监控页自己带滚动容器**（UI 审查 D2）：详情区的高度是
+    //   「窗口高 − 写死的 360」⇒ 窗口一矮（主窗默认 1200×780）第二行图
+    //   整行就在窗口外 ⇒ **看不见也够不着**。⇒ 自己能滚 ⇒ 一定够得着。
+    let mon_scroll = gtk::ScrolledWindow::new();
+    mon_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    mon_scroll.set_vexpand(true);
+    mon_scroll.set_hexpand(true);
+    mon_scroll.set_child(Some(&mon_root));
 
     // ---- 文件页（阶段 116）：路径栏 ＋ 文件表 ＋ 上传 / 下载 / 查看 ----
     //
@@ -1969,7 +2812,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
 
     let (f_store, f_view_tbl) = flat_table(
         &[tr("名称"), tr("类型"), tr("大小"), tr("权限"), tr("类型键")],
-        &[220, 60, 100, 120, 80],
+        // ⚠️ **权限列要给够宽**：现在是中文（`目录　属主读写／属组只读／…`）
+        //   ⇒ 120px 不够 ⇒ 会被截成「目录　属主读写／…」。
+        &[220, 60, 100, 250, 80],
         0,
     );
     // ⚠️ **最后一列是内部用的类型键**（"dir" / "file" …）⇒ 不给用户看。
@@ -2025,16 +2870,29 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let page_logs = stack.add_named(&log_root, Some(PAGE_LOGS));
     page_logs.set_title(tr("日志"));
     // ⚠️ **阶段 114**：监控页（4 个指标卡 ＋ 4 张折线图）。
-    let page_monitor = stack.add_named(&mon_root, Some(PAGE_MONITOR));
+    //
+    // ⚠️ **页面本体是滚动容器**（UI 审查 D2）⇒ 窗口再矮也够得着第二行图。
+    let page_monitor = stack.add_named(&mon_scroll, Some(PAGE_MONITOR));
     page_monitor.set_title(tr("监控"));
 
     // ⚠️ **阶段 116**：文件页（浏览 ＋ 上传 ＋ 下载）。
     let page_files = stack.add_named(&f_root, Some(PAGE_FILES));
     page_files.set_title(tr("文件"));
 
+    // ⚠️ **容器终端页**（UI 审查 D19：终端搬进容器页了）。
+    //
+    // ⚠️ **内容是懒建的**：终端后端（VTE / ghostty）**第一次打开终端时**
+    //   才建 ⇒ 不给每个用户白造一个终端控件。
+    let term_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let page_term = stack.add_named(&term_slot, Some(PAGE_TERM));
+    page_term.set_title(tr("终端"));
+
     let switcher = gtk::StackSwitcher::new();
     switcher.set_stack(Some(&stack));
-    switcher.set_halign(gtk::Align::Start);
+    // ⚠️ **页签条占满整幅**（UI 审查 D17）：以前 `set_halign(Start)` ⇒
+    //   页签条只占 ≈537px，详情区 1000px ⇒ 右边空一大块（看着像没做完）。
+    switcher.set_halign(gtk::Align::Fill);
+    switcher.set_hexpand(true);
 
     let d_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
     d_root.set_margin_start(6);
@@ -2100,12 +2958,36 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     detail_box.append(&p_root);
 
     // ---- 状态行 ----
+    //
+    // ⚠️ **一行三样**（UI 审查 D7 / D13）：
+    // - 左边：当前分段的**状态文字**（每个分段各存一份 ⇒ 不互相污染）；
+    // - 右边：「上次刷新 hh:mm:ss」（**从工具条挪过来** ⇒ 工具条不再
+    //   挤成一团，D13 说的「上次刷新」与「自动刷新」连成一片的问题消失）；
+    // - 再右边：**双击提示**（双击进 shell 以前是个**没有提示的隐藏交互**）。
     let status = gtk::Label::new(Some(tr("正在读取远程容器…")));
     status.set_xalign(0.0);
     status.set_margin_start(6);
     status.set_margin_end(6);
     status.set_margin_top(2);
     status.set_margin_bottom(2);
+    status.set_hexpand(true);
+    status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    last.set_margin_end(6);
+    last.set_valign(gtk::Align::Center);
+
+    let hint = gtk::Label::new(Some(tr("双击容器行可进入 shell")));
+    hint.set_xalign(1.0);
+    hint.set_margin_end(6);
+    hint.set_margin_top(2);
+    hint.set_margin_bottom(2);
+    hint.add_css_class("dim-label");
+    hint.set_valign(gtk::Align::Center);
+
+    let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    status_bar.append(&status);
+    status_bar.append(&last);
+    status_bar.append(&hint);
 
     // ---- 页面：上（工具条 + 表格）｜下（详情区）----
     //
@@ -2135,7 +3017,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(&seg_bar);
     page.append(&seg_stack);
-    page.append(&status);
+    page.append(&status_bar);
 
     // ---- 外层：给**编辑区**留一个落点（阶段 113 之后）----
     //
@@ -2171,6 +3053,11 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         model,
         view: view.clone(),
         status,
+        status_text: RefCell::new(HashMap::new()),
+        empty,
+        search_entry: search.clone(),
+        hint,
+        row_menu: RefCell::new(None),
         last,
         auto: auto.clone(),
         filter: Cell::new(Filter::All),
@@ -2187,6 +3074,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         detail: DetailUi {
             root: d_root,
             title: d_title,
+            pill: d_pill,
             config: card_config,
             net: card_net,
             mount: card_mount,
@@ -2213,6 +3101,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             btn_pause: log_pause.clone(),
             btn_clear: log_clear.clone(),
             follow: log_follow.clone(),
+            wrap: log_wrap.clone(),
             status: log_status,
         },
         stack: stack.clone(),
@@ -2253,6 +3142,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         images_hint: images_hint.clone(),
         images_selected: RefCell::new(String::new()),
         images_op_msg: RefCell::new(String::new()),
+        images_all: RefCell::new(Vec::new()),
+        volumes_all: RefCell::new(Vec::new()),
+        networks_all: RefCell::new(Vec::new()),
+        images_query: RefCell::new(String::new()),
+        volumes_query: RefCell::new(String::new()),
+        networks_query: RefCell::new(String::new()),
         volumes_store: volumes_store.clone(),
         volumes_view: volumes_view.clone(),
         networks_store: networks_store.clone(),
@@ -2275,7 +3170,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         networks_busy: Cell::new(false),
         term_chan: RefCell::new(None),
         term_running: Cell::new(false),
-        term_win: RefCell::new(None),
+        term_slot: RefCell::new(Some(term_slot.clone())),
+        term_page_ready: Cell::new(false),
         term_closing: Cell::new(false),
         term_view: RefCell::new(None),
         term_bar: RefCell::new(None),
@@ -2360,6 +3256,31 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         }
         update_images_actions(&ui);
     }
+    // ---- 三个分段的**搜索框**（UI 审查 D12）----
+    {
+        let u = Rc::downgrade(&ui);
+        images_search.connect_search_changed(move |s| {
+            let Some(u) = u.upgrade() else { return };
+            *u.images_query.borrow_mut() = s.text().to_string();
+            refilter_images(&u);
+        });
+    }
+    {
+        let u = Rc::downgrade(&ui);
+        volumes_search.connect_search_changed(move |s| {
+            let Some(u) = u.upgrade() else { return };
+            *u.volumes_query.borrow_mut() = s.text().to_string();
+            refilter_volumes(&u);
+        });
+    }
+    {
+        let u = Rc::downgrade(&ui);
+        networks_search.connect_search_changed(move |s| {
+            let Some(u) = u.upgrade() else { return };
+            *u.networks_query.borrow_mut() = s.text().to_string();
+            refilter_networks(&u);
+        });
+    }
 
     // 主线程接收循环（**弱引用** ⇒ 面板关了这条循环自己会结束）。
     {
@@ -2380,13 +3301,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         // ⚠️ **把操作结果贴回去**（刷新那条消息会冲掉它）。
                         let op = u.images_op_msg.borrow().clone();
                         if !op.is_empty() {
-                            u.status.set_text(&op);
+                            u.set_segment_status(SEG_IMAGES, &op);
                             u.images_op_msg.borrow_mut().clear();
                         }
                     }
                     Msg::Images(Err(msg)) => {
                         u.images_busy.set(false);
-                        u.status.set_text(&msg);
+                        u.set_segment_status(SEG_IMAGES, &msg);
                     }
                     Msg::Volumes(Ok(v)) => {
                         u.volumes_busy.set(false);
@@ -2394,7 +3315,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     }
                     Msg::Volumes(Err(msg)) => {
                         u.volumes_busy.set(false);
-                        u.status.set_text(&msg);
+                        u.set_segment_status(SEG_VOLUMES, &msg);
                     }
                     Msg::Networks(Ok(v)) => {
                         u.networks_busy.set(false);
@@ -2402,7 +3323,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     }
                     Msg::Networks(Err(msg)) => {
                         u.networks_busy.set(false);
-                        u.status.set_text(&msg);
+                        u.set_segment_status(SEG_NETWORKS, &msg);
                     }
                     // ⚠️ **阶段 116**：文件列表 / 传输 / 查看。
                     Msg::Files { name, path, seq, r } => {
@@ -2426,7 +3347,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     }
                     // ⚠️ **阶段 120**：镜像操作的结果（进度 / 成功 / 失败）。
                     Msg::ImageOp { msg, done } => {
-                        u.status.set_text(&msg);
+                        u.set_segment_status(SEG_IMAGES, &msg);
                         if done {
                             // ⚠️ **结果先存着** ⇒ 等列表刷新完再贴回去
                             //   （刷新那条「共 N 个镜像」会把结果冲掉）。
@@ -2457,8 +3378,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         Ok(text) => show_file_window(stw.upgrade().as_ref(), &path, &text),
                         Err(msg) => {
                             if let Some(st) = stw.upgrade() {
+                                let parent = host_window(&u, &st);
                                 crate::panel::dialogs::show_error(
-                                    st.topwin().as_ref(),
+                                    parent.as_ref(),
                                     &tr("查看文件失败"),
                                     &msg,
                                 );
@@ -2553,7 +3475,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     }
                     Msg::Action(msg) => {
                         *u.last_action.borrow_mut() = msg.clone();
-                        u.status.set_text(&msg);
+                        u.set_segment_status(SEG_CONTAINERS, &msg);
                         // 动作完了 ⇒ 列表刷新（状态变了）＋ 详情重取。
                         if let Some(st) = stw.upgrade() {
                             refresh(&st, &u);
@@ -2616,6 +3538,15 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             start_stats(&st, &u, &n);
                         }
                     }
+                    // ⚠️ **换容器了** ⇒ 容器终端也得换（UI 审查 D19：终端
+                    //    现在在页面里 ⇒ 它显示的是**这个容器**的 shell）。
+                    if u.term_name.borrow().as_str() != n && u.term_running.get() {
+                        stop_terminal(&u);
+                        // 终端页正开着 ⇒ 给新容器起一条。
+                        if u.stack.visible_child_name().as_deref() == Some(PAGE_TERM) {
+                            open_container_terminal(&st, &u, &n);
+                        }
+                    }
                     load_detail(&st, &u, &n);
                 }
                 None => u.clear_detail(),
@@ -2635,7 +3566,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             };
             let name = u.selected.borrow().clone();
             if name.is_empty() {
-                u.status.set_text(tr("先在列表里选中一个容器"));
+                u.set_segment_status(SEG_CONTAINERS, tr("先在列表里选中一个容器"));
                 return;
             }
             open_container_terminal(&st, &u, &name);
@@ -2660,24 +3591,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 }
                 // ⚠️ **二次确认**：停掉用户服务器上的容器是**不可逆**的副作用 ⇒
                 //    先问一句（默认焦点落在「取消」上 ⇒ 手快按回车不会误停）。
-                let msg = trf!(
-                    "确定要{act}容器「{name}」吗？",
-                    act = action.label(),
-                    name = name
-                );
-                let (st2, u2) = (st.clone(), u.clone());
-                crate::panel::dialogs::confirm_title(
-                    st.topwin().as_ref(),
-                    tr("请确认"),
-                    &msg,
-                    action.label(),
-                    move |ok| {
-                        if !ok {
-                            return;
-                        }
-                        do_action(&st2, &u2, action);
-                    },
-                );
+                confirm_container_action(&st, &u, &name, action);
             });
         }
     }
@@ -2745,8 +3659,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     )
                 };
                 let (st2, u2) = (st.clone(), u.clone());
+                let parent = host_window(&u, &st);
                 crate::panel::dialogs::confirm_title(
-                    st.topwin().as_ref(),
+                    parent.as_ref(),
                     tr("请确认"),
                     &msg,
                     action.label(),
@@ -2884,14 +3799,15 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 let Some(st) = stw.upgrade() else { return };
                 let container = u.selected.borrow().clone();
                 if container.is_empty() {
+                    let parent = host_window(&u, &st);
                     crate::panel::dialogs::show_error(
-                        st.topwin().as_ref(),
+                        parent.as_ref(),
                         &tr("先选一个容器"),
                         &tr("选中一个容器之后才能上传文件"),
                     );
                     return;
                 }
-                let top = st.topwin();
+                let top = host_window(&u, &st);
                 let mut b = gtk::FileChooserNative::builder()
                     .modal(true)
                     .title(if is_dir {
@@ -2913,6 +3829,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 let st2 = Rc::clone(&st);
                 let u2 = Rc::clone(&u);
                 let container2 = container.clone();
+                // ⚠️ **弹窗的 transient parent**（UI 审查 D20）⇒ 传进闭包。
+                let parent2 = top.clone();
                 ch.connect_response(move |c, r| {
                     if r == gtk::ResponseType::Accept {
                         if let Some(f) = c.file() {
@@ -2934,7 +3852,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                                     d = remote_dir
                                 );
                                 crate::panel::dialogs::confirm_title(
-                                    st3.topwin().as_ref(),
+                                    parent2.as_ref(),
                                     tr("请确认"),
                                     &msg,
                                     tr("上传"),
@@ -2962,16 +3880,18 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 let Some(st) = stw.upgrade() else { return };
                 let container = u.selected.borrow().clone();
                 if container.is_empty() {
+                    let parent = host_window(&u, &st);
                     crate::panel::dialogs::show_error(
-                        st.topwin().as_ref(),
+                        parent.as_ref(),
                         &tr("先选一个容器"),
                         &tr("选中一个容器之后才能下载文件"),
                     );
                     return;
                 }
                 let Some((name, kind)) = files_selected(&u) else {
+                    let parent = host_window(&u, &st);
                     crate::panel::dialogs::show_error(
-                        st.topwin().as_ref(),
+                        parent.as_ref(),
                         &tr("先选一个条目"),
                         &tr("先在列表里选中一个条目，再点「下载…」"),
                     );
@@ -2979,7 +3899,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 };
                 let remote = files_remote_path(&u, &name);
                 let is_dir = kind == "dir";
-                let top = st.topwin();
+                let top = host_window(&u, &st);
                 let mut b = gtk::FileChooserNative::builder()
                     .modal(true)
                     .title(tr("选下载到哪个目录"))
@@ -3018,16 +3938,18 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     return;
                 }
                 let Some((name, kind)) = files_selected(&u) else {
+                    let parent = host_window(&u, &st);
                     crate::panel::dialogs::show_error(
-                        st.topwin().as_ref(),
+                        parent.as_ref(),
                         &tr("先选一个条目"),
                         &tr("先在列表里选中一个文件，再点「查看…」"),
                     );
                     return;
                 };
                 if kind == "dir" {
+                    let parent = host_window(&u, &st);
                     crate::panel::dialogs::show_error(
-                        st.topwin().as_ref(),
+                        parent.as_ref(),
                         &tr("看不了目录"),
                         &tr("目录请用「下载…」整个拉下来"),
                     );
@@ -3074,6 +3996,33 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             u.log_clear();
         });
     }
+    // **「折行」开关**（UI 审查 D10）
+    {
+        let u = Rc::downgrade(&ui);
+        log_wrap.connect_toggled(move |b| {
+            let Some(u) = u.upgrade() else { return };
+            // ⚠️ **开着就折行，不开就横向滚动**（折行会把时间戳与正文拆开）。
+            u.log
+                .view
+                .set_wrap_mode(if b.is_active() {
+                    gtk::WrapMode::WordChar
+                } else {
+                    gtk::WrapMode::None
+                });
+        });
+    }
+    // **「复制全部」**（UI 审查 D10）
+    {
+        let u = Rc::downgrade(&ui);
+        log_copy.connect_clicked(move |_| {
+            let Some(u) = u.upgrade() else { return };
+            let text = u.log.buffer.text(&u.log.buffer.start_iter(), &u.log.buffer.end_iter(), false);
+            copy_to_clipboard(&text);
+            u.log
+                .status
+                .set_text(&trf!("已复制 {n} 个字符到剪贴板", n = text.chars().count()));
+        });
+    }
     // **自动跟随**：打开时立刻滚到底。
     {
         let u = Rc::downgrade(&ui);
@@ -3111,21 +4060,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 u.refilter();
             });
         }
-    }
-    // 「刷新」按钮
-    //
-    // ⚠️ **抓弱引用**（AGENTS.md 引用环红线）：界面控件在 `PanelState` 里，
-    // 回调里再抓 `PanelState` 的**强引用** ⇒ 控件 → PanelState → 控件
-    // 成环 ⇒ 面板永远释放不掉。
-    {
-        let stw = Rc::downgrade(st);
-        let u = Rc::downgrade(&ui);
-        refresh_btn.connect_clicked(move |_| {
-            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                return;
-            };
-            refresh(&st, &u);
-        });
     }
     // 自动刷新开关
     {
@@ -3170,6 +4104,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 }
                 u.seg_current.set(key);
                 u.seg.set_visible_child_name(key);
+                // ⚠️ **底部那行跟着换**（UI 审查 D7）：否则切到「镜像」页
+                //   底栏还挂着「正在读取远程容器…」（上一段污染下一段）。
+                u.sync_status_line();
                 refresh_segment(&st, &u);
             });
         }
@@ -3222,7 +4159,226 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             }
         });
     }
+    // ================= UI 审查 D5：右键菜单 ＋ 键盘 =================
+    {
+        // ---- **右键菜单**（进 shell / 日志 / 启停 / 重启 / 复制 ID）----
+        //
+        // ⚠️ **为什么要有**：写操作（启停 / 重启 / 进 shell）以前**只能**
+        //   「选中行 → 看下半区详情 → 点按钮」⇒ 在 20 个容器里停掉一个要
+        //   滚动、选中、够到下半区、再点 ⇒ 右键直接就在手边。
+        //
+        // ⚠️ **GTK4 没有 `connect_button_press_event`**（那是 GTK3 的写法）
+        //   ⇒ 右键要用 `GestureClick`（`set_button(3)`）。
+        let pop = crate::menu::popover(&view);
+        let body = crate::menu::body();
+        let b_shell = crate::menu::item("utilities-terminal-symbolic", tr("进入容器"), None);
+        let b_logs = crate::menu::item("text-x-generic-symbolic", tr("查看日志"), None);
+        let b_start = crate::menu::item("media-playback-start-symbolic", tr("启动"), None);
+        let b_stop = crate::menu::item("media-playback-stop-symbolic", tr("停止"), None);
+        let b_restart = crate::menu::item("view-refresh-symbolic", tr("重启"), None);
+        let b_copy = crate::menu::item("edit-copy-symbolic", tr("复制容器 ID"), None);
+        body.append(&b_shell);
+        body.append(&b_logs);
+        body.append(&crate::menu::sep());
+        body.append(&b_start);
+        body.append(&b_stop);
+        body.append(&b_restart);
+        body.append(&crate::menu::sep());
+        body.append(&b_copy);
+        pop.set_child(Some(&body));
+
+        // 右键 ⇒ 先把光标挪到那一行（这样菜单里的操作针对的是右键的那一行）。
+        {
+            let view2 = view.clone();
+            let click = gtk::GestureClick::new();
+            click.set_button(3);
+            click.connect_pressed(move |_g, _n, x, y| {
+                if let Some((Some(path), _c, _cx, _cy)) = view2.path_at_pos(x as i32, y as i32) {
+                    gtk::prelude::TreeViewExt::set_cursor(&view2, &path, None, false);
+                }
+            });
+            view.add_controller(click);
+        }
+        // 菜单里的五个动作。
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            b_shell.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                let Some(name) = u.selected_container_name() else { return };
+                open_container_terminal(&st, &u, &name);
+                u.close_row_menu();
+            });
+        }
+        {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            b_logs.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                let Some(name) = u.selected_container_name() else { return };
+                // ⚠️ **切到日志页** ⇒ 那一页自己会起流（见 stack 的
+                //   `visible-child-name` 回调）。
+                u.stack.set_visible_child_name(PAGE_LOGS);
+                let _ = st;
+                u.close_row_menu();
+            });
+        }
+        for (btn, action) in [
+            (b_start, Action::Start),
+            (b_stop, Action::Stop),
+            (b_restart, Action::Restart),
+        ] {
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
+            btn.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                let Some(name) = u.selected_container_name() else { return };
+                u.close_row_menu();
+                confirm_container_action(&st, &u, &name, action);
+            });
+        }
+        {
+            let u = Rc::downgrade(&ui);
+            b_copy.connect_clicked(move |_| {
+                let Some(u) = u.upgrade() else { return };
+                let Some(name) = u.selected_container_name() else { return };
+                let id = u.selected_container_id();
+                u.close_row_menu();
+                let _ = name;
+                copy_to_clipboard(&id);
+            });
+        }
+        // 菜单挂在表格上 ⇒ 右键哪一行就在哪儿弹。
+        {
+            let pop2 = pop.clone();
+            let click = gtk::GestureClick::new();
+            click.set_button(3);
+            click.connect_pressed(move |_g, _n, x, y| {
+                pop2.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                    x as i32,
+                    y as i32,
+                    1,
+                    1,
+                )));
+                pop2.popup();
+            });
+            view.add_controller(click);
+        }
+        *ui.row_menu.borrow_mut() = Some(pop);
+    }
+    // ---- **键盘**（↑↓ 选行 / Enter 进 shell / Del 停止 / `/` 搜）----
+    //
+    // ⚠️ **↑↓ 是 GTK 自带的**（表格获得焦点就能上下选行）⇒ 这里只补
+    //   三个**没有**的：Enter / Del / `/`。
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        let key = gtk::EventControllerKey::new();
+        key.connect_key_pressed(move |_k, keyval, _code, mods| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return glib::Propagation::Proceed;
+            };
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            match keyval {
+                // ⚠️ **Enter** ⇒ 进 shell（跟双击一样）。
+                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
+                    if let Some(name) = u.selected_container_name() {
+                        open_container_terminal(&st, &u, &name);
+                        return glib::Propagation::Stop;
+                    }
+                }
+                // ⚠️ **Delete** ⇒ 停止容器（写操作 ⇒ 照样二次确认）。
+                gtk::gdk::Key::Delete => {
+                    if let Some(name) = u.selected_container_name() {
+                        confirm_container_action(&st, &u, &name, Action::Stop);
+                        return glib::Propagation::Stop;
+                    }
+                }
+                // ⚠️ **`/`** ⇒ 跳到搜索框（跟大部分列表界面一样）。
+                gtk::gdk::Key::slash if !ctrl => {
+                    u.search_entry.grab_focus();
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
+            }
+            glib::Propagation::Proceed
+        });
+        view.add_controller(key);
+    }
+    // ---- **空态的「重试」按钮**（UI 审查 D6）----
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        ui.empty.primary.connect_clicked(move |_| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return;
+            };
+            refresh(&st, &u);
+        });
+    }
     ui
+}
+
+/// 把一段文字**复制到剪贴板**。
+fn copy_to_clipboard(text: &str) {
+    if let Some(d) = gtk::gdk::Display::default() {
+        d.clipboard().set_text(text);
+    }
+}
+
+/// 启停 / 重启的**二次确认**（写操作 ⇒ 一律要问一句）。
+///
+/// ⚠️ **为什么单独一个函数**：详情区的按钮与右键菜单、键盘 Delete
+///   都要走这同一套确认 ⇒ 别复制三份（改一处漏两处的经典坑）。
+fn confirm_container_action(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    name: &str,
+    action: Action,
+) {
+    // ⚠️ **二次确认**：停掉用户服务器上的容器是**不可逆**的副作用 ⇒
+    //   先问一句（默认焦点落在「取消」上 ⇒ 手快按回车不会误停）。
+    let msg = trf!(
+        "确定要{act}容器「{name}」吗？",
+        act = action.label(),
+        name = name
+    );
+    let (st2, u2) = (st.clone(), ui.clone());
+    let name2 = name.to_string();
+    let parent = host_window(ui, st);
+    crate::panel::dialogs::confirm_title(
+        parent.as_ref(),
+        tr("请确认"),
+        &msg,
+        action.label(),
+        move |ok| {
+            if !ok {
+                return;
+            }
+            do_action(&st2, &u2, action, &name2);
+        },
+    );
+}
+
+/// 容器页的**宿主窗口**（弹窗的 transient parent）。
+///
+/// ⚠️ **为什么不用 `st.topwin()`**（UI 审查 D20）：`topwin()` 从
+///   `PanelState::root` 往上找祖先窗口 ⇒ 容器页**还没挂进窗口**时（或
+///   单独放进一个窗口时）它返回 `None` ⇒ 弹窗**没有 transient parent**
+///   ⇒ GTK 会警告「GtkDialog mapped without a transient parent」⇒
+///   弹窗可能落在屏幕任意位置、甚至在主窗**后面**。
+///   ⇒ 改成从**容器页自己**往上找 ⇒ 拿到的就是**真正显示它的那扇窗**。
+fn host_window(ui: &Rc<DockerUi>, st: &Rc<PanelState>) -> Option<gtk::Window> {
+    ui.page
+        .ancestor(gtk::Window::static_type())
+        .and_downcast::<gtk::Window>()
+        .or_else(|| st.topwin())
 }
 
 /// 开/关自动刷新定时器。
@@ -3506,14 +4662,13 @@ pub fn stop_stats(ui: &Rc<DockerUi>) {
 /// 做一次**写操作**（启停 / 重启）。
 ///
 /// ⚠️ **界面必须先二次确认**（见 `build()` 里的按钮接线）⇒ 这里只管执行。
-fn do_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: Action) {
-    let name = ui.selected.borrow().clone();
+fn do_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: Action, name: &str) {
     if name.is_empty() {
         return;
     }
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
-    let name2 = name.clone();
+    let name2 = name.to_string();
     let tx = ui.tx.clone();
     let rt = crate::backend::hub::runtime();
     rt.spawn(async move {
@@ -3541,7 +4696,7 @@ fn do_compose_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, action: ComposeActi
     }
     // 配置文件与工作目录取自**容器标签**（项目里每个容器都带一份）。
     let Some(sum) = ui.project_summary(&name) else {
-        ui.status.set_text(tr("找不到这个 compose 项目的容器"));
+        ui.set_segment_status(SEG_CONTAINERS, tr("找不到这个 compose 项目的容器"));
         return;
     };
     let opts = st.opts.clone();
@@ -3587,39 +4742,42 @@ enum ShellChoice {
 /// ⚠️ **走共享连接**上的独立 exec 通道（不新增 SSH 连接）。
 /// ⚠️ **容器里可能没有 shell** ⇒ 挨个试 `/bin/sh` → `/bin/bash` → … ⇒
 ///    全都没有才报错（说清楚试了哪些）。
-/// ⚠️ **终端另开一个窗口**：容器详情区只有一小块 ⇒ 终端塞进去只有几行
-///    （用户没法用）⇒ 单独一个窗口（跟「外观窗口」「凭据库管理器」一样）。
-/// ⚠️ **阶段 119**：窗口与终端控件**只建一次** ⇒ 「重连 / 换 shell」
-///    **复用**它们（不另开窗口、不重建控件 ⇒ 滚动缓冲也还在）。
+/// ⚠️ **终端现在在容器页里**（UI 审查 D19）：以前是**另开一个窗口**
+///   ⇒ 编辑器都搬进容器页了（阶段 124），终端还留在外面不一致；
+///   而且那个窗口**没有 transient parent**（可能落在主窗后面）。
+///   ⇒ 现在终端是详情区的**一个子页**（「终端」页签）。
+/// ⚠️ **阶段 119**：终端控件**只建一次** ⇒ 「重连 / 换 shell」
+///   **复用**它（不重建控件 ⇒ 滚动缓冲也还在）。
 fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     // 已经在开着 ⇒ 别开第二个（远端会多一个孤儿 shell）。
-    if ui.term_running.get() {
-        ui.status.set_text(tr("容器终端已经开着（在另一个窗口里）"));
+    if ui.term_running.get() && ui.term_name.borrow().as_str() == name {
+        // ⚠️ **已经在看着它** ⇒ 只需把页面切过去。
+        ui.stack.set_visible_child_name(PAGE_TERM);
         return;
     }
+    // ⚠️ **换容器了** ⇒ 旧的会话要收掉（不然容器里留着孤儿 shell）。
+    if ui.term_running.get() {
+        stop_terminal(ui);
+    }
     *ui.term_name.borrow_mut() = name.to_string();
-    ensure_term_window(st, ui, name);
+    ensure_term_page(st, ui);
+    // ⚠️ **切到「终端」页**（用户要看终端 ⇒ 就在眼前）。
+    ui.stack.set_visible_child_name(PAGE_TERM);
     start_term_session(st, ui, name, ShellChoice::Auto);
 }
 
-/// **建容器终端的窗口**（第一次开时建；以后**复用**）。
+/// **建容器终端的页面内容**（第一次打开时建；以后**复用**）。
 ///
-/// ⚠️ **为什么复用**：重连 / 换 shell 时**不该**弹第二个窗口（用户以为
-///   界面出问题了）⇒ 窗口、工具条、搜索条、终端控件**都留着**。
-fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
-    // 窗口还**在屏幕上** ⇒ 复用（不用重建）。
-    let alive = ui
-        .term_win
-        .borrow()
-        .as_ref()
-        .map(|w| w.is_visible())
-        .unwrap_or(false);
-    if alive {
+/// ⚠️ **为什么复用**：重连 / 换 shell 时**不该**重建终端控件（用户以为
+///   界面出问题了，而且滚动缓冲会丢）⇒ 工具条、搜索条、终端控件**都留着**。
+fn ensure_term_page(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    // 建过了 ⇒ 复用。
+    if ui.term_page_ready.get() {
         return;
     }
-    // ⚠️ **旧的窗口已经关掉了**（里面的控件也跟着销毁了）⇒ 句柄**全丢掉**，
+    ui.term_page_ready.set(true);
+    // ⚠️ **旧控件已经销毁了**（`stop_terminal` 清过）⇒ 句柄**全丢掉**，
     //    别攥着一个已销毁的控件（再用会炸）。
-    *ui.term_win.borrow_mut() = None;
     ui.term_view.borrow_mut().take();
     *ui.term_bar.borrow_mut() = None;
     *ui.term_shell_combo.borrow_mut() = None;
@@ -3637,16 +4795,14 @@ fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     let view = term.widget().clone();
     term.set_expand(true, true);
 
-    let win = gtk::Window::new();
-    win.set_title(Some(&trf!("容器终端：{n}", n = name)));
-    win.set_default_size(900, 560);
-
     let status = gtk::Label::new(Some(tr("正在打开容器终端…")));
     status.set_xalign(0.0);
+    status.set_hexpand(true);
     status.set_margin_start(6);
     status.set_margin_end(6);
     status.set_margin_bottom(4);
     status.add_css_class("dim-label");
+    status.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     // ---- 工具条（阶段 119：切 shell / 重连 / 清屏 / 搜索）----
     let shell_lbl = gtk::Label::new(Some(tr("Shell")));
@@ -3667,6 +4823,11 @@ fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     clear_btn.set_tooltip_text(Some(tr("清掉屏幕上的输出")));
     let search_btn = gtk::ToggleButton::with_label(tr("搜索"));
     search_btn.set_tooltip_text(Some(tr("在容器终端的输出里查找")));
+    // ⚠️ **「关闭」**：终端现在在页面里 ⇒ 没有窗口的 ✕ 了 ⇒ 给一颗
+    //   「关闭终端」（收掉远端那条 `docker exec` ＋ 回概览页）。
+    let close_btn = gtk::Button::with_label(tr("关闭终端"));
+    close_btn.set_tooltip_text(Some(tr("关掉这个容器里的 shell（回到概览）")));
+    close_btn.add_css_class("flat");
 
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bar.set_margin_start(6);
@@ -3678,6 +4839,9 @@ fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     bar.append(&reconnect_btn);
     bar.append(&clear_btn);
     bar.append(&search_btn);
+    bar.append(&close_btn);
+    // ⚠️ **状态标签占满剩下的宽度**（终端名 + 当前状态）。
+    bar.append(&status);
 
     // ---- 搜索条（阶段 119）----
     //
@@ -3749,11 +4913,13 @@ fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     vbox.append(&bar);
     vbox.append(&search_bar);
     vbox.append(&view);
-    vbox.append(&status);
-    win.set_child(Some(&vbox));
-    win.present();
-    // ⚠️ **记下窗口句柄**（测试钩子要能关掉它）。
-    *ui.term_win.borrow_mut() = Some(win.clone());
+    // ⚠️ **装进详情区的「终端」页**（不是另开窗口 ⇒ UI 审查 D19）。
+    if let Some(slot) = ui.term_slot.borrow().as_ref() {
+        while let Some(child) = slot.first_child() {
+            slot.remove(&child);
+        }
+        slot.append(&vbox);
+    }
     *ui.term_bar.borrow_mut() = Some(bar);
     *ui.term_shell_combo.borrow_mut() = Some(shell_combo.clone());
     *ui.term_shell_items.borrow_mut() = shell_items;
@@ -3765,15 +4931,13 @@ fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     *ui.term_search_btn.borrow_mut() = Some(search_btn.clone());
     *ui.term_view.borrow_mut() = Some(term);
 
-    // ⚠️ **窗口关掉 ⇒ 远端那条 `docker exec` 也要收掉**（否则容器里会留下
-    //    一个孤儿 shell 一直占着）。
+    // ⚠️ **「关闭终端」按钮** ⇒ 收掉远端那条 `docker exec` ＋ 回概览页。
     {
         let u = Rc::downgrade(ui);
-        win.connect_close_request(move |_| {
-            if let Some(u) = u.upgrade() {
-                stop_terminal(&u);
-            }
-            glib::Propagation::Proceed
+        close_btn.connect_clicked(move |_| {
+            let Some(u) = u.upgrade() else { return };
+            stop_terminal(&u);
+            u.stack.set_visible_child_name(PAGE_OVERVIEW);
         });
     }
 
@@ -3953,10 +5117,9 @@ fn start_term_session(
                     if was_running {
                         u.term_reconnects.set(u.term_reconnects.get() + 1);
                     }
-                    // 标题带上 shell（一眼看得出现在用的是哪个）。
-                    if let Some(w) = u.term_win.borrow().as_ref() {
-                        w.set_title(Some(&trf!("容器终端：{n}（{s}）", n = name, s = shell)));
-                    }
+                    // ⚠️ **标题带上 shell**（一眼看得出现在用的是哪个）。
+                    //   ⚠️ 终端现在是**页面**（UI 审查 D19）⇒ 没有窗口标题
+                    //   了 ⇒ 标题信息落到**状态行**上（见下面的 `set_term_status`）。
                     set_term_status(
                         &u,
                         &trf!(
@@ -4033,8 +5196,8 @@ fn set_term_status(ui: &Rc<DockerUi>, text: &str) {
 
 /// 停掉**容器内终端**（关通道 ⇒ 容器里那个 shell 退出）。
 fn stop_terminal(ui: &Rc<DockerUi>) {
-    // ⚠️ **重入保护**：窗口的 `close_request` 也会调这里 ⇒ 自己调自己
-    //   （关窗口 ⇒ close_request ⇒ stop_terminal ⇒ 又关窗口…）。
+    // ⚠️ **重入保护**：「关闭终端」按钮与页签关闭钩子都会调这里 ⇒
+    //   不挡一下就是「自己调自己」。
     if ui.term_closing.get() {
         return;
     }
@@ -4044,22 +5207,18 @@ fn stop_terminal(ui: &Rc<DockerUi>) {
     ui.term_gen.set(ui.term_gen.get() + 1);
     // ⚠️ **请求序号 +1** ⇒ 还在路上的请求作废（它到了也没地方挂）。
     ui.term_req.set(ui.term_req.get() + 1);
-    // ⚠️ **控件句柄也要清掉**：窗口已经关了 ⇒ 那个控件已经被销毁 ⇒
+    // ⚠️ **控件句柄清掉**：会话已经断了 ⇒ 那个控件没有后端了 ⇒
     //    攥着它再用会炸。
     ui.term_view.borrow_mut().take();
-    // ⚠️ **窗口也要关掉**（阶段 125 顺手修的真 bug）：
-    //    以前只「把句柄 take 掉」**不关窗口** ⇒
-    //    - 用户**关掉容器页签** ⇒ 容器终端窗口**留在屏幕上**（里面是
-    //      一个已经死掉的终端）⇒ 还**盖住**别的窗口；
-    //    - 截图也拍不到该拍的东西（盖在上面）。
-    //    ⇒ 现在由 `stop_terminal` 负责把窗口收掉。
-    //
-    // ⚠️ **窗口句柄留着**（不 take）：留着才能回答「那个窗口**还在屏幕上
-    //    吗**」（测试钩子要问这个）⇒ 窗口关掉了它只是不在屏幕上了 ⇒
-    //    攥着也安全（我们只对它调 `close`，不再用里面的控件）。
-    if let Some(w) = ui.term_win.borrow().as_ref() {
-        w.close();
+    // ⚠️ **终端页的内容也清掉**（UI 审查 D19）：终端现在是**页面里的
+    //    一个控件** ⇒ 会话断了以后那一页不能还留着一个死终端 ⇒
+    //    清空 ⇒ 下次打开会重新建。
+    if let Some(slot) = ui.term_slot.borrow().as_ref() {
+        while let Some(child) = slot.first_child() {
+            slot.remove(&child);
+        }
     }
+    ui.term_page_ready.set(false);
     ui.term_running.set(false);
     ui.term_closing.set(false);
 }
@@ -4116,7 +5275,7 @@ fn refresh(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     ui.busy.set(true);
     // ⚠️ **loading 动画**（用户 2026-11-16）：开始取了 ⇒ 转起来。
     ui.set_loading(true);
-    ui.status.set_text(&tr("正在读取远程容器…"));
+    ui.set_segment_status(SEG_CONTAINERS, tr("正在读取远程容器…"));
 
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
@@ -4266,8 +5425,53 @@ pub fn set_rows_for_test(st: &Rc<PanelState>, rows: Vec<ContainerInfo>) {
     ui.busy.set(false);
     *ui.containers.borrow_mut() = rows.clone();
     ui.rebuild(&rows);
+    // ⚠️ **空态也得对上**（UI 审查 D6）⇒ 灌一份空数据进去也该看到空态。
+    ui.sync_empty_state(rows.is_empty());
     // ⚠️ **loading 动画停掉**（测试里不连服务器 ⇒ 没有「正在加载」这回事）。
     ui.set_loading(false);
+}
+
+/// 测试钩子：**按某一列排序**（UI 审查 D4）⇒ 返回排序后的**顶层行名字**。
+///
+/// ⚠️ **为什么要有这个钩子**：排序是「点列头」触发的 ⇒ 冒烟点不到列头
+///   ⇒ 得能**直接**把模型排一遍 ⇒ 才能验「CPU 列真的按**数值**排」
+///   （`9.5%` 必须排在 `50.8%` 前面 ⇒ 字符串排序会看错）。
+pub fn sort_by_for_test(st: &Rc<PanelState>, col: usize, asc: bool) -> Vec<String> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    ui.model.set_sort_column_id(
+        gtk::SortColumn::Index(col as u32),
+        if asc {
+            gtk::SortType::Ascending
+        } else {
+            gtk::SortType::Descending
+        },
+    );
+    let mut out = Vec::new();
+    if let Some(mut it) = ui.model.iter_first() {
+        loop {
+            let name: String = ui.model.get(&it, COL_NAME as i32);
+            out.push(name);
+            if !ui.model.iter_next(&mut it) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 测试钩子：**空态 / 错态**是不是显示着（UI 审查 D6）。
+pub fn empty_state_visible_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.empty.root.is_visible()
+}
+
+/// 测试钩子：**空态的标题**（错态分类要看它）。
+pub fn empty_state_title_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    ui.empty.title.text().to_string()
 }
 
 /// 测试钩子：**灌一份详情**进界面（**不连服务器**）＋ 把它当成选中的容器。
@@ -4289,12 +5493,30 @@ pub fn detail_visible_for_test(st: &Rc<PanelState>) -> bool {
         .unwrap_or(false)
 }
 
-/// 测试钩子：详情标题文字（「详情：web（运行中）」）。
+/// 测试钩子：详情标题文字（「详情：web」）。
 pub fn detail_title_for_test(st: &Rc<PanelState>) -> String {
     st.docker_ui
         .borrow()
         .as_ref()
         .map(|u| u.detail.title.text().to_string())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：详情头的**状态药丸**（文字 + 档位类）。
+pub fn detail_pill_for_test(st: &Rc<PanelState>) -> (String, Vec<String>) {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| {
+            let classes: Vec<String> = u
+                .detail
+                .pill
+                .css_classes()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            (u.detail.pill.text().to_string(), classes)
+        })
         .unwrap_or_default()
 }
 
@@ -4304,10 +5526,10 @@ pub fn detail_card_for_test(st: &Rc<PanelState>, which: &str) -> String {
         .borrow()
         .as_ref()
         .map(|u| match which {
-            "config" => u.detail.config.text().to_string(),
-            "net" => u.detail.net.text().to_string(),
-            "mount" => u.detail.mount.text().to_string(),
-            "env" => u.detail.env.text().to_string(),
+            "config" => grid_kv_text(&u.detail.config),
+            "net" => grid_kv_text(&u.detail.net),
+            "mount" => grid_kv_text(&u.detail.mount),
+            "env" => grid_kv_text(&u.detail.env),
             _ => String::new(),
         })
         .unwrap_or_default()
@@ -4560,11 +5782,10 @@ pub fn term_button_sensitive_for_test(st: &Rc<PanelState>) -> bool {
 pub fn term_window_open_for_test(st: &Rc<PanelState>) -> bool {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
-    ui.term_win
-        .borrow()
-        .as_ref()
-        .map(|w| w.is_visible())
-        .unwrap_or(false)
+    // ⚠️ **终端现在是详情区里的一个页签**（UI 审查 D19）⇒ 「开着」＝
+    //   会话还在跑 **且** 那一页正显示着。
+    ui.term_running.get()
+        && ui.stack.visible_child_name().as_deref() == Some(PAGE_TERM)
 }
 
 /* ---------------- 阶段 119：容器终端工具条的测试钩子 ---------------- */
@@ -4795,9 +6016,10 @@ pub fn push_stat_for_test(st: &Rc<PanelState>, pt: docker::StatPoint) {
 pub fn close_terminal_window_for_test(st: &Rc<PanelState>) {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
-    if let Some(w) = ui.term_win.borrow_mut().take() {
-        w.close();
-    }
+    // ⚠️ **终端现在是页面**（UI 审查 D19）⇒ 「关掉」＝ 停掉会话 ＋
+    //   把详情区切回概览页（不然那一页还占着位置）。
+    stop_terminal(ui);
+    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
 }
 
 /// 测试钩子：**展开所有 compose 项目**。///
@@ -5045,6 +6267,34 @@ pub fn cursor_name_for_test(st: &Rc<PanelState>) -> String {
 mod tests {
     use super::*;
 
+    /// docker 状态 ⇒ 药丸档位（美化·地基 2/5）。
+    ///
+    /// ⚠️ 这条钉的是「`state_markup` 与药丸渲染器共用一个映射」——
+    ///    谁改了分支没同步另一处，这里先红。
+    #[test]
+    fn 状态映射到药丸档位() {
+        use crate::panel::pillcell::PillState;
+        assert_eq!(pill_state_of("running"), PillState::Ok);
+        assert_eq!(pill_state_of("paused"), PillState::Warn);
+        assert_eq!(pill_state_of("restarting"), PillState::Warn);
+        assert_eq!(pill_state_of("dead"), PillState::Err);
+        // 已停止/已创建不是错误 ⇒ 灰
+        assert_eq!(pill_state_of("exited"), PillState::Dim);
+        assert_eq!(pill_state_of("created"), PillState::Dim);
+        // compose 父行摘要 / 空串 ⇒ 灰（不假装有状态）
+        assert_eq!(pill_state_of("1/3 运行中"), PillState::Dim);
+        assert_eq!(pill_state_of(""), PillState::Dim);
+    }
+
+    /// 药丸文字：六种状态原文翻中文；摘要原样显示（不是「状态未知」）。
+    #[test]
+    fn 药丸文字翻中文() {
+        assert_eq!(pill_text_of("running"), tr("运行中"));
+        assert_eq!(pill_text_of("exited"), tr("已停止"));
+        assert_eq!(pill_text_of("1/3 运行中"), "1/3 运行中");
+        assert_eq!(pill_text_of(""), "");
+    }
+
     fn c(name: &str, compose: &str) -> ContainerInfo {
         ContainerInfo {
             id: format!("{name}-id"),
@@ -5118,6 +6368,125 @@ mod tests {
             }
             _ => panic!("第 1 行应当是项目行"),
         }
+    }
+
+    /* ---------------- UI 审查 2026-11-18 的纯函数 ---------------- */
+
+    /// ⚠️ **CPU 必须按数值排**（UI 审查 D4）：`"9.5%"` 按字典序排在
+    ///   `"50.8%"` **前面** ⇒ 「找最占资源的容器」会看错。
+    #[test]
+    fn cpu按数值排而不是按字符串() {
+        let a = sort_key("9.5%", SortKind::Percent);
+        let b = sort_key("50.8%", SortKind::Percent);
+        assert!(a < b, "9.5% 应当排在 50.8% 前面（数值排序）：{a} vs {b}");
+        // ⚠️ **字符串排序正好相反** ⇒ 这条断言真的抓得住退化。
+        assert!(
+            "9.5%".cmp("50.8%") == std::cmp::Ordering::Greater,
+            "字符串排序的对照组失效了（这条断言就抓不住退化了）"
+        );
+    }
+
+    /// 内存列按**字节**排（不是按字符串）。
+    #[test]
+    fn 内存按字节排() {
+        let a = sort_key("1.0MiB / 4.0GiB", SortKind::Bytes);
+        let b = sort_key("900.0MiB / 4.0GiB", SortKind::Bytes);
+        assert!(a < b, "1MiB 应当排在 900MiB 前面：{a} vs {b}");
+        assert!((a - 1024.0 * 1024.0).abs() < 1.0, "1MiB 应当是 1048576 字节：{a}");
+    }
+
+    /// 内存列的百分比（UI 审查 D21：表格与指标卡**同一个量**）。
+    #[test]
+    fn 内存列带上百分比() {
+        let s = mem_with_pct("52.84MiB / 63.00GiB");
+        assert!(s.contains('%'), "内存列应当带百分比：{s}");
+        assert!(s.contains("52.84MiB"), "内存列应当保留绝对值：{s}");
+        // ⚠️ **不能露出没替换的占位符**（`trf!` 只认 `{名字}` ⇒
+        //   `{p:.1}` 不会被替换 ⇒ 界面上会显示「{p:.1}%」这种原文）。
+        assert!(!s.contains('{'), "占位符没被替换：{s}");
+        assert!(!s.contains('}'), "占位符没被替换：{s}");
+        // ⚠️ **限值认不出来时**（没有 `/`）⇒ 原样给，别编一个数出来。
+        assert_eq!(mem_with_pct("52.84MiB"), "52.84MiB");
+        assert_eq!(mem_with_pct(""), "");
+    }
+
+    /// ⚠️ **凡是给界面看的格式化字符串，都不许露出没替换的占位符**。
+    ///
+    /// ⚠️ **为什么要有这条**：`trf!` 宏只替换 `{名字}` ⇒ 写成
+    ///   `trf!("{v:.1}%", v = x)` ⇒ **格式说明被忽略** ⇒ 界面上直接
+    ///   显示「{v:.1}%」（真实踩过：CPU 合计列与内存百分比列）。
+    #[test]
+    fn 格式化字符串不留占位符() {
+        // 项目父行的 CPU 合计（走 `set_project_row` 的那条路径）。
+        let cpu_sum: f64 = 12.34;
+        let cpu_text = format!("{cpu_sum:.2}%");
+        assert_eq!(cpu_text, "12.34%");
+        assert!(!cpu_text.contains('{'));
+        // ⚠️ **父行跟子行的小数位一样**（子行是 docker stats 的「0.00%」）。
+        assert_eq!(cpu_text.chars().filter(|c| *c == '.').count(), 1);
+    }
+
+    /// 父行的内存合计 ⇒ **docker 同款单位**（UI 审查 D21）。
+    #[test]
+    fn 父行内存合计跟子行同单位() {
+        // 59.3MiB ⇒ 父行写「59.3MiB」，**不是**「59.3 MB」。
+        assert_eq!(human_size_bin(59.3 * 1024.0 * 1024.0), "59.3MiB");
+        assert_eq!(human_size_bin(62.6 * 1024.0f64.powi(3)), "62.6GiB");
+        assert_eq!(human_size_bin(512.0), "512 B");
+        // ⚠️ **不能再出现十进制名字**（MB/GB 跟 MiB/GiB 混着写没法比）。
+        let s = human_size_bin(59.3 * 1024.0 * 1024.0);
+        assert!(!s.ends_with("MB"), "不该用十进制名字：{s}");
+    }
+
+    /// 权限串 ⇒ 中文（UI 审查 D11）。
+    #[test]
+    fn 权限串翻成中文() {
+        let s = perms_zh("drwxr-xr-x", docker::FileKind::Dir);
+        assert!(s.contains('读'), "权限里应当有「读」：{s}");
+        assert!(s.contains('写'), "属主可写：{s}");
+        assert!(!s.contains("drwx"), "不该再摆原始八进制：{s}");
+        // ⚠️ **认不出来就原样给**（别吞信息）。
+        let weird = perms_zh("???", docker::FileKind::File);
+        assert!(weird.contains("???"), "认不出来应当原样给：{weird}");
+    }
+
+    /// 纵轴量程取整（UI 审查 D3：刻度上的数字要读得懂）。
+    #[test]
+    fn 纵轴量程取整到好看的数() {
+        assert_eq!(nice_max(0.0), 1.0);
+        assert_eq!(nice_max(0.5), 1.0);
+        assert_eq!(nice_max(1.2), 2.0);
+        assert_eq!(nice_max(7.0), 10.0);
+        assert_eq!(nice_max(999.0), 1000.0);
+        // ⚠️ **不能小于观测值**（否则曲线会顶出格子）。
+        assert!(nice_max(1234.0) >= 1234.0);
+    }
+
+    /// 纵轴刻度的文字（**短**）。
+    #[test]
+    fn 纵轴刻度文字够短() {
+        assert_eq!(fmt_axis(100.0), "100");
+        assert_eq!(fmt_axis(0.0), "0");
+        assert_eq!(fmt_axis(12000.0), "12K");
+        assert_eq!(fmt_axis(2_000_000.0), "2.0M");
+        // ⚠️ **纯 ASCII** ⇒ cairo 的玩具文字接口才画得出来。
+        for v in [0.0, 100.0, 12000.0, 2_000_000.0, 3_000_000_000.0] {
+            assert!(
+                fmt_axis(v).chars().all(|c| c.is_ascii()),
+                "刻度文字必须是 ASCII：{:?}",
+                fmt_axis(v)
+            );
+        }
+    }
+
+    /// 百分比类的图**固定量程** 0..100（UI 审查 D3：曲线高度就是百分比）。
+    #[test]
+    fn 百分比图固定量程() {
+        let series: Vec<(&[(f64, f64)], (f64, f64, f64))> = vec![(&[(0.0, 5.0)], (0.0, 0.0, 0.0))];
+        assert_eq!(chart_max(&series, Some(100.0)), 100.0);
+        // ⚠️ **超过 100% 时不许被裁掉**（多核容器会超）。
+        let hot: Vec<(&[(f64, f64)], (f64, f64, f64))> = vec![(&[(0.0, 150.0)], (0.0, 0.0, 0.0))];
+        assert_eq!(chart_max(&hot, Some(100.0)), 150.0);
     }
 }
 
@@ -5200,7 +6569,7 @@ fn refresh_images(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
         return; // 上一次还没回来 ⇒ 不叠加
     }
     ui.images_busy.set(true);
-    ui.status.set_text(&tr("正在读取远程镜像…"));
+    ui.set_segment_status(SEG_IMAGES, tr("正在读取远程镜像…"));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let tx = ui.tx.clone();
@@ -5217,7 +6586,7 @@ fn refresh_volumes(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
         return;
     }
     ui.volumes_busy.set(true);
-    ui.status.set_text(&tr("正在读取远程卷…"));
+    ui.set_segment_status(SEG_VOLUMES, tr("正在读取远程卷…"));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let tx = ui.tx.clone();
@@ -5234,7 +6603,7 @@ fn refresh_networks(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
         return;
     }
     ui.networks_busy.set(true);
-    ui.status.set_text(&tr("正在读取远程网络…"));
+    ui.set_segment_status(SEG_NETWORKS, tr("正在读取远程网络…"));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let tx = ui.tx.clone();
@@ -5274,13 +6643,35 @@ async fn fetch_networks(
 
 /// 填**镜像表** ＋ 更新状态行（阶段 115）。
 fn apply_images(ui: &Rc<DockerUi>, v: &[docker::ImageInfo]) {
+    *ui.images_all.borrow_mut() = v.to_vec();
+    refilter_images(ui);
+}
+
+/// 重新按搜索词填**镜像表**（UI 审查 D12）。
+///
+/// ⚠️ **为什么镜像页最需要筛选**：本机 44 个镜像里 30 个是同一个 tag 的
+///   重复 ⇒ 仓库列重复 30 遍 ⇒ 真实服务器上镜像轻松上百个 ⇒ 没有筛选
+///   就只能肉眼扫。
+fn refilter_images(ui: &Rc<DockerUi>) {
     // ⚠️ **保住选中**（阶段 120）：自动刷新每 7 秒来一次 ⇒ 每次都把选中
     //    清掉的话，用户**根本点不到操作按钮**（按钮会跟着变灰）⇒
     //    重建以后**按名字找回来**。
     let keep = ui.images_selected.borrow().clone();
+    let q = ui.images_query.borrow().to_ascii_lowercase();
+    let all = ui.images_all.borrow().clone();
     ui.images_store.clear();
     let mut found: Option<gtk::TreeIter> = None;
-    for i in v {
+    let mut shown = 0usize;
+    for i in all.iter() {
+        if !q.is_empty() {
+            let hit = i.repository.to_ascii_lowercase().contains(&q)
+                || i.tag.to_ascii_lowercase().contains(&q)
+                || i.id.to_ascii_lowercase().contains(&q);
+            if !hit {
+                continue;
+            }
+        }
+        shown += 1;
         let row = ui.images_store.append(None);
         ui.images_store.set(
             &row,
@@ -5300,7 +6691,13 @@ fn apply_images(ui: &Rc<DockerUi>, v: &[docker::ImageInfo]) {
         ui.images_view.selection().select_iter(&it);
     }
     update_images_actions(ui);
-    ui.status.set_text(&trf!("共 {n} 个镜像", n = v.len()));
+    let total = all.len();
+    let msg = if shown == total {
+        trf!("共 {n} 个镜像", n = total)
+    } else {
+        trf!("显示 {s} / 共 {n} 个镜像", s = shown, n = total)
+    };
+    ui.set_segment_status(SEG_IMAGES, &msg);
 }
 
 /// 镜像的**完整名字**（`仓库:标签`；悬空镜像只有仓库）。
@@ -5317,23 +6714,70 @@ fn image_full_name(i: &docker::ImageInfo) -> String {
 
 /// 填**卷表** ＋ 更新状态行（阶段 115）。
 fn apply_volumes(ui: &Rc<DockerUi>, v: &[docker::VolumeInfo]) {
+    *ui.volumes_all.borrow_mut() = v.to_vec();
+    refilter_volumes(ui);
+}
+
+/// 重新按搜索词填**卷表**（UI 审查 D12：这三页以前**一点筛选都没有**）。
+fn refilter_volumes(ui: &Rc<DockerUi>) {
+    let q = ui.volumes_query.borrow().to_ascii_lowercase();
+    let all = ui.volumes_all.borrow().clone();
     ui.volumes_store.clear();
-    for x in v {
+    let mut shown = 0usize;
+    for x in all.iter() {
+        if !q.is_empty() {
+            let hit = x.name.to_ascii_lowercase().contains(&q)
+                || x.driver.to_ascii_lowercase().contains(&q);
+            if !hit {
+                continue;
+            }
+        }
+        shown += 1;
         let row = ui.volumes_store.append(None);
         ui.volumes_store.set(&row, &[(0u32, &x.name), (1u32, &x.driver)]);
     }
-    ui.status.set_text(&trf!("共 {n} 个卷", n = v.len()));
+    let total = all.len();
+    let msg = if shown == total {
+        trf!("共 {n} 个卷", n = total)
+    } else {
+        trf!("显示 {s} / 共 {n} 个卷", s = shown, n = total)
+    };
+    ui.set_segment_status(SEG_VOLUMES, &msg);
 }
 
 /// 填**网络表** ＋ 更新状态行（阶段 115）。
 fn apply_networks(ui: &Rc<DockerUi>, v: &[docker::NetInfo]) {
+    *ui.networks_all.borrow_mut() = v.to_vec();
+    refilter_networks(ui);
+}
+
+/// 重新按搜索词填**网络表**（UI 审查 D12）。
+fn refilter_networks(ui: &Rc<DockerUi>) {
+    let q = ui.networks_query.borrow().to_ascii_lowercase();
+    let all = ui.networks_all.borrow().clone();
     ui.networks_store.clear();
-    for x in v {
+    let mut shown = 0usize;
+    for x in all.iter() {
+        if !q.is_empty() {
+            let hit = x.name.to_ascii_lowercase().contains(&q)
+                || x.driver.to_ascii_lowercase().contains(&q)
+                || x.scope.to_ascii_lowercase().contains(&q);
+            if !hit {
+                continue;
+            }
+        }
+        shown += 1;
         let row = ui.networks_store.append(None);
         ui.networks_store
             .set(&row, &[(0u32, &x.name), (1u32, &x.driver), (2u32, &x.scope)]);
     }
-    ui.status.set_text(&trf!("共 {n} 个网络", n = v.len()));
+    let total = all.len();
+    let msg = if shown == total {
+        trf!("共 {n} 个网络", n = total)
+    } else {
+        trf!("显示 {s} / 共 {n} 个网络", s = shown, n = total)
+    };
+    ui.set_segment_status(SEG_NETWORKS, &msg);
 }
 
 /* ---------------- 阶段 116：文件页 ---------------- */
@@ -5352,14 +6796,71 @@ fn file_kind_key(k: docker::FileKind) -> &'static str {
     }
 }
 
+/// 权限串 ⇒ **人能读的中文**（UI 审查 D11）。
+///
+/// ⚠️ **为什么**：原来直接摆 `drwxr-xr-x` ⇒ Windows 用户看不懂，
+///   而且**没走 `tr()`**（项目规矩：用户可见文案全中文）。
+///
+/// ⚠️ **目录的大小给「—」**：目录的 size 是 **inode 大小**（4.0 KB）
+///   ⇒ 纯噪音 ⇒ docker 官方与 dbx 都给「—」。
+fn perms_zh(perms: &str, kind: docker::FileKind) -> String {
+    let t = tr(kind.label()).to_string();
+    let b = perms.as_bytes();
+    if b.len() < 10 {
+        // 认不出来 ⇒ 原样给（别吞信息）。
+        return if perms.is_empty() {
+            t
+        } else {
+            trf!("{t}　{p}", t = t, p = perms)
+        };
+    }
+    // ⚠️ **权限串的形状**：`drwxr-xr-x` ⇒ 第 0 个是类型，后面 9 个是
+    //   「属主 3 个 + 属组 3 个 + 其他 3 个」⇒ 逐个**字符**看，别把它
+    //   当位掩码（当位掩码会把 'r'(0x72) 读成「只写」）。
+    let exec_word = if kind == docker::FileKind::Dir {
+        tr("进入")
+    } else {
+        tr("执行")
+    };
+    let g = |base: usize| -> String {
+        let mut s = String::new();
+        if b[base] == b'r' {
+            s.push_str(tr("读"));
+        }
+        if b[base + 1] == b'w' {
+            s.push_str(tr("写"));
+        }
+        if b[base + 2] == b'x' {
+            s.push_str(exec_word);
+        }
+        if s.is_empty() {
+            s.push_str(tr("无"));
+        }
+        s
+    };
+    trf!(
+        "{t}　属主{g0}／属组{g1}／其他{g2}",
+        t = t,
+        g0 = g(1),
+        g1 = g(4),
+        g2 = g(7)
+    )
+}
+
 /// 填**文件表** ＋ 更新状态行（阶段 116）。
 fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
     ui.files.store.clear();
     for f in v {
         let name = f.name.clone();
         let kind_label = tr(f.kind.label()).to_string();
-        let size = crate::util::human_size(f.size);
-        let perms = f.perms.clone();
+        // ⚠️ **目录的大小是 inode 大小**（4.0 KB）⇒ 纯噪音 ⇒ 给「—」
+        //   （UI 审查 D11）。
+        let size = if f.kind == docker::FileKind::Dir {
+            tr("—").to_string()
+        } else {
+            crate::util::human_size(f.size)
+        };
+        let perms = perms_zh(&f.perms, f.kind);
         let key = file_kind_key(f.kind).to_string();
         let row = ui.files.store.append(None);
         ui.files.store.set(
@@ -5756,8 +7257,9 @@ fn images_push(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
     let msg = trf!("确定要把镜像「{img}」推到仓库吗？", img = image);
     let (st2, u2) = (st.clone(), ui.clone());
     let image = image.to_string();
+    let parent = host_window(ui, st);
     crate::panel::dialogs::confirm_title(
-        st.topwin().as_ref(),
+        parent.as_ref(),
         tr("请确认"),
         &msg,
         tr("推送"),
@@ -5772,7 +7274,7 @@ fn images_push(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
 
 /// **推送**的后台部分（远端跑 `docker push`）。
 fn run_image_push(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
-    ui.status.set_text(&trf!("正在推送镜像「{img}」…", img = image));
+    ui.set_segment_status(SEG_IMAGES, &trf!("正在推送镜像「{img}」…", img = image));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let image = image.to_string();
@@ -5794,7 +7296,7 @@ fn run_image_push(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
 ///
 /// ⚠️ **不是写操作**（不动远端）⇒ 不用二次确认；但会**写本地文件**。
 fn images_export(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
-    let top = st.topwin();
+    let top = host_window(ui, st);
     let mut b = gtk::FileChooserNative::builder()
         .modal(true)
         .title(tr("把镜像导出到哪个文件"))
@@ -5834,7 +7336,7 @@ fn run_image_export(
     image: &str,
     dest: &std::path::Path,
 ) {
-    ui.status.set_text(&trf!("正在导出镜像「{img}」…", img = image));
+    ui.set_segment_status(SEG_IMAGES, &trf!("正在导出镜像「{img}」…", img = image));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let image = image.to_string();
@@ -5881,8 +7383,10 @@ fn run_image_export(
 fn images_tag(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
     let (st2, u2) = (st.clone(), ui.clone());
     let image = image.to_string();
+    let parent = host_window(ui, st);
+    let parent2 = parent.clone();
     crate::panel::dialogs::ask_text(
-        st.topwin().as_ref(),
+        parent.as_ref(),
         tr("给镜像另打一个标签"),
         "",
         move |target| {
@@ -5895,7 +7399,7 @@ fn images_tag(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
             let (st3, u3) = (st2.clone(), u2.clone());
             let image2 = image.clone();
             crate::panel::dialogs::confirm_title(
-                st2.topwin().as_ref(),
+                parent2.as_ref(),
                 tr("请确认"),
                 &msg,
                 tr("打标签"),
@@ -5912,7 +7416,7 @@ fn images_tag(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
 
 /// **打标签**的后台部分（远端跑 `docker tag`）。
 fn run_image_tag(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str, target: &str) {
-    ui.status.set_text(&trf!("正在给镜像「{img}」打标签…", img = image));
+    ui.set_segment_status(SEG_IMAGES, &trf!("正在给镜像「{img}」打标签…", img = image));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let image = image.to_string();
@@ -5939,8 +7443,9 @@ fn images_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
     );
     let (st2, u2) = (st.clone(), ui.clone());
     let image = image.to_string();
+    let parent = host_window(ui, st);
     crate::panel::dialogs::confirm_title(
-        st.topwin().as_ref(),
+        parent.as_ref(),
         tr("请确认"),
         &msg,
         tr("删除"),
@@ -5955,7 +7460,7 @@ fn images_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
 
 /// **删除**的后台部分（远端跑 `docker rmi`）。
 fn run_image_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, image: &str) {
-    ui.status.set_text(&trf!("正在删除镜像「{img}」…", img = image));
+    ui.set_segment_status(SEG_IMAGES, &trf!("正在删除镜像「{img}」…", img = image));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let image = image.to_string();
