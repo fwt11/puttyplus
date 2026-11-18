@@ -112,6 +112,25 @@ fn stash_password(session_key: &str, name: &str, pw: Option<&str>) {
     );
 }
 
+/// 「记住密码」勾选框 ⇒ **写回 ini 的标记**（纯函数，可单测）。
+///
+/// ⚠️ **为什么要这么算**（用户 2026-11-18 报「编辑这个数据库连接没用」）：
+/// - **存得了**（凭据库能写 + 不是堡垒机会话）⇒ 用**勾选框的状态**
+///   （用户能改，改了就照改）；
+/// - **存不了**（凭据库锁着 / 没启用 / 堡垒机会话）⇒ **沿用原来存着的标记**。
+///
+/// ⛔ 以前是 `remember.set_active(p.remember && pol.can_remember && !bastion)`
+/// ⇒ 凭据库**只是暂时锁着**的时候，勾选框被强制取消 ⇒ 保存时把 ini 里的
+/// `remember=true` **抹掉** ⇒ 库里那份密码变成**孤儿**（没人再会去用它）
+/// ⇒ 这条连接从此每次都要重输密码 ⇒ 用户看着就是「编辑没用」。
+pub fn remember_writeback(stored: bool, can_store: bool, checkbox: bool) -> bool {
+    if can_store {
+        checkbox
+    } else {
+        stored
+    }
+}
+
 /// 存一条连接（配置进 ini，密码按需进凭据库）。
 ///
 /// **返回一句提示**（可能为空）：密码没记上时要说清楚为什么——用户以为
@@ -147,6 +166,22 @@ pub fn save(draft: &DbConnDraft) -> Option<String> {
                 }
             }
         }
+    } else if draft.password.is_some() {
+        // ⚠️ 用户**填了密码**、但「记住密码」没勾（或者那个勾选框压根没摆出来
+        // —— 凭据库锁着 / 堡垒机会话）⇒ 这个密码**不会存起来**。
+        // ⛔ 以前这里**什么都不说** ⇒ 用户以为存住了（下次连接又要重输，
+        // 还以为自己的密码坏了）⇒ 「编辑这个数据库连接」就变成了"没用"。
+        hint = Some(
+            tr("这次填的密码只用这一次，没有存起来（下次连接还要重输）。\n\n\
+               想让它记住：解锁凭据库后重新保存一次这条连接，并勾上「记住密码」。")
+                .to_string(),
+        );
+    }
+    if !profile.remember {
+        // 用户明确说「别记住」⇒ 凭据库里那一份也删掉（不然是孤儿）。
+        // （跟连接编辑器一个做法：用户说"别记住"就别留着。）
+        // ⚠️ 库锁着时删不掉（读不了加密内容）⇒ 只是这次没删掉。
+        let _ = crate::vault::remove(&dbstore::vault_name(&draft.session_key, &profile.name));
     }
     dbstore::save(&draft.session_key, &profile);
     // 会话树 / 连接管理器里要立刻能看到这条连接
@@ -615,10 +650,15 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
     //    藏起来了，要是还留着 `active`，保存时就会**悄悄**把密码写进
     //    凭据库 —— 用户压根没勾过。
     let bastion = is_bastion_session(key);
-    remember.set_visible(pol.show_checkbox && !bastion);
-    remember.set_sensitive(pol.can_remember);
+    // **存得了** = 凭据库能写 + 不是堡垒机会话。
+    let can_store = pol.can_remember && !bastion;
+    remember.set_visible(can_store);
+    remember.set_sensitive(can_store);
     // 存不住的时候不许"带着勾"（看着像已经记住了，其实压根没存）
-    remember.set_active(p.remember && pol.can_remember && !bastion);
+    remember.set_active(p.remember && can_store);
+    // ⚠️ **写回 ini 的标记另算**（`remember_writeback`）：存不了的时候
+    //    **沿用原来存着的标记** —— 凭据库只是暂时锁着，抹掉它会让库里
+    //    那份密码变成孤儿（这条连接从此每次都要重输密码）。
     let (pr, _, _) = dialogs::form_pair(tr("密码"), &pass, "", &remember);
     box_.append(&pr);
 
@@ -651,7 +691,9 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
             user: user.text().trim().to_string(),
             dbname: dbname.text().trim().to_string(),
             password: (!pw.is_empty()).then(|| Zeroizing::new(pw)),
-            remember: remember.is_active(),
+            // ⚠️ 写回的标记：存得了 ⇒ 用勾选框（用户能改）；存不了 ⇒
+            //    **沿用原来存着的**（别因为库暂时锁着就把它抹掉）。
+            remember: remember_writeback(p.remember, can_store, remember.is_active()),
             session_key: key2.clone(),
         };
         if let Err(e) = draft.validate() {
@@ -663,6 +705,10 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
         let renamed = profile.name != p.name;
         if renamed {
             dbstore::remove(&key2, &p.name);
+            // ⚠️ 凭据库里**旧名字**那一条也删掉（键跟着连接名走）⇒
+            //    不留一个没人再会用的孤儿密码（它在库里躺着，用户还以为
+            //    密码存着）。
+            let _ = crate::vault::remove(&dbstore::vault_name(&key2, &p.name));
         }
         let saved = save(&draft);
         // 改完的密码**这次连接就用它**（不勾「记住密码」也用）——
@@ -673,9 +719,14 @@ pub fn ui_edit(parent: Option<&gtk::Window>, key: &str, name: &str) {
             draft.password.as_deref().map(|z| z.as_str()),
         );
         dlg.close();
-        if let Some(h) = saved {
-            dialogs::info(None, tr("连接已保存"), &trf!("「{v0}」已保存。\n\n{h}", v0 = profile.name, h = h));
-        }
+        // ⚠️ **总要有个回音**（用户 2026-11-18：「编辑这个数据库连接」没用）：
+        //    以前只有"密码没存上"的时候才弹提示 ⇒ 正常保存时对话框一关
+        //    就没动静了 ⇒ 用户看着像"点了没反应"。
+        let body = match saved {
+            Some(h) => trf!("「{v0}」已保存。\n\n{h}", v0 = profile.name, h = h),
+            None => trf!("「{v0}」已保存。", v0 = profile.name),
+        };
+        dialogs::info(None, tr("连接已保存"), &body);
     });
 }
 
@@ -744,5 +795,21 @@ mod tests {
         let mut d4 = draft();
         d4.user = String::new();
         assert!(d4.validate().is_err());
+    }
+
+    /// 凭据库**只是暂时锁着**时，编辑连接**不许**把「记住密码」抹掉
+    /// （用户 2026-11-18 报「编辑这个数据库连接没用」）。
+    ///
+    /// ⛔ 以前是 `p.remember && pol.can_remember` ⇒ 锁着时勾被强制取消 ⇒
+    ///    保存时 ini 里的 `remember=true` 没了 ⇒ 库里那份密码变成孤儿。
+    #[test]
+    fn 凭据库锁着时不抹掉记住密码标记() {
+        // 存不了（锁着）⇒ 沿用原来存着的标记
+        assert!(remember_writeback(true, false, false));
+        // 存得了 ⇒ 用勾选框的状态（用户能改）
+        assert!(remember_writeback(false, true, true));
+        assert!(!remember_writeback(true, true, false));
+        // 存不了、原来也没记 ⇒ 还是没记
+        assert!(!remember_writeback(false, false, false));
     }
 }

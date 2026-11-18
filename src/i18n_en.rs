@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2000] = [
+pub static EN: [(&str, &str); 2002] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -237,6 +237,7 @@ pub static EN: [(&str, &str); 2000] = [
     ("、", ", "),
     ("「{label}」有必填参数是空的，已取消发送。", "\"{label}\" has an empty required parameter, so sending was cancelled."),
     ("「{name}」：{e}", "\"{name}\": {e}"),
+    ("「{v0}」已保存。", "\"{v0}\" was saved."),
     ("「{v0}」已保存。\n\n{h}", "\"{v0}\" was saved.\n\n{h}"),
     ("「{v0}」是目录，内置查看/编辑器只处理文本文件。", "\"{v0}\" is a directory; the built-in viewer/editor handles text files only."),
     ("「{v0}」有未保存的修改。\n\n保存到{v1}后再关闭吗？", "\"{v0}\" has unsaved changes.\n\nSave it to {v1} and then close?"),
@@ -1838,6 +1839,7 @@ pub static EN: [(&str, &str); 2000] = [
     ("这条连接的数据库地址是空的（去连接管理器里改）", "The database address of this connection is empty (change it in the connection manager)"),
     ("这条连接的数据库用户是空的（去连接管理器里改）", "The database user of this connection is empty (change it in the connection manager)"),
     ("这条连接的端口无效（去连接管理器里改）", "The port of this connection is invalid (change it in the connection manager)"),
+    ("这次填的密码只用这一次，没有存起来（下次连接还要重输）。\n\n想让它记住：解锁凭据库后重新保存一次这条连接，并勾上「记住密码」。", "The password you entered is only used this time; it was not saved (you will have to type it again on the next connection).\n\nTo make it stick: unlock the credential vault, save this connection again and tick \"Remember password (store it in the credential vault)\"."),
     ("这里是这条连接的默认值，新开的会话都按它来。\n保活、终端类型、认证顺序只对 SSH 连接有意义。\n已经跑着的会话要单独改，用标签上的「会话选项…」——那是临时覆盖，优先于这里。", "These are the defaults of this connection, every new session follows them.\nKeepalive, terminal type and authentication order only make sense for SSH connections.\nA session that is already running is changed separately with \"Session options…\" on the tab — that is a temporary override and takes precedence over this."),
     ("这里留着程序发过的每一条通知（最新的在最上面）。桌面通知发不出去时，             这里就是唯一的记录。", "Every notification the program sent is kept here (the newest one on top). When the desktop notification does not get through,\n             this is the only record."),
     ("进入容器", "Enter container"),

@@ -150,6 +150,12 @@ pub struct RowMenuCtx {
 ///
 /// 阶段 77a：「导出为 PuTTY 会话…」加在这里——连接管理器删掉后，
 /// 导出**选中这一条**的入口只剩侧栏（文件菜单那个导出的是全部）。
+///
+/// ⚠️ **清单里的 label 必须是「中文原文」**：点击分派那边拿它当**数据**比
+/// （`match label { "编辑这个数据库连接…" => … }`）⇒ 翻译只能发生在**显示处**
+/// （`crate::menu::item` 里的 `tr_dyn`）。
+/// ⛔ 以前这里包了 `tr()` ⇒ **英文界面下标签变成英文 ⇒ 一个都匹配不上
+/// ⇒ 整个右键菜单点了没反应**（菜单项显示正常，行为全哑）。
 pub fn row_menu_items(ctx: &RowMenuCtx) -> Vec<RowMenuItem> {
     use RowMenuItem::{Act, Sep};
     let mut v: Vec<RowMenuItem> = Vec::new();
@@ -159,7 +165,7 @@ pub fn row_menu_items(ctx: &RowMenuCtx) -> Vec<RowMenuItem> {
     if ctx.kind == 0 {
         if ctx.group.as_deref() == Some(RECENT_GROUP) {
             v.push(Act {
-                label: tr("清空最近连接"),
+                label: "清空最近连接",
                 icon: "edit-clear-all-symbolic",
             });
         }
@@ -168,71 +174,71 @@ pub fn row_menu_items(ctx: &RowMenuCtx) -> Vec<RowMenuItem> {
     // 连接 / 打开数据库 / 打开端口转发（三行共用第一个项）
     v.push(Act {
         label: match ctx.kind {
-            3 => tr("打开数据库"),
-            4 => tr("打开端口转发"),
-            _ => tr("连接"),
+            3 => "打开数据库",
+            4 => "打开端口转发",
+            _ => "连接",
         },
         icon: "go-next-symbolic",
     });
     if ctx.fwd.is_some() {
         v.push(Act {
-            label: tr("启用转发"),
+            label: "启用转发",
             icon: "network-transmit-receive-symbolic",
         });
     }
     if ctx.kind == 2 {
         v.push(Act {
-            label: tr("在新窗口打开"),
+            label: "在新窗口打开",
             icon: "window-new-symbolic",
         });
     }
     if ctx.custom {
         v.push(Sep);
         v.push(Act {
-            label: tr("编辑…"),
+            label: "编辑…",
             icon: "document-edit-symbolic",
         });
         v.push(Act {
-            label: tr("删除"),
+            label: "删除",
             icon: "edit-delete-symbolic",
         });
         v.push(Act {
-            label: tr("导出为 PuTTY 会话…"),
+            label: "导出为 PuTTY 会话…",
             icon: "document-save-symbolic",
         });
     }
     if ctx.kind == 1 || ctx.kind == 2 {
         v.push(Sep);
         v.push(Act {
-            label: tr("重新连接终端"),
+            label: "重新连接终端",
             icon: "view-refresh-symbolic",
         });
         v.push(Act {
-            label: tr("新建数据库连接…"),
+            label: "新建数据库连接…",
             icon: "list-add-symbolic",
         });
     }
     if ctx.has_db {
         v.push(Sep);
         v.push(Act {
-            label: tr("编辑这个数据库连接…"),
+            label: "编辑这个数据库连接…",
             icon: "document-edit-symbolic",
         });
         v.push(Act {
-            label: tr("删除这个数据库连接"),
+            label: "删除这个数据库连接",
             icon: "edit-delete-symbolic",
         });
     }
     if ctx.kind == 1 {
         v.push(Sep);
         v.push(Act {
-            label: tr("从最近中移除"),
+            label: "从最近中移除",
             icon: "list-remove-symbolic",
         });
     }
     v.push(Sep);
     v.push(Act {
-        label: tr("复制地址"),
+        label: "复制地址",
         icon: "edit-copy-symbolic",
     });
     v
@@ -1114,7 +1120,10 @@ impl Sidebar {
                     }
                     _ => {
                         let b = crate::menu::item(icon, label, None);
-                        if label == "删除" || label == tr("删除这个数据库连接") {
+                        // ⚠️ 比的是**中文原文**（清单里的 label 就是中文原文，
+                        // 翻译在显示处做）——以前这里写 `tr("删除这个数据库连接")`
+                        // ⇒ 英文界面下这个判断永远不成立 ⇒ 危险项不标红。
+                        if label == "删除" || label == "删除这个数据库连接" {
                             crate::menu::danger(&b);
                         }
                         b
@@ -1802,6 +1811,84 @@ mod tests {
             has_db,
             fwd: None,
             group: None,
+        }
+    }
+
+    /// 点击分派那边认的标签（从源码里扒 `match label { "…" => … }` 的字面量）。
+    ///
+    /// ⚠️ **为什么扫源码**：分派是**拿标签当数据比**的（`match label { … }`），
+    /// 编译器不会告诉你"某个标签没有分支" ⇒ 清单里加一项而忘了加分派，
+    /// 那个菜单项就是**点了没反应**（用户 2026-11-18 踩的就是这类坑）。
+    fn dispatch_labels(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if !t.starts_with('"') || !t.contains("=>") {
+                continue;
+            }
+            // 抽出这一行里的所有 "..." 字面量
+            let mut chars = t.chars();
+            while let Some(c) = chars.next() {
+                if c != '"' {
+                    continue;
+                }
+                let mut lit = String::new();
+                for c2 in chars.by_ref() {
+                    if c2 == '"' {
+                        break;
+                    }
+                    lit.push(c2);
+                }
+                out.push(lit);
+            }
+        }
+        out
+    }
+
+    /// **清单里的每个标签都必须在点击分派里有分支**，且清单**不许**包 `tr()`。
+    ///
+    /// ⚠️ **为什么单测抓不到、只能扫源码**：清单里的 label 现在是**中文原文**
+    /// （翻译在显示处做），所以中文模式下两种写法返回的都是中文 ⇒ 光看返回值
+    /// 分不出对错。⛔ 以前清单里包了 `tr()` ⇒ **英文界面下标签变成英文**
+    /// ⇒ 分派（比中文原文）一个都匹配不上 ⇒ **整个右键菜单点了没反应**。
+    #[test]
+    fn 菜单清单与点击分派逐字一致() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/sidebar.rs");
+        let src = std::fs::read_to_string(&path).expect("要能读自己的源码");
+
+        // ① 清单函数体里不许出现 tr(
+        let start = src.find("pub fn row_menu_items").expect("要能找到 row_menu_items");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("要能找到函数结尾");
+        let body = &body[..end];
+        assert!(
+            !body.contains("tr(\""),
+            "菜单清单里不许包 tr()：标签要保持中文原文（翻译在显示处做），\
+             否则英文界面下点了没反应"
+        );
+
+        // ② 清单里出现的标签，都要在分派里有分支
+        let dispatch = dispatch_labels(&src);
+        let mut c = ctx(0, false, false);
+        c.group = Some(super::RECENT_GROUP.to_string());
+        let mut ctxs = vec![
+            c,
+            ctx(1, false, false),
+            ctx(2, true, false),
+            ctx(2, false, false),
+            ctx(3, false, true),
+            ctx(4, false, true),
+        ];
+        for c in ctxs.drain(..) {
+            for item in row_menu_items(&c) {
+                let RowMenuItem::Act { label, .. } = item else {
+                    continue;
+                };
+                assert!(
+                    dispatch.iter().any(|d| d == label),
+                    "菜单项「{label}」在点击分派里没有分支 ⇒ 点了没反应"
+                );
+            }
         }
     }
 
