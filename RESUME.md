@@ -45,6 +45,54 @@
   正确完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行关机；失败就**不许
   关**，把原因报给用户。
 
+## 〇之二之一十八、最新进展（2026-11-18：`v0.9.0` 重发 ＋ 两个真 bug）
+
+- **发版**：用户 2026-11-18「如果弄完了，还是重发 v0.9」⇒ **同一个 `v0.9.0`
+  tag 移了两次**（`8aa3890` → `03e409b`）＋ **强推 tag** ⇒ `release.yml`
+  自动重建 Release 的六个资产（deb×2 / tar.gz×2 / windows zip / SHA256SUMS）。
+  ⚠️ **移 tag 不改 Release 的 `published_at`**（那是首次发布日）⇒ 页面上的
+  「19 小时前」是正常的，**看资产的 `created_at`**（本次 2026-11-18T15:07Z）。
+- ⚠️ **重发的姿势**（与上一轮同）：
+  ```bash
+  git tag -f v0.9.0 <新提交> && git push --force origin v0.9.0
+  ```
+  ⇒ 三个 workflow（CI / CI·Windows / Release）对新提交**全 success**。
+- **修的两个真 bug**（用户报的同一句话：「在数据库连接上右键点『编辑这个数据库
+  连接』没用」）：
+  1. **`panel/dbconn.rs`（提交 `8aa3890`）**：
+     - 「**记住密码**」勾选框的**显示状态**被当成要写回 ini 的值 ⇒ 凭据库只是
+       **暂时锁着**时勾选被强制取消 ⇒ 保存时把 ini 里的 `remember=true` **抹掉**
+       ⇒ 库里那份密码成**孤儿** ⇒ 这条连接**从此每次都要重输密码**。
+       ⇒ 新增纯函数 `remember_writeback(stored, can_store, checkbox)`：
+       **存得了 ⇒ 用勾选框；存不了 ⇒ 沿用原来存着的标记**。
+     - **保存后一点回音都没有** ⇒ 正常保存时也弹「连接已保存」（附上「密码没存住」
+       的原因与补救办法）。
+  2. **`src/sidebar.rs`（提交 `03e409b`）**：⚠️ **根因不在菜单项，在弹层的锚点
+     坐标** —— 右键菜单的弹层是 `set_parent(&view)` 挂在**树**上的 ⇒
+     `gtk_popover_set_pointing_to()` 的锚点矩形**按树的坐标**解释；以前却用
+     `view.compute_point(&sb.widget, …)` 算成了**侧栏盒子**的坐标 ⇒ 平白差了
+     「树顶 ↔ 侧栏顶」那一百来像素 ⇒ **数据库连接都排在树的最底下** ⇒ 锚点落到
+     **屏幕外** ⇒ GTK 把弹层 `SHOW` 之后**立刻关掉**（实测日志：`popover SHOW`
+     紧接着 `popover CLOSED`）⇒ 用户看着就是「菜单根本不弹 / 任何一项都没反应」。
+     ⇒ 修法：锚点改用**树自己的坐标**（手势回调的 (x, y) 本来就是树坐标）。
+- ⚠️ **顺带修的英文界面死菜单**（`8aa3890`）：`row_menu_items()` 给的 label 以前
+  包了 `tr()` ⇒ **英文界面下标签变成英文**，而分派那边拿**中文原文**当数据比 ⇒
+  一个都匹配不上 ⇒ 整个侧栏右键菜单点了没反应。⇒ 清单里的 label 保持**中文
+  原文**（翻译在显示处做）；单测 `sidebar::菜单清单与点击分派逐字一致` 扫源码
+  钉住。
+- **验证**（本地全绿）：`cargo test --lib` **871 passed / 0 failed**；
+  `cargo check --examples` 全过；`bash tools/cli_contract_check.sh`
+  **PASS=73 FAIL=0**；GUI 冒烟 8 个全 OK（CI 那 5 个 ＋
+  `sidebar_rowmenu_pos_smoke` / `dbedit_remember_smoke` / `sidebar_menu_smoke`）。
+  ⚠️ **反向验证**：`sidebar_rowmenu_pos_smoke` 把锚点改回 `sb.widget` 坐标系 ⇒
+  弹层 `visible=false` ⇒ 冒烟当场红（退出码 5）。
+- **新的测试钩子**（`src/sidebar.rs`）：`row_menu_popover()` /
+  `open_row_menu_at()` / `row_area()` / `scroll_row_to_bottom()` /
+  `db_row_paths()`；菜单构建抽成 `Sidebar::show_row_menu()`（**右键手势与冒烟
+  走同一条路** ⇒ 测的就是真弹层）。
+- **CI 变了**：`.github/workflows/ci.yml` 的 GUI 冒烟名单从 5 个加到 **8 个**
+  （三个侧栏/数据库的守卫以前**只在本地跑** ⇒ CI 抓不到这类回归）。
+
 ## 〇之二之一十六、最新进展（2026-11-17：文件面板按文件名过滤）
 
 - **起因**：用户 2026-11-17 连着提了四条「查找」相关的需求 ⇒ 「查找」这条线
