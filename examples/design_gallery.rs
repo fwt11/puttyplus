@@ -245,14 +245,17 @@ fn main() {
     win.present();
     pump(500);
 
-    // ---- 两轮截图：Light → Dark（apply 换 provider，控件自动跟）----
-    assert!(theme::apply(Theme::Light), "Light 主题的 CSS 没装上");
-    pump(400);
-    shot("/tmp/pp-gallery-light.png");
-
-    assert!(theme::apply(Theme::Dark), "Dark 主题的 CSS 没装上");
-    pump(400);
-    shot("/tmp/pp-gallery-dark.png");
+    // ---- 三轮截图：Light → Dark → HighContrast（apply 换 provider，控件自动跟）----
+    // 美化·二批 8：高对比也进画廊——令牌 v2 的原语必须**三套主题都站得住**。
+    for (t, name) in [
+        (Theme::Light, "light"),
+        (Theme::Dark, "dark"),
+        (Theme::HighContrast, "contrast"),
+    ] {
+        assert!(theme::apply(t), "{t:?} 主题的 CSS 没装上");
+        pump(400);
+        shot(&format!("/tmp/pp-gallery-{name}.png"));
+    }
 
     println!("design_gallery: OK");
     // 截完就撤（不留挂着的窗口；ui_shot 那种跑不死的是给人眼手动看的）

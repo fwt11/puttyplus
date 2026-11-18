@@ -2289,9 +2289,17 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let filter_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     filter_group.set_hexpand(true);
     filter_group.append(&search);
-    filter_group.append(&f_all);
-    filter_group.append(&f_run);
-    filter_group.append(&f_stop);
+    // 筛选组收进**分段控件**（美化·二批 7）：三颗互斥 ToggleButton 本来就
+    //   是"分段"的语义 ⇒ 套上 `.pp-segmented`（圆角胶囊容器 + 段内 dim、
+    //   选中 accent_soft）⇒ 跟表设计器、顶层分段条一个样式，不再是三颗
+    //   散着的默认按钮。
+    let f_seg = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    f_seg.add_css_class("pp-segmented");
+    f_seg.set_valign(gtk::Align::Center);
+    f_seg.append(&f_all);
+    f_seg.append(&f_run);
+    f_seg.append(&f_stop);
+    filter_group.append(&f_seg);
 
     let action_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     action_group.append(&auto_lbl);
@@ -2530,7 +2538,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     //
     // ⚠️ **用 ToggleButton ＋ group**：点一个别的自动取消 ⇒ 表现像
     //   「分段按钮」而不是「四个复选框」。
-    let seg_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    // 美化·二批 7：整条收进 `.pp-segmented` 胶囊 ⇒ 跟容器页筛选组、
+    //   表设计器的分段一个样式；刷新图标按钮作为**尾段**留在胶囊里。
+    let seg_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    seg_bar.add_css_class("pp-segmented");
+    // ⚠️ 胶囊**贴内容**（不 expand）⇒ 不然整幅白条里只有四个小段，
+    //    看着像一条空工具栏。
+    seg_bar.set_halign(gtk::Align::Start);
     seg_bar.set_margin_start(6);
     seg_bar.set_margin_end(6);
     seg_bar.set_margin_top(4);
