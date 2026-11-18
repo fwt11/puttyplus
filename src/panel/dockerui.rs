@@ -723,6 +723,10 @@ fn fmt_axis(v: f64) -> String {
 /// ⚠️ **纵轴自动量程**（或固定量程）：见 [`chart_max`]。
 /// ⚠️ **纵轴有刻度**（UI 审查 D3）：顶端标**最大值**、底端标 **0** ⇒
 ///   用户不用猜「这条线冲顶是多少」。
+///
+/// 美化·地基 4/5：图自己画成**一张圆角卡**；曲线下加**渐变面积填充**
+/// （冲高的那段一眼可辨）；网格**虚线化**再淡一档；曲线 2px **圆角线帽**
+/// （以前 1.6px 的细硬线看着像示波器，现在是仪表盘）。
 fn draw_chart(
     cr: &gtk::cairo::Context,
     w: i32,
@@ -743,42 +747,88 @@ fn draw_chart(
     let plot_w = (ww - pad_l - pad_r).max(1.0);
     let plot_h = (hh - pad_t - pad_b).max(1.0);
 
-    // 背景 + 边框（**主题色**，不再是写死的白底）
+    // 卡片底 + 边框（圆角矩形；**主题色**，不再是写死的白底）
+    rounded_rect_path(cr, 0.5, 0.5, ww - 1.0, hh - 1.0, 8.0);
     cr.set_source_rgb(pal.bg.0, pal.bg.1, pal.bg.2);
-    let _ = cr.rectangle(0.5, 0.5, ww - 1.0, hh - 1.0);
     let _ = cr.fill_preserve();
     cr.set_source_rgb(pal.border.0, pal.border.1, pal.border.2);
     let _ = cr.set_line_width(1.0);
     let _ = cr.stroke();
 
-    // 网格（三条横线）
-    cr.set_source_rgba(pal.grid.0, pal.grid.1, pal.grid.2, 0.45);
+    // 纵轴量程
+    let max_y = chart_max(series, fixed);
+
+    // 各条曲线的**像素点集**（面积填充与折线共用，算一遍就好）
+    let pixel_series: Vec<Vec<(f64, f64)>> = series
+        .iter()
+        .map(|(pts, _)| {
+            let mut xy: Vec<(f64, f64)> = Vec::with_capacity(pts.len());
+            let n = pts.len() as f64;
+            for (i, (_, v)) in pts.iter().enumerate() {
+                let x = pad_l + plot_w * (i as f64) / (n - 1.0).max(1.0);
+                let vv = if v.is_finite() { *v } else { 0.0 };
+                let y = pad_t + plot_h * (1.0 - (vv / max_y).clamp(0.0, 1.0));
+                xy.push((x, y));
+            }
+            xy
+        })
+        .collect();
+
+    // 面积填充（先画 ⇒ 曲线压在填充上面）。渐变：曲线色
+    // alpha 0.18（顶部）→ 0.02（底部）⇒ 冲高那段有"重量"，低平段不糊底。
+    for (xy, (_pts, color)) in pixel_series.iter().zip(series) {
+        if xy.len() < 2 {
+            continue;
+        }
+        let grad = gtk::cairo::LinearGradient::new(pad_l, pad_t, pad_l, pad_t + plot_h);
+        grad.add_color_stop_rgba(0.0, color.0, color.1, color.2, 0.18);
+        grad.add_color_stop_rgba(1.0, color.0, color.1, color.2, 0.02);
+        let _ = cr.set_source(&grad);
+        let last = xy.last().copied().unwrap_or((pad_l, pad_t + plot_h));
+        let first = xy.first().copied().unwrap_or(last);
+        let mut started = false;
+        for &(x, y) in xy.iter() {
+            if started {
+                let _ = cr.line_to(x, y);
+            } else {
+                let _ = cr.move_to(x, y);
+                started = true;
+            }
+        }
+        // 沿底边闭合
+        let _ = cr.line_to(last.0, pad_t + plot_h);
+        let _ = cr.line_to(first.0, pad_t + plot_h);
+        let _ = cr.close_path();
+        let _ = cr.fill();
+    }
+
+    // 网格（三条横线，**虚线** + 更淡 ⇒ 让位给数据）
+    cr.set_source_rgba(pal.grid.0, pal.grid.1, pal.grid.2, 0.35);
+    let _ = cr.set_dash(&[2.0, 3.0], 0.0);
     for i in 1..=3 {
         let y = pad_t + plot_h * (i as f64) / 4.0;
         let _ = cr.move_to(pad_l, y);
         let _ = cr.line_to(pad_l + plot_w, y);
     }
     let _ = cr.stroke();
+    let _ = cr.set_dash(&[], 0.0);
 
-    // 纵轴量程
-    let max_y = chart_max(series, fixed);
-
-    // 曲线
-    for (pts, color) in series {
-        if pts.len() < 2 {
+    // 曲线：2px 圆角线帽
+    for (xy, (_pts, color)) in pixel_series.iter().zip(series) {
+        if xy.len() < 2 {
             continue;
         }
-        let n = pts.len() as f64;
         cr.set_source_rgb(color.0, color.1, color.2);
-        let _ = cr.set_line_width(1.6);
-        for (i, (_, v)) in pts.iter().enumerate() {
-            let x = pad_l + plot_w * (i as f64) / (n - 1.0).max(1.0);
-            let vv = if v.is_finite() { *v } else { 0.0 };
-            let y = pad_t + plot_h * (1.0 - (vv / max_y).clamp(0.0, 1.0));
-            if i == 0 {
-                let _ = cr.move_to(x, y);
-            } else {
+        let _ = cr.set_line_width(2.0);
+        let _ = cr.set_line_cap(gtk::cairo::LineCap::Round);
+        let _ = cr.set_line_join(gtk::cairo::LineJoin::Round);
+        let mut started = false;
+        for &(x, y) in xy.iter() {
+            if started {
                 let _ = cr.line_to(x, y);
+            } else {
+                let _ = cr.move_to(x, y);
+                started = true;
             }
         }
         let _ = cr.stroke();
@@ -792,6 +842,21 @@ fn draw_chart(
     let _ = cr.show_text(&fmt_axis(max_y));
     let _ = cr.move_to(3.0, hh - 3.0);
     let _ = cr.show_text("0");
+}
+
+/// cairo 的**圆角矩形路径**（cairo 没有现成接口 ⇒ 四段 90° 弧手拼）。
+///
+/// 美化·地基 4/5：图表底板要圆角 ⇒ 每个角一段 `arc`（圆心在角内缩 r 处）。
+fn rounded_rect_path(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let _ = cr.new_path();
+    // 右上 → 右下 → 左下 → 左上，最后 close_path 收口
+    let _ = cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
+    let _ = cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
+    let _ = cr.arc(x + r, y + h - r, r, FRAC_PI_2, std::f64::consts::PI);
+    let _ = cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * FRAC_PI_2);
+    let _ = cr.close_path();
 }
 
 /// 内存列：`"52.84MiB / 63.00GiB"` ⇒ `"8.4% · 52.84MiB / 63.00GiB"`。
