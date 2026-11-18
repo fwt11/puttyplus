@@ -45,6 +45,29 @@
   正确完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行关机；失败就**不许
   关**，把原因报给用户。
 
+## 〇之二之一十九、最新进展（2026-11-19：美化·地基 1–5 全落地，未 push）
+
+- **背景**：用户 2026-11-18「界面还是不够美」⇒ 诊断＝设计系统「**有色无形**」
+  （只有颜色令牌，没有形状/层级/字号令牌，全 app 是 Adwaita 默认形状）⇒
+  用户拍板「**专业工具风**」（对标 Termius/TablePlus）＋「**地基优先**」。
+- **五个提交**（每批一个，均已验证）：
+  `851dbdd` 1/5 令牌 v2（暗色三层 + `pp_card` + `.pp-card/.pp-pill/.pp-kbd/.pp-mono`
+  原语 + 表格节奏）→ `dd9b961` 2/5 状态药丸（新 `panel/pillcell.rs`，容器表
+  状态列 + 详情头）→ `a1e7d2c` 3/5 表格节奏与等宽 → `dfedf8c` 4/5 图表精修
+  → `1bd9e74` 5/5 `examples/design_gallery.rs` 活画廊 + `UI_CHECKLIST.md` §8。
+  阶段号 126–130，细节见 `docs/功能说明-内部.md`。
+- ⚠️ **工作区遗留分拣**：开工前工作区里有 2026-11-18 那轮 D1–D21 修复的
+  **未提交改动** ⇒ theme.rs 的随 1/5、dockerui.rs 等的随 2/5 进了库；剩余的
+  （docker.rs / emptystate.rs / 审查台账+截图）单独收 `2af78bd`。
+- **验证**：`cargo test --lib` **879 全绿**（新断言全部反向验证过）；
+  `cargo check --examples` 132 个全过；`cli_contract_check` PASS=73；
+  `docker_ui_smoke` / `welcome_cards_smoke` / `db_ui_smoke` 全过；
+  **release/puttyplus 已出新产物**（11-19 00:30）。
+- ⚠️ **未 push**（用户指令只有「提交」）⇒ 下次开机若要发布：
+  `git push origin main`（推上去 CI 会跑 ci.yml + ci-windows.yml）。
+- **下一批候选**（用户验收后再动）：欢迎页空态改三张能力卡＋键帽化、
+  间距全面 4pt 化、侧栏/DB 工作台推广药丸、高对比主题核对新原语。
+
 ## 〇之二之一十八、最新进展（2026-11-18：`v0.9.0` 重发 ＋ 两个真 bug）
 
 - **发版**：用户 2026-11-18「如果弄完了，还是重发 v0.9」⇒ **同一个 `v0.9.0`
