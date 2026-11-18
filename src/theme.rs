@@ -239,7 +239,7 @@ pub fn dim_hex() -> String {
 /// 当前主题的底色（CSS 里的 `pp_bg`）。
 pub fn bg_hex() -> String {
     match current_theme() {
-        Theme::Dark => "#1e2124".into(),
+        Theme::Dark => "#17191c".into(),
         Theme::Light => "#f3f4f6".into(),
         Theme::HighContrast => "#000000".into(),
         Theme::System => system_bg().unwrap_or_else(|| "#f3f4f6".into()),
@@ -463,11 +463,55 @@ pub fn syn_colors() -> SynColors {
 /// 只能用同色盖住。
 pub fn panel_hex() -> String {
     match current_theme() {
-        Theme::Dark => "#26292e".into(),
+        Theme::Dark => "#1e2124".into(),
         Theme::Light => "#ffffff".into(),
         Theme::HighContrast => "#000000".into(),
         Theme::System => system_base_hex().unwrap_or_else(|| "#ffffff".into()),
     }
+}
+
+/* ---------------- 折线图（cairo 自绘）的颜色 ---------------- */
+
+/// 折线图的**曲线颜色**（4 条，按顺序取）。
+///
+/// ⚠️ **为什么不能写死 RGB 常量**：容器工作台的监控曲线是 **cairo 自绘**
+///   的 ⇒ **不过 CSS** ⇒ 写死的颜色在暗色主题下是「白底黑线」那种破相
+///   （UI 审查 2026-11-18 D1/D3）。⇒ 曲线色也必须**跟主题走**。
+///
+/// ⚠️ **为什么每个主题给一套**：同一组颜色在亮底上要够深、在暗底上要够亮
+///   ⇒ 一套颜色不可能同时够 ⇒ 按主题各给一套（对比度都 ≥ 3:1）。
+pub fn chart_series_hexes() -> [&'static str; 4] {
+    chart_series_hexes_for(current_theme())
+}
+
+/// 折线图的**曲线颜色**（**按主题给**；纯函数 ⇒ 能单测）。
+///
+/// ⚠️ **为什么拆出纯函数**：单测里没有 GTK ⇒ `current_theme()` 只能是
+///   `System` ⇒ 没法验「换主题颜色真的变了」⇒ 纯函数能直接对比两套主题。
+pub fn chart_series_hexes_for(t: Theme) -> [&'static str; 4] {
+    match t {
+        Theme::Dark => ["#58a6ff", "#56d364", "#f0883e", "#bc8cff"],
+        Theme::Light => ["#0969da", "#1a7f37", "#bc4c00", "#8250df"],
+        Theme::HighContrast => ["#4fc3ff", "#5cff9e", "#ffc44d", "#d59bff"],
+        // ⚠️ **跟随系统**：看系统底色是亮是暗 ⇒ 借亮/暗那两套里的一套。
+        Theme::System => {
+            if system_base_is_dark() {
+                ["#58a6ff", "#56d364", "#f0883e", "#bc8cff"]
+            } else {
+                ["#0969da", "#1a7f37", "#bc4c00", "#8250df"]
+            }
+        }
+    }
+}
+
+/// 折线图的**网格线颜色**（半透明 ⇒ 画的时候自己调 alpha）。
+pub fn chart_grid_hex() -> String {
+    dim_hex()
+}
+
+/// 折线图的**坐标轴文字颜色**。
+pub fn chart_axis_hex() -> String {
+    fg_hex()
 }
 
 /// 「跟随系统」时系统主题的 base 色（CSS 里 `@pp_panel` 就是它）。
@@ -741,6 +785,7 @@ fn system_tokens() -> Option<String> {
 
     Some(format!("@define-color pp_bg {bg};\n\
          @define-color pp_panel {base};\n\
+         @define-color pp_card {base};\n\
          @define-color pp_fg {fg};\n\
          @define-color pp_dim {dim};\n\
          @define-color pp_border {border};\n\
@@ -856,6 +901,41 @@ const COMPONENTS: &str = r#"
 }
 .pp-chip-warn { background-color: mix(@pp_warn, @pp_bg, 0.84); color: @pp_fg; }
 .pp-chip-err { background-color: mix(@pp_err, @pp_bg, 0.82); color: @pp_fg; }
+/* ── 设计令牌 v2 的原语类（2026-11-18 美化·地基批）────────────────
+   以前形状/层级各写各的（菜单一套、空态一套、欢迎卡一套）⇒ 收成四个
+   可复用原语：卡片 / 药丸 / 键帽 / 等宽。圆角尺度：卡片 10、键帽 5、
+   药丸 999（胶囊）。卡片面用 @pp_card——暗色下比窗口底亮两档（三层：
+   窗底 < 面板 < 卡片），浅色/高对比下与面板同值（没有第三层可分）。
+   ⚠️ **阴影不给弹层**（X11 弹层不透明 ⇒ box-shadow 画成黑块，见
+   AGENTS.md「弹层四脾气」）；卡片本批也只靠边框+圆角做层次。 */
+.pp-card {
+  background-color: @pp_card;
+  border: 1px solid @pp_border;
+  border-radius: 10px;
+}
+/* 状态药丸：底色 = 状态色往背景混 0.84（跟 .pp-chip-ok/-warn/-err 同配方
+   ⇒ 对比度由 @pp_fg 守住，WCAG 单测钉着）。圆点由渲染器自画（pillcell.rs），
+   CSS 这层只管"胶囊"的形状。 */
+.pp-pill {
+  border-radius: 999px;
+  padding: 1px 9px;
+  color: @pp_fg;
+}
+.pp-pill-ok   { background-color: mix(@pp_ok,   @pp_bg, 0.84); }
+.pp-pill-warn { background-color: mix(@pp_warn, @pp_bg, 0.84); }
+.pp-pill-err  { background-color: mix(@pp_err,  @pp_bg, 0.82); }
+/* 键帽：快捷键提示用（欢迎页、空态）。等宽 + 淡底 + 细边框 ⇒ 一眼是"按这个键"。 */
+.pp-kbd {
+  font-family: monospace;
+  font-size: 0.9em;
+  background-color: @pp_bg;
+  border: 1px solid @pp_border;
+  border-radius: 5px;
+  padding: 0px 6px;
+  color: @pp_dim;
+}
+/* 等宽文字：ID、端口、路径这类"技术值"——比例字体让人数错位。 */
+.pp-mono { font-family: monospace; }
 /* 「传输队列」按钮上的**角标**（阶段 102 + 2026-11-11 重做）。
    形状：**一个蓝圆（圆里写数字），外面套一圈在转的弧**。
 
@@ -928,7 +1008,7 @@ button.pp-xfer-busy {
    是一排自己画的 ToggleButton（**不是** GtkStackSwitcher——它内部那排
    按钮是 homogeneous 的，每个按钮平分整行宽度，5 个按钮摊满 640px，
    看着像一排导航链接）。当前段用强调色底标出来。 */
-.pp-segmented { background-color: @pp_panel; border-radius: 8px; padding: 2px; }
+.pp-segmented { background-color: @pp_card; border-radius: 8px; padding: 2px; }
 .pp-segmented button {
   border-radius: 6px;
   border: none;
@@ -966,7 +1046,7 @@ button.pp-xfer-busy {
      现在：**真的居中**（dbui.rs 里左右各一个会伸展的撑杆）、全部左对齐、
      每行 = 图标 + 文字且**整列等宽**、快捷键提示删掉（工具栏上已有）。 */
 .pp-empty {
-  background-color: @pp_panel;
+  background-color: @pp_card;
   border: 1px solid @pp_border;
   border-radius: 12px;
   /* ⚠️ **宽度不能超过容器**（审计 P0-2，2026-10-30）：DB 工作台活在一块
@@ -1495,10 +1575,19 @@ treeview.view { background-color: @pp_panel; }
    「整块被选中」。GTK4 的 TreeView 没有「按行 hover」的 CSS 节点，
    行级高亮只能靠选中态。 */
 
+/* 表格节奏（美化·地基批）：单元格统一 4px 7px 的内边距 ⇒ 行高有呼吸感
+   （以前是 Adwaita 默认的紧凑挤法）。⚠️ 紧凑密度会在 `.pp-compact` 下
+   覆盖回 1px 4px（density.rs）⇒ 两边不冲突。 */
+treeview.view cell {
+  padding: 4px 7px;
+}
+
 treeview header button, .treeview header button {
   background-color: @pp_bg;
-  color: @pp_fg;
   border-color: @pp_border;
+  /* 表头降半调：小一号的次要色 + 加粗 ⇒ 数据是主角，表头是标签。 */
+  color: @pp_dim;
+  font-weight: 600;
 }
 
 popover, modelbutton, .background.popover { background-color: @pp_bg; color: @pp_fg; border-color: @pp_border; }
@@ -1576,7 +1665,7 @@ button.pp-plus-btn:hover label.pp-plus { color: @pp_accent; }
    边框就没了（看着像没卡片，只剩一行字）。 */
 .pp-welcome-title { font-size: 15pt; font-weight: 700; color: @pp_fg; }
 button.pp-recent-card {
-  background-color: @pp_panel;
+  background-color: @pp_card;
   border: 1px solid @pp_border;
   border-radius: 10px;
   padding: 8px 12px;
@@ -1642,12 +1731,13 @@ label.pp-error { color: @pp_err; }
 
 const DARK_CSS: &str = concat!(
     r#"
-@define-color pp_bg      #1e2124;
-@define-color pp_panel   #26292e;
+@define-color pp_bg      #17191c;
+@define-color pp_panel   #1e2124;
+@define-color pp_card    #26292e;
 @define-color pp_fg      #dcdfe4;
 @define-color pp_dim     #9aa0a6;
 @define-color pp_border  #3a3f47;
-@define-color pp_hover   #31353c;
+@define-color pp_hover   #2f3339;
 @define-color pp_accent  #3d7dd6;
 @define-color pp_on_accent #ffffff;
 @define-color pp_accent_soft #253349;
@@ -1665,6 +1755,7 @@ const LIGHT_CSS: &str = concat!(
     r#"
 @define-color pp_bg      #f3f4f6;
 @define-color pp_panel   #ffffff;
+@define-color pp_card    #ffffff;
 @define-color pp_fg      #1f2328;
 @define-color pp_dim     #5c636a;
 @define-color pp_border  #d3d7dd;
@@ -1686,6 +1777,7 @@ const CONTRAST_CSS: &str = concat!(
     r#"
 @define-color pp_bg      #000000;
 @define-color pp_panel   #000000;
+@define-color pp_card    #000000;
 @define-color pp_fg      #ffffff;
 @define-color pp_dim     #ffffff;
 @define-color pp_border  #ffffff;
@@ -1899,7 +1991,7 @@ mod tests {
         // pp_bg/pp_fg 覆盖成对不存在的 @bg/@fg 的引用（解析退化成白色），
         // 结果"深色"主题白底白字。这里钉死：主题块里的定义必须原样生效。
         for (t, bg) in [
-            (Theme::Dark, "#1e2124"),
+            (Theme::Dark, "#17191c"),
             (Theme::Light, "#f3f4f6"),
             (Theme::HighContrast, "#000000"),
         ] {
@@ -2038,7 +2130,7 @@ mod tests {
     fn 固定主题的说明文字对比度够_aa() {
         // (主题, pp_dim, pp_bg, pp_panel)
         let cases = [
-            (Theme::Dark, "#9aa0a6", "#1e2124", "#26292e"),
+            (Theme::Dark, "#9aa0a6", "#17191c", "#1e2124"),
             (Theme::Light, "#5c636a", "#f3f4f6", "#ffffff"),
             (Theme::HighContrast, "#ffffff", "#000000", "#000000"),
         ];
@@ -2122,7 +2214,7 @@ mod tests {
     fn 列表行文字对比度够_aa() {
         // (主题, pp_fg, pp_panel)
         let cases = [
-            (Theme::Dark, "#dcdfe4", "#26292e"),
+            (Theme::Dark, "#dcdfe4", "#1e2124"),
             (Theme::Light, "#1f2328", "#ffffff"),
             (Theme::HighContrast, "#ffffff", "#000000"),
         ];
@@ -2156,6 +2248,43 @@ mod tests {
         }
     }
 
+    /// 卡片面（`pp_card`）要跟窗底（`pp_bg`）**分得开**——美化·地基批的
+    /// 核心就是「暗色三层：窗底 < 面板 < 卡片」。用「对黑底的对比度」
+    /// 当亮度次序（比 luma 计算省事，次序等价）。
+    #[test]
+    fn 卡片面比窗底亮一层_暗色三层分得开() {
+        let lum = |hex: &str| contrast_ratio(hex, "#000000");
+        // 暗色：窗底 < 面板 < 卡片，一层比一层亮
+        let (bg, panel, card) = ("#17191c", "#1e2124", "#26292e");
+        assert!(lum(panel) > lum(bg), "暗色面板 {panel} 应比窗底 {bg} 亮一层");
+        assert!(lum(card) > lum(panel), "暗色卡片 {card} 应比面板 {panel} 亮一层");
+        // 浅色：白卡片压浅灰窗底，同样分得开
+        assert!(lum("#ffffff") > lum("#f3f4f6"), "浅色卡片应比窗底亮");
+        // 高对比没有第三层可分（黑就是黑）——这是设计决定，不断言
+    }
+
+    /// 令牌 v2 的原语类必须每套主题都有（CSS 子串钉死，防止被人删了没察觉）。
+    #[test]
+    fn 令牌v2原语类都在() {
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+            let css = css_text(t).expect("非 System 主题都该有 CSS");
+            for frag in [
+                "@define-color pp_card",
+                ".pp-card {",
+                ".pp-pill {",
+                ".pp-pill-ok",
+                ".pp-pill-warn",
+                ".pp-pill-err",
+                ".pp-kbd {",
+                ".pp-mono {",
+                "treeview.view cell {",
+                "padding: 4px 7px;",
+            ] {
+                assert!(css.contains(frag), "{t:?} 缺原语「{frag}」");
+            }
+        }
+    }
+
     /// 徽章底色得跟调色板里的 `pp_chip` 对得上（一个写死、一个现算，
     /// 差了就说明有人只改了一处）。
     #[test]
@@ -2170,6 +2299,33 @@ mod tests {
                 css.contains(&format!("@define-color pp_chip    {chip};")),
                 "{t:?} 的调色板里没有 pp_chip {chip}"
             );
+        }
+    }
+
+    /// ⚠️ **折线图的颜色必须跟主题走**（UI 审查 2026-11-18 D1）。
+    ///
+    /// ⚠️ **为什么这条重要**：cairo 自绘的控件**不过 CSS** ⇒ 以前把
+    ///   颜色写死（`set_source_rgb(1.0,1.0,1.0)`）⇒ 暗色主题下是**白盒子**。
+    ///   ⇒ 这里钉死「每套主题给一套颜色，且各套**不一样**」。
+    #[test]
+    fn 折线图颜色跟主题走() {
+        let dark = chart_series_hexes_for(Theme::Dark);
+        let light = chart_series_hexes_for(Theme::Light);
+        let contrast = chart_series_hexes_for(Theme::HighContrast);
+        // ⚠️ **暗色与亮色必须不同**（相同 ⇒ 有一边看不清）。
+        assert_ne!(dark, light, "暗色与亮色给了同一套曲线色");
+        assert_ne!(dark, contrast, "暗色与高对比给了同一套曲线色");
+        // ⚠️ **每条线都得是合法颜色**（cairo 要 RGB）。
+        for set in [dark, light, contrast] {
+            for c in set {
+                assert!(
+                    gdk::RGBA::parse(c).is_ok(),
+                    "曲线色 {c} 不是合法颜色"
+                );
+                // ⚠️ **不许是纯白 / 纯黑**（在暗底/亮底上必然有一边看不见）。
+                assert_ne!(c.to_ascii_lowercase(), "#ffffff", "纯白曲线看不见");
+                assert_ne!(c.to_ascii_lowercase(), "#000000", "纯黑曲线看不见");
+            }
         }
     }
 
