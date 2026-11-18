@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2070] = [
+pub static EN: [(&str, &str); 2077] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -69,6 +69,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("SFTP 尚未连接，无法扫描远程目录。", "SFTP is not connected yet, cannot scan the remote directory."),
     ("SFTP 尚未连接，无法移动。", "SFTP is not connected yet, cannot move."),
     ("SFTP 尚未连接，无法读取远程文件。", "SFTP is not connected yet, cannot read the remote file."),
+    ("SFTP 文件", "SFTP files"),
     ("SFTP 连接 {v0}@{v1}:{v2} 需要密码：\n{err}", "The SFTP connection {v0}@{v1}:{v2} needs a password:\n{err}"),
     ("SFTP 连接失败", "SFTP connection failed"),
     ("SFTP 连接已断开。", "The SFTP connection was closed."),
@@ -92,6 +93,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("SOCKS5 请求版本不对", "Wrong SOCKS5 request version"),
     ("SQL 为空", "The SQL is empty"),
     ("SSH 密码", "SSH password"),
+    ("SSH 终端", "SSH terminal"),
     ("SSH 终端 · SFTP 文件 · 数据库工作台", "SSH Terminal · SFTP Files · Database Workbench"),
     ("SSH 连接 {v0}@{v1}:{v2} 需要密码：\n{msg}", "The SSH connection {v0}@{v1}:{v2} needs a password:\n{msg}"),
     ("SSH 连接失败：{msg}", "SSH connection failed: {msg}"),
@@ -264,6 +266,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("上传", "Upload"),
     ("上传 {v0} 个（{v1}）、建目录 {v2} 个、删除 {v3} 个", "Uploaded {v0} ({v1}), created {v2} directories, deleted {v3}"),
     ("上传…", "Upload…"),
+    ("上传下载与编辑", "Transfer & edit files"),
     ("上传中 {u} 个", "Uploading {u}"),
     ("上传失败（远程命令退出码 {c}）", "Upload failed (remote command exit code {c})"),
     ("上传完成", "Upload finished"),
@@ -421,6 +424,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("全显示", "Show all"),
     ("全部", "All"),
     ("全部完成：{v0}", "All done: {v0}"),
+    ("全部快捷键", "All shortcuts"),
     ("全部替换", "Replace all"),
     ("全隐藏", "Hide all"),
     ("共 {n} 个卷", "{n} volumes in total"),
@@ -1221,6 +1225,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("新建数据库连接（当前会话）", "New database connection (current session)"),
     ("新建文件夹", "New folder"),
     ("新建本地目录", "New local directory"),
+    ("新建标签", "New tab"),
     ("新建终端", "New terminal"),
     ("新建表", "New table"),
     ("新建表…", "New table…"),
@@ -1345,6 +1350,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("查看日志", "View logs"),
     ("查看明细", "View the details"),
     ("查询", "Query"),
+    ("查询与导入导出", "Query & import/export"),
     ("查询失败: {e}", "The query failed: {e}"),
     ("查询失败: {v0}", "The query failed: {v0}"),
     ("查询完成：{msg}", "Query finished: {msg}"),
@@ -1920,6 +1926,7 @@ pub static EN: [(&str, &str); 2070] = [
     ("远程 {bh}:{v0} → {v1}:{v2}", "Remote {bh}:{v0} → {v1}:{v2}"),
     ("远程修改时间", "Remote modified time"),
     ("远程删除不可恢复，目录将递归删除。", "Deleting on the remote cannot be undone, the directory is deleted recursively."),
+    ("远程命令行与分屏", "Remote shells & split panes"),
     ("远程执行 docker 命令失败", "Running the docker command on the remote host failed"),
     ("远程文件", "Remote file"),
     ("远程时间未对齐（服务器不允许改 mtime）", "The remote time was not synchronised (the server does not allow changing the mtime)"),

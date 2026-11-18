@@ -152,14 +152,17 @@ fn main() {
         format!("{wt:?}")
     );
     check!(
-        "欢迎页有定位说明",
-        wt.iter().any(|t| t.contains("SSH") && t.contains("SFTP")),
+        "欢迎页有三张能力卡（阶段 131：定位句升级成卡）",
+        wt.iter().any(|t| t.contains("SSH 终端"))
+            && wt.iter().any(|t| t.contains("SFTP 文件"))
+            && wt.iter().any(|t| t.contains("数据库工作台")),
         format!("{wt:?}")
     );
     check!(
-        "欢迎页的快捷键收成了一行",
-        wt.iter()
-            .any(|t| t.contains("常用键位") && t.contains("F1")),
+        "欢迎页的快捷键是键帽行（键名 + 说明分开摆）",
+        wt.iter().any(|t| t.contains("Ctrl+Shift+T"))
+            && wt.iter().any(|t| t.contains("新建标签"))
+            && wt.iter().any(|t| t.contains("F1")),
         format!("{wt:?}")
     );
     check!(
@@ -167,11 +170,13 @@ fn main() {
         !wt.iter().any(|t| t == "快捷键一览"),
         format!("{wt:?}")
     );
-    // 「新建连接」的主 CTA 还在
+    // ⚠️ **「新建连接」按钮不在欢迎页**（2026-11-02 用户要求删除：
+    //    和侧栏空态 CTA 重复 ⇒ 入口只在侧栏）。以前这条断言断「有」，
+    //    按钮删了它就过时了 ⇒ 现在断「没有」。
     let wbtns = buttons_of(&welcome);
     check!(
-        "欢迎页有「新建连接」主 CTA",
-        wbtns.iter().any(|(t, s)| t.contains("新建连接") && *s),
+        "欢迎页不摆「新建连接」按钮（入口只在侧栏）",
+        !wbtns.iter().any(|(t, _)| t.contains("新建连接")),
         format!("{wbtns:?}")
     );
     // 最近连接块：先是没有最近记录 ⇒ 不摆这块（摆一个空块更没用）

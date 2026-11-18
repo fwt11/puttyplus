@@ -2121,10 +2121,47 @@ pub fn welcome_page() -> gtk::Widget {
     // 阶段 91：定位句**提成标题**（正常色、稍大），下面加一句"下一步干什么"
     // 的副标题 ⇒ 一眼知道这是干什么的、也知道自己该点哪儿。
     let recents = crate::recent::load();
-    let title = gtk::Label::new(Some(tr("SSH 终端 · SFTP 文件 · 数据库工作台")));
-    title.add_css_class("pp-welcome-title");
-    title.set_margin_bottom(4);
-    box_.append(&title);
+
+    // ---- 能力卡（阶段 131）：定位句从一行字升级成三张卡 ----
+    //
+    // ⚠️ **这三张卡不是按钮**：2026-11-02 用户删掉了欢迎页的「新建连接」
+    //    大按钮（理由：和侧栏空态 CTA 重复 ⇒ 同一个入口不能摆三份）⇒
+    //    这里只**说明**这个应用能干什么，入口仍在侧栏的「＋」。
+    //    是 Box 不是 Button ⇒ 没有 hover、没有点击语义 ⇒ 不会出现
+    //    "看着能点、点了没反应"。
+    let caps: [(&str, &str, &str); 3] = [
+        ("utilities-terminal-symbolic", tr("SSH 终端"), tr("远程命令行与分屏")),
+        ("folder-remote-symbolic", tr("SFTP 文件"), tr("上传下载与编辑")),
+        ("drive-harddisk-symbolic", tr("数据库工作台"), tr("查询与导入导出")),
+    ];
+    let caps_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    caps_row.set_halign(gtk::Align::Center);
+    for (icon_name, name, desc) in caps {
+        let tile = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        tile.add_css_class("pp-card");
+        // ⚠️ **三张卡等宽**（AGENTS.md 阶段 96 的教训：一排卡片宽窄不一
+        //    = 参差的锯齿 = "看着丑"的主因）⇒ 统一给最小宽。
+        tile.set_size_request(176, -1);
+        let icon = gtk::Image::from_icon_name(icon_name);
+        icon.set_pixel_size(24);
+        icon.set_valign(gtk::Align::Center);
+        tile.append(&icon);
+        let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        let nl = gtk::Label::new(Some(name));
+        nl.set_xalign(0.0);
+        nl.add_css_class("pp-card-title");
+        texts.append(&nl);
+        let dl = gtk::Label::new(Some(desc));
+        dl.set_xalign(0.0);
+        dl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        dl.add_css_class("pp-card-sub");
+        texts.append(&dl);
+        tile.append(&texts);
+        caps_row.append(&tile);
+    }
+    caps_row.set_margin_bottom(6);
+    box_.append(&caps_row);
+
     let sub = gtk::Label::new(Some(if recents.is_empty() {
         tr("从左侧建一个连接就能开工")
     } else {
@@ -2187,23 +2224,43 @@ pub fn welcome_page() -> gtk::Widget {
     // 就是侧栏那个「＋」** ⇒ 文案要跟着改，不能再让人去找一个不存在的
     // 按钮（上面两句提示已经改过）。
 
-    // ---- 常用键位只留一行 ----
+    // ---- 常用键位：**键帽化**（阶段 131）----
     //
     // ⚠️ 原来这里是一张**两列六行**的速查表，跟 F1 的快捷键一览**重复**
-    // （审计 P2-9）⇒ 收成一行，剩下的按 F1 看。
+    // （审计 P2-9）⇒ 收成一行；美化·地基 2 批再升级成**键帽**（.pp-kbd）——
+    // 键名有底有边框，一眼就知道"这是要按的键"，不用混在说明文字里认。
     let d = |k: &str| {
         crate::shortcuts::by_display(k)
             .map(|b| b.display.to_string())
             .unwrap_or_else(|| k.to_string())
     };
-    let tip = gtk::Label::new(Some(&trf!("常用键位：{v0} 新建标签 · {v1} 查找 · {v2} 快捷键一览", v0 = d("Ctrl+Shift+T"), v1 = d("Ctrl+F"), v2 = d("F1"))));
-    tip.add_css_class("dim-label");
-    tip.set_margin_top(22);
-    // ⚠️ 必须限宽 + 开 wrap：这一行字挺长，窄窗口里会被**裁掉半截**
-    // （"F1 快捷键一览" 只剩一个"览"）。
-    tip.set_wrap(true);
-    tip.set_max_width_chars(44);
-    box_.append(&tip);
+    let keys_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    keys_row.set_halign(gtk::Align::Center);
+    keys_row.set_margin_top(22);
+    let mk_kbd = |k: &str| {
+        let l = gtk::Label::new(Some(k));
+        l.add_css_class("pp-kbd");
+        l
+    };
+    let mk_dim = |t: &str| {
+        let l = gtk::Label::new(Some(t));
+        l.add_css_class("dim-label");
+        l
+    };
+    let mut first = true;
+    for (k, what) in [
+        (d("Ctrl+Shift+T"), tr("新建标签")),
+        (d("Ctrl+F"), tr("查找")),
+        (d("F1"), tr("全部快捷键")),
+    ] {
+        if !first {
+            keys_row.append(&mk_dim("·"));
+        }
+        first = false;
+        keys_row.append(&mk_kbd(&k));
+        keys_row.append(&mk_dim(&what));
+    }
+    box_.append(&keys_row);
 
     box_.upcast()
 }
