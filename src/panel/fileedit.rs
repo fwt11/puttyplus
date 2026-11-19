@@ -1162,6 +1162,7 @@ fn attach_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
     let editor_id = sub.add_editor(
         e.id,
         Some(tab_icon(e)),
+        Some(tab_loc_icon(e.remote)),
         &tab_title(e),
         e.page.clone().upcast(),
         Some(on_close),
@@ -1212,11 +1213,40 @@ fn tab_title(e: &FileEdit) -> String {
 }
 
 /// 子标签上的图标：可编辑是「铅笔」，只读是「文档」。
-fn tab_icon(e: &FileEdit) -> &'static str {
+fn tab_icon(e: &FileEdit) -> crate::panel::subtabs::TabIcon {
     if e.base_readonly {
-        "text-x-generic-symbolic"
+        crate::panel::subtabs::TabIcon {
+            name: "text-x-generic-symbolic".into(),
+            tip: tr("这个文件是只读的").to_string(),
+        }
     } else {
-        "document-edit-symbolic"
+        crate::panel::subtabs::TabIcon {
+            name: "document-edit-symbolic".into(),
+            tip: tr("这个文件可以编辑").to_string(),
+        }
+    }
+}
+
+/// 子标签上的**位置图标**：远程是「服务器」，本地是「电脑」。
+///
+/// ⚠️ **为什么要有**（用户 2026-11-19 提的）：页签上只有**文件名** ⇒
+///   「ntluser.ini」到底是**这台服务器上**的还是**本机**的，光看名字
+///   分不出来 ⇒ 挂一个小图标标位置。
+///
+/// ⚠️ **图标名必须是主题里真有的**：`network-server-symbolic` /
+///   `computer-symbolic` 都是 **Adwaita 自带**的（GTK4 基础主题 ⇒
+///   Windows 上那套 GTK4 也带）⇒ 不会显示成「缺图」。
+pub fn tab_loc_icon(remote: bool) -> crate::panel::subtabs::TabIcon {
+    if remote {
+        crate::panel::subtabs::TabIcon {
+            name: "network-server-symbolic".into(),
+            tip: tr("这个文件在远程服务器上").to_string(),
+        }
+    } else {
+        crate::panel::subtabs::TabIcon {
+            name: "computer-symbolic".into(),
+            tip: tr("这个文件在本机上").to_string(),
+        }
     }
 }
 
@@ -3470,6 +3500,22 @@ mod tests {
     }
 
     use super::*;
+
+    /// 页签上的**位置图标**：远程＝服务器，本地＝电脑（用户 2026-11-19 提的）。
+    ///
+    /// ⚠️ **为什么钉住图标名**：图标名**必须是主题里真有的** ⇒ 写错一个
+    ///   字母，界面上就是「缺图」（用户会以为程序坏了）⇒ 名字钉在单测里。
+    #[test]
+    fn 位置图标分远程与本地() {
+        let remote = tab_loc_icon(true);
+        assert_eq!(remote.name, "network-server-symbolic");
+        assert!(remote.tip.contains("远程"), "tooltip 没说清是远程：{}", remote.tip);
+        let local = tab_loc_icon(false);
+        assert_eq!(local.name, "computer-symbolic");
+        assert!(local.tip.contains("本机"), "tooltip 没说清是本机：{}", local.tip);
+        // ⚠️ 两个图标**不能重名**（重了就分不出远程 / 本地）。
+        assert_ne!(remote.name, local.name);
+    }
 
     #[test]
     fn binary_detection() {

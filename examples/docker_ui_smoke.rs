@@ -1595,7 +1595,10 @@ fn main() {
         );
         // 加一个编辑器 ⇒ 编辑区露出来，而且**还在容器页里**。
         let dummy = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        sub3.add_editor(9001, None, "冒烟", dummy.upcast(), None);
+        //
+        // ⚠️ 参数顺序：`id, 模式图标, 位置图标, 标题, 内容, 关闭回调`
+        //   （阶段 136 加了「位置图标」⇒ 签名变过，漏改这里 CI 会红）。
+        sub3.add_editor(9001, None, None, "冒烟", dummy.upcast(), None);
         pump(200);
         check!(
             "⑰ 编辑区露出来了（开着编辑器却看不见 = 功能等于没有）",

@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2078] = [
+pub static EN: [(&str, &str); 2082] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1885,6 +1885,10 @@ pub static EN: [(&str, &str); 2078] = [
     ("这个容器没有在运行（先启动它才能进终端）", "This container is not running (start it before opening a terminal)"),
     ("这个容器里没有 {sh}（可以换一个：{list}）", "This container has no {sh} (you can pick another one: {list})"),
     ("这个容器里没有可用的 shell（试过 {list}）", "This container has no usable shell (tried {list})"),
+    ("这个文件可以编辑", "This file can be edited"),
+    ("这个文件在本机上", "This file is on this computer"),
+    ("这个文件在远程服务器上", "This file is on the remote server"),
+    ("这个文件是只读的", "This file is read-only"),
     ("这个本地条目没有名字", "This local entry has no name"),
     ("这个条目没有名字", "This entry has no name"),
     ("这个模式里有 {v0} 张表，一次画不下（上限 {ER_MAX_TABLES} 张）。先在对象树里选一张表，看它跟别人的关系。", "There are {v0} tables in this schema, too many to draw at once (the limit is {ER_MAX_TABLES}). Pick one table in the object tree first and look at how it relates to the others."),

@@ -446,6 +446,21 @@ fn main() {
         "编辑区上没装停靠接收器（编辑器拖不回编辑区 = 功能等于没有）"
     );
     println!("[3] 拖放零件齐了：拖拽源 + 页签栏接收器 + 停靠接收器 ✓");
+    // ---- 3b) 页签上要标出「这个文件在哪台机器上」（用户 2026-11-19）----
+    //
+    // ⚠️ **为什么重要**：页签上只有**文件名** ⇒ 「ntluser.ini」是这台
+    //   服务器上的还是**本机**的，光看名字分不出来 ⇒ 必须有个小图标。
+    let eid0 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
+    let icons = sub.editor_tab_icon_names_for_test(eid0);
+    assert!(
+        icons.iter().any(|n| n == "computer-symbolic"),
+        "本地文件的小标签上应当有「电脑」图标（现在有：{icons:?}）"
+    );
+    assert!(
+        icons.iter().any(|n| n == "document-edit-symbolic"),
+        "可编辑的文件还应当保留「铅笔」图标（现在有：{icons:?}）"
+    );
+    println!("[3b] 页签图标齐了：位置（电脑）+ 模式（铅笔）✓");
     // ---- 4) 拖回子标签栏 ⇒ 变回子页签；再拖回来 ⇒ 变回编辑区 ----
     let eid = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
     // ⚠️ **走跟拖放落点一样的路**：先解析负载，再调用同一个转换函数。

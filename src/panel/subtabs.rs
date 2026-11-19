@@ -121,12 +121,54 @@ struct SubPage {
     on_close: Option<Box<dyn Fn() -> bool>>,
 }
 
+/// 页签头上的一个**小图标**（**名字 ＋ tooltip**）。
+///
+/// ⚠️ **为什么带 tooltip**：16px 的小图标（服务器 / 电脑）光看认不出是哪
+///   一头 ⇒ 鼠标停上去得说清楚「这个文件在远程服务器上」/「这个文件在本机」。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabIcon {
+    /// 图标名（**必须是主题里真有的** ⇒ 否则显示成「缺图」）。
+    pub name: String,
+    /// tooltip 文案。
+    pub tip: String,
+}
+
+/// 往一个横向容器里挂一个小图标（**没有就什么都不做**）。
+fn append_icon(box_: &gtk::Box, icon: Option<&TabIcon>) {
+    let Some(ic) = icon else { return };
+    let img = gtk::Image::from_icon_name(&ic.name);
+    img.set_pixel_size(16);
+    img.set_valign(gtk::Align::Center);
+    img.set_tooltip_text(Some(&ic.tip));
+    box_.append(&img);
+}
+
+/// 递归收集一棵控件树里**所有 Image 的图标名**（测试钩子用）。
+fn collect_icon_names(w: &gtk::Widget, out: &mut Vec<String>) {
+    if let Some(img) = w.downcast_ref::<gtk::Image>() {
+        if let Some(name) = img.icon_name() {
+            out.push(name.to_string());
+        }
+    }
+    let mut c = w.first_child();
+    while let Some(x) = c {
+        collect_icon_names(&x, out);
+        c = x.next_sibling();
+    }
+}
+
 /// **编辑区**里的一个编辑器（阶段 107；阶段 108 起可在「编辑区 ⇄ 子标签栏」之间拖）。
 struct EditorPage {
     /// 编辑器 id（= `fileedit::FileEdit::id`）。
     id: u64,
     /// 图标名（重建标签时要用）。
-    icon: Option<String>,
+    icon: Option<TabIcon>,
+    /// **位置图标**（远程 / 本地；重建标签时要用）。
+    ///
+    /// ⚠️ **为什么单独一个**：模式图标（铅笔＝可编辑 / 文档＝只读）**两种
+    ///   文件都一样** ⇒ 光看它分不出「这台服务器上的」还是「本机的」
+    ///   ⇒ 页签上再挂一个位置图标（服务器 / 电脑）（用户 2026-11-19 提的）。
+    loc_icon: Option<TabIcon>,
     /// 标题（重建标签时要用）。
     title: String,
     /// 标题标签（**当前活着的那一个**：搬家时换新的 ⇒ 改标题只改一处，
@@ -694,7 +736,8 @@ impl SubTabs {
     pub fn add_editor(
         self: &Rc<Self>,
         id: u64,
-        icon: Option<&str>,
+        icon: Option<TabIcon>,
+        loc_icon: Option<TabIcon>,
         title: &str,
         content: gtk::Widget,
         on_close: Option<Box<dyn Fn() -> bool>>,
@@ -707,11 +750,12 @@ impl SubTabs {
         // 理由见 `make_title_label`）。
         let label = self.make_title_label(title);
 
-        let tab = self.build_editor_tab(id, icon, title, &label);
+        let tab = self.build_editor_tab(id, icon.as_ref(), loc_icon.as_ref(), title, &label);
         self.editor_tabs.append(&tab);
         self.editor_pages.borrow_mut().push(EditorPage {
             id,
-            icon: icon.map(|s| s.to_string()),
+            icon,
+            loc_icon,
             title: title.to_string(),
             label,
             tab: Some(tab),
@@ -730,7 +774,8 @@ impl SubTabs {
     fn build_editor_tab(
         self: &Rc<Self>,
         id: u64,
-        icon: Option<&str>,
+        icon: Option<&TabIcon>,
+        loc_icon: Option<&TabIcon>,
         title: &str,
         label: &gtk::Label,
     ) -> gtk::Box {
@@ -738,12 +783,9 @@ impl SubTabs {
         tab.set_margin_start(4);
         tab.set_margin_end(2);
         tab.add_css_class("pp-editor-tab");
-        if let Some(name) = icon {
-            let img = gtk::Image::from_icon_name(name);
-            img.set_pixel_size(16);
-            img.set_valign(gtk::Align::Center);
-            tab.append(&img);
-        }
+        // ⚠️ **位置图标在前**（远程 / 本地）⇒ 一眼知道「这个文件在哪台机器上」。
+        append_icon(&tab, loc_icon);
+        append_icon(&tab, icon);
         // 文件名：点一下就切到这个编辑器。
         //
         // ⚠️ **不能整块做成一个 Button 再塞 ×**：GTK 里按钮不能嵌套按钮
@@ -799,18 +841,16 @@ impl SubTabs {
     fn build_editor_head(
         self: &Rc<Self>,
         id: u64,
-        icon: Option<&str>,
+        icon: Option<&TabIcon>,
+        loc_icon: Option<&TabIcon>,
         title: &str,
     ) -> (gtk::Box, gtk::Label) {
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         head.set_margin_start(4);
         head.set_margin_end(2);
-        if let Some(name) = icon {
-            let img = gtk::Image::from_icon_name(name);
-            img.set_pixel_size(16);
-            img.set_valign(gtk::Align::Center);
-            head.append(&img);
-        }
+        // ⚠️ **位置图标在前**（远程 / 本地）——跟编辑区小标签一个顺序。
+        append_icon(&head, loc_icon);
+        append_icon(&head, icon);
         // ⚠️ **新建一个文件名标签**（不是把小标签栏那个搬过来）——
         // 搬运会**丢文件名**，见 `make_title_label` 的说明。
         let label = self.make_title_label(title);
@@ -1035,7 +1075,7 @@ impl SubTabs {
     ///
     /// 返回是否真拖回去了（本来就在编辑区 ⇒ false）。
     pub fn undock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, title, widget) = {
+        let (icon, loc_icon, title, widget) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
@@ -1045,6 +1085,7 @@ impl SubTabs {
             }
             (
                 p.icon.clone(),
+                p.loc_icon.clone(),
                 p.title.clone(),
                 p.widget.clone(),
             )
@@ -1074,7 +1115,7 @@ impl SubTabs {
         host.set_end_child(Some(&widget));
         host.set_hexpand(true);
         host.set_vexpand(true);
-        let (head, label) = self.build_editor_head(id, icon.as_deref(), &title);
+        let (head, label) = self.build_editor_head(id, icon.as_ref(), loc_icon.as_ref(), &title);
         self.nb.append_page(&host.clone().upcast::<gtk::Widget>(), Some(&head));
         {
             let mut pages = self.editor_pages.borrow_mut();
@@ -1117,7 +1158,7 @@ impl SubTabs {
     ///
     /// 返回是否真停回去了（本来就在编辑区 ⇒ false）。
     pub fn dock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, title, widget, host) = {
+        let (icon, loc_icon, title, widget, host) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
@@ -1127,6 +1168,7 @@ impl SubTabs {
             }
             (
                 p.icon.clone(),
+                p.loc_icon.clone(),
                 p.title.clone(),
                 p.widget.clone(),
                 p.host.clone(),
@@ -1152,7 +1194,7 @@ impl SubTabs {
         }
         // 小标签：**新造一个**（不把页签头那个搬回来 ⇒ 文件名不会丢）。
         let label = self.make_title_label(&title);
-        let tab = self.build_editor_tab(id, icon.as_deref(), &title, &label);
+        let tab = self.build_editor_tab(id, icon.as_ref(), loc_icon.as_ref(), &title, &label);
         self.editor_stack.add_named(&widget, Some(&id.to_string()));
         self.editor_tabs.append(&tab);
         {
@@ -1172,6 +1214,30 @@ impl SubTabs {
         // 终端页的宿主（`switch-page` 回调做这件事）。
         self.show_editor_host_page();
         true
+    }
+
+    /// 测试钩子：某个编辑器页签上的**图标名**（按出现顺序）。
+    ///
+    /// ⚠️ **为什么要有**：页签上现在有**两个**小图标（位置 ＋ 模式）⇒
+    ///   冒烟得能验「位置图标真的挂上去了」（用户 2026-11-19 提的）。
+    pub fn editor_tab_icon_names_for_test(&self, id: u64) -> Vec<String> {
+        // ⚠️ **两种停靠位的标签控件不一样**：底部＝编辑区的小标签；
+        //    子标签栏＝页签头（`head`）⇒ 都要能读到。
+        let (tab, head) = {
+            let pages = self.editor_pages.borrow();
+            let Some(p) = pages.iter().find(|p| p.id == id) else {
+                return Vec::new();
+            };
+            (p.tab.clone(), p.head.clone())
+        };
+        let mut out = Vec::new();
+        if let Some(t) = tab {
+            collect_icon_names(t.upcast_ref::<gtk::Widget>(), &mut out);
+        }
+        if let Some(h) = head {
+            collect_icon_names(h.upcast_ref::<gtk::Widget>(), &mut out);
+        }
+        out
     }
 
     /// 这个编辑器现在是停在**编辑区**还是**子标签栏**（阶段 108）。
