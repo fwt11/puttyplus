@@ -134,6 +134,13 @@ pub struct PanelState {
     pub remote_pane: RefCell<Option<Rc<Pane>>>,
     pub local_pane: RefCell<Option<Rc<Pane>>>,
     pub remote_cwd: RefCell<String>,
+    /// **列完某个目录后要选中哪一行**（阶段 138）：`(目录, 文件名)`。
+    ///
+    /// 干什么用：打开 compose 文件 ⇒ 面板要**跳到项目目录**（那个目录是
+    ///   异步列出来的）⇒ 列完才知道哪一行是它 ⇒ 先记下意图，回包到了再选。
+    ///
+    /// ⚠️ **只在目录对得上时才选** ⇒ 免得把别的目录里的同名文件选中。
+    pub pending_select: RefCell<Option<(String, String)>>,
     pub remote_home: RefCell<Option<String>>,
     pub local_cwd: RefCell<String>,
 
@@ -380,6 +387,7 @@ impl SftpPanel {
             remote_pane: RefCell::new(None),
             local_pane: RefCell::new(None),
             remote_cwd: RefCell::new("/".into()),
+            pending_select: RefCell::new(None),
             remote_home: RefCell::new(None),
             local_cwd: RefCell::new(String::new()),
             local_monitor: RefCell::new(None),
@@ -1291,6 +1299,47 @@ fn submit_list(st: &Rc<PanelState>, path: &str) {
     submit_list_full(st, path, false);
 }
 
+/// 把**远端文件面板**导航到某个目录；`select` 里的文件名在**列完之后**
+/// 会被**选中**（阶段 138）。
+///
+/// 干什么用（用户 2026-11-19）：「点『编辑 compose 文件』⇒ 编辑器旁边
+///   那个 SFTP 列表最好**跳到 docker-compose.yml 所在目录**」⇒ 打开之前
+///   先把面板导航过去，用户看到的就是**项目文件树 + compose 编辑器**。
+///
+/// ⚠️ **和「手动点目录」是同一条路**（`submit_list`）⇒ 断线重试、目录
+///    跟随、mtime 轮询的语义完全一样（不用另造一套）。
+/// ⚠️ **文件面板是会话级的一个 widget** ⇒ 跳过去以后，终端页那边看到的
+///    也是这个目录（这是「同一个面板」，不是两份）。
+///
+/// 返回是否真的导航了（没连上 ⇒ 什么都不做，返回 false）。
+pub fn goto_remote_dir(st: &Rc<PanelState>, path: &str, select: Option<&str>) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // ⚠️ **没连上就别动面板**：
+    //    ① `submit_list_full` 里 `tx` 是 `unwrap()` 的 ⇒ 没 worker 会直接炸；
+    //    ② 没连上就发列表请求 ⇒ 回包是失败 ⇒ 会弹一个「读取远程目录失败」
+    //       的错框（用户点个「编辑 compose 文件」却弹错框 ⇒ 莫名其妙）。
+    if st.tx.borrow().is_none() || !st.conn_ok.get() {
+        return false;
+    }
+    // 记住「列完要选中哪一行」（回包到了才选得着 ⇒ 先记意图）。
+    if let Some(name) = select {
+        *st.pending_select.borrow_mut() = Some((path.to_string(), name.to_string()));
+    }
+    if path == *st.remote_cwd.borrow() {
+        // ⚠️ **已经在这个目录** ⇒ 不用重新列（省一次 SFTP 往返）⇒ 直接选。
+        if let Some(name) = select {
+            let p = st.pane(true);
+            pane::select_by_name(&p, name);
+            *st.pending_select.borrow_mut() = None;
+        }
+        return true;
+    }
+    submit_list(st, path);
+    true
+}
+
 fn submit_simple(st: &Rc<PanelState>, op: SimpleOp, path: &str, new_path: Option<&str>) {
     // ⚠️ **先记下"怎么重发"**（阶段 99）：断线失败时要靠它重试同一条操作
     remember_retry(
@@ -1579,6 +1628,18 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 st.pane(true).set_cwd_entry(&path);
                 let show_hidden = st.pane(true).show_hidden.get();
                 pane::fill_model(&st.pane(true), show_hidden, pane::entry_rows(&entries));
+                // ⚠️ **阶段 138**：列完这个目录 ⇒ 把之前记下的那一行**选中**
+                //   （打开 compose 文件时：面板跳到项目目录 + 高亮那个文件）。
+                //
+                //   ⚠️ **只在这个目录上选** ⇒ 免得选中别的目录里的同名文件。
+                let want = st.pending_select.borrow().clone();
+                if let Some((dir, name)) = want {
+                    if dir == path {
+                        *st.pending_select.borrow_mut() = None;
+                        let p = st.pane(true);
+                        pane::select_by_name(&p, &name);
+                    }
+                }
                 st.remote_mtime.set(dir_mtime);
                 set_connected_status(st, &path);
             }

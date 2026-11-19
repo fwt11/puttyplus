@@ -422,6 +422,26 @@ fn find_row(pane: &Pane, name: &str) -> Option<gtk::TreeIter> {
     None
 }
 
+/// 按文件名**选中**一行（阶段 138）。
+///
+/// 干什么用：用户 2026-11-19「点『编辑 compose 文件』⇒ 编辑器旁边那个
+///   SFTP 列表最好**跳到 docker-compose.yml 所在目录**」⇒ 跳过去之后还要
+///   把那个文件**选中** ⇒ 用户一眼看到「编辑的就是这个文件」（不是目录里
+///   一堆 yaml 里的随便哪个）。
+///
+/// 返回是否真选中了（文件不在当前目录 ⇒ false）。
+pub fn select_by_name(pane: &Pane, name: &str) -> bool {
+    let Some(it) = find_row(pane, name) else {
+        return false;
+    };
+    pane.view.selection().select_iter(&it);
+    // ⚠️ **顺带滚到可见处**：文件多的时候它可能在屏幕外 ⇒ 用户看不到
+    //    「选中了哪一行」（选中状态在屏幕外看不见）。
+    let path = pane.model.path(&it);
+    pane.view.scroll_to_cell(Some(&path), None, false, 0.0, 0.0);
+    true
+}
+
 /// 更新某一行文件名后面的传输进度。找不到（文件不在当前目录）返回 false。
 ///
 /// `xfer` = 这一行**正在传**（上传或下载）⇒ 名称单元格画呼吸背景

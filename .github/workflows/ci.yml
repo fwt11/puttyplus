@@ -227,7 +227,7 @@ jobs:
             exit 1
           }
 
-      - name: 编译全部 example（144 个冒烟都得能编）
+      - name: 编译全部 example（145 个冒烟都得能编）
         # ⚠️ **为什么单独一步**：单测（`cargo test --lib`）与 `cargo build
         #    --release` **都不编 example** ⇒ 改了公开签名（例如
         #    `panel::on_row_activated` 多了个 `islink`）而漏改某个 example
@@ -272,10 +272,14 @@ jobs:
           #     「只弹一次」而消失）；
           #   - `editor_dock_smoke`：编辑器的**三个停靠位**（主栏页签 /
           #     底部编辑区 / 左右侧栏）＋ 挪回去（用户 2026-11-19 要的
-          #     「tab 可以自由停靠在屏幕的多个位置」）。
+          #     「tab 可以自由停靠在屏幕的多个位置」）；
+          #   - `compose_jump_smoke`：打开 compose 文件 ⇒ **文件面板跳到
+          #     项目目录**＋ 选中那个文件（用户 2026-11-19 提的）。⚠️ 它的
+          #     B 组要本机测试 sshd（2233）⇒ CI 上**明说「跳过」**（A 组
+          #     仍全跑：选中逻辑 + 没连上时的空操作）。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
-                     docker_perm_smoke editor_dock_smoke; do
+                     docker_perm_smoke editor_dock_smoke compose_jump_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then

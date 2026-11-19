@@ -5503,19 +5503,45 @@ fn open_compose_file(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     };
     ui.status
         .set_text(&trf!("正在打开 {p}…", p = path));
-    // ⚠️ **先确保编辑区就挂在这一页**（用户 2026-11-16：「打开之后用户马上
-    //   能看到，不要跑到 term 界面」）。
+    open_compose_path(st, &path, &sum.dir);
+}
+
+/// 打开一个 compose 配置文件（阶段 138）。
+///
+/// 干什么用：① 在**主栏页签**里开这个文件（与其它文件一样）；② **把文件
+///   面板跳到它所在的项目目录**并**选中它**（用户 2026-11-19：「sftp 最好
+///   能跳转到 docker-compose.yml 文件所在目录」）。
+///
+/// ⚠️ **为什么抽成独立函数**：冒烟要能走**同一条路**验这件事 ⇒ 如果把逻辑
+///   留在 `open_compose_file` 里，测试只能去点按钮（要真 docker + 真容器
+///   标签 ⇒ 测不了）；复制一份逻辑到测试里 ⇒ **那种测试是假的**
+///   （把真路径删了测试照样绿）。
+///
+/// `work_dir` = compose 的**工作目录**（容器标签
+/// `com.docker.compose.project.working_dir` ⇒ 那**就是**
+/// docker-compose.yml 所在目录）；取不到才退回从文件路径推。
+pub fn open_compose_path(st: &Rc<PanelState>, path: &str, work_dir: &str) {
+    // ⚠️ **阶段 138：编辑器默认停「主栏页签」**（与终端并列）⇒ **不要**再
+    //   把底部编辑区搬到容器页。
     //
-    //   编辑区是**一个共享的 widget** ⇒ 它同一时刻只能待在一页里 ⇒ 切页
-    //   时会跟着搬；但**保险起见**这里再钉一次（万一切页回调没赶上）。
-    if let Some(sub) = st.sub_tabs() {
-        let tab = ui.tab_id.get();
-        if tab != 0 {
-            sub.host_editor_area_for_page(tab);
-        }
+    //   那是**阶段 113 的老做法**（那时编辑器住在编辑区里 ⇒ 编辑区得跟着
+    //   当前页走）；阶段 137 之后编辑器是**自己的页签** ⇒ 这时候再搬编辑
+    //   区，只会把**终端页的编辑区**抢走（用户没要求过的副作用）。
+    //
+    // ⚠️ **先把文件面板跳到 compose 所在目录** ⇒ 编辑器左边就是**项目文件
+    //   树**（docker-compose.yml / .env / 其它配置）⇒ 点一下就能开兄弟
+    //   文件；再把那个文件**选中** ⇒ 一眼看到「编辑的就是这一个」。
+    let dir = if work_dir.is_empty() {
+        crate::util::path_parent(path)
+    } else {
+        work_dir.to_string()
+    };
+    let file_name = crate::util::path_basename(path);
+    if !dir.is_empty() {
+        crate::panel::goto_remote_dir(st, &dir, Some(&file_name));
     }
-    // ⚠️ **远程文件** ⇒ 走 SFTP 打开（编辑区里另开一个编辑器标签）。
-    crate::panel::fileedit::open_remote(st, &path, false);
+    // ⚠️ **远程文件** ⇒ 走 SFTP 打开（另开一个编辑器页签）。
+    crate::panel::fileedit::open_remote(st, path, false);
 }
 
 /// 触发一次刷新。
