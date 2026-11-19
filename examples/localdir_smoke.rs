@@ -8,7 +8,6 @@
 //! 运行（无桌面时用 xvfb-run）：
 //!   xvfb-run -a cargo run --example localdir_smoke
 
-use gtk::prelude::*;
 use puttyplus::args::ConnOptions;
 use puttyplus::panel::{self, SftpPanel};
 
@@ -35,16 +34,24 @@ fn main() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
+    // ⚠️ Windows 上 `canonicalize` 返回的是**逐字路径**（`\\?\C:\…`）⇒
+    //    面板里存/显示的是**去掉前缀**的那个（阶段 134）⇒ 断言要比这个。
+    let second_pretty = puttyplus::platform::localpath::pretty(&second_abs);
 
     // 第一次启动：导航到 second，应立即落盘
     let p1 = SftpPanel::new(&ConnOptions::default());
     panel::on_entry_activated(&p1.st, false, &second_abs);
-    assert_eq!(*p1.st.local_cwd.borrow(), second_abs, "导航后目录没变");
+    assert_eq!(*p1.st.local_cwd.borrow(), second_pretty, "导航后目录没变");
     let settings = cfg.join("puttyplus").join("settings.ini");
     let text = std::fs::read_to_string(&settings).expect("settings.ini 没生成");
     assert!(
         text.contains("[navigation]") && text.contains("local_dir="),
         "settings.ini 里没有本地目录记忆:\n{text}"
+    );
+    // ⚠️ 设置里**不该**留着 Windows 的逐字路径前缀（界面显示的就是它）
+    assert!(
+        !text.contains("\\\\?\\"),
+        "设置里不该有逐字路径前缀:\n{text}"
     );
     panel::shutdown(&p1.st);
     drop(p1);
@@ -53,7 +60,7 @@ fn main() {
     let p2 = SftpPanel::new(&ConnOptions::default());
     assert_eq!(
         *p2.st.local_cwd.borrow(),
-        second_abs,
+        second_pretty,
         "重启后没有恢复到上次的本地目录"
     );
     panel::shutdown(&p2.st);
@@ -63,7 +70,7 @@ fn main() {
     std::fs::remove_dir_all(&second).unwrap();
     let p3 = SftpPanel::new(&ConnOptions::default());
     let restored = p3.st.local_cwd.borrow().clone();
-    assert_ne!(restored, second_abs, "恢复到已被删除的目录");
+    assert_ne!(restored, second_pretty, "恢复到已被删除的目录");
     assert!(
         std::path::Path::new(&restored).is_dir(),
         "回退目录也不可用: {restored}"

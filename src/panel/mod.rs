@@ -437,10 +437,13 @@ impl SftpPanel {
         let mut local = std::env::var("PUTTYPLUS_LOCALDIR").unwrap_or_default();
         if local.is_empty() {
             local = crate::settings::last_local_dir()
+                // ⚠️ 旧版本记下的是 Windows 的逐字路径（`\\?\C:\Users\fwt`）
+                //    ⇒ 恢复时先去掉前缀（界面上不能出现那个前缀）。
+                .map(|p| localpath::pretty(&p))
                 .filter(|p| usable_local_dir(p))
                 .unwrap_or_else(default_local_dir);
         }
-        *st.local_cwd.borrow_mut() = local;
+        *st.local_cwd.borrow_mut() = localpath::pretty(&local);
 
         st.root.set_position(420); // 远程/本地 ≈ 55:45
         let remote_pane = pane::build_pane(&st, true);
@@ -773,15 +776,26 @@ pub fn remember_local_dir(path: &str) {
     if path.is_empty() {
         return;
     }
+    crate::settings::set_last_local_dir(&local_dir_to_remember(path));
+}
+
+/// 记进设置的那个本地目录：**绝对化** + 去掉 Windows 逐字前缀。
+///
+/// ⚠️ Windows 上 `canonicalize` 返回的是**逐字路径**
+///    （`\\?\C:\Users\fwt`）⇒ 直接存进设置、显示给用户都不像
+///    「Windows 的路径」⇒ 去掉前缀（见 [`localpath::pretty`]）。
+fn local_dir_to_remember(path: &str) -> String {
     let abs = std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string());
-    crate::settings::set_last_local_dir(&abs);
+    localpath::pretty(&abs)
 }
 
 /// 本地目录的唯一变更入口：改状态 + 立即落盘。
 fn set_local_cwd(st: &Rc<PanelState>, path: &str) {
-    *st.local_cwd.borrow_mut() = path.to_string();
+    // ⚠️ 统一去掉 Windows 的逐字前缀（`\\?\`）⇒ 界面显示的路径与
+    //    实际读写的路径长得一样，用户也能照着敲。
+    *st.local_cwd.borrow_mut() = localpath::pretty(path);
     remember_local_dir(path);
 }
 

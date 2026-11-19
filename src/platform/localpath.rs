@@ -101,6 +101,56 @@ pub fn basename(path: &str) -> String {
     }
 }
 
+/// Windows 的**逐字路径**前缀：`\\?\`。
+///
+/// Win32 里这是「一个字符都不解释」的开关（顺带绕开 MAX_PATH 与
+/// 「结尾带点/空格」的正规化）。Windows 上 `std::fs::canonicalize`
+/// 返回的就是这种形式。
+const VERBATIM_PREFIX: &str = "\\\\?\\";
+
+/// 把 Windows 的**逐字路径**换成 Windows 上人看惯的样子。
+///
+/// ## 为什么需要
+///
+/// Windows 上 `std::fs::canonicalize` 返回的是 `\\?\C:\Users\fwt`
+/// ——那是给 Win32 用的「不解释」形式；用户在资源管理器 / cmd 里
+/// 看到的、也手打得出来的路径**从来没有**这个前缀。
+/// 直接显示出来 ⇒ 用户以为程序坏了（这个前缀他还删不得：
+/// 删了就不是同一个路径了）。
+///
+/// ## 规则
+///
+/// | 输入 | 输出 |
+/// |---|---|
+/// | `\\?\C:\Users\fwt` | `C:\Users\fwt` |
+/// | `\\?\UNC\srv\share\x` | `\\srv\share\x` |
+/// | `\\?\Volume{…}\x` | **原样**（去掉前缀就指不到那个卷） |
+/// | `\\.\COM1` | 原样（设备路径） |
+/// | POSIX 路径 | 原样 |
+///
+/// ⚠️ **不分运行平台**（跟 [`is_abs_shape`] 一个思路）⇒ Linux 上也能单测。
+///
+/// ⚠️ **只是「给人看」**：逐字路径多出来的两个本事——超长路径
+///    （> MAX_PATH）与「结尾带点/空格」的文件名——去掉前缀就没了。
+///    ⇒ 走 std 的文件操作不受影响（Rust 自己会把超长的绝对路径
+///    转回逐字形式再交给 Win32）。
+pub fn pretty(path: &str) -> String {
+    let Some(rest) = path.strip_prefix(VERBATIM_PREFIX) else {
+        return path.to_string();
+    };
+    let b = rest.as_bytes();
+    // UNC：\\?\UNC\srv\share → \\srv\share
+    if b.len() >= 4 && b[..4].eq_ignore_ascii_case(b"UNC\\") {
+        return format!("\\\\{}", &rest[4..]);
+    }
+    // 盘符：\\?\C:\… → C:\…
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return rest.to_string();
+    }
+    // 其它（\\?\Volume{…}、\\?\GLOBALROOT\…）去掉前缀就指不到了 ⇒ 原样
+    path.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +225,28 @@ mod tests {
             assert_eq!(basename("C:\\dir\\a.txt"), "a.txt");
             assert_eq!(parent("C:\\dir"), "C:\\");
         }
+    }
+
+    /// 逐字路径（`\\?\`）不该出现在界面上 ⇒ 换成 Windows 习惯的样子。
+    #[test]
+    fn 逐字路径换成_windows_习惯() {
+        assert_eq!(pretty("\\\\?\\C:\\Users\\fwt"), "C:\\Users\\fwt");
+        assert_eq!(pretty("\\\\?\\C:/Users/fwt"), "C:/Users/fwt");
+        assert_eq!(pretty("\\\\?\\UNC\\srv\\share\\x"), "\\\\srv\\share\\x");
+        // UNC 的大小写不敏感
+        assert_eq!(pretty("\\\\?\\unc\\srv\\share"), "\\\\srv\\share");
+        // 去掉前缀就指不到的东西 ⇒ 原样
+        assert_eq!(pretty("\\\\?\\Volume{1234}\\x"), "\\\\?\\Volume{1234}\\x");
+        assert_eq!(
+            pretty("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1"),
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1"
+        );
+        assert_eq!(pretty("\\\\.\\COM1"), "\\\\.\\COM1");
+        // 普通路径原样
+        assert_eq!(pretty("C:\\Users\\fwt"), "C:\\Users\\fwt");
+        assert_eq!(pretty("\\\\srv\\share\\x"), "\\\\srv\\share\\x");
+        assert_eq!(pretty("/home/fwt"), "/home/fwt");
+        assert_eq!(pretty(""), "");
+        assert_eq!(pretty("\\\\?\\"), "\\\\?\\");
     }
 }

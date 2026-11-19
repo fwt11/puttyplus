@@ -89,7 +89,8 @@ fn build(st: &Rc<PanelState>) {
     /* ---- 两端目录 ---- */
     let local_entry = gtk::Entry::new();
     local_entry.set_hexpand(true);
-    local_entry.set_text(&*st.local_cwd.borrow());
+    // ⚠️ 显示时去掉 Windows 的逐字前缀（`\\?\`）⇒ 与资源管理器里看到的一致
+    local_entry.set_text(&crate::platform::localpath::pretty(&st.local_cwd.borrow()));
     let remote_entry = gtk::Entry::new();
     remote_entry.set_hexpand(true);
     remote_entry.set_text(&*st.remote_cwd.borrow());

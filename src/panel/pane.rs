@@ -300,7 +300,9 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
 
 impl Pane {
     pub fn set_cwd_entry(&self, cwd: &str) {
-        self.entry.set_text(cwd);
+        // ⚠️ 本地路径可能带着 Windows 的**逐字前缀**（`\\?\C:\Users\fwt`）
+        //    ⇒ 显示时去掉（远端是 POSIX 路径，这个函数对它没有影响）。
+        self.entry.set_text(&crate::platform::localpath::pretty(cwd));
     }
 
     /// 选中项的完整路径列表。
