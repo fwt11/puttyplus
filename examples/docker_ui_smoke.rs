@@ -1970,6 +1970,67 @@ fn main() {
                 format!("界面={ui_first:?} 远端={remote_first:?}（原文={remote_names:?}）")
             );
 
+            // ---- 阶段 140：文件页瘦身（图标 / 权限不翻译 / 工具条一行）----
+            {
+                // ⚠️ **图标**：目录 / 文件 / 链接各有各的图标（用户 2026-11-19：
+                //   「文件、目录之类的要有图标吧，不然看不出来是啥」）。
+                let icons = dockerui::files_icons_for_test(&panel2.st);
+                check!(
+                    "㉒ 每一行都有图标名",
+                    !icons.is_empty() && icons.iter().all(|i| !i.trim().is_empty()),
+                    format!("{icons:?}")
+                );
+                check!(
+                    "㉒ 图标名是 Adwaita 真有的那三个",
+                    icons.iter().all(|i| {
+                        i.as_str() == "folder-symbolic"
+                            || i.as_str() == "text-x-generic-symbolic"
+                            || i.as_str() == "insert-link-symbolic"
+                    }),
+                    format!("{icons:?}")
+                );
+                // ⚠️ **权限用通用写法**（`drwxr-xr-x`）⇒ 不许出现中文。
+                check!(
+                    "㉒ 权限列是 drwxr-xr-x 这种通用写法",
+                    rows.iter().all(|r| {
+                        let p = r.3.trim();
+                        p.is_empty()
+                            || ((p.starts_with('d') || p.starts_with('-') || p.starts_with('l'))
+                                && p.len() >= 10)
+                    }),
+                    format!("{rows:?}")
+                );
+                // ⚠️ **工具条**：一行 ＋ **纯图标**（没有文字）＋ 每个都有 tooltip。
+                let tb = dockerui::files_toolbar_for_test(&panel2.st);
+                check!(
+                    "㉒ 工具条是 6 个纯图标按钮（没有文字）",
+                    tb.len() == 6 && tb.iter().all(|(_, has_label)| !has_label),
+                    format!("{tb:?}")
+                );
+                check!(
+                    "㉒ 每个按钮都有 tooltip",
+                    tb.iter().all(|(tip, _)| !tip.trim().is_empty()),
+                    format!("{tb:?}")
+                );
+                // ⚠️ **没有「类型」列**（图标已经表达了 ⇒ 省下的宽度给文件名）。
+                let cols = dockerui::files_cols_for_test(&panel2.st);
+                let vis: Vec<&str> = cols
+                    .iter()
+                    .filter(|(_, v)| *v)
+                    .map(|(t, _)| t.as_str())
+                    .collect();
+                check!(
+                    "㉒ 文件表没有「类型」列",
+                    !vis.contains(&"类型"),
+                    format!("{cols:?}")
+                );
+                check!(
+                    "㉒ 文件表的可见列是 图标/名称/大小/权限（4 列）",
+                    vis.len() == 4,
+                    format!("{cols:?}")
+                );
+            }
+
             // ---- **真上传**：本地造文件 ⇒ 传到容器的 /tmp ⇒ 远端一字不差 ----
             let tmp_dir = std::env::temp_dir().join(format!("pp-116-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&tmp_dir);

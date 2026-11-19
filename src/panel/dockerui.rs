@@ -97,6 +97,84 @@ const COL_DETAIL: usize = 7;
 const COL_STATE_MK: usize = 8;
 const N_COLS: usize = 9;
 
+/* ---------------- 文件表的列（阶段 140） ---------------- */
+
+/// **图标名**（`folder-symbolic` / `text-x-generic-symbolic` / …）。
+///
+/// 干什么用：给名称列前面那条**窄图标列**用 ⇒ 一眼分得清目录 / 文件 /
+///   链接（用户 2026-11-19：「文件、目录之类的要有图标吧，不然看不出来是啥」）。
+const FC_ICON: usize = 0;
+/// 名称。
+const FC_NAME: usize = 1;
+/// 大小。
+const FC_SIZE: usize = 2;
+/// 权限（**通用写法**，不翻译 —— 见 [`perm_text`]）。
+const FC_PERM: usize = 3;
+/// 类型**文字**（「目录」/「文件」/「链接」）。
+///
+/// ⚠️ **界面上不显示**（图标已经表达了）⇒ 留着给 **tooltip** 和测试用。
+const FC_TYPE: usize = 4;
+/// 类型**键**（`"dir"` / `"file"` / …；**界面上不显示**）。
+const FC_KIND: usize = 5;
+/// 文件表的列数。
+const FC_N_COLS: usize = 6;
+
+/// 纯图标按钮（**文字挪进 tooltip**）。
+///
+/// ⚠️ **为什么要这个**：用户 2026-10-28：「主界面尽量少用文字」⇒ 文件面板
+///   的按钮早就是纯图标了 ⇒ 容器文件页也得同一口径（以前是两行**大文字
+///   按钮**，白占一整行高度）。
+fn icon_btn(icon: &str, tooltip: &str) -> gtk::Button {
+    let b = gtk::Button::new();
+    let img = gtk::Image::from_icon_name(icon);
+    img.set_pixel_size(16);
+    b.set_child(Some(&img));
+    // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
+    crate::a11y::watch_tooltip(&b);
+    b.set_tooltip_text(Some(tooltip));
+    b.add_css_class("flat");
+    b
+}
+
+/// 条目类型 ⇒ **图标名**（阶段 140）。
+///
+/// ⚠️ **图标名必须是 Adwaita 真有的**（实测：`emblem-symbolic-link-symbolic`
+///   在 Adwaita 里**不存在** ⇒ 只能用真有的）。
+fn file_icon(kind: docker::FileKind) -> &'static str {
+    match kind {
+        docker::FileKind::Dir => "folder-symbolic",
+        docker::FileKind::File => "text-x-generic-symbolic",
+        // ⚠️ Adwaita 没有「软链徽标」的 symbolic 版 ⇒ 用「链接」图标。
+        docker::FileKind::Link => "insert-link-symbolic",
+        _ => "text-x-generic-symbolic",
+    }
+}
+
+/// 权限列的**通用写法**（阶段 140）。
+///
+/// ⚠️ **为什么不翻成中文**（用户 2026-11-19：「权限好像一般没有说还要翻译成
+///   汉语的」）：Linux / Docker / `chmod` 用的都是同一套写法（`drwxr-xr-x`）
+///   ⇒ 翻译成中文反而跟命令对不上，也没法复制粘贴。
+fn perm_text(perms: &str) -> String {
+    perms.to_string()
+}
+
+/// 文件页的**报错 ⇒ 说人话**（阶段 140）。
+///
+/// ⚠️ **为什么**：有些容器镜像很精简 ⇒ **没有 `ls`** ⇒ docker 的原话是
+///   `OCI runtime exec failed: … "ls": executable file not found in $PATH`
+///   ⇒ 用户既看不懂「这个容器列不了目录」，也不知道怎么办 ⇒ 这里给**原因
+///   ＋ 两条出路**。
+fn files_err_zh(msg: &str) -> String {
+    if msg.contains("executable file not found") && msg.contains("ls") {
+        return tr(
+            "这个容器里没有 ls 命令 ⇒ 列不了目录。换个带 ls 的镜像（常见的都有），或者用「终端」页进容器自己看。",
+        )
+        .to_string();
+    }
+    msg.to_string()
+}
+
 /// 过滤：全部 / 运行中 / 已停止。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
@@ -551,10 +629,15 @@ struct FilesUi {
     root: gtk::Box,
     /// **路径栏**（当前远程目录；回车 ⇒ 去这个目录）。
     path: gtk::Entry,
-    /// 文件表（**平表**：名字 / 类型 / 大小 / 权限 ＋ 一个隐藏的类型键列）。
+    /// 文件表（**平表**：图标 / 名字 / 大小 / 权限 ＋ 两个隐藏列）。
     store: gtk::TreeStore,
     /// 文件表。
     view: gtk::TreeView,
+    /// **工具条上的按钮**（阶段 140：纯图标 ＋ tooltip；一行）。
+    ///
+    /// ⚠️ **留着是为了冒烟能断言**：用户 2026-11-19：「大按钮、框框占太多
+    ///   空间」⇒ 得钉住「按钮**没有文字**、每个都有 tooltip」。
+    btns: Vec<gtk::Button>,
     /// 状态行（**列表**的状态：几个条目 / 出错原因）。
     status: gtk::Label,
     /// **传输状态行**（上传 / 下载的进度与结果）。
@@ -2997,46 +3080,43 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ---- 文件页（阶段 116）：路径栏 ＋ 文件表 ＋ 上传 / 下载 / 查看 ----
     //
     // ⚠️ **容器里没有 SFTP** ⇒ 一切靠 `docker exec`（见 `backend/docker.rs`）。
+    //
+    // ⚠️ **阶段 140：工具条**压成**一行**（以前是「路径行」＋「按钮行」两行
+    //   大按钮 ⇒ 白占一整行高度），按钮改成**纯图标**（文字挪进 tooltip）。
+    //   ⇒ 跟文件面板的工具条同一口径（用户 2026-10-28：「主界面尽量少用文字」）。
     let f_path = gtk::Entry::new();
     f_path.set_placeholder_text(Some(tr("容器里的目录")));
     f_path.set_hexpand(true);
-    let f_up = gtk::Button::with_label(tr("上一级"));
-    let f_refresh = gtk::Button::with_label(tr("刷新"));
-    let f_upload = gtk::Button::with_label(tr("上传文件…"));
-    let f_uploaddir = gtk::Button::with_label(tr("上传目录…"));
-    let f_download = gtk::Button::with_label(tr("下载…"));
-    let f_view = gtk::Button::with_label(tr("查看…"));
+    f_path.set_width_chars(8);
+    f_path.add_css_class("pp-path");
+    let f_up = icon_btn("go-up-symbolic", tr("回到上一级目录"));
+    let f_refresh = icon_btn("view-refresh-symbolic", tr("重新读取这个目录"));
+    let f_upload = icon_btn("document-send-symbolic", tr("把本地文件上传到容器当前目录"));
+    let f_uploaddir = icon_btn("folder-new-symbolic", tr("把本地整个目录上传到容器当前目录"));
+    let f_download = icon_btn("go-down-symbolic", tr("把容器里的文件下载到本地"));
+    let f_view = icon_btn("document-open-symbolic", tr("查看容器里这个文件的内容"));
 
-    let f_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let f_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     f_bar.set_margin_start(6);
     f_bar.set_margin_end(6);
-    f_bar.set_margin_top(4);
+    f_bar.set_margin_top(2);
+    f_bar.set_margin_bottom(2);
     f_bar.append(&f_path);
-    f_bar.append(&f_up);
-    f_bar.append(&f_refresh);
-
-    let f_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    f_actions.set_margin_start(6);
-    f_actions.set_margin_end(6);
-    f_actions.set_margin_top(2);
-    f_actions.append(&f_upload);
-    f_actions.append(&f_uploaddir);
-    f_actions.append(&f_download);
-    f_actions.append(&f_view);
-
-    let (f_store, f_view_tbl) = flat_table(
-        &[tr("名称"), tr("类型"), tr("大小"), tr("权限"), tr("类型键")],
-        // ⚠️ **权限列要给够宽**：现在是中文（`目录　属主读写／属组只读／…`）
-        //   ⇒ 120px 不够 ⇒ 会被截成「目录　属主读写／…」。
-        &[220, 60, 100, 250, 80],
-        0,
-        // 大小右对齐（美化·地基 3/5；跟文件面板的大列同一口径）
-        &[ColStyle::Normal, ColStyle::Normal, ColStyle::Num, ColStyle::Normal, ColStyle::Normal],
-    );
-    // ⚠️ **最后一列是内部用的类型键**（"dir" / "file" …）⇒ 不给用户看。
-    if let Some(col) = f_view_tbl.columns().get(4) {
-        col.set_visible(false);
+    for b in [
+        &f_up,
+        &f_refresh,
+        &f_upload,
+        &f_uploaddir,
+        &f_download,
+        &f_view,
+    ] {
+        f_bar.append(b);
     }
+
+    // ⚠️ **阶段 140**：文件表用**自己的**建法（`files_table`）⇒ 名称列前面
+    //   有**图标**（目录 / 文件 / 链接一眼分得清），而且**没有「类型」列**
+    //   （图标已经表达了 ⇒ 省下的宽度给文件名）。
+    let (f_store, f_view_tbl) = files_table();
     let f_scroll = gtk::ScrolledWindow::new();
     f_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     f_scroll.set_vexpand(true);
@@ -3063,7 +3143,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     f_root.set_margin_end(6);
     f_root.set_margin_bottom(6);
     f_root.append(&f_bar);
-    f_root.append(&f_actions);
     f_root.append(&f_scroll);
     f_root.append(&f_xfer_status);
     f_root.append(&f_status);
@@ -3378,6 +3457,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             path: f_path,
             store: f_store,
             view: f_view_tbl,
+            btns: vec![
+                f_up.clone(),
+                f_refresh.clone(),
+                f_upload.clone(),
+                f_uploaddir.clone(),
+                f_download.clone(),
+                f_view.clone(),
+            ],
             status: f_status,
             xfer_status: f_xfer_status,
         },
@@ -3570,7 +3657,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         }
                         match r {
                             Ok(v) => apply_files(&u, &v),
-                            Err(msg) => u.files.status.set_text(&msg),
+                            // ⚠️ **说人话**（阶段 140）：容器里没有 `ls` 时
+                            //   docker 的原话是「OCI runtime exec failed …」
+                            //   ⇒ 用户看不懂「这个容器列不了目录」。
+                            Err(msg) => u.files.status.set_text(&files_err_zh(&msg)),
                         }
                     }
                     // ⚠️ **阶段 120**：镜像操作的结果（进度 / 成功 / 失败）。
@@ -3984,6 +4074,45 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 files_view(&st, &u, &container, &remote);
             }
         });
+        // **悬停 ⇒ tooltip 里写清「这是什么」**（阶段 140）。
+        //
+        // ⚠️ **为什么**：表里**没有「类型」列**了（图标表达了）⇒ 想看
+        //   「目录 / 文件 / 链接」这种**文字**时，悬停一下就有。
+        {
+            let view = f_view_cb.clone();
+            view.connect_query_tooltip(|view, x, y, _kbd, tooltip| {
+                let Some((Some(path), _col, _cx, _cy)) = view.path_at_pos(x, y) else {
+                    return false;
+                };
+                // GTK4 的树视图 tooltip 要自己指定行（默认处理器被我们接管了）
+                view.set_tooltip_row(tooltip, &path);
+                let Some(model) = view.model() else { return false };
+                let Some(mut it) = model.iter_first() else { return false };
+                loop {
+                    if model.path(&it) == path {
+                        let name: String = model.get(&it, FC_NAME as i32);
+                        let kind: String = model.get(&it, FC_TYPE as i32);
+                        let size: String = model.get(&it, FC_SIZE as i32);
+                        let perm: String = model.get(&it, FC_PERM as i32);
+                        let mut lines = vec![name];
+                        if !kind.is_empty() {
+                            lines.push(trf!("类型：{v0}", v0 = kind));
+                        }
+                        if !size.is_empty() {
+                            lines.push(trf!("大小：{size}", size = size));
+                        }
+                        if !perm.is_empty() {
+                            lines.push(trf!("权限：{p}", p = perm));
+                        }
+                        tooltip.set_text(Some(&lines.join("\n")));
+                        return true;
+                    }
+                    if !model.iter_next(&mut it) {
+                        return false;
+                    }
+                }
+            });
+        }
         // **「上一级」**
         {
             let stw = Rc::downgrade(st);
@@ -6823,16 +6952,58 @@ mod tests {
         assert!(!s.ends_with("MB"), "不该用十进制名字：{s}");
     }
 
-    /// 权限串 ⇒ 中文（UI 审查 D11）。
+    /// 权限列 ⇒ **通用写法，不翻成中文**（阶段 140）。
+    ///
+    /// ⚠️ **为什么改**（用户 2026-11-19：「权限好像一般没有说还要翻译成汉语
+    ///   的」）：Linux / Docker / `chmod` 用的都是同一套写法（`drwxr-xr-x`）
+    ///   ⇒ 翻译成中文反而跟命令对不上，也没法复制粘贴。
     #[test]
-    fn 权限串翻成中文() {
-        let s = perms_zh("drwxr-xr-x", docker::FileKind::Dir);
-        assert!(s.contains('读'), "权限里应当有「读」：{s}");
-        assert!(s.contains('写'), "属主可写：{s}");
-        assert!(!s.contains("drwx"), "不该再摆原始八进制：{s}");
-        // ⚠️ **认不出来就原样给**（别吞信息）。
-        let weird = perms_zh("???", docker::FileKind::File);
-        assert!(weird.contains("???"), "认不出来应当原样给：{weird}");
+    fn 权限列用通用写法不翻成中文() {
+        assert_eq!(perm_text("drwxr-xr-x"), "drwxr-xr-x");
+        assert_eq!(perm_text("-rw-r--r--"), "-rw-r--r--");
+        assert_eq!(perm_text("lrwxrwxrwx"), "lrwxrwxrwx");
+        // ⚠️ **认不出来也原样给**（别吞信息）。
+        assert_eq!(perm_text("???"), "???");
+        assert_eq!(perm_text(""), "");
+        // ⚠️ **不许出现中文**（这条是被用户的话钉死的）。
+        for p in ["drwxr-xr-x", "-rw-r--r--", "lrwxrwxrwx", "???"] {
+            let s = perm_text(p);
+            assert!(
+                !s.chars().any(|c| c as u32 >= 0x4e00 && c as u32 <= 0x9fff),
+                "权限里不该有中文：{s}"
+            );
+        }
+    }
+
+    /// 文件类型 ⇒ **图标**（阶段 140：目录 / 文件 / 链接一眼分得清）。
+    #[test]
+    fn 文件类型各有图标() {
+        assert_eq!(file_icon(docker::FileKind::Dir), "folder-symbolic");
+        assert_eq!(file_icon(docker::FileKind::File), "text-x-generic-symbolic");
+        assert_eq!(file_icon(docker::FileKind::Link), "insert-link-symbolic");
+        // ⚠️ **三种类型不能撞成同一个图标**（不然还是分不清）。
+        assert_ne!(
+            file_icon(docker::FileKind::Dir),
+            file_icon(docker::FileKind::File)
+        );
+        assert_ne!(
+            file_icon(docker::FileKind::File),
+            file_icon(docker::FileKind::Link)
+        );
+    }
+
+    /// 文件页的报错 ⇒ **说人话**（阶段 140：容器里没有 `ls`）。
+    #[test]
+    fn 文件页报错说人话() {
+        // ⚠️ **容器里没有 ls** ⇒ docker 的原话用户看不懂。
+        let raw = "OCI runtime exec failed: exec: \"ls\": executable file not found in $PATH";
+        let s = files_err_zh(raw);
+        assert!(s.contains("ls"), "得说清是缺 ls：{s}");
+        assert!(!s.contains("OCI runtime"), "不该再摆 docker 的原话：{s}");
+        // ⚠️ **别的错 ⇒ 原样给**（别把真原因翻译没了）。
+        let other = "permission denied";
+        assert_eq!(files_err_zh(other), other);
+        assert_eq!(files_err_zh(""), "");
     }
 
     /// 纵轴量程取整（UI 审查 D3：刻度上的数字要读得懂）。
@@ -6932,6 +7103,76 @@ fn flat_table(
         }
         view.append_column(&col);
     }
+    (store, view)
+}
+
+/// 建**文件表**（阶段 140）：**名称列前面有图标** ＋ 权限用**通用写法**。
+///
+/// ⚠️ **为什么不用 [`flat_table`]**：那个表是「一列一个 `CellRendererText`」
+///   ⇒ 放不了图标（`CellRendererText` **没有** `icon-name` 属性）⇒ 这里
+///   单独给名称列前面加一条**窄图标列**（跟文件面板 `pane.rs` 同一套路）。
+///
+/// ⚠️ **没有「类型」列**：图标已经表达了（用户 2026-11-19：「文件、目录之类
+///   的要有图标吧，不然看不出来是啥」）⇒ 省下的宽度全给文件名。
+fn files_table() -> (gtk::TreeStore, gtk::TreeView) {
+    let types: Vec<glib::Type> = vec![glib::Type::STRING; FC_N_COLS];
+    let store = gtk::TreeStore::new(&types);
+    let view = gtk::TreeView::new();
+    view.set_model(Some(&store));
+
+    // ---- 图标列（窄窄的一条，只放 16px 的图标）----
+    let col_icon = gtk::TreeViewColumn::new();
+    let r_pix = gtk::CellRendererPixbuf::new();
+    col_icon.pack_start(&r_pix, false);
+    col_icon.add_attribute(&r_pix, "icon-name", FC_ICON as i32);
+    // ⚠️ **空模型时量出来的宽度会一直是 0** ⇒ 整列被压没（跟文件面板同一个坑）
+    //   ⇒ 给个下限把位置先占住。
+    col_icon.set_min_width(24);
+    col_icon.set_resizable(false);
+    view.append_column(&col_icon);
+
+    // ---- 名称（展开列：文件名最长 ⇒ 宽度给它）----
+    let col_name = gtk::TreeViewColumn::new();
+    col_name.set_title(tr("名称"));
+    col_name.set_resizable(true);
+    col_name.set_min_width(220);
+    col_name.set_expand(true);
+    {
+        let r = gtk::CellRendererText::new();
+        r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        col_name.pack_start(&r, false);
+        // ⚠️ **必须显式绑 "text"**（不绑就是一片空白）。
+        col_name.add_attribute(&r, "text", FC_NAME as i32);
+    }
+    view.append_column(&col_name);
+
+    // ---- 大小（右对齐；跟文件面板的大列同一口径）----
+    let col_size = gtk::TreeViewColumn::new();
+    col_size.set_title(tr("大小"));
+    col_size.set_resizable(true);
+    col_size.set_min_width(90);
+    {
+        let r = gtk::CellRendererText::new();
+        gtk::prelude::CellRendererExt::set_alignment(&r, 1.0, 0.5);
+        col_size.set_alignment(1.0);
+        col_size.pack_start(&r, false);
+        col_size.add_attribute(&r, "text", FC_SIZE as i32);
+    }
+    view.append_column(&col_size);
+
+    // ---- 权限（**通用写法**，十来个字符 ⇒ 不用给 250px）----
+    let col_perm = gtk::TreeViewColumn::new();
+    col_perm.set_title(tr("权限"));
+    col_perm.set_resizable(true);
+    col_perm.set_min_width(110);
+    {
+        let r = gtk::CellRendererText::new();
+        r.set_family(Some("monospace"));
+        col_perm.pack_start(&r, false);
+        col_perm.add_attribute(&r, "text", FC_PERM as i32);
+    }
+    view.append_column(&col_perm);
+
     (store, view)
 }
 
@@ -7224,58 +7465,10 @@ fn file_kind_key(k: docker::FileKind) -> &'static str {
     }
 }
 
-/// 权限串 ⇒ **人能读的中文**（UI 审查 D11）。
-///
-/// ⚠️ **为什么**：原来直接摆 `drwxr-xr-x` ⇒ Windows 用户看不懂，
-///   而且**没走 `tr()`**（项目规矩：用户可见文案全中文）。
-///
-/// ⚠️ **目录的大小给「—」**：目录的 size 是 **inode 大小**（4.0 KB）
-///   ⇒ 纯噪音 ⇒ docker 官方与 dbx 都给「—」。
-fn perms_zh(perms: &str, kind: docker::FileKind) -> String {
-    let t = tr(kind.label()).to_string();
-    let b = perms.as_bytes();
-    if b.len() < 10 {
-        // 认不出来 ⇒ 原样给（别吞信息）。
-        return if perms.is_empty() {
-            t
-        } else {
-            trf!("{t}　{p}", t = t, p = perms)
-        };
-    }
-    // ⚠️ **权限串的形状**：`drwxr-xr-x` ⇒ 第 0 个是类型，后面 9 个是
-    //   「属主 3 个 + 属组 3 个 + 其他 3 个」⇒ 逐个**字符**看，别把它
-    //   当位掩码（当位掩码会把 'r'(0x72) 读成「只写」）。
-    let exec_word = if kind == docker::FileKind::Dir {
-        tr("进入")
-    } else {
-        tr("执行")
-    };
-    let g = |base: usize| -> String {
-        let mut s = String::new();
-        if b[base] == b'r' {
-            s.push_str(tr("读"));
-        }
-        if b[base + 1] == b'w' {
-            s.push_str(tr("写"));
-        }
-        if b[base + 2] == b'x' {
-            s.push_str(exec_word);
-        }
-        if s.is_empty() {
-            s.push_str(tr("无"));
-        }
-        s
-    };
-    trf!(
-        "{t}　属主{g0}／属组{g1}／其他{g2}",
-        t = t,
-        g0 = g(1),
-        g1 = g(4),
-        g2 = g(7)
-    )
-}
-
 /// 填**文件表** ＋ 更新状态行（阶段 116）。
+///
+/// ⚠️ **阶段 140**：多填两列 —— **图标名**（名称列前面那条窄列用）与
+///   **类型键**（`dir` / `file` …）；权限改成**通用写法**（不翻译）。
 fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
     ui.files.store.clear();
     for f in v {
@@ -7288,17 +7481,20 @@ fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
         } else {
             crate::util::human_size(f.size)
         };
-        let perms = perms_zh(&f.perms, f.kind);
+        // ⚠️ **权限不翻成中文**（用户 2026-11-19）⇒ 原样给（见 [`perm_text`]）。
+        let perms = perm_text(&f.perms);
         let key = file_kind_key(f.kind).to_string();
+        let icon = file_icon(f.kind).to_string();
         let row = ui.files.store.append(None);
         ui.files.store.set(
             &row,
             &[
-                (0u32, &name),
-                (1u32, &kind_label),
-                (2u32, &size),
-                (3u32, &perms),
-                (4u32, &key),
+                (FC_ICON as u32, &icon),
+                (FC_NAME as u32, &name),
+                (FC_SIZE as u32, &size),
+                (FC_PERM as u32, &perms),
+                (FC_TYPE as u32, &kind_label),
+                (FC_KIND as u32, &key),
             ],
         );
     }
@@ -7309,8 +7505,8 @@ fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
 fn files_selected(ui: &Rc<DockerUi>) -> Option<(String, String)> {
     let sel = ui.files.view.selection();
     let (model, iter) = sel.selected()?;
-    let name: String = model.get(&iter, 0);
-    let kind: String = model.get(&iter, 4);
+    let name: String = model.get(&iter, FC_NAME as i32);
+    let kind: String = model.get(&iter, FC_KIND as i32);
     if name.is_empty() {
         return None;
     }
@@ -7576,14 +7772,78 @@ pub fn files_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String, String, 
     let model = ui.files.store.clone();
     if let Some(mut iter) = model.iter_first() {
         loop {
-            let g = |c: i32| -> String { model.get(&iter, c) };
-            out.push((g(0), g(1), g(2), g(3)));
+            let g = |c: usize| -> String { model.get(&iter, c as i32) };
+            out.push((
+                g(FC_NAME),
+                g(FC_TYPE),
+                g(FC_SIZE),
+                g(FC_PERM),
+            ));
             if !model.iter_next(&mut iter) {
                 break;
             }
         }
     }
     out
+}
+
+/// 测试钩子：文件表每一行的**图标名**（阶段 140）。
+///
+/// 干什么用：冒烟要钉住「目录 / 文件 / 链接各有各的图标」（用户 2026-11-19：
+///   「文件、目录之类的要有图标吧，不然看不出来是啥」）。
+pub fn files_icons_for_test(st: &Rc<PanelState>) -> Vec<String> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    let model = ui.files.store.clone();
+    if let Some(mut iter) = model.iter_first() {
+        loop {
+            let icon: String = model.get(&iter, FC_ICON as i32);
+            out.push(icon);
+            if !model.iter_next(&mut iter) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 测试钩子：文件页**工具条上的按钮**（tooltip ＋ 有没有文字）。
+///
+/// 干什么用：冒烟要钉住「按钮是**纯图标**（没有文字）＋ 每个都有 tooltip」
+///   （用户 2026-11-19：「大按钮、框框占太多空间」）。
+pub fn files_toolbar_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    ui.files
+        .btns
+        .iter()
+        .map(|b| {
+            let tip = b.tooltip_text().unwrap_or_default().to_string();
+            // ⚠️ **有文字 = 不是纯图标**（按钮的 child 是 Label 时才有 label）。
+            let has_label = b.label().is_some();
+            (tip, has_label)
+        })
+        .collect()
+}
+
+/// 测试钩子：文件表**每一列的标题 ＋ 是否可见**（阶段 140）。
+///
+/// 干什么用：冒烟要钉住「**没有「类型」列**了」（图标已经表达了 ⇒ 省宽度）。
+pub fn files_cols_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    ui.files
+        .view
+        .columns()
+        .iter()
+        .map(|c| {
+            (
+                c.title().to_string(),
+                c.is_visible(),
+            )
+        })
+        .collect()
 }
 
 /// 测试钩子：文件页**当前目录**。

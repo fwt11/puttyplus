@@ -64,12 +64,17 @@ pub const COL_DROP: i32 = 14;
 pub const ICON_DIR: &str = "folder-symbolic";
 /// 普通文件的图标。
 pub const ICON_FILE: &str = "text-x-generic-symbolic";
-/// **软链接**的图标（GTK 标准的软链徽标）。
+/// **软链接**的图标。
 ///
 /// ⚠️ 为什么单独一个：用户 2026-11-10：「链接用链接的图标，文件用文件的
 /// 图标」——列表里一眼能看出哪个是链接。⇒ **只换图标，不加列**（面板本来
 /// 就挤，再加一列更挤）。
-pub const ICON_LINK: &str = "emblem-symbolic-link-symbolic";
+///
+/// ⚠️ **图标名必须是 Adwaita 真有的**（阶段 140 实测）：原来的
+///   `emblem-symbolic-link-symbolic` 在 Adwaita 里**不存在**（只有
+///   bloom / flow / Papirus 有）⇒ 界面上摆的是「缺图」⇒ 链接根本看不出来。
+///   ⇒ 改用 Adwaita 真有的 `insert-link-symbolic`（链条，跟随主题变色）。
+pub const ICON_LINK: &str = "insert-link-symbolic";
 
 /// 权限串是不是「软链」。
 ///

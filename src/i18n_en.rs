@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2082] = [
+pub static EN: [(&str, &str); 2090] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -671,6 +671,7 @@ pub static EN: [(&str, &str); 2082] = [
     ("命令：{c}", "Command: {c}"),
     ("响铃", "Bell"),
     ("唯一", "Unique"),
+    ("回到上一级目录", "Go up one directory"),
     ("回放", "Replay"),
     ("回放 {v0} — PuTTYPlus", "Replay {v0} — PuTTYPlus"),
     ("回放只是把录到的内容重放一遍：颜色是按屏幕还原的；输出快过采样间隔、滚动缓冲被挤爆时会缺；输入事件不录（文件里不会有你敲的密码）。", "The replay just plays back what was recorded: the colours are restored from the screen; output that comes faster than the sampling interval can get lost when the scroll buffer overflows; input events are not recorded (the file will not contain the password you typed)."),
@@ -1063,8 +1064,11 @@ pub static EN: [(&str, &str); 2082] = [
     ("把剪贴板里的本地文件上传到远程当前目录", "Upload the local files in the clipboard to the remote current directory"),
     ("把字段 / 索引 / 外键的改动写进库", "Write the field / index / foreign key changes into the database"),
     ("把定义文本复制到剪贴板", "Copy the definition text to the clipboard"),
+    ("把容器里的文件下载到本地", "Download a file from the container to the local machine"),
     ("把当前显示的全部日志复制到剪贴板", "Copy all the logs currently shown to the clipboard"),
     ("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里", "Export the whole table to a local file (CSV / SQL / JSON), or import a local CSV into the table"),
+    ("把本地整个目录上传到容器当前目录", "Upload a whole local directory into the container's current directory"),
+    ("把本地文件上传到容器当前目录", "Upload a local file into the container's current directory"),
     ("把编辑器拖回这里停靠", "Drag the editor back here to dock it"),
     ("把表「{table}」改成新名字。", "Rename table \"{table}\"."),
     ("把这一行往上挪一位：新加的字段会按这个顺序加进表里（已有列的物理顺序数据库改不了，要改得重建表）", "Move this row up one position: newly added fields are added to the table in this order (the database cannot change the physical order of existing columns — that needs a table rebuild)"),
@@ -1329,6 +1333,7 @@ pub static EN: [(&str, &str); 2082] = [
     ("本机没有 tar 命令，解不开：{e}", "No local tar command, cannot unpack: {e}"),
     ("机制", "Mechanism"),
     ("权限", "Permissions"),
+    ("权限：{p}", "Permissions: {p}"),
     ("条件", "Condition"),
     ("条件…", "Condition…"),
     ("条件「{v0}」没填值", "The condition \"{v0}\" has no value"),
@@ -1345,6 +1350,7 @@ pub static EN: [(&str, &str); 2082] = [
     ("查看", "View"),
     ("查看…", "View…"),
     ("查看定义", "View the definition"),
+    ("查看容器里这个文件的内容", "View the contents of this file in the container"),
     ("查看数据", "View the data"),
     ("查看文件", "View file"),
     ("查看文件失败", "Cannot view the file"),
@@ -1883,6 +1889,7 @@ pub static EN: [(&str, &str); 2082] = [
     ("这个会话下还没有数据库连接", "There is no database connection under this session yet"),
     ("这个凭据库没有主密码（不加密模式）。\n设一个主密码就会把它变成加密库——库里的连接密码原样保留。", "This credential vault has no master password (unencrypted mode).\nSetting one turns it into an encrypted vault — the connection passwords in it are kept as they are."),
     ("这个容器没有在运行（先启动它才能进终端）", "This container is not running (start it before opening a terminal)"),
+    ("这个容器里没有 ls 命令 ⇒ 列不了目录。换个带 ls 的镜像（常见的都有），或者用「终端」页进容器自己看。", "This container has no ls command, so its directory cannot be listed. Use an image that ships ls (most do), or open the \"Terminal\" page and look inside the container yourself."),
     ("这个容器里没有 {sh}（可以换一个：{list}）", "This container has no {sh} (you can pick another one: {list})"),
     ("这个容器里没有可用的 shell（试过 {list}）", "This container has no usable shell (tried {list})"),
     ("这个文件可以编辑", "This file can be edited"),
@@ -2019,6 +2026,7 @@ pub static EN: [(&str, &str); 2082] = [
     ("重新建立这条 SSH 会话（和右键菜单里的「重新连接终端」是同一个动作）", "Re-establish this SSH session (the same action as \"Reconnect terminal\" in the context menu)"),
     ("重新排布（表多了不好看了就点它）", "Re-layout (click it when there are too many tables to look at)"),
     ("重新读取", "Read again"),
+    ("重新读取这个目录", "Re-read this directory"),
     ("重新连接 SFTP", "Reconnect SFTP"),
     ("重新连接终端", "Reconnect the terminal"),
     ("重置", "Reset"),
