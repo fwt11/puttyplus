@@ -258,7 +258,21 @@ fn real_drag(from: (i32, i32), to: (i32, i32)) {
 }
 
 /// 截图（同一个 X display 里调 scrot，不用另开一个显示）。
+///
+/// ⚠️ **先把本窗口置顶**（阶段 137 补）：连接失败会弹一个模态框（「SFTP
+///   连接失败」）⇒ 它**盖住页签栏** ⇒ 截图里页签头看着像「没文件名」
+///   （其实是控件树是对的，被挡了）⇒ 置顶后再拍。
 fn shot(path: &str) {
+    if let Ok(out) = std::process::Command::new("xdotool")
+        .args(["search", "--name", "fileedit panel smoke"])
+        .output()
+    {
+        if let Some(wid) = String::from_utf8_lossy(&out.stdout).lines().next() {
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowraise", wid.trim()])
+                .status();
+        }
+    }
     pump(800);
     let st = std::process::Command::new("/usr/bin/scrot")
         .arg("-o")
@@ -352,24 +366,50 @@ fn main() {
         w = st.root.width()
     );
 
-    // ---- 2) 打开一个文件 ⇒ 编辑区进终端列，与终端同宽、不压文件列表 ----
+    // ---- 2) 打开一个文件 ⇒ **默认与终端并列**（阶段 137 的新默认）----
     puttyplus::panel::fileedit::open_local(&st, tmp_txt.to_str().unwrap(), false);
     pump(700);
-    // ⚠️ **核心断言**（放最前）：终端**仍然可见** ⇒ 这就是"同窗同时显示"。
-    let term = term_widget(&st);
-    assert!(
-        term.is_mapped(),
-        "编辑器打开后终端不见了（阶段 107 的核心：两个要同时显示）"
-    );
+    let eid0 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
+    // ⚠️ **阶段 137**：默认是**主栏页签**（与终端并列）——
+    // 用户 2026-11-19：「默认打开还是显示为和 term 并列的 tab」。
     assert_eq!(
         sub.page_count(),
-        pages_before,
-        "编辑器不该再占子页签（阶段 107：它住终端列下面的编辑区）"
+        pages_before + 1,
+        "编辑器应当与终端**并列为一个页签**（阶段 137 的默认）"
     );
-    assert_eq!(sub.editor_count(), 1, "编辑区里应当有一个编辑器");
+    assert_eq!(sub.editor_count(), 1, "应当有一个编辑器");
+    // ⚠️ 底部编辑区**仍然露着**（它兼作「停靠区」⇒ 用户能把编辑器拖回去）
+    //    ⇒ 判据是「编辑器**不在**那儿」，不是「那块看不见」。
+    assert!(
+        sub.editor_is_docked(eid0) == Some(false),
+        "默认**不该**停在底部编辑区（那是另一个停靠位，要拖过去）"
+    );
+    // 终端**还在**（只是切到了编辑器那一页 ⇒ 终端页的内容暂时不在屏幕上）。
+    let term = term_widget(&st);
+    assert!(
+        term.parent().is_some(),
+        "终端被连带销毁了（切页不该动它）"
+    );
+    // ⚠️ **阶段 137 的默认形态**拍一张（用户要看的「与 term 并列的 tab」）。
+    shot("/tmp/fileedit_main_tab.png");
+
+    // ---- 2b) 挪到**底部编辑区** ⇒ 与终端同宽、不压文件列表 ----
+    //
+    // ⚠️ 底部编辑区**还在**（阶段 107 的形态）⇒ 三个停靠位都能用：
+    //    主栏（默认）/ 底部 / 侧栏（阶段 137 新增）。
+    assert!(
+        sub.move_editor_to_bottom(eid0),
+        "编辑器没能挪到底部编辑区"
+    );
+    pump(400);
     assert!(
         sub.editor_area_visible(),
         "编辑区应当露出来（用户开着编辑器却看不见 = 功能等于没有）"
+    );
+    // ⚠️ **核心断言**：停到底部时，终端**仍然可见** ⇒ 这就是"同窗同时显示"。
+    assert!(
+        term.is_mapped(),
+        "编辑器停到底部后终端不见了（阶段 107 的核心：两个要同时显示）"
     );
     // 文件面板**不再**搬进编辑器页 ⇒ 一直待在终端页里。
     assert!(
@@ -450,7 +490,6 @@ fn main() {
     //
     // ⚠️ **为什么重要**：页签上只有**文件名** ⇒ 「ntluser.ini」是这台
     //   服务器上的还是**本机**的，光看名字分不出来 ⇒ 必须有个小图标。
-    let eid0 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
     let icons = sub.editor_tab_icon_names_for_test(eid0);
     assert!(
         icons.iter().any(|n| n == "computer-symbolic"),
@@ -469,8 +508,8 @@ fn main() {
         .expect("拖放负载应当能解析出编辑器 id");
     assert_eq!(pid, eid, "负载里的 id 跟编辑器对不上");
     assert!(
-        sub.undock_editor(pid),
-        "编辑器没能拖回子标签栏（阶段 108 的核心）"
+        sub.move_editor_to_main(pid),
+        "编辑器没能挪回主栏页签（阶段 137 的核心）"
     );
     pump(400);
     assert_eq!(
@@ -559,7 +598,7 @@ fn main() {
     shot("/tmp/fileedit-undock.png");
 
     // 再拖回来
-    assert!(sub.dock_editor(pid), "编辑器没能拖回编辑区");
+    assert!(sub.move_editor_to_bottom(pid), "编辑器没能挪回底部编辑区");
     pump(400);
     assert_eq!(sub.editor_is_docked(pid), Some(true), "编辑器应当停回编辑区");
     assert_eq!(
@@ -708,13 +747,22 @@ fn main() {
     // ---- 6) 再开一个 ⇒ 编辑区 2 个；关掉 ⇒ 1 个；全关 ⇒ 编辑区藏起来 ----
     puttyplus::panel::fileedit::open_local(&st, tmp_two.to_str().unwrap(), false);
     pump(700);
-    assert_eq!(sub.editor_count(), 2, "编辑区里应当有两个编辑器");
+    assert_eq!(sub.editor_count(), 2, "应当有两个编辑器");
+    // ⚠️ **阶段 137**：默认是**主栏页签** ⇒ 新开的文件**并列为一个页签**。
+    //
+    // ⚠️ **注意**：第一个文件这时**停在底部编辑区**（[5] 拖回去的）⇒ 它
+    //   **不占**子页签 ⇒ 子页签只多一个（终端 + 第二个文件）。
     assert_eq!(
         sub.page_count(),
-        pages_before,
-        "第二个编辑器也不该占子页签"
+        pages_before + 1,
+        "新开的文件应当与终端并列为一个页签（阶段 137 的默认）：现在 {n} 个，之前 {b} 个",
+        n = sub.page_count(),
+        b = pages_before
     );
-    println!("[6] 两个文件：编辑区 2 个编辑器、子页签仍是 {n} 个 ✓", n = pages_before);
+    println!(
+        "[6] 两个文件：2 个编辑器、子页签 {n} 个（终端 + 新开的那个）✓",
+        n = pages_before + 1
+    );
 
     // 改内容 ⇒ 标题带「●」脏标记（阶段 107 的小标签栏）
     assert!(

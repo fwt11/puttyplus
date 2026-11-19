@@ -227,7 +227,7 @@ jobs:
             exit 1
           }
 
-      - name: 编译全部 example（119 个冒烟都得能编）
+      - name: 编译全部 example（144 个冒烟都得能编）
         # ⚠️ **为什么单独一步**：单测（`cargo test --lib`）与 `cargo build
         #    --release` **都不编 example** ⇒ 改了公开签名（例如
         #    `panel::on_row_activated` 多了个 `islink`）而漏改某个 example
@@ -266,8 +266,16 @@ jobs:
           #   - `dbedit_remember_smoke`：「编辑这个数据库连接」不许把
           #     `remember=true` 抹掉（抹了 ⇒ 库里的密码成孤儿）；
           #   - `sidebar_menu_smoke`：侧栏右键菜单的**清单**与点击分派一致。
+          # ⚠️ **阶段 135/137 的两个新冒烟也在名单里**（都不连服务器 ⇒ 快）：
+          #   - `docker_perm_smoke`：Docker 没权限 ⇒ 弹框（每连接一次）＋
+          #     页面大号错态常驻（用户 2026-11-19 明确要求后者不能因为
+          #     「只弹一次」而消失）；
+          #   - `editor_dock_smoke`：编辑器的**三个停靠位**（主栏页签 /
+          #     底部编辑区 / 左右侧栏）＋ 挪回去（用户 2026-11-19 要的
+          #     「tab 可以自由停靠在屏幕的多个位置」）。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
-                     sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke; do
+                     sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
+                     docker_perm_smoke editor_dock_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then

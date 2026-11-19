@@ -157,6 +157,30 @@ fn collect_icon_names(w: &gtk::Widget, out: &mut Vec<String>) {
     }
 }
 
+/// 编辑器停靠在**哪儿**（阶段 137）。
+///
+/// ⚠️ **为什么从「是不是停着」改成「停在哪儿」**：以前只有两处（编辑区 /
+///   子标签栏）⇒ 一个 bool 够用；现在有**三处**（主栏 / 底部 / 侧栏）⇒
+///   位置本身成了数据（页签要在三者之间搬来搬去）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditorPlace {
+    /// **主栏页签**（与终端并列）——阶段 137 之后的**默认**。
+    ///
+    /// 干什么用（用户 2026-11-19）：「打开文件和 term 显示为**并列的 tab**」
+    /// ——以前（阶段 107 之前）就是这样 ⇒ 改回去。
+    Main,
+    /// **底部编辑区**（终端列下面；阶段 107 的默认家）。
+    ///
+    /// 保留：终端与编辑器**同屏上下**（用户 2026-11-14 要的「同时显示」）。
+    Bottom,
+    /// **侧栏页签**（左右分栏；阶段 137 新增）。
+    ///
+    /// 干什么用（用户 2026-11-19）：「这个 tab 可以**自由停靠在屏幕的多个
+    /// 位置**，就像很多软件那样，比如 vscode」⇒ 拖到窗口左/右边缘 ⇒ 在
+    /// 那儿开一条分栏。
+    Side,
+}
+
 /// **编辑区**里的一个编辑器（阶段 107；阶段 108 起可在「编辑区 ⇄ 子标签栏」之间拖）。
 struct EditorPage {
     /// 编辑器 id（= `fileedit::FileEdit::id`）。
@@ -196,8 +220,8 @@ struct EditorPage {
     host: Option<gtk::Paned>,
     /// 关之前先问一遍（未保存修改）。返回 false = 不关。
     on_close: Option<Box<dyn Fn() -> bool>>,
-    /// 现在停在「编辑区」还是「子标签栏」（阶段 108）。
-    docked: bool,
+    /// 现在停在**哪儿**（阶段 137：主栏 / 底部 / 侧栏）。
+    place: EditorPlace,
 }
 
 /// 连接页的子标签容器。
@@ -218,6 +242,21 @@ pub struct SubTabs {
     /// ⚠️ **阶段 108**：这里**不再**是「上下分」（编辑区搬走了）⇒
     /// 连接页的内容就是子标签区本身。
     root: gtk::Overlay,
+    /// **工作区**（阶段 137）：`[主栏 | 侧栏]` 的水平分栏。
+    ///
+    /// ⚠️ **为什么要有**：用户要「tab 可以**自由停靠在屏幕的多个位置**」
+    ///   （像 VS Code 的分栏）⇒ 光有主栏的页签栏不够 ⇒ 得能**在边上再开
+    ///   一栏**。
+    work: gtk::Paned,
+    /// **侧栏**（阶段 137）：左右分栏里那一栏的页签 notebook。
+    ///
+    /// ⚠️ **为什么是另一个 notebook**：每个「栏」要有**自己的页签栏**
+    ///   （VS Code 的 editor group 就是这样）⇒ 侧栏里的文件各有各的页签。
+    side_nb: gtk::Notebook,
+    /// 侧栏的外壳（放 `side_nb`；没有页时整块藏起来）。
+    side_box: gtk::Box,
+    /// 侧栏现在在**左边**吗（阶段 137：拖到左边缘 ⇒ 侧栏换到左边）。
+    side_left: Cell<bool>,
     /// **编辑区**（阶段 107）：文件编辑器住的地方。
     ///
     /// 干什么用（用户 2026-11-14）：「终端和文件编辑可以放在同一个窗口中，
@@ -306,10 +345,14 @@ impl SubTabs {
         let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         btn_box.append(&add);
 
-        // 浮在页签栏那一行的右端（**不占布局宽度**）
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&nb));
-        overlay.add_overlay(&btn_box);
+        // ---- 浮在页签栏那一行的右端（**不占布局宽度**）----
+        //
+        // ⚠️ **阶段 137**：这个 Overlay 现在是**主栏**（`main_group`），
+        //   「+」按钮要浮在**主栏页签栏**的右端 ⇒ 不能浮在整个工作区的
+        //   右端（那样有侧栏时按钮会跑到侧栏那半边去）。
+        let main_group = gtk::Overlay::new();
+        main_group.set_child(Some(&nb));
+        main_group.add_overlay(&btn_box);
         // halign/valign 不是 FILL 时，Overlay 会按**自然尺寸**把 overlay
         // 子控件摆到对应的边上——所以按钮只占自己那一小块，不拦截别处的点击
         //（GTK 4.10 的 overlay-pass-through  gtk4-rs 0.11 没绑，用不着）。
@@ -317,6 +360,38 @@ impl SubTabs {
         btn_box.set_valign(gtk::Align::Start);
         btn_box.set_margin_end(4);
         btn_box.set_margin_top(2);
+
+        // ---- **侧栏**（阶段 137）：左右分栏里那一栏 ----
+        //
+        // ⚠️ **为什么是另一个 notebook**：每个「栏」要有**自己的页签栏**
+        //   （VS Code 的 editor group 就是这样）⇒ 侧栏里的文件各有各的页签，
+        //   切侧栏不影响主栏当前页。
+        let side_nb = gtk::Notebook::new();
+        side_nb.set_scrollable(true);
+        side_nb.set_vexpand(true);
+        side_nb.set_hexpand(true);
+        let side_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        side_box.append(&side_nb);
+        side_box.set_hexpand(true);
+        side_box.set_vexpand(true);
+        side_box.set_visible(false); // 没有页时整块藏起来
+
+        // ---- **工作区**：`[主栏 | 侧栏]` 的水平分栏 ----
+        let work = gtk::Paned::new(gtk::Orientation::Horizontal);
+        work.set_start_child(Some(&main_group));
+        work.set_end_child(Some(&side_box));
+        work.set_hexpand(true);
+        work.set_vexpand(true);
+        // ⚠️ **侧栏先收起来**（position = 0 ⇒ 空间全给主栏）。
+        work.set_resize_start_child(true);
+        work.set_shrink_start_child(false);
+        work.set_resize_end_child(false);
+        work.set_shrink_end_child(false);
+        work.set_position(0);
+
+        // 连接页的内容 = 工作区。
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&work));
 
         // ---- 编辑区（阶段 107/108）：终端与文件编辑器同窗同时显示 ----
         //
@@ -360,6 +435,10 @@ impl SubTabs {
         let sub = Rc::new(SubTabs {
             nb,
             root: overlay,
+            work,
+            side_nb,
+            side_box,
+            side_left: Cell::new(false),
             editor_area,
             editor_tabs,
             editor_stack,
@@ -401,6 +480,9 @@ impl SubTabs {
         sub.attach_undock_target();
         // 阶段 108：编辑区是「把编辑器拖回来」的落点（**挂在编辑区自己身上**）。
         sub.attach_dock_target();
+        // 阶段 137：侧栏是「停到分栏里」的落点；工作区左右边缘是「开分栏」。
+        sub.attach_side_target();
+        sub.attach_work_target();
 
         sub
     }
@@ -726,6 +808,30 @@ impl SubTabs {
             .map(|t| t.upcast())
     }
 
+    /// 测试钩子：某个编辑器页签上的**图标名**（按出现顺序）。
+    ///
+    /// ⚠️ **为什么要有**：页签上现在有**两个**小图标（位置 ＋ 模式）⇒
+    ///   冒烟得能验「位置图标真的挂上去了」（用户 2026-11-19 提的）。
+    pub fn editor_tab_icon_names_for_test(&self, id: u64) -> Vec<String> {
+        // ⚠️ **三个停靠位的标签控件不一样**：底部＝编辑区的小标签；
+        //    主栏 / 侧栏＝页签头（`head`）⇒ 都要能读到。
+        let (tab, head) = {
+            let pages = self.editor_pages.borrow();
+            let Some(p) = pages.iter().find(|p| p.id == id) else {
+                return Vec::new();
+            };
+            (p.tab.clone(), p.head.clone())
+        };
+        let mut out = Vec::new();
+        if let Some(t) = tab {
+            collect_icon_names(t.upcast_ref::<gtk::Widget>(), &mut out);
+        }
+        if let Some(h) = head {
+            collect_icon_names(h.upcast_ref::<gtk::Widget>(), &mut out);
+        }
+        out
+    }
+
     /// 加一个编辑器到**编辑区**（不是子页签），返回它的 id。
     ///
     /// 干什么用（用户 2026-11-14）：「终端和文件编辑可以放在同一个窗口中，
@@ -744,33 +850,46 @@ impl SubTabs {
     ) -> u64 {
         content.set_hexpand(true);
         content.set_vexpand(true);
-        self.editor_stack.add_named(&content, Some(&id.to_string()));
 
         // 标题标签：**每次都新造一个**（不在容器之间搬家 ⇒ 文件名不会丢，
         // 理由见 `make_title_label`）。
         let label = self.make_title_label(title);
 
-        let tab = self.build_editor_tab(id, icon.as_ref(), loc_icon.as_ref(), title, &label);
-        self.editor_tabs.append(&tab);
+        // ⚠️ **阶段 137：默认停「主栏」**（与终端并列的页签）——
+        // 用户 2026-11-19：「默认打开还是显示为和 term 并列的 tab」。
+        //
+        // 那一页的内容 = 「**文件面板 ｜ 编辑器**」（阶段 121 的形态：
+        // 用户 2026-11-15「编辑器旁边要有 sftp」）。
+        //
+        // ⚠️ **文件面板是「会话级的一个 widget」** ⇒ 同一时刻只能在一个宿主
+        //    里 ⇒ 左边这一格**先空着**，切到这一页时由 `tabs.rs` 的
+        //    `switch-page` 回调把文件面板搬过来（切走时搬回去）。
+        let host = gtk::Paned::new(gtk::Orientation::Horizontal);
+        host.set_end_child(Some(&content));
+        host.set_hexpand(true);
+        host.set_vexpand(true);
+        let (head, label) = self.build_editor_head(id, icon.as_ref(), loc_icon.as_ref(), title);
+        self.nb.append_page(&host.clone().upcast::<gtk::Widget>(), Some(&head));
         self.editor_pages.borrow_mut().push(EditorPage {
             id,
             icon,
             loc_icon,
             title: title.to_string(),
             label,
-            tab: Some(tab),
-            head: None,
+            tab: None,
+            head: Some(head),
             widget: content,
-            host: None,
+            host: Some(host),
             on_close,
-            docked: true,
+            place: EditorPlace::Main,
         });
-        // 有编辑器了 ⇒ 编辑区露出来（Paned 会把空间分给它）。
         self.refresh_editor_area();
+        // 刚打开的文件**立刻可见**（切到它那一页）。
+        self.switch_editor(id);
         id
     }
 
-    /// 编辑区小标签栏上的一个标签：[图标][文件名][×]（阶段 107）。
+    /// 编辑区小标签栏上的一个标签：[位置图标][图标][文件名][×]（阶段 107）。
     fn build_editor_tab(
         self: &Rc<Self>,
         id: u64,
@@ -931,7 +1050,11 @@ impl SubTabs {
         {
             let me = Rc::downgrade(self);
             src.connect_drag_begin(move |_src, _drag| {
-                if let Some(me) = me.upgrade() {
+                let Some(me) = me.upgrade() else { return };
+                // ⚠️ **只有「停在底部编辑区」的编辑器才切页**（阶段 137）：
+                //    停在主栏/侧栏的编辑器，它的页签**就在眼前** ⇒ 切走
+                //    反而会把它藏起来（拖都拖不成）。
+                if me.editor_place(id) == Some(EditorPlace::Bottom) {
                     me.show_editor_host_page();
                 }
             });
@@ -961,39 +1084,49 @@ impl SubTabs {
         self.nb.set_current_page(Some(num));
     }
 
-    /// 切到某个编辑器（停靠的切内容栈；拖回子标签栏的切页签）。
+    /// 切到某个编辑器（**按它停在哪儿**分派：底部 / 主栏 / 侧栏）。
     pub fn switch_editor(self: &Rc<Self>, id: u64) {
-        let (docked, widget, host) = {
+        let (place, widget, host) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return;
             };
-            (p.docked, p.widget.clone(), p.host.clone())
+            (p.place, p.widget.clone(), p.host.clone())
         };
-        if docked {
-            self.editor_stack.set_visible_child_name(&id.to_string());
-            self.editor_current.set(Some(id));
-            // 「当前」那个标签加个高亮类（别的去掉）。
-            for p in self.editor_pages.borrow().iter() {
-                if let Some(t) = &p.tab {
-                    if p.id == id {
-                        t.add_css_class("pp-editor-tab-active");
-                    } else {
-                        t.remove_css_class("pp-editor-tab-active");
+        match place {
+            EditorPlace::Bottom => {
+                self.editor_stack.set_visible_child_name(&id.to_string());
+                self.editor_current.set(Some(id));
+                // 「当前」那个标签加个高亮类（别的去掉）。
+                for p in self.editor_pages.borrow().iter() {
+                    if let Some(t) = &p.tab {
+                        if p.id == id {
+                            t.add_css_class("pp-editor-tab-active");
+                        } else {
+                            t.remove_css_class("pp-editor-tab-active");
+                        }
                     }
                 }
             }
-        } else {
-            // 已经拖回子标签栏了 ⇒ 切到那个页签。
-            //
-            // ⚠️ **页内容是宿主 Paned**（阶段 121：左＝文件面板 / 右＝编辑器）
-            //    ⇒ 用宿主去查页序号，**不能**用编辑器内容 widget。
-            if let Some(h) = &host {
-                if let Some(num) = self.nb.page_num(h) {
-                    self.nb.set_current_page(Some(num));
+            EditorPlace::Main => {
+                // 主栏那一页 ⇒ 切到那个页签。
+                //
+                // ⚠️ **页内容是宿主 Paned**（阶段 121：左＝文件面板 / 右＝编辑器）
+                //    ⇒ 用宿主去查页序号，**不能**用编辑器内容 widget。
+                if let Some(h) = &host {
+                    if let Some(num) = self.nb.page_num(h) {
+                        self.nb.set_current_page(Some(num));
+                    }
                 }
+                self.editor_current.set(Some(id));
             }
-            self.editor_current.set(Some(id));
+            EditorPlace::Side => {
+                // 侧栏那一页 ⇒ 切侧栏的当前页（**别动主栏的当前页**）。
+                if let Some(num) = self.side_nb.page_num(&widget) {
+                    self.side_nb.set_current_page(Some(num));
+                }
+                self.editor_current.set(Some(id));
+            }
         }
     }
 
@@ -1012,35 +1145,44 @@ impl SubTabs {
         self.remove_editor(id)
     }
 
-    /// **不询问**直接关掉某个编辑器（**两种位置都能摘**：编辑区 / 子标签栏）。
+    /// **不询问**直接关掉某个编辑器（**三种位置都能摘**：底部 / 主栏 / 侧栏）。
     pub fn remove_editor(self: &Rc<Self>, id: u64) -> bool {
         let idx = self.editor_pages.borrow().iter().position(|p| p.id == id);
         let Some(idx) = idx else { return false };
-        let (docked, widget, tab, host) = {
+        let (place, widget, tab, host) = {
             let pages = self.editor_pages.borrow();
             (
-                pages[idx].docked,
+                pages[idx].place,
                 pages[idx].widget.clone(),
                 pages[idx].tab.clone(),
                 pages[idx].host.clone(),
             )
         };
-        if docked {
-            self.editor_stack.remove(&widget);
-            if let Some(t) = &tab {
-                self.editor_tabs.remove(t);
+        match place {
+            EditorPlace::Bottom => {
+                self.editor_stack.remove(&widget);
+                if let Some(t) = &tab {
+                    self.editor_tabs.remove(t);
+                }
             }
-        } else {
-            // 拖回子标签栏的那个 ⇒ 从 notebook 里摘掉那一页。
-            //
-            // ⚠️ **先把两个孩子摘下来**（阶段 121）：编辑器（要留给调用方，
-            //    不然会被连带销毁）+ **文件面板**（它住在左半 ⇒ 宿主被销毁
-            //    时它也会跟着没了 ⇒ **SFTP 列表整个消失**）。
-            if let Some(h) = &host {
-                h.set_end_child(None::<&gtk::Widget>);
-                h.set_start_child(None::<&gtk::Widget>);
-                if let Some(num) = self.nb.page_num(h) {
-                    self.nb.remove_page(Some(num));
+            EditorPlace::Main => {
+                // 主栏那一页 ⇒ 从 notebook 里摘掉。
+                //
+                // ⚠️ **先把两个孩子摘下来**（阶段 121）：编辑器（要留给调用方，
+                //    不然会被连带销毁）+ **文件面板**（它住在左半 ⇒ 宿主被销毁
+                //    时它也会跟着没了 ⇒ **SFTP 列表整个消失**）。
+                if let Some(h) = &host {
+                    h.set_end_child(None::<&gtk::Widget>);
+                    h.set_start_child(None::<&gtk::Widget>);
+                    if let Some(num) = self.nb.page_num(h) {
+                        self.nb.remove_page(Some(num));
+                    }
+                }
+            }
+            EditorPlace::Side => {
+                // 侧栏那一页 ⇒ 从侧栏的 notebook 里摘掉。
+                if let Some(num) = self.side_nb.page_num(&widget) {
+                    self.side_nb.remove_page(Some(num));
                 }
             }
         }
@@ -1055,7 +1197,7 @@ impl SubTabs {
                 .editor_pages
                 .borrow()
                 .iter()
-                .filter(|p| p.docked)
+                .filter(|p| p.place == EditorPlace::Bottom)
                 .last()
                 .map(|p| p.id);
             match next {
@@ -1064,106 +1206,164 @@ impl SubTabs {
             }
         }
         self.refresh_editor_area();
+        self.refresh_side();
         true
     }
 
-    /// 把编辑器**拖回子标签栏**（阶段 108：变回一个子页签）。
+    /// 把编辑器挪到**主栏**（与终端并列的页签）。
     ///
-    /// 干什么用：用户 2026-11-15：「我希望也可以拖动它的 tab，把它拖动到
-    /// 原来修改之前的位置」——阶段 107 之前编辑器就是子页签 ⇒ 拖回那儿
-    /// 就是"回到老地方"。
+    /// 干什么用（用户 2026-11-19）：「默认打开还是显示为和 term 并列的
+    /// tab」⇒ 主栏是编辑器的**默认**家；拖到底部、拖到侧栏之后，还能再
+    /// 拖回来。
     ///
-    /// 返回是否真拖回去了（本来就在编辑区 ⇒ false）。
-    pub fn undock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, loc_icon, title, widget) = {
+    /// 返回是否真挪过去了（已经在主栏 ⇒ false）。
+    pub fn move_editor_to_main(self: &Rc<Self>, id: u64) -> bool {
+        let (icon, loc_icon, title, widget, place) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
             };
-            if !p.docked {
-                return false; // 已经在子标签栏里了
+            if p.place == EditorPlace::Main {
+                return false; // 已经在主栏了
             }
             (
                 p.icon.clone(),
                 p.loc_icon.clone(),
                 p.title.clone(),
                 p.widget.clone(),
+                p.place,
             )
         };
-        // 从编辑区摘掉（内容 + 小标签）。
-        self.editor_stack.remove(&widget);
-        let tab = {
-            let pages = self.editor_pages.borrow();
-            pages.iter().find(|p| p.id == id).and_then(|p| p.tab.clone())
-        };
-        if let Some(t) = &tab {
-            self.editor_tabs.remove(t);
-        }
-        // 变成一个子页签（**页签头是新造的** ⇒ 文件名一定在）。
+        // 先把它从原来那儿的容器里摘下来。
+        self.detach_editor_widget(id, place, &widget);
+        // 变成主栏的一个页签（**页签头是新造的** ⇒ 文件名一定在）。
         //
-        // ⚠️ **那一页的内容是「文件面板 ｜ 编辑器」的 Paned**（阶段 121）。
-        //
-        // 干什么用：用户 2026-11-15：「**编辑器旁边要有 sftp**，就像我们修改
-        // 将 term 和编辑器能同时显示之前那样」⇒ 拖到子标签栏的编辑器要
-        // **自己左边带一份 SFTP 文件列表**（阶段 98 的形态）⇒ 左边放文件
-        // 面板、右边放编辑器。
-        //
-        // ⚠️ **文件面板是「会话级的一个 widget」** ⇒ 同一时刻只能在一个宿主
-        //    里 ⇒ 左边这一格**先空着**，切到这一页时由 `tabs.rs` 的
-        //    `switch-page` 回调把文件面板搬过来（切走时搬回去）。
+        // ⚠️ **那一页的内容是「文件面板 ｜ 编辑器」的 Paned**（阶段 121）：
+        //    用户 2026-11-15：「**编辑器旁边要有 sftp**」。
         let host = gtk::Paned::new(gtk::Orientation::Horizontal);
         host.set_end_child(Some(&widget));
         host.set_hexpand(true);
         host.set_vexpand(true);
-        let (head, label) = self.build_editor_head(id, icon.as_ref(), loc_icon.as_ref(), &title);
+        let (head, label) =
+            self.build_editor_head(id, icon.as_ref(), loc_icon.as_ref(), &title);
         self.nb.append_page(&host.clone().upcast::<gtk::Widget>(), Some(&head));
         {
             let mut pages = self.editor_pages.borrow_mut();
             if let Some(p) = pages.iter_mut().find(|p| p.id == id) {
-                p.docked = false;
+                p.place = EditorPlace::Main;
                 p.head = Some(head);
                 p.tab = None;
                 p.label = label;
                 p.host = Some(host);
             }
         }
-        // 编辑区可能空了 ⇒ 变成一条「停靠区」（用户还能把编辑器拖回来）。
         self.refresh_editor_area();
-        // ⚠️ **拖出去后切到编辑器那一页**（阶段 117 的行为，阶段 121 恢复）。
-        //
-        // 为什么恢复：这一页现在**左边就是 SFTP 列表**（文件面板搬过来了）
-        // ⇒ 切过去看到的就是「文件列表 ｜ 编辑器」，**正是用户要的样子**
-        // （阶段 107 之前 term 和编辑器不能同时显示时的形态）。
-        //
-        // ⚠️ 阶段 119 曾经**撤回**这一步（切过去 ⇒ 终端页被藏起来 ⇒ SFTP
-        //    列表跟着消失）—— 那时编辑器页里**没有**文件面板 ⇒ 用户要的
-        //    「编辑器旁边有 sftp」没解决；现在这一页自带文件面板 ⇒ 撤回的
-        //    理由不再成立。
         self.switch_editor(id);
-        // 「当前编辑器」指针留给**还停靠着的**那个（拖走的那个不在编辑区里）。
-        if self.editor_current.get() == Some(id) {
-            let next = self
-                .editor_pages
-                .borrow()
-                .iter()
-                .filter(|p| p.docked)
-                .last()
-                .map(|p| p.id);
-            self.editor_current.set(next);
-        }
         true
     }
 
-    /// 把编辑器**停靠**回编辑区（阶段 108：从子标签栏拖回来）。
+    /// 把编辑器挪到**侧栏**（左右分栏；阶段 137）。
     ///
-    /// 返回是否真停回去了（本来就在编辑区 ⇒ false）。
-    pub fn dock_editor(self: &Rc<Self>, id: u64) -> bool {
-        let (icon, loc_icon, title, widget, host) = {
+    /// 干什么用（用户 2026-11-19）：「这个 tab 可以**自由停靠在屏幕的多个
+    /// 位置**，就像很多软件那样，比如 vscode」⇒ 拖到窗口左/右边缘 ⇒
+    /// 在那儿开一条分栏，编辑器停进去。
+    ///
+    /// ⚠️ **侧栏那一页只有编辑器**（不带文件面板）：文件面板是**会话级的
+    ///    一个 widget** ⇒ 同一时刻只能在一个宿主里 ⇒ 侧栏不抢它。
+    ///
+    /// 返回是否真挪过去了（已经在侧栏 ⇒ false）。
+    pub fn move_editor_to_side(self: &Rc<Self>, id: u64) -> bool {
+        let (icon, loc_icon, title, widget, place) = {
             let pages = self.editor_pages.borrow();
             let Some(p) = pages.iter().find(|p| p.id == id) else {
                 return false;
             };
-            if p.docked {
+            if p.place == EditorPlace::Side {
+                return false; // 已经在侧栏了
+            }
+            (
+                p.icon.clone(),
+                p.loc_icon.clone(),
+                p.title.clone(),
+                p.widget.clone(),
+                p.place,
+            )
+        };
+        self.detach_editor_widget(id, place, &widget);
+        // 侧栏页签头（新造的 ⇒ 文件名一定在）。
+        let (head, label) =
+            self.build_editor_head(id, icon.as_ref(), loc_icon.as_ref(), &title);
+        self.side_nb.append_page(&widget, Some(&head));
+        {
+            let mut pages = self.editor_pages.borrow_mut();
+            if let Some(p) = pages.iter_mut().find(|p| p.id == id) {
+                p.place = EditorPlace::Side;
+                p.head = Some(head);
+                p.tab = None;
+                p.label = label;
+                p.host = None;
+            }
+        }
+        self.refresh_editor_area();
+        self.refresh_side();
+        self.switch_editor(id);
+        true
+    }
+
+    /// 把编辑器**从它现在待着的容器里摘下来**（**不动登记**）。
+    ///
+    /// ⚠️ **为什么单独一个函数**：三个停靠位（底部 / 主栏 / 侧栏）搬来搬去
+    ///   ⇒ 摘的规矩得**只有一处** ⇒ 不然漏一处就是「控件有两个爹」。
+    fn detach_editor_widget(self: &Rc<Self>, id: u64, place: EditorPlace, widget: &gtk::Widget) {
+        match place {
+            EditorPlace::Bottom => {
+                self.editor_stack.remove(widget);
+                let tab = self
+                    .editor_pages
+                    .borrow()
+                    .iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.tab.clone());
+                if let Some(t) = &tab {
+                    self.editor_tabs.remove(t);
+                }
+            }
+            EditorPlace::Main => {
+                let host = self
+                    .editor_pages
+                    .borrow()
+                    .iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.host.clone());
+                // ⚠️ **先把两个孩子摘下来**（阶段 121）：编辑器（要搬走 ⇒
+                //    不摘就会被连带销毁）+ **文件面板**（它住在左半 ⇒ 宿主
+                //    被销毁时它也会跟着没了 ⇒ **SFTP 列表整个消失**）。
+                if let Some(h) = &host {
+                    h.set_end_child(None::<&gtk::Widget>);
+                    h.set_start_child(None::<&gtk::Widget>);
+                    if let Some(num) = self.nb.page_num(h) {
+                        self.nb.remove_page(Some(num));
+                    }
+                }
+            }
+            EditorPlace::Side => {
+                if let Some(num) = self.side_nb.page_num(widget) {
+                    self.side_nb.remove_page(Some(num));
+                }
+            }
+        }
+    }
+
+    /// 把编辑器挪到**底部编辑区**（终端列下面；阶段 107 的默认家）。
+    ///
+    /// 返回是否真挪过去了（已经在底部 ⇒ false）。
+    pub fn move_editor_to_bottom(self: &Rc<Self>, id: u64) -> bool {
+        let (icon, loc_icon, title, widget, place) = {
+            let pages = self.editor_pages.borrow();
+            let Some(p) = pages.iter().find(|p| p.id == id) else {
+                return false;
+            };
+            if p.place == EditorPlace::Bottom {
                 return false; // 已经在编辑区里了
             }
             (
@@ -1171,27 +1371,10 @@ impl SubTabs {
                 p.loc_icon.clone(),
                 p.title.clone(),
                 p.widget.clone(),
-                p.host.clone(),
+                p.place,
             )
         };
-        // ⚠️ **顺序很重要**（阶段 121）：
-        //
-        // ① **先把两个孩子从宿主里摘下来**（GTK 的 `set_*_child(None)` 会
-        //    顺带解除父级）：
-        //    - 右半＝**编辑器**（要搬回编辑区 ⇒ 不摘就会被连带销毁）；
-        //    - 左半＝**文件面板**（它由 `PanelState` 持有，但仍是宿主的
-        //      孩子 ⇒ 不摘的话，宿主被销毁时它也会跟着没了 ⇒ **SFTP 列表
-        //      会整个消失**）。
-        if let Some(h) = &host {
-            h.set_end_child(None::<&gtk::Widget>);
-            h.set_start_child(None::<&gtk::Widget>);
-        }
-        // ② 再从 notebook 里摘掉那一页（宿主 Paned 随之销毁）。
-        if let Some(h) = &host {
-            if let Some(num) = self.nb.page_num(h) {
-                self.nb.remove_page(Some(num));
-            }
-        }
+        self.detach_editor_widget(id, place, &widget);
         // 小标签：**新造一个**（不把页签头那个搬回来 ⇒ 文件名不会丢）。
         let label = self.make_title_label(&title);
         let tab = self.build_editor_tab(id, icon.as_ref(), loc_icon.as_ref(), &title, &label);
@@ -1200,7 +1383,7 @@ impl SubTabs {
         {
             let mut pages = self.editor_pages.borrow_mut();
             if let Some(p) = pages.iter_mut().find(|p| p.id == id) {
-                p.docked = true;
+                p.place = EditorPlace::Bottom;
                 p.tab = Some(tab);
                 p.head = None;
                 p.label = label;
@@ -1216,37 +1399,37 @@ impl SubTabs {
         true
     }
 
-    /// 测试钩子：某个编辑器页签上的**图标名**（按出现顺序）。
-    ///
-    /// ⚠️ **为什么要有**：页签上现在有**两个**小图标（位置 ＋ 模式）⇒
-    ///   冒烟得能验「位置图标真的挂上去了」（用户 2026-11-19 提的）。
-    pub fn editor_tab_icon_names_for_test(&self, id: u64) -> Vec<String> {
-        // ⚠️ **两种停靠位的标签控件不一样**：底部＝编辑区的小标签；
-        //    子标签栏＝页签头（`head`）⇒ 都要能读到。
-        let (tab, head) = {
-            let pages = self.editor_pages.borrow();
-            let Some(p) = pages.iter().find(|p| p.id == id) else {
-                return Vec::new();
-            };
-            (p.tab.clone(), p.head.clone())
-        };
-        let mut out = Vec::new();
-        if let Some(t) = tab {
-            collect_icon_names(t.upcast_ref::<gtk::Widget>(), &mut out);
-        }
-        if let Some(h) = head {
-            collect_icon_names(h.upcast_ref::<gtk::Widget>(), &mut out);
-        }
-        out
-    }
-
     /// 这个编辑器现在是停在**编辑区**还是**子标签栏**（阶段 108）。
     pub fn editor_is_docked(&self, id: u64) -> Option<bool> {
         self.editor_pages
             .borrow()
             .iter()
             .find(|p| p.id == id)
-            .map(|p| p.docked)
+            .map(|p| p.place == EditorPlace::Bottom)
+    }
+
+    /// 这个编辑器现在停在**哪儿**（阶段 137：主栏 / 底部 / 侧栏）。
+    pub fn editor_place(&self, id: u64) -> Option<EditorPlace> {
+        self.editor_pages
+            .borrow()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.place)
+    }
+
+    /// 测试钩子：**侧栏**里有几个页签（阶段 137）。
+    pub fn side_page_count(&self) -> usize {
+        self.side_nb.n_pages() as usize
+    }
+
+    /// 测试钩子：侧栏现在在**左边**吗（阶段 137）。
+    pub fn side_is_left(&self) -> bool {
+        self.side_left.get()
+    }
+
+    /// 把侧栏换到**左边 / 右边**（阶段 137：拖到窗口左/右边缘）。
+    pub fn set_side_left_pub(self: &Rc<Self>, left: bool) {
+        self.set_side_left(left);
     }
 
     /// 「拖回子标签栏的编辑器」那一页的**宿主 Paned**（左＝文件面板 / 右＝编辑器）。
@@ -1303,7 +1486,7 @@ impl SubTabs {
         if let Some(cur) = self.nb.current_page() {
             let pages = self.editor_pages.borrow();
             if let Some(p) = pages.iter().find(|p| {
-                !p.docked
+                p.place != EditorPlace::Bottom
                     && p.host
                         .as_ref()
                         .map(|h| self.nb.page_num(h) == Some(cur))
@@ -1316,7 +1499,7 @@ impl SubTabs {
         // 已经不在编辑区了，指着它会让快捷键找错人）。
         let cur = self.editor_current.get();
         let pages = self.editor_pages.borrow();
-        cur.filter(|id| pages.iter().any(|p| p.id == *id && p.docked))
+        cur.filter(|id| pages.iter().any(|p| p.id == *id && p.place == EditorPlace::Bottom))
     }
 
     /// 一共开着几个编辑器（**两种位置都算**：编辑区 + 子标签栏）。
@@ -1352,7 +1535,10 @@ impl SubTabs {
     fn refresh_editor_area(&self) {
         let (any, docked) = {
             let pages = self.editor_pages.borrow();
-            (!pages.is_empty(), pages.iter().any(|p| p.docked))
+            (
+                !pages.is_empty(),
+                pages.iter().any(|p| p.place == EditorPlace::Bottom),
+            )
         };
         self.editor_area.set_visible(any);
         self.editor_hint.set_visible(any && !docked);
@@ -1378,6 +1564,141 @@ impl SubTabs {
             34
         };
         col.set_position((h - want).max(0));
+    }
+
+    /// **侧栏**的显示/隐藏（阶段 137）。
+    ///
+    /// ⚠️ **没有页就整块藏起来**（Paned 的 position = 0 ⇒ 空间全给主栏）
+    /// ⇒ 用户没往侧栏拖东西时，界面跟以前一模一样（不占地方）。
+    fn refresh_side(&self) {
+        let has = self.side_nb.n_pages() > 0;
+        self.side_box.set_visible(has);
+        if !has {
+            self.work.set_position(0);
+            return;
+        }
+        // 给侧栏一块宽度（约 40%）。
+        let w = self.work.width();
+        if w <= 0 {
+            return; // 还没量出宽度 ⇒ 等下一次再说
+        }
+        let target = if self.side_left.get() {
+            // 侧栏在**左边**（它是 start child）⇒ 分割条在 40% 处。
+            ((w as f64) * 0.4) as i32
+        } else {
+            // 侧栏在**右边**（它是 end child）⇒ 分割条在 60% 处。
+            ((w as f64) * 0.6) as i32
+        };
+        self.work.set_position(target);
+    }
+
+    /// 侧栏换到**左边**（阶段 137：拖到窗口左边缘 ⇒ 在左边开一条分栏）。
+    ///
+    /// ⚠️ **换边 = 把 Paned 的两个孩子对调** ⇒ 先都摘下来再挂回去
+    ///    （直接设 start 会把原来那个 unparent ⇒ 里面的页面全丢）。
+    fn set_side_left(self: &Rc<Self>, left: bool) {
+        if self.side_left.get() == left {
+            return;
+        }
+        self.side_left.set(left);
+        let main = self.work.start_child();
+        let side = self.work.end_child();
+        self.work.set_start_child(None::<&gtk::Widget>);
+        self.work.set_end_child(None::<&gtk::Widget>);
+        if left {
+            self.work.set_start_child(side.as_ref());
+            self.work.set_end_child(main.as_ref());
+        } else {
+            self.work.set_start_child(main.as_ref());
+            self.work.set_end_child(side.as_ref());
+        }
+        self.refresh_side();
+    }
+
+    /// **工作区**的拖放接收器（阶段 137）：拖到**左右边缘** ⇒ 开一条分栏。
+    ///
+    /// 干什么用（用户 2026-11-19）：「tab 可以**自由停靠在屏幕的多个
+    /// 位置**」⇒ 拖到窗口左边 ⇒ 侧栏换到左边；拖到右边 ⇒ 侧栏在右边；
+    /// 拖在中间 ⇒ 回到主栏（与终端并列）。
+    ///
+    /// ⚠️ **为什么挂在工作区上**：页签栏那一段由主栏自己的接收器管
+    ///    （`attach_undock_target`）⇒ GTK 先问**最里层**的控件 ⇒
+    ///    页签栏的落点归它，这里只管**内容区**与**边缘**。
+    fn attach_work_target(self: &Rc<Self>) {
+        let dst = gtk::DropTargetAsync::new(
+            Some(gdk::ContentFormats::new(&[EDITOR_MIME])),
+            gdk::DragAction::MOVE,
+        );
+        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(EDITOR_MIME));
+        // 边缘判定：左右各 22% ⇒ 那儿开分栏；中间 ⇒ 回主栏。
+        let zone_of = |x: f64, w: i32| -> u8 {
+            if w <= 0 {
+                return 1; // 还没量出宽度 ⇒ 当作中间
+            }
+            let f = x / (w as f64);
+            if f < 0.22 {
+                0 // 左边缘
+            } else if f > 0.78 {
+                2 // 右边缘
+            } else {
+                1 // 中间
+            }
+        };
+        let work = self.work.clone();
+        dst.connect_drag_motion(move |_d, _drop, x, _y| {
+            if zone_of(x, work.width()) == 1 {
+                // 中间 ⇒ **不接受**（让主栏的接收器管，或什么都不做）。
+                gdk::DragAction::empty()
+            } else {
+                gdk::DragAction::MOVE
+            }
+        });
+        let me = Rc::downgrade(self);
+        dst.connect_drop(move |_d, drop, x, _y| {
+            let Some(me) = me.upgrade() else {
+                return false;
+            };
+            let zone = zone_of(x, me.work.width());
+            let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| match zone {
+                0 => {
+                    me.set_side_left(true);
+                    me.move_editor_to_side(id);
+                }
+                2 => {
+                    me.set_side_left(false);
+                    me.move_editor_to_side(id);
+                }
+                _ => {
+                    me.move_editor_to_main(id);
+                }
+            });
+            read_editor_payload(&drop, cb);
+            true
+        });
+        self.work.add_controller(dst);
+    }
+
+    /// **侧栏**的拖放接收器（阶段 137）：拖到侧栏里 ⇒ 停到侧栏。
+    fn attach_side_target(self: &Rc<Self>) {
+        let dst = gtk::DropTargetAsync::new(
+            Some(gdk::ContentFormats::new(&[EDITOR_MIME])),
+            gdk::DragAction::MOVE,
+        );
+        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(EDITOR_MIME));
+        dst.connect_drag_enter(move |_d, _drop, _x, _y| gdk::DragAction::MOVE);
+        dst.connect_drag_motion(move |_d, _drop, _x, _y| gdk::DragAction::MOVE);
+        let me = Rc::downgrade(self);
+        dst.connect_drop(move |_d, drop, _x, _y| {
+            let Some(me) = me.upgrade() else {
+                return false;
+            };
+            let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| {
+                me.move_editor_to_side(id);
+            });
+            read_editor_payload(&drop, cb);
+            true
+        });
+        self.side_nb.add_controller(dst);
     }
 
     /// 编辑区是「把编辑器拖回来」的落点（阶段 108）。
@@ -1411,7 +1732,7 @@ impl SubTabs {
                 return false;
             };
             let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| {
-                me.dock_editor(id);
+                me.move_editor_to_bottom(id);
             });
             read_editor_payload(&drop, cb);
             true
@@ -1453,7 +1774,7 @@ impl SubTabs {
                 return false;
             };
             let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| {
-                me.undock_editor(id);
+                me.move_editor_to_main(id);
             });
             read_editor_payload(&drop, cb);
             true
@@ -1544,7 +1865,7 @@ impl SubTabs {
             .editor_pages
             .borrow()
             .iter()
-            .filter(|p| !p.docked)
+            .filter(|p| p.place != EditorPlace::Bottom)
             .count();
         normal + undocked
     }
