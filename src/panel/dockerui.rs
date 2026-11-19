@@ -138,6 +138,20 @@ pub struct DockerUi {
     ///   当前账号不在 docker 组、docker 守护进程没起 —— 这三个**长得
     ///   一模一样** ⇒ 用户只能猜 ⇒ 这里给**分类过的标题 + 解释 + 重试**。
     empty: crate::emptystate::DynamicEmptyState,
+    /// 镜像 / 卷 / 网络三页**各自的错态**（阶段 135）。
+    ///
+    /// ⚠️ **为什么以前只有容器页有**（用户 2026-11-19 报的）：这三页失败时
+    ///   **只写底部一行小灰字** ⇒ 界面上就是「一张空表 + 角落一行小字」
+    ///   ⇒ 用户以为是自己没镜像/没卷，**根本看不出是没权限**。
+    ///   ⇒ 三页也各挂一块**大号错态**（标题按错误分类 + 解释 + 重试）。
+    images_empty: crate::emptystate::DynamicEmptyState,
+    volumes_empty: crate::emptystate::DynamicEmptyState,
+    networks_empty: crate::emptystate::DynamicEmptyState,
+    /// 「没权限」的提示**弹过了没有**（**每个连接只弹一次**；阶段 135）。
+    ///
+    /// ⚠️ **为什么记在这儿**：这是**每个连接**的状态（`DockerUi` 挂在
+    ///   `PanelState` 上 ⇒ 一条连接一份）⇒ 换个连接就重新提示一次。
+    denied_notified: Cell<bool>,
     /// 搜索框（**键盘 `/` 要能聚焦到它** ⇒ 留个句柄）。
     search_entry: gtk::SearchEntry,
     /// 底部那行**右侧的提示**（「双击容器行可进入 shell」）。
@@ -911,10 +925,13 @@ fn human_size_bin(n: f64) -> String {
 ///   在界面上**长得一模一样** ⇒ 用户只能猜 ⇒ 按分类给不同标题。
 fn classify_docker_error(msg: &str) -> crate::emptystate::DockerErrorKind {
     use crate::emptystate::DockerErrorKind as K;
-    if msg.contains("权限") {
-        K::NoPermission
-    } else if msg.contains("守护进程") || msg.contains("服务没有运行") || msg.contains("连不上") {
+    // ⚠️ **顺序要紧**（阶段 135）：「守护进程没起」的那句话里**也带
+    //   「权限」两个字**（「服务没起，或当前账号没权限」）⇒ 先认它 ⇒
+    //   否则会把「守护进程没起」说成「没权限」⇒ **弹出来的对话框就是错的**。
+    if msg.contains("守护进程") || msg.contains("服务没有运行") || msg.contains("连不上") {
         K::NotRunning
+    } else if msg.contains("权限") {
+        K::NoPermission
     } else if msg.contains("没有找到 docker") || msg.contains("没装 Docker") {
         K::NoDocker
     } else if msg.contains("太老") {
@@ -922,6 +939,57 @@ fn classify_docker_error(msg: &str) -> crate::emptystate::DockerErrorKind {
     } else {
         K::Other
     }
+}
+
+/// 远端账号**没有 Docker 权限** ⇒ **弹一次对话框**说清楚（每个连接只弹一次）。
+///
+/// ⚠️ **为什么是模态对话框**（用户 2026-11-19 报的）：以前这件事只写在
+///   **底部一行小灰字**里 ⇒ 用户根本看不见（他截图里就是「一张空表 +
+///   角落一行小字」）⇒ 现在直接弹窗，说明原因**和怎么办**。
+///
+/// ⚠️ **为什么只弹一次**：弹窗是**用户点的**入口触发的 ⇒ 连着点几次
+///   就是骚扰 ⇒ 每个连接只弹一次。
+///   ⚠️ **但页面上的大号错态一直都在** ⇒ **每次点「容器」看到的都一样**
+///   （不会「这次弹、下次不弹」让用户诧异）。
+///
+/// ⚠️ **「重试」是用户明确要求的** ⇒ 允许再弹一次（告诉他「还是不行」）。
+fn warn_no_permission(st: Option<&Rc<PanelState>>, ui: &Rc<DockerUi>, msg: &str) {
+    if classify_docker_error(msg) != crate::emptystate::DockerErrorKind::NoPermission {
+        return;
+    }
+    if ui.denied_notified.get() {
+        return;
+    }
+    ui.denied_notified.set(true);
+    let parent = st.and_then(|s| s.topwin());
+    let st2 = st.cloned();
+    let ui2 = ui.clone();
+    crate::panel::dialogs::show_error_with_retry(
+        parent.as_ref(),
+        tr("没有访问 Docker 的权限"),
+        &docker_denied_help(),
+        tr("重试"),
+        move || {
+            ui2.denied_notified.set(false);
+            let Some(st) = st2.clone() else { return };
+            refresh_segment(&st, &ui2);
+        },
+    );
+}
+
+/// 「没有 Docker 权限」时给用户看的**怎么办**（对话框正文）。
+///
+/// ⚠️ **为什么单出一个公开函数**：这段话是**用户可见文案** ⇒ 得能
+///   **单测**（断言它真说了「怎么办」）⇒ 别埋在闭包里。
+///
+/// ⚠️ **必须是「一行」的 `tr()`**：i18n 的守门扫描器**不折叠行续接**
+///   （`\` + 换行 + 缩进）⇒ 折行排版会让查表 key 对不上 ⇒ 守门误报
+///   「没译文」（见 `src/i18n.rs` 的 `unescape` 注释）。
+///
+/// ⚠️ **不许用 Markdown 的 `**`**：GTK 不渲染 Markdown ⇒ 用户会看到
+///   **字面的星号**（这个坑踩过，见 `panel/fwdmgr.rs`）。
+pub fn docker_denied_help() -> String {
+    tr("当前账号没有访问 Docker 的权限。\n这台服务器的 docker 守护进程只让 docker 组的账号访问。要用容器功能，得在服务器上把当前账号加进 docker 组（改完要重新登录才生效）：\n\nsudo usermod -aG docker 你的用户名\n\n或者改用有权限的账号登录。\nPuTTYPlus 不会自动 sudo（那会要密码、也会留痕迹）——这里只把原因说清楚，怎么改由你决定。").to_string()
 }
 
 /// 一张卡片的**键值对**（UI 审查 D9）。
@@ -1531,6 +1599,53 @@ impl DockerUi {
         let st = crate::emptystate::docker_error(kind, msg);
         self.empty.set_texts(&st.title, &st.desc);
         self.empty.root.set_visible(true);
+    }
+
+    /// **某个分段取数失败** ⇒ **统一**的处理（阶段 135）。
+    ///
+    /// ⚠️ **为什么抽成一个函数**：真路径（消息循环）与**测试钩子**都得
+    ///   走它 ⇒ 走**同一条路** ⇒ 断言才抓得住回归。
+    ///   （之前钩子自己实现了一遍 ⇒ 把真路径删了测试照样绿 ⇒ 等于没测。）
+    ///
+    /// 三件事：状态行写一句 ＋ **大号错态** ＋ 必要时**弹一次对话框**。
+    fn seg_failed(self: &Rc<Self>, st: Option<&Rc<PanelState>>, seg: &'static str, msg: &str) {
+        self.set_segment_status(seg, msg);
+        self.show_seg_error(seg, msg);
+        warn_no_permission(st, self, msg);
+    }
+
+    /// **容器页取数失败** ⇒ 清表 + 大号错态 + 必要时弹框（同一条路）。
+    fn containers_failed(self: &Rc<Self>, st: Option<&Rc<PanelState>>, msg: &str) {
+        self.fail(msg);
+        warn_no_permission(st, self, msg);
+    }
+
+    /// 某个分段的**错态**（阶段 135）：显示大号空态（标题按错误分类）。
+    ///
+    /// ⚠️ **为什么镜像/卷/网络也要有**（用户 2026-11-19 报的）：这三页
+    ///   以前失败时**只写底部一行小灰字** ⇒ 用户看到的是「一张空表」，
+    ///   根本分不清「没权限」与「真的没有镜像」⇒ 跟容器页一样给大号说明。
+    fn show_seg_error(&self, seg: &'static str, msg: &str) {
+        let empty = self.seg_empty(seg);
+        let kind = classify_docker_error(msg);
+        let st = crate::emptystate::docker_error(kind, msg);
+        empty.set_texts(&st.title, &st.desc);
+        empty.root.set_visible(true);
+    }
+
+    /// 某个分段的错态**收起来**（取到数据了）。
+    fn hide_seg_error(&self, seg: &'static str) {
+        self.seg_empty(seg).root.set_visible(false);
+    }
+
+    /// 某个分段的**错态空态**（容器页是 `empty`，其余三页各有各的）。
+    fn seg_empty(&self, seg: &str) -> &crate::emptystate::DynamicEmptyState {
+        match seg {
+            SEG_IMAGES => &self.images_empty,
+            SEG_VOLUMES => &self.volumes_empty,
+            SEG_NETWORKS => &self.networks_empty,
+            _ => &self.empty,
+        }
     }
 
     /// 设置**某个分段**的状态文字（UI 审查 D7）。
@@ -2530,9 +2645,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     networks_bar.set_margin_top(4);
     networks_bar.append(&networks_search);
 
-    let images_root = flat_page_with_bar(&images_view, Some(&images_bar));
-    let volumes_root = flat_page_with_bar(&volumes_view, Some(&volumes_bar));
-    let networks_root = flat_page_with_bar(&networks_view, Some(&networks_bar));
+    let (images_root, images_empty) = flat_page_with_bar(&images_view, Some(&images_bar));
+    let (volumes_root, volumes_empty) = flat_page_with_bar(&volumes_view, Some(&volumes_bar));
+    let (networks_root, networks_empty) = flat_page_with_bar(&networks_view, Some(&networks_bar));
 
     // ---- 阶段 115：顶层的四个分段（容器 / 镜像 / 卷 / 网络）----
     //
@@ -3156,6 +3271,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         status,
         status_text: RefCell::new(HashMap::new()),
         empty,
+        images_empty,
+        volumes_empty,
+        networks_empty,
+        denied_notified: Cell::new(false),
         search_entry: search.clone(),
         hint,
         row_menu: RefCell::new(None),
@@ -3392,13 +3511,18 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 let Some(u) = u.upgrade() else { break };
                 match r {
                     Msg::List(Ok(info)) => u.apply(&info),
-                    Msg::List(Err(msg)) => u.fail(&msg),
+                    Msg::List(Err(msg)) => {
+                        // ⚠️ **没权限 ⇒ 弹一次对话框**（阶段 135）。
+                        u.containers_failed(stw.upgrade().as_ref(), &msg);
+                    }
                     // ⚠️ **阶段 115**：三个新分段的结果。
                     //    ⚠️ **失败时只改状态行**（不清容器表）⇒ 切回容器页
                     //    还能看到原来的列表。
                     Msg::Images(Ok(v)) => {
                         u.images_busy.set(false);
                         apply_images(&u, &v);
+                        // ⚠️ **取到数据了 ⇒ 错态收起来**（阶段 135）。
+                        u.hide_seg_error(SEG_IMAGES);
                         // ⚠️ **把操作结果贴回去**（刷新那条消息会冲掉它）。
                         let op = u.images_op_msg.borrow().clone();
                         if !op.is_empty() {
@@ -3408,23 +3532,26 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     }
                     Msg::Images(Err(msg)) => {
                         u.images_busy.set(false);
-                        u.set_segment_status(SEG_IMAGES, &msg);
+                        // ⚠️ **大号错态**（阶段 135）：不能只剩底部那行小字。
+                        u.seg_failed(stw.upgrade().as_ref(), SEG_IMAGES, &msg);
                     }
                     Msg::Volumes(Ok(v)) => {
                         u.volumes_busy.set(false);
                         apply_volumes(&u, &v);
+                        u.hide_seg_error(SEG_VOLUMES);
                     }
                     Msg::Volumes(Err(msg)) => {
                         u.volumes_busy.set(false);
-                        u.set_segment_status(SEG_VOLUMES, &msg);
+                        u.seg_failed(stw.upgrade().as_ref(), SEG_VOLUMES, &msg);
                     }
                     Msg::Networks(Ok(v)) => {
                         u.networks_busy.set(false);
                         apply_networks(&u, &v);
+                        u.hide_seg_error(SEG_NETWORKS);
                     }
                     Msg::Networks(Err(msg)) => {
                         u.networks_busy.set(false);
-                        u.set_segment_status(SEG_NETWORKS, &msg);
+                        u.seg_failed(stw.upgrade().as_ref(), SEG_NETWORKS, &msg);
                     }
                     // ⚠️ **阶段 116**：文件列表 / 传输 / 查看。
                     Msg::Files { name, path, seq, r } => {
@@ -4422,6 +4549,32 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             };
             refresh(&st, &u);
         });
+    }
+    // ---- **镜像 / 卷 / 网络三页的「重试」**（阶段 135）----
+    //
+    // ⚠️ **每一页重刷自己那一段**（别去刷容器页）⇒ 跟 `refresh_segment`
+    //   一个口径（自动刷新也是这个口径）。
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        for (empty, seg) in [
+            (&ui.images_empty, SEG_IMAGES),
+            (&ui.volumes_empty, SEG_VOLUMES),
+            (&ui.networks_empty, SEG_NETWORKS),
+        ] {
+            let stw = stw.clone();
+            let u = u.clone();
+            empty.primary.connect_clicked(move |_| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                match seg {
+                    SEG_IMAGES => refresh_images(&st, &u),
+                    SEG_VOLUMES => refresh_volumes(&st, &u),
+                    _ => refresh_networks(&st, &u),
+                }
+            });
+        }
     }
     ui
 }
@@ -5575,6 +5728,50 @@ pub fn empty_state_title_for_test(st: &Rc<PanelState>) -> String {
     ui.empty.title.text().to_string()
 }
 
+/// 测试钩子：让某个分段进入**错态**（**不连服务器**）。
+///
+/// ⚠️ **为什么要有**：镜像 / 卷 / 网络三页以前失败时**只写底部一行小灰字**
+///   ⇒ 用户根本看不出「是没权限」⇒ 这个钩子让冒烟能**不连服务器**就
+///   验「错态是不是真的显示出来了、标题对不对」（阶段 135）。
+///
+/// ⚠️ **必须走真路径那条**（[`DockerUi::seg_failed`]）⇒ 否则钩子自己
+///   实现一遍 ⇒ 把真路径删了测试照样绿 ⇒ 等于没测。
+///
+/// `seg` 取 `SEG_IMAGES` / `SEG_VOLUMES` / `SEG_NETWORKS` / `SEG_CONTAINERS`。
+pub fn set_seg_error_for_test(st: &Rc<PanelState>, seg: &str, msg: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    match seg {
+        SEG_IMAGES => ui.seg_failed(Some(st), SEG_IMAGES, msg),
+        SEG_VOLUMES => ui.seg_failed(Some(st), SEG_VOLUMES, msg),
+        SEG_NETWORKS => ui.seg_failed(Some(st), SEG_NETWORKS, msg),
+        _ => ui.containers_failed(Some(st), msg),
+    }
+}
+
+/// 测试钩子：某个分段的**错态**是不是显示着。
+pub fn seg_empty_visible_for_test(st: &Rc<PanelState>, seg: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.seg_empty(seg).root.is_visible()
+}
+
+/// 测试钩子：某个分段**错态的标题**。
+pub fn seg_empty_title_for_test(st: &Rc<PanelState>, seg: &str) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    ui.seg_empty(seg).title.text().to_string()
+}
+
+/// 测试钩子：「没权限」的提示**弹过了没有**（每个连接只弹一次）。
+pub fn denied_notified_for_test(st: &Rc<PanelState>) -> bool {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.denied_notified.get())
+        .unwrap_or(false)
+}
+
 /// 测试钩子：**灌一份详情**进界面（**不连服务器**）＋ 把它当成选中的容器。
 ///
 /// 冒烟用它验详情区（标题 / 四张卡片 / 按钮可用性）⇒ 不用真的连服务器。
@@ -6368,6 +6565,49 @@ pub fn cursor_name_for_test(st: &Rc<PanelState>) -> String {
 mod tests {
     use super::*;
 
+    /// 错误分类：三种「第一分钟错误」要**长得不一样**（阶段 135 加了顺序断言）。
+    ///
+    /// ⚠️ **顺序这条最要紧**：后端那句「连不上远程的 Docker（服务没起，
+    ///   或当前账号没权限）」**同时**含「连不上」与「权限」⇒ 先认哪个
+    ///   决定标题 ⇒ 也决定**弹不弹那个「没权限」的对话框** ⇒ 认错就是
+    ///   **弹一个错的对话框**给用户。
+    #[test]
+    fn docker错误分类() {
+        use crate::emptystate::DockerErrorKind as K;
+        // 用户截图里那句 ⇒ 必须是「没权限」。
+        assert_eq!(
+            classify_docker_error("当前账号没有访问 Docker 的权限（需要加入 docker 组，或改用有权限的账号登录）"),
+            K::NoPermission
+        );
+        // ⚠️ **守护进程没起**：那句话里也有「权限」两个字 ⇒ 不能认成没权限。
+        assert_eq!(
+            classify_docker_error("连不上远程的 Docker（服务没起，或当前账号没权限）"),
+            K::NotRunning
+        );
+        assert_eq!(
+            classify_docker_error("远程的 Docker 服务没有运行（守护进程没起来）"),
+            K::NotRunning
+        );
+        assert_eq!(
+            classify_docker_error("远程没有找到 docker（这台服务器上可能没装 Docker）"),
+            K::NoDocker
+        );
+        assert_eq!(classify_docker_error("随便什么错"), K::Other);
+    }
+
+    /// 「没权限」的说明：**得说清楚怎么办**（阶段 135）。
+    #[test]
+    fn 没权限的说明说了怎么办() {
+        let help = docker_denied_help();
+        assert!(help.contains("docker 组"), "没说要加入 docker 组：{help}");
+        assert!(help.contains("usermod"), "没给具体命令：{help}");
+        // ⚠️ **不许出现 Markdown 星号**（GTK 不渲染 ⇒ 用户看到字面星号）。
+        // ⚠️ **星号要「拼出来」**：写成字面量的话，lint 会**扫到自己**
+        //    （源码里那个 `"**"` 自己就命中了）——同一个坑，见 AGENTS.md。
+        let stars = ["*", "*"].concat();
+        assert!(!help.contains(&stars), "说明里有 Markdown 星号：{help}");
+    }
+
     /// docker 状态 ⇒ 药丸档位（美化·地基 2/5）。
     ///
     /// ⚠️ 这条钉的是「`state_markup` 与药丸渲染器共用一个映射」——
@@ -6653,7 +6893,7 @@ fn flat_table(
 
 /// 把一张表包进**能滚动的页面**（表格占满 + 上下留白）。
 fn flat_page(view: &gtk::TreeView) -> gtk::Box {
-    flat_page_with_bar(view, None)
+    flat_page_with_bar(view, None).0
 }
 
 /// 把一张表包进**能滚动的页面**（可选：表格上面加一条**操作条**）。
@@ -6661,19 +6901,38 @@ fn flat_page(view: &gtk::TreeView) -> gtk::Box {
 /// ⚠️ **为什么要有操作条**（阶段 120）：镜像段**没有详情区** ⇒ 推送 /
 ///    导出 / 打标签 / 删除这些**行操作**得有个落脚的地方 ⇒ 放在表格
 ///    正上方（选中哪一行就作用在哪一行）。
-fn flat_page_with_bar(view: &gtk::TreeView, bar: Option<&gtk::Box>) -> gtk::Box {
+/// 一页「平表 + 工具条」，**外加一块错态空态**（镜像 / 卷 / 网络三页）。
+///
+/// ⚠️ **为什么也要空态**（阶段 135，用户 2026-11-19 报的）：这三页以前
+///   失败时**只写底部一行小灰字** ⇒ 界面上是「一张空表 + 角落一行小字」
+///   ⇒ 用户根本看不出「是没权限」还是「真的没有镜像」⇒ 这里给同样的
+///   **大号错态**（标题按错误分类 + 解释 + 重试）。
+///
+/// 返回 `(整页, 错态空态)`——空态由调用方塞进 [`DockerUi`]（重试按钮
+/// 要接到「重刷这一段」的回调上）。
+fn flat_page_with_bar(
+    view: &gtk::TreeView,
+    bar: Option<&gtk::Box>,
+) -> (gtk::Box, crate::emptystate::DynamicEmptyState) {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     scroll.set_vexpand(true);
     scroll.set_hexpand(true);
     scroll.set_child(Some(view));
+    // ⚠️ **空态盖在表格上**（跟容器页一样）⇒ 出错时是「一块说明」，
+    //   不是「一张空表」。
+    let empty = crate::emptystate::build_dynamic(&crate::emptystate::docker_empty());
+    empty.root.set_visible(false);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&scroll));
+    overlay.add_overlay(&empty.root);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_margin_bottom(6);
     if let Some(b) = bar {
         root.append(b);
     }
-    root.append(&scroll);
-    root
+    root.append(&overlay);
+    (root, empty)
 }
 
 /// 刷新**当前分段**（阶段 115）。

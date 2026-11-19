@@ -148,7 +148,7 @@ pub fn docker_error(kind: DockerErrorKind, msg: &str) -> EmptyState {
 }
 
 /// 容器工作台的错误**分类**（决定空态的标题）。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DockerErrorKind {
     /// 远端没装 docker。
     NoDocker,

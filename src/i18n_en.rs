@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2077] = [
+pub static EN: [(&str, &str); 2078] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -966,6 +966,7 @@ pub static EN: [(&str, &str); 2077] = [
     ("当前终端后端不支持容器终端", "The current terminal backend does not support container terminals"),
     ("当前终端后端不支持进程内 SSH。", "The current terminal backend does not support in-process SSH."),
     ("当前终端引擎还不支持进程内 SSH，这个选择暂时退回 spawn。", "The current terminal engine does not support in-process SSH yet, so this choice falls back to spawn for now."),
+    ("当前账号没有访问 Docker 的权限。\n这台服务器的 docker 守护进程只让 docker 组的账号访问。要用容器功能，得在服务器上把当前账号加进 docker 组（改完要重新登录才生效）：\n\nsudo usermod -aG docker 你的用户名\n\n或者改用有权限的账号登录。\nPuTTYPlus 不会自动 sudo（那会要密码、也会留痕迹）——这里只把原因说清楚，怎么改由你决定。", "The current account has no permission to access Docker.\nThe docker daemon on this server only accepts accounts in the docker group. To use the container features, add the current account to the docker group on the server (you have to log in again for it to take effect):\n\nsudo usermod -aG docker your_username\n\nOr log in with an account that has permission.\nPuTTYPlus never runs sudo by itself (that would ask for a password and leave traces) — it only explains the cause; how to fix it is up to you."),
     ("当前账号没有访问 Docker 的权限（需要加入 docker 组，或改用有权限的账号登录）", "The current account has no permission to access Docker (join the docker group, or log in with an account that has permission)"),
     ("当前连接：{v0}", "Current connection: {v0}"),
     ("录制", "Record"),
