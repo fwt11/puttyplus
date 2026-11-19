@@ -3,7 +3,7 @@
 PuTTY 兼容的 SSH 终端 + SFTP 图形客户端，**双实现并存且功能必须保持一致**：
 
 - **仓库根就是 crate**（`Cargo.toml` / `src/` / `examples/` / `debian/` / `tools/` /
-  `docs/`）—— Rust 主线（GTK4 + vte4 + russh + russh-sftp），lib+bin 结构，571 个单测。
+  `docs/`）—— Rust 主线（GTK4 + vte4 + russh + russh-sftp），lib+bin 结构，885 个单测。
   ⚠️ **2026-11-01 起没有 `rust/` 子目录了**：本仓库**直接就是** GitHub 上的发布
   仓库（`git@github.com:fwt11/puttyplus.git`），改完 push 即发布。
 - `c/` — 对照基线。C（GTK3 + VTE + libssh），**已冻结**（Rust 的功能改动不再反向
@@ -539,6 +539,58 @@ docker 组 ⇒ 容器页只在**底部一行小灰字**里写「当前账号没�
 - ⚠️ **截图前要把窗口置顶**（`fileedit_panel_smoke`）：连接失败弹的模态框会
   **盖住页签栏** ⇒ 截图里页签头看着像「没文件名」（控件树其实是对的）⇒
   `shot()` 里加 `xdotool windowraise`（**CI 没装 xdotool ⇒ 找不到就跳过**）。
+
+⚠️ **compose 文件打开时，文件面板要跳到项目目录**（用户 2026-11-19：
+「点击『编辑compose文件』……sftp最好能跳转到docker-compose.yml文件所在
+目录」）：编辑器在**主栏页签**里（阶段 137 的默认）⇒ 它左边那个文件面板
+（**会话级的同一个 widget**）要**跳到 docker-compose.yml 所在目录**并
+**选中那个文件** ⇒ 用户看到的是「**项目文件树 ｜ compose 编辑器**」，
+一眼看到编辑的是哪个文件。
+- ⚠️ **目录取「compose 工作目录」优先**（容器标签
+  `com.docker.compose.project.working_dir` ⇒ 那**就是** compose 文件所在
+  目录）⇒ 取不到才退回从文件路径推。
+- ⚠️ **打开 compose 不要再抢终端页的底部编辑区**（那是**阶段 113 的老
+  做法**：那时编辑器住在编辑区里 ⇒ 编辑区得跟着当前页走；阶段 137 之后
+  编辑器是**自己的页签** ⇒ 再搬只会把用户终端页的编辑区抢走）。
+- ⚠️ **没连上 ⇒ `goto_remote_dir` 是安全的空操作**（返回 false、不改
+  cwd、不留「待选中」的脏状态）⇒ 不会因为点一下就弹「读取远程目录失败」。
+- ⚠️ **测试要走真路径**：逻辑放在 `dockerui::open_compose_path`（**公开**
+  的）⇒ 冒烟调的就是生产那条路（复制一份逻辑到测试里 ⇒ **那种测试是
+  假的**）。
+
+⚠️ **容器页里「点项目」和「点容器」要显示不同的东西**（用户 2026-11-19：
+「点击容器显示的内容应该是容器自己的，而不是其他 compose 项目的」）：
+**点项目行 ⇒ 只显示那个项目的 compose 内容；点容器行 ⇒ 只显示那个容器的
+详情**（不该在旁边挂着别的 compose 项目）。
+- ⚠️ **根因**：`proj_root`（项目详情块）是 `detail.root`（容器详情块）的
+  **兄弟**（在 sub-tab stack **之外**）⇒ 不显式藏起来，它在**每个**页签都
+  露着 ⇒ 选一个独立容器时看到的还是上一个项目的 compose。
+- ⇒ `cursor_changed` 的**容器行分支**里要 `proj_root.set_visible(false)`
+  ＋ 清空 `selected_project`（不然 `apply()` 刷新时又会把项目详情拉回来）。
+
+⚠️ **容器文件页要瘦**（用户 2026-11-19：「文件、目录之类的要有图标吧，
+不然看不出来是啥」「权限好像一般没有说还要翻译成汉语的」「大按钮、框框
+占太多空间」）：
+- **图标**：名称列前面加一条**窄图标列**（目录 `folder-symbolic` / 文件
+  `text-x-generic-symbolic` / 链接 `insert-link-symbolic`）⇒ 顺带**去掉
+  「类型」列**（图标已经表达了 ⇒ 省下的宽度给文件名）。
+  ⚠️ **`CellRendererText` 没有 `icon-name` 属性** ⇒ 图标必须用
+  `CellRendererPixbuf`（跟文件面板 `pane.rs` 同一套路）。
+  ⚠️ **图标名必须是 Adwaita 真有的**（实测 `emblem-symbolic-link-symbolic`
+  在 Adwaita 里**不存在** ⇒ 文件面板的软链图标一直是「缺图」⇒ 阶段 140
+  一并改成 `insert-link-symbolic`）。
+- **权限**：**不翻成中文**（用户明说）⇒ 原样给 `drwxr-xr-x` ⇒
+  权限列从 250px 收到 110px。
+  ⚠️ **这条推翻了 UI 审查 D11**（「权限翻成中文」）⇒ 单测
+  `权限串翻成中文` 要改成 `权限列用通用写法不翻成中文`。
+- **工具条**：两行（路径行 ＋ 按钮行）**合并成一行**，按钮全是**纯图标**
+  （文字挪进 tooltip）⇒ 跟文件面板的工具条同一口径。
+  ⚠️ 纯图标按钮**必须有 tooltip**（不然可访问名称也没有）⇒
+  `crate::a11y::watch_tooltip(&b)`。
+- ⚠️ **docker 的原话要换成「说人话」**：有些镜像**没有 `ls`** ⇒ 原话是
+  `OCI runtime exec failed … "ls": executable file not found in $PATH`
+  ⇒ 用户看不懂 ⇒ `files_err_zh` 把它换成「这个容器里没有 ls 命令 ⇒ 列不了
+  目录。换个带 ls 的镜像，或者用「终端」页进容器自己看。」
 
 ## 核心规则（改代码前必读）
 

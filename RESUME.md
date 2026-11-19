@@ -15,6 +15,35 @@
 > ⚠️ **下面的第二节及以后是 2026-10-27 那轮的历史记录**（阶段 19/20 的收尾），
 > 留着是为了别把当时的坑忘了；**当前状态看第一节**。
 
+## 〇之二之一二十七、最新进展（2026-11-19：发版 `v0.9.1`）
+
+- **发版**：`v0.9.0` 之后的全部（**美化·地基批 126–130** ＋ **二批 131–133**
+  ＋ **容器工作台审查 D1–D21** ＋ **阶段 134–140**）一起发成 **`v0.9.1`**。
+- **版本号三处一致**（发版链路的护栏）：
+  - `Cargo.toml` 的 `[package] version` → `0.9.1`
+  - `Cargo.lock` 里 `name = "puttyplus"` 那一段 → `0.9.1`
+  - `debian/changelog` 顶条 → `puttyplus (0.9.1-1) unstable; urgency=medium`
+    （⚠️ **deb 的包名与包版本来自这里**，不是 Cargo.toml）
+  - ⇒ `python3 tools/check_version.py v0.9.1` ⇒ 「版本号一致（…）：0.9.1」
+- **发布说明**：`docs/发布说明/v0.9.1.md`（正文用 `{{VERSION}}` 占位 ⇒
+  `release.yml` 生成 Release 正文时用 sed 注入实际版本号；**文件不存在 ⇒
+  workflow 直接失败** ⇒ 必须发版前写好）。
+- **命令**（顺序别乱）：
+  ```bash
+  python3 tools/check_version.py v0.9.1   # 三处一致
+  bash tools/cli_contract_check.sh        # PASS=73 FAIL=0
+  cargo build --release && cp target/release/puttyplus release/puttyplus
+  git add … && git commit -F /tmp/msg.txt && git push origin main
+  git tag -a v0.9.1 -m "…" && git push origin v0.9.1   # ← 触发 release.yml
+  ```
+- ⚠️ **push tag 触发的是 `release.yml`，不是 `ci.yml`**（`ci.yml` 只监听
+  `push: branches: [main]`）⇒ 查这次发版的 CI 要看 **Release** 那个
+  workflow（它编 amd64 + arm64 + Windows 三个，再建 Release 挂资产）。
+  ⇒ `ci.yml` / `ci-windows.yml` 是 push 到 main 时**另外**跑的。
+- ⚠️ **关机是「一次性指令」**（用户 2026-11-19 明确）：「如果本 tag 的 ci
+  正确完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行关机；失败就**不许
+  关**，把原因报给用户。
+
 ## 〇之二之一十七、最新进展（2026-11-17：发版 `v0.9.0`）
 
 - **发版**：`v0.8.0` 之后的全部（阶段 112/113/114/115/116/118/119/120/123/
@@ -44,6 +73,92 @@
 - ⚠️ **关机是「一次性指令」**（用户 2026-11-17 明确）：「如果本 tag 的 ci
   正确完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行关机；失败就**不许
   关**，把原因报给用户。
+
+## 〇之二之一二十六、最新进展（2026-11-19：容器文件页瘦身，阶段 140）
+
+- **用户提的**（三件事，一句话一件事）：
+  - 「文件、目录之类的要有图标吧，不然看不出来是啥」；
+  - 「权限好像一般没有说还要翻译成汉语的」；
+  - 「大按钮、框框占太多空间，要压缩」。
+- **实现**：
+  - **图标**：名称列前面加一条**窄图标列**（目录 `folder-symbolic` / 文件
+    `text-x-generic-symbolic` / 链接 `insert-link-symbolic`）⇒ **顺带去掉
+    「类型」列**（图标已经表达了 ⇒ 省下的宽度给文件名）。
+    ⚠️ `CellRendererText` **没有** `icon-name` 属性 ⇒ 图标必须用
+    `CellRendererPixbuf`（跟文件面板 `pane.rs` 同一套路）。
+  - **权限**：**不翻成中文** ⇒ 原样 `drwxr-xr-x` ⇒ 权限列 250px → 110px。
+    ⚠️ **这条推翻了 UI 审查 D11** ⇒ 单测 `权限串翻成中文` 改成
+    `权限列用通用写法不翻成中文`。
+  - **工具条**：两行（路径行 ＋ 按钮行）**合并成一行**，按钮全是**纯图标**
+    （文字挪进 tooltip）⇒ 跟文件面板的工具条同一口径。
+  - **顺带修了一个真 bug**：文件面板的软链图标 `emblem-symbolic-link-symbolic`
+    在 **Adwaita 里不存在**（只有 bloom / flow / Papirus 有）⇒ 界面上一直是
+    「缺图」⇒ 改成 Adwaita 真有的 `insert-link-symbolic`。
+  - **顺带把 docker 的原话换成「说人话」**（用户截图里那条
+    `OCI runtime exec failed … "ls": executable file not found in $PATH`）：
+    容器镜像精简、**没有 `ls`** ⇒ 现在直接说「这个容器里没有 ls 命令 ⇒ 列不了
+    目录。换个带 ls 的镜像，或者用「终端」页进容器自己看。」
+- **新测试钩子**（`dockerui`）：`files_icons_for_test` / `files_toolbar_for_test`
+  / `files_cols_for_test` ⇒ 冒烟能钉住「有图标 / 按钮没文字 / 没有类型列」。
+- ⚠️ **反向验证**：把图标、权限、按钮、类型列**四处一起退回** ⇒ 6 条断言
+  变红 ⇒ 断言真抓得住（不是自己骗自己）。
+- **验证**：lib **885 全绿**；examples 全编（145 个）；`docker_ui_smoke` 全过
+  （新增 7 条断言）；契约 PASS=73。
+
+## 〇之二之一二十五、最新进展（2026-11-19：compose 项目块与容器详情互斥，阶段 139）
+
+- **用户提的**（截图里发现的）：容器列表里选中一个**独立容器**（some-postgres）
+  ⇒ 底下却显示着**别的 compose 项目**（eng_tut）的 compose 内容 ⇒
+  「点击容器显示的内容应该是容器自己的，而不是其他 compose 项目的」。
+- **根因**：`proj_root`（项目详情块）是 `detail.root`（容器详情块）的
+  **兄弟**（在 sub-tab stack **之外**）⇒ 不显式藏起来，它在**每个**页签都
+  露着 ⇒ 选独立容器时看到的还是上一个项目的 compose。
+- **修法**：`cursor_changed` 的**容器行分支**里 `proj_root.set_visible(false)`
+  ＋ 清空 `selected_project`（不然 `apply()` 刷新时又会把项目详情拉回来）。
+  ⇒ 「点项目行只显示 compose；点容器行只显示容器详情」。
+- **断言**：`docker_ui_smoke` 新增 ⑪b 组 7 条（选独立容器 ⇒ 项目块隐藏 /
+  项目名清空 / 容器详情显示；再点回项目 ⇒ 项目块回来 / 容器详情隐藏）。
+  ⚠️ **反向验证**：去掉隐藏逻辑 ⇒ 2 条红。
+
+## 〇之二之一二十四、最新进展（2026-11-19：compose 文件打开时 SFTP 跳到项目目录，阶段 138）
+
+- **用户提的**：点「编辑 compose 文件」⇒ 编辑器作为单独的 tab 显示 ⇒
+  **左边的 SFTP 显示的是不相干的目录** ⇒ 「**sftp最好能跳转到
+  docker-compose.yml文件所在目录**」；或者「编辑器就在容器界面显示，但是
+  要显示得合适」，并让我「仔细思考下怎么更好」。
+- **怎么想清楚的（结论：选前者）**：
+  - **编辑器 = 主栏页签**（与终端并列，阶段 137 的默认）⇒ **一致**：打开
+    任何文件都是页签，compose 文件也是文件 ⇒ 不搞特例。页签能拖到三个
+    停靠位（阶段 137）⇒ 用户嫌占地方可以挪走；容器页也在页签栏里 ⇒ 点
+    一下就回去。
+  - **「显示在容器界面里」那条路满足不了用户的第一诉求**：容器页**没有
+    文件面板** ⇒ 看不到项目目录；而且底部编辑区是**会话级共享的一个
+    widget** ⇒ compose 编辑器进去就把终端页的编辑区顶走（老代码
+    `host_editor_area_for_page` 正是这么干的 ⇒ 阶段 138 把它删了）。
+  - ⇒ 最终：**主栏页签 + 左边 SFTP 跳到项目目录 + 选中那个文件** ⇒ 看到
+    的是「项目文件树 ｜ compose 编辑器」。
+- **实现**：
+  - `panel::goto_remote_dir(st, dir, select)`：把远端文件面板导航到某目录
+    （**和「手动点目录」是同一条路** `submit_list` ⇒ 断线重试 / 目录跟随
+    / mtime 轮询的语义完全一样），列完后**选中**指定的那一行。
+  - `pane::select_by_name`：按名字选中一行（找不到 ⇒ 返回 false、**不动**
+    已有选区）。
+  - `dockerui::open_compose_path(st, path, work_dir)`：**公开** ⇒ 冒烟走
+    的就是生产那条路（复制一份逻辑到测试里 ⇒ **那种测试是假的**）。
+  - 目录取 **compose 工作目录**优先（容器标签
+    `com.docker.compose.project.working_dir`）⇒ 取不到才退回从路径推。
+- ⚠️ **没连上 ⇒ `goto_remote_dir` 是安全的空操作**（返回 false、不改 cwd、
+  不留「待选中」的脏状态）⇒ 不会因为点一下就弹「读取远程目录失败」。
+- **新冒烟 `examples/compose_jump_smoke.rs`**（11 条断言，全绿）：
+  A 组（不连服务器）：选中 / 选不存在的 / 没连上时的空操作；
+  B 组（连本机测试 sshd 2233）：**真跳目录 + 选中 + 编辑器打开**。
+  ⚠️ **两轮反向验证都真能抓回归**（去掉跳转调用 ⇒ 3 条红；去掉选中 ⇒ 1
+  条红）。
+- **CI 守门**：加了 `compose_jump_smoke`（A 组必跑；B 组要本机 sshd ⇒ CI
+  上明说「跳过」）。
+- **验证**：lib **883 全绿**；examples 全编（145 个）；五个冒烟全过；
+  契约 PASS=73；release 产物已重建。
+- ⚠️ **未 push**（用户还没说推送）。
 
 ## 〇之二之一二十三、最新进展（2026-11-19：编辑器停靠多位置，阶段 137）
 
