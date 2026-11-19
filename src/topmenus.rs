@@ -464,7 +464,7 @@ pub fn orphan_actions(registered: &[&'static str]) -> Vec<&'static str> {
 pub enum NewScope {
     /// 全局：跟哪个会话无关（新建连接、导入 PuTTY 会话）
     Global,
-    /// 会话内：在**当前会话**里新建（新建终端、新建数据库连接）
+    /// 会话内：在**当前会话**里新建（新建终端、新建数据库连接、容器页）
     Session,
 }
 
@@ -511,6 +511,21 @@ pub const NEW_ITEMS: &[NewItem] = &[
         scope: NewScope::Session,
     },
     NewItem {
+        // ⚠️ **容器页**（阶段 141）：它是**主栏里的一个页签**（跟终端页、
+        //   数据库页同类）⇒ 放进「新建页」菜单里最自然。
+        //
+        // ⚠️ **图标用 Adwaita 的箱子**（`package-x-generic-symbolic`）：
+        //   `docker-symbolic` 来自 docker-icon-theme 包，大多数系统没装 ⇒
+        //   会显示成「缺图」（同 `dockerui::mount` 里的那条注释）。
+        //
+        // ⚠️ **作用域 = 会话内**：容器工作台复用**这条 SSH 连接**开 exec
+        //   通道 ⇒ 没有会话就没法建。
+        icon: "package-x-generic-symbolic",
+        label: "容器…",
+        action: "docker",
+        scope: NewScope::Session,
+    },
+    NewItem {
         icon: "document-open-symbolic",
         label: "导入 PuTTY 会话…",
         action: "import",
@@ -550,7 +565,7 @@ impl NewEntry {
     /// 这个入口提供哪些项（**从 [`NEW_ITEMS`] 里筛**，不另写一份）。
     pub fn items(self) -> Vec<&'static NewItem> {
         match self {
-            // 会话内的入口：只给"会话内能做"的（新建终端 / 新建数据库连接）
+            // 会话内的入口：只给"会话内能做"的（新建终端 / 新建数据库连接 / 容器）
             NewEntry::SubTab => NEW_ITEMS
                 .iter()
                 .filter(|i| i.scope == NewScope::Session)
@@ -580,7 +595,7 @@ impl NewEntry {
                 tr("新建…（连接 / 终端 / 数据库连接 / 导入 PuTTY 会话）")
             }
             // 会话内的：说清"只作用于当前会话"
-            NewEntry::SubTab => tr("新建页（终端 / 数据库连接）——只作用于当前会话"),
+            NewEntry::SubTab => tr("新建页（终端 / 数据库连接 / 容器）——只作用于当前会话"),
             NewEntry::Welcome => tr("新建连接…（侧栏的「＋」里还能建终端 / 数据库连接）"),
             NewEntry::FileMenu => tr("新建连接…"),
         }
@@ -704,6 +719,35 @@ mod tests {
             assert_eq!(it.scope, NewScope::Session, "子标签给了全局动作");
         }
         assert!(NewEntry::SubTab.items().len() < NEW_ITEMS.len());
+    }
+
+    /// **「容器…」也在「新建页」菜单里**（阶段 141）。
+    ///
+    /// ⚠️ **为什么**：容器页本来就是**主栏里的一个页签**（跟终端页、数据库页
+    ///   同类）⇒ 用户从「+」就能开，不必去「连接」菜单里找。
+    #[test]
+    fn 容器页在新建菜单里() {
+        let it = NEW_ITEMS
+            .iter()
+            .find(|i| i.action == "docker")
+            .expect("动作表里该有「容器…」");
+        assert_eq!(it.label, "容器…");
+        // ⚠️ **会话级**：容器工作台复用**这条 SSH 连接**开 exec 通道。
+        assert_eq!(it.scope, NewScope::Session, "容器页应当是会话内动作");
+        // ⚠️ **图标必须是 Adwaita 真有的**（`docker-symbolic` 来自
+        //   docker-icon-theme 包 ⇒ 大多数系统显示成「缺图」）。
+        assert_eq!(it.icon, "package-x-generic-symbolic");
+        // 子标签的「+」要能看到它。
+        assert!(
+            NewEntry::SubTab.items().iter().any(|i| i.action == "docker"),
+            "子标签菜单里没有「容器…」"
+        );
+        // ⚠️ **tooltip 也要提到容器**（否则用户点开一看，说的跟看到的不一样）。
+        assert!(
+            NewEntry::SubTab.tooltip().contains("容器"),
+            "tooltip 没提容器：{}",
+            NewEntry::SubTab.tooltip()
+        );
     }
 
     /// 两个 `+` 换不同图标 + tooltip 写清作用域（审计 P1-6）。

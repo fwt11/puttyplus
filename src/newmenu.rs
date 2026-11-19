@@ -52,7 +52,9 @@ impl NewCtx {
     /// 这个动作现在能不能点。
     pub fn allows(&self, action: &str) -> bool {
         match action {
-            "new_term" | "new_db" => self.has_session,
+            // ⚠️ **都要有会话**：「新建终端」「新建数据库连接」「容器页」
+            //   都作用在**当前这条连接**上 ⇒ 没会话时点了没反应 ⇒ 置灰。
+            "new_term" | "new_db" | "docker" => self.has_session,
             _ => true,
         }
     }
@@ -95,6 +97,15 @@ fn run_in_ctx(tabs: &std::rc::Rc<Tabs>, st: Option<&std::rc::Rc<PanelState>>, ac
         "new" => new_connection(tabs, st),
         "new_term" => new_terminal(tabs),
         "new_db" => new_db_connection(st),
+        // ⚠️ **容器页**（阶段 141）：挂在**当前这条连接**上（复用它的 SSH
+        //   连接开 exec 通道）⇒ 跟「新建数据库连接」一样要 `st`。
+        //   ⇒ 没有会话时菜单项是**置灰**的（见 `NewCtx::allows`）⇒ 这里
+        //   直接返回（不该走到）。
+        "docker" => {
+            if let Some(st) = st {
+                crate::panel::on_open_docker(st);
+            }
+        }
         "import" => import_putty(tabs),
         _ => {}
     }
@@ -174,4 +185,28 @@ pub fn entry_tooltip(entry: NewEntry) -> &'static str {
 /// 表里的一项（给想自己拼菜单的调用方用）。
 pub fn item_of(entry: NewEntry, action: &str) -> Option<&'static NewItem> {
     entry.items().into_iter().find(|i| i.action == action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **会话级的动作，没会话时必须置灰**（阶段 141 加了「容器…」）。
+    ///
+    /// ⚠️ **为什么要钉**：置灰 = 用户一看就知道「得先有连接」；不置灰 ⇒
+    ///   点了没反应 ⇒ 用户以为程序卡了（这是 P1-2 那一批的老教训）。
+    #[test]
+    fn 会话级动作没会话时要置灰() {
+        let empty = NewCtx::empty();
+        let with = NewCtx::with_session();
+        for act in ["new_term", "new_db", "docker"] {
+            assert!(!empty.allows(act), "没有会话时「{act}」不该可用");
+            assert!(with.allows(act), "有会话时「{act}」该可用");
+        }
+        // ⚠️ **全局动作**（新建连接 / 导入 PuTTY 会话）**永远可用**。
+        for act in ["new", "import"] {
+            assert!(empty.allows(act), "「{act}」不该被置灰");
+            assert!(with.allows(act), "「{act}」不该被置灰");
+        }
+    }
 }

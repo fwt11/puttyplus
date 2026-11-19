@@ -7,12 +7,13 @@
 //!
 //! **断言**：
 //! 1. 顶栏入口的菜单项 = 动作表**全集**，且**逐项**对得上（文字 + 图标）；
-//! 2. 子标签入口只给"会话内能做"的（新建终端 / 新建数据库连接）；
-//! 3. 没有会话时「新建终端 / 新建数据库连接」**置灰**（点了没反应最让人
+//! 2. 子标签入口只给"会话内能做"的（新建终端 / 新建数据库连接 / 容器）；
+//! 3. 没有会话时「新建终端 / 新建数据库连接 / 容器」**置灰**（点了没反应最让人
 //!    以为程序卡了），有会话时全部可用；
 //! 4. 两个 `+` 长得**不一样**（子标签是 `tab-new-symbolic`），顶栏与侧栏
 //!    是同一件事 ⇒ 图标一样；
-//! 5. 侧栏的 `+` 点开后，弹层里就是动作表那几项（**走真按钮**）。
+//! 5. 侧栏的 `+` 点开后，弹层里就是动作表那几项（**走真按钮**）；
+//! 6. **点子标签菜单里的「容器…」⇒ 主栏真的多出一个容器页签**（阶段 141）。
 //!
 //! ```text
 //! xvfb-run -a cargo run --example newmenu_smoke
@@ -93,8 +94,8 @@ fn main() {
         let items = NewEntry::SubTab.items();
         let actions: Vec<&str> = items.iter().map(|i| i.action).collect();
         check!(
-            "子标签只给「新建终端 / 新建数据库连接」",
-            actions == vec!["new_term", "new_db"],
+            "子标签只给「新建终端 / 新建数据库连接 / 容器」",
+            actions == vec!["new_term", "new_db", "docker"],
             format!("{actions:?}")
         );
         // ⚠️ **不许**出现全局动作（建连接 / 导入 PuTTY 会话）——那不属于这个会话
@@ -102,6 +103,21 @@ fn main() {
             "子标签不给全局动作",
             !actions.contains(&"new") && !actions.contains(&"import"),
             format!("{actions:?}")
+        );
+        // ⚠️ **容器页也是会话内的**（阶段 141）：它复用**这条 SSH 连接**开
+        //   exec 通道 ⇒ 没有会话就没法建 ⇒ 作用域必须是 Session。
+        let docker = items.iter().find(|i| i.action == "docker");
+        check!(
+            "「容器…」是会话级动作（作用域 = Session）",
+            docker.map(|i| i.scope) == Some(puttyplus::topmenus::NewScope::Session),
+            format!("{:?}", docker.map(|i| i.scope))
+        );
+        // ⚠️ **图标要用 Adwaita 真有的**：`docker-symbolic` 来自 docker-icon-theme
+        //   包，大多数系统没装 ⇒ 会显示成「缺图」。
+        check!(
+            "「容器…」的图标是 Adwaita 自带的箱子",
+            docker.map(|i| i.icon) == Some("package-x-generic-symbolic"),
+            format!("{:?}", docker.map(|i| i.icon))
         );
     }
 
@@ -278,11 +294,11 @@ fn main() {
             .filter_map(|b| puttyplus::menu::item_label(b))
             .collect();
         check!(
-            "子标签菜单 = 会话内的两项",
-            labels == vec!["新建终端", "新建数据库连接…"],
+            "子标签菜单 = 会话内的三项",
+            labels == vec!["新建终端", "新建数据库连接…", "容器…"],
             format!("{labels:?}")
         );
-        // 有会话 ⇒ 两项都该能点
+        // 有会话 ⇒ 三项都该能点
         for b in btns.iter() {
             check!(
                 &format!(
@@ -293,6 +309,31 @@ fn main() {
                 "它被置灰了"
             );
         }
+        // ⚠️ **点「容器…」⇒ 容器页真的挂上**（阶段 141）。
+        //
+        // ⚠️ 断言的是**外部可见的结果**（主栏里多了一个「容器」页签），
+        //   不是「我们调用了 on_open_docker」。
+        let pages_before = sub.page_count();
+        let docker_btn = btns
+            .iter()
+            .find(|b| puttyplus::menu::item_label(b).as_deref() == Some("容器…"))
+            .expect("菜单里该有「容器…」");
+        docker_btn.emit_clicked();
+        pump(600);
+        let pages_after = sub.page_count();
+        check!(
+            "点「容器…」后主栏多了一个页签",
+            pages_after == pages_before + 1,
+            format!("{pages_before} → {pages_after}")
+        );
+        let kinds: Vec<puttyplus::panel::subtabs::PageKind> = (0..pages_after as u32)
+            .map(|i| sub.kind_by_page_num(i))
+            .collect();
+        check!(
+            "多出来的那个页签是容器页",
+            kinds.contains(&puttyplus::panel::subtabs::PageKind::Docker),
+            format!("{kinds:?}")
+        );
         // 子标签的「＋」图标跟顶栏**不一样**（长得一样分不清）
         check!(
             "子标签 + 的图标与顶栏不同",

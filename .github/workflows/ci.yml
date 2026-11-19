@@ -277,9 +277,12 @@ jobs:
           #     项目目录**＋ 选中那个文件（用户 2026-11-19 提的）。⚠️ 它的
           #     B 组要本机测试 sshd（2233）⇒ CI 上**明说「跳过」**（A 组
           #     仍全跑：选中逻辑 + 没连上时的空操作）。
+          #   - `newmenu_smoke`：「新建」入口的统一性（审计 P1-2 / P1-6）＋
+          #     **阶段 141 的「容器…」**：菜单里有、没会话时置灰、点了真的
+          #     挂出容器页签（**走真按钮**，不是复制逻辑）。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
-                     docker_perm_smoke editor_dock_smoke compose_jump_smoke; do
+                     docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then

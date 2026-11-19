@@ -1239,7 +1239,7 @@ pub static EN: [(&str, &str); 2090] = [
     ("新建连接…", "New connection…"),
     ("新建连接…（侧栏的「＋」里还能建终端 / 数据库连接）", "New connection… (the \"+\" in the sidebar can also create a terminal / database connection)"),
     ("新建连接（在当前窗口开新标签）", "New connection (opens a new tab in this window)"),
-    ("新建页（终端 / 数据库连接）——只作用于当前会话", "New tab (terminal / database connection) — applies to the current session only"),
+    ("新建页（终端 / 数据库连接 / 容器）——只作用于当前会话", "New tab (terminal / database connection / containers) — applies to the current session only"),
     ("新开的终端用这个字号；已经开着的终端不动", "New terminals use this font size; the ones that are already open stay as they are"),
     ("方向", "Direction"),
     ("方式", "Method"),
