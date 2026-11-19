@@ -3742,6 +3742,24 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             }
             match u.selected_container_name() {
                 Some(n) => {
+                    // ⚠️ **阶段 139：选中的是「容器行」⇒ compose 项目那块要
+                    //   **收起来**。
+                    //
+                    //   干什么用（用户 2026-11-19 报的截图）：选中的是**独立
+                    //   容器** some-postgres（它没有 compose）⇒ 底下却显示着
+                    //   **别的项目** eng_tut 的 compose 信息（连「配置文件
+                    //   /opt/eng_tut/docker-compose.yml」都写着）⇒ 用户根本
+                    //   分不清那是哪个容器的。
+                    //
+                    //   ⚠️ **项目块在详情框里是「容器详情」的兄弟**（不是子页
+                    //      签里的东西）⇒ 不藏起来的话，它在**每个页签**
+                    //      （概览 / 日志 / 监控 / 文件 / 终端）都露着。
+                    //
+                    //   ⇒ 规则：**点项目只显示 compose 内容；点容器只显示
+                    //     容器内容**（两种详情互斥，跟项目详情藏容器详情一个
+                    //     道理）。
+                    *u.selected_project.borrow_mut() = String::new();
+                    u.detail.proj_root.set_visible(false);
                     // ⚠️ **阶段 117**：有选中 ⇒ 「进入容器」可点。
                     u.btn_enter.set_sensitive(true);
                     // ⚠️ **先记下选中的容器**（阶段 112 修的 bug）。

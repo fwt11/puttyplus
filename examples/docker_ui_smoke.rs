@@ -998,6 +998,55 @@ fn main() {
                 );
             }
 
+            // ---- ⑪b 选中**独立容器** ⇒ compose 项目那块要**收起来** ----
+            //
+            // ⚠️ **阶段 139**（用户 2026-11-19 报的截图）：选的是独立容器
+            //   some-postgres（**它没有 compose**）⇒ 底下却显示着**别的
+            //   项目** eng_tut 的 compose 信息 ⇒ 用户分不清那是哪个容器的。
+            //
+            //   ⇒ 规则：**点项目只显示 compose 内容；点容器只显示容器内容**。
+            check!(
+                "⑪b 能选中独立容器行",
+                dockerui::select_container_for_test(&panel.st, "solo-a"),
+                "选不中独立容器行"
+            );
+            pump(300);
+            check!(
+                "⑪b 选中容器 ⇒ **compose 项目那块藏起来**（不显示不相干的 compose）",
+                !dockerui::project_detail_visible_for_test(&panel.st),
+                "容器详情和上一个项目的 compose 信息**同时显示**着"
+            );
+            check!(
+                "⑪b 选中容器 ⇒ 记住的 compose 项目名也清掉了（刷新不会又冒出来）",
+                dockerui::selected_project_for_test(&panel.st).is_empty(),
+                format!(
+                    "还记着 {:?}",
+                    dockerui::selected_project_for_test(&panel.st)
+                )
+            );
+            check!(
+                "⑪b 选中容器 ⇒ 容器详情显示着",
+                dockerui::detail_visible_for_test(&panel.st),
+                "容器详情没显示"
+            );
+            // ---- 反过来：再点回项目行 ⇒ compose 内容回来、容器详情藏起来 ----
+            check!(
+                "⑪b 点回项目行 ⇒ compose 内容又出来了",
+                dockerui::select_project_for_test(&panel.st, "proj"),
+                "选不中项目行"
+            );
+            pump(300);
+            check!(
+                "⑪b 点回项目行 ⇒ 项目详情显示着",
+                dockerui::project_detail_visible_for_test(&panel.st),
+                "项目详情没显示"
+            );
+            check!(
+                "⑪b 点回项目行 ⇒ 容器详情**藏起来**了（两种详情互斥）",
+                !dockerui::detail_visible_for_test(&panel.st),
+                "容器详情还开着"
+            );
+
             // ---- 写操作 ⇒ 二次确认 ----
             //
             // ⚠️ **安全**：这里**不点确定** ⇒ 命令不会跑 ⇒ 碰不到远端任何项目。
