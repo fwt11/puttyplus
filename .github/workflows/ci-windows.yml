@@ -16,7 +16,8 @@ on:
     branches: [feature/cross-platform, main]
   workflow_dispatch:
   # ⚠️ **可被复用**（阶段 0.5.0 收尾）：`release.yml` 用它来出 Windows 版
-  #    的发布资产（`puttyplus-windows-x86_64.zip`）——否则 Release 里只有
+  #    的发布资产（2026-11-20 起是 Inno Setup 安装包
+  #    `puttyplus-windows-x86_64-setup.exe`）——否则 Release 里只有
   #    Linux 的 deb/tar.gz，Windows 版**下不到**（只有 CI 的 artifact，
   #    过期就没了）。
   workflow_call:
@@ -391,31 +392,48 @@ jobs:
             exit 1
           fi
 
-      - name: 打包可执行文件（含 GTK 的 DLL）
+      - name: 打包安装包（Inno Setup，替代原 zip）
+        # ⚠️ **装出来的层级必须跟 gvsbuild 一致（bin\ + share\ 两级）**：
+        #    GTK 按「自己 DLL 所在目录叫 bin ⇒ 上一级是前缀」找图标主题
+        #    ⇒ share\icons 必须在 bin\ 旁边。以前 zip 全平铺又没带 share\，
+        #    用户 2026-11-20 报「GitHub 下载版工具栏图标全是缺图占位符」
+        #    ——安装包两个都修：层级照抄 gvsbuild，share\icons 一起打进去
+        #    （Adwaita 6.7M + hicolor 115K，lzma2 压完很小）。
         # ⚠️ **exe 单独拿走是跑不起来的**：GTK / glib / pango 的 DLL 都在
-        #    gvsbuild 的 bin 里 ⇒ 一起打包（share/ 图标主题先不带，
-        #    缺了只是图标显示不出来，不影响功能）。
+        #    gvsbuild 的 bin 里 ⇒ 一起打包。
+        # ⚠️ runner 预装了 Inno Setup 6.7.1（标准路径）⇒ 万一哪天不在了
+        #    才 choco 兜底（runner 侧装，不碰用户机器）。
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force "release-windows" | Out-Null
-          Copy-Item "$env:CARGO_TARGET_DIR\release\puttyplus.exe" "release-windows\"
-          Copy-Item "C:\gtk\bin\*.dll" "release-windows\"
-          Compress-Archive -Path "release-windows\*" `
-            -DestinationPath "puttyplus-windows-x86_64.zip" -Force
-          Get-ChildItem "release-windows" | Measure-Object |
-            ForEach-Object { Write-Host "打包文件数：$($_.Count)" }
+          New-Item -ItemType Directory -Force "release-windows\bin", "release-windows\share" | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR\release\puttyplus.exe" "release-windows\bin\"
+          Copy-Item "C:\gtk\bin\*.dll" "release-windows\bin\"
+          Copy-Item "C:\gtk\share\icons" "release-windows\share\icons" -Recurse -Force
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+          # ⚠️ ISCC 解析相对路径是相对脚本目录（tools\）⇒ StageDir 传绝对路径
+          $stageAbs = Join-Path $PWD "release-windows"
+          & $iscc "/DAppVersion=$ver" "/DStageDir=$stageAbs" tools\windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item "release-windows\puttyplus-windows-x86_64-setup.exe" |
+            Format-List Name, Length, LastWriteTime
 
-      - name: 上传可执行文件
+      - name: 上传安装包
         # ⚠️ **artifact 名用 `pkg-windows`**：`release.yml` 的 publish job
         #    用 `pattern: pkg-*` 收拢产物（Linux 那边叫 `pkg-amd64` /
-        #    `pkg-arm64`）⇒ 这里也得叫 `pkg-*` ⇒ Windows 的 zip 才会进
+        #    `pkg-arm64`）⇒ 这里也得叫 `pkg-*` ⇒ Windows 的安装包才会进
         #    Release 的资产列表。
-        #    （zip **文件**名仍是 `puttyplus-windows-x86_64.zip`。）
+        #    （安装包**文件**名是 `puttyplus-windows-x86_64-setup.exe`；
+        #    2026-11-20 起 zip 绿色版退场，Release 里 Windows 只有它。）
         uses: actions/upload-artifact@v4
         with:
           name: pkg-windows
-          path: puttyplus-windows-x86_64.zip
+          path: release-windows\puttyplus-windows-x86_64-setup.exe
           if-no-files-found: error
 
       - name: 收集诊断

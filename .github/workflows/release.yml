@@ -301,10 +301,11 @@ jobs:
           for t in dist/puttyplus-linux-x86_64.tar.gz dist/puttyplus-linux-aarch64.tar.gz; do
             [ -f "$t" ] || { echo "::error::缺少 $t"; exit 1; }
           done
-          # ⚠️ **Windows 的 zip 也要在**：它跟两个 deb 一样是「用户直接
+          # ⚠️ **Windows 的安装包也要在**：它跟两个 deb 一样是「用户直接
           #    下载就能用」的东西 ⇒ 少它 ⇒ Release 里就没有 Windows 版
           #    （这正是 0.5.0 发布时用户问「为什么没有 windows 版的」）。
-          for t in dist/puttyplus-windows-x86_64.zip; do
+          #    2026-11-20 起 zip 绿色版退场，换成 Inno Setup 安装包。
+          for t in dist/puttyplus-windows-x86_64-setup.exe; do
             [ -f "$t" ] || { echo "::error::缺少 $t"; exit 1; }
           done
 
@@ -329,7 +330,7 @@ jobs:
         run: |
           set -eux
           cd dist
-          sha256sum puttyplus_*.deb puttyplus-linux-*.tar.gz puttyplus-windows-*.zip > SHA256SUMS
+          sha256sum puttyplus_*.deb puttyplus-linux-*.tar.gz puttyplus-windows-*-setup.exe > SHA256SUMS
           cat SHA256SUMS
 
       - name: 建 Release 并上传资产
@@ -426,7 +427,7 @@ jobs:
             upload_url="https://uploads.github.com/repos/$REPO/releases/$rid/assets"
           }
           upload_url=$(echo "$upload_url" | sed 's/{[^}]*}//')
-          for f in puttyplus_*.deb puttyplus-linux-*.tar.gz puttyplus-windows-*.zip SHA256SUMS; do
+          for f in puttyplus_*.deb puttyplus-linux-*.tar.gz puttyplus-windows-*-setup.exe SHA256SUMS; do
             [ -f "$f" ] || continue
             old_id=$(api GET "https://api.github.com/repos/$REPO/releases/$rid/assets" \
                      >/dev/null 2>&1; jq -r --arg n "$f" '.[] | select(.name==$n) | .id' /tmp/api.out 2>/dev/null | head -1)

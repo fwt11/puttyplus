@@ -174,10 +174,38 @@ Windows 的盘符形态（`IdentityFile` 曾因此把 `C:\...` 当相对路径�
 
 Windows CI：`.github/workflows/ci-windows.yml`（**独立文件，不动 `ci.yml`**）
 ⇒ 装 MSVC 工具链 + gvsbuild 的 GTK4 + Zig 0.17 ⇒ 编译 + 单测 + 73 条契约
-+ 打包 exe。⚠️ **Windows runner 没有桌面会话 ⇒ GUI 冒烟跑不了**（Linux job
++ 打包**安装包**。⚠️ **Windows runner 没有桌面会话 ⇒ GUI 冒烟跑不了**（Linux job
 用 xvfb、本地 Windows 机器人工验，清单见 `docs/跨平台-构建说明.md` §10）。
 构建细节（GTK4 怎么装、Zig、pangocairo 的坑、ConPTY 的坑、CI 的三个坑）
 见 **`docs/跨平台-构建说明.md`**。
+
+### ⭐ Windows 打包：安装包替代 zip + exe 图标（2026-11-20，阶段 120/121）
+
+- **产物形态（用户拍板）**：Release 里 Windows 只留 **Inno Setup 安装包**
+  `puttyplus-windows-x86_64-setup.exe`，**zip 绿色版退场**；每用户安装
+  （`PrivilegesRequired=lowest` ⇒ `%LOCALAPPDATA%\Programs\PuTTYPlus`，
+  不弹 UAC）。本机**不装** Inno Setup ⇒ 安装包只在 CI 出
+  （runner 预装 ISCC 6.7.1）；`tools/win_installer.ps1` 是本机同款脚本，
+  找不到 ISCC 就明说、不自动装。
+- ⚠️ **装出来的层级必须照抄 gvsbuild（`bin\` + `share\` 两级）**：GTK 按
+  「自己 DLL 所在目录叫 `bin` ⇒ 上一级是前缀」找图标主题 ⇒ `share\icons`
+  （Adwaita + hicolor）必须打进包里且在 `bin\` 旁边。以前 zip 全平铺又没带
+  `share\` ⇒ 用户 2026-11-20 报「GitHub 下载版工具栏图标全是缺图占位符」
+  （本机 `t\release` 那份有图标纯属开发环境假象：DLL 从 `C:\gtk\bin` 加载
+  ⇒ 前缀指回 `C:\gtk`）。**别再把 GTK DLL 平铺到 exe 旁边了**。
+- **exe 图标**：真源是 `src/appicon.rs` 内嵌 PNG（单一来源）⇒
+  `tools/gen_windows_icon.py`（纯 stdlib）生成 `assets/puttyplus.ico`
+  （生成物入库，CI 不用装图像库）⇒ `build.rs` 用 `winresource` 嵌进 exe
+  + 版本资源。⚠️ build.rs 判目标平台必须看 `CARGO_CFG_TARGET_OS`
+  （`#[cfg]` 判的是宿主）；Linux 上整个 return（CI 的
+  `cargo check --examples` 不受影响）。⚠️ MSVC 下 winresource 要
+  Windows SDK 的 `rc.exe`（CI 的 msvc-dev-cmd 自带）。
+- ⚠️ **无签名 ⇒ SmartScreen 必拦**（MotW + 零信誉，「Windows 已保护你的
+  电脑」）：文档口径是「更多信息 → 仍要运行」/「属性 → 解除锁定」；
+  治本要买代码签名证书（未拍板）。MotW 的实测结论见 2026-11-20 会话记录：
+  `Unblock-File` 清标记即可运行；这不是文件损坏，别往二进制兼容上猜。
+- ⚠️ `.iss` / PowerShell 脚本要 **UTF-8 带 BOM**（英文 runner 上没 BOM 的
+  中文按系统代码页解读必乱码）。
 
 ⚠️ **Windows 上的 SSH 走哪条路（阶段 3，用户 2026-11-10 拍板）**：
 **PATH 里有 `ssh.exe`（或 `plink.exe`）⇒ 就 spawn 它**（终端里跑的是用户
