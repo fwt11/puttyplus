@@ -31,6 +31,11 @@ opt-level = "s"
 default = ["ghostty"]
 ghostty = ["dep:ghostty-vt"]
 
+# 只在 Windows 目标下被 build.rs 用来嵌图标/版本资源（阶段 120）；
+# Linux 上 build.rs 直接 return，这个依赖不参与任何编译产物。
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
 glib = "0.22"
