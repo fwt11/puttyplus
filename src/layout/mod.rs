@@ -3,7 +3,9 @@
 //! - `header`：**统一的面板头协议**（阶段 143）—— 阶段 144 的格子头复用它。
 //! - `cell` / `tree`：**格子树**（阶段 144）—— 格子 = 一个 `SubTabs`，
 //!   树是**纯数据**（拆分/关闭/查找都是纯函数 ⇒ 单测直接测）。
+//! - `dnd`：**跨格子拖拽的负载协议**（阶段 145）—— mime ＋ `<kind>:<id>`。
 
 pub mod cell;
+pub mod dnd;
 pub mod header;
 pub mod tree;

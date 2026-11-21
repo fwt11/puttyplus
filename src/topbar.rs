@@ -376,6 +376,22 @@ pub fn app_menubar(
             crate::tabs::close_pane_page(&page);
         }
     });
+    // ⚠️ **阶段 145：格子动作**（作用在**格子**上，不是终端面板上）。
+    act!("split_cell_lr", || {
+        if let Some(page) = crate::tabs::current_page() {
+            crate::tabs::split_cell(&page, false);
+        }
+    });
+    act!("split_cell_ud", || {
+        if let Some(page) = crate::tabs::current_page() {
+            crate::tabs::split_cell(&page, true);
+        }
+    });
+    act!("close_cell", || {
+        if let Some(page) = crate::tabs::current_page() {
+            crate::tabs::close_cell(&page);
+        }
+    });
     act!("broadcast", || crate::tabs::toggle_broadcast());
     act!("log", || {
         if let Some(page) = crate::tabs::current_page() {

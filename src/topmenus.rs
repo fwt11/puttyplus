@@ -317,6 +317,33 @@ pub const TOP_MENUS: &[(&str, &[MenuEntry])] = &[
                 shortcut: None,
                 enabled: None,
             },
+            MenuEntry::Sep,
+            // ⚠️ **阶段 145：格子动作**——作用在**格子**上（面板怎么组合），
+            //    与「终端」菜单里的「左右分屏」（作用在**终端面板**上）是两回事。
+            MenuEntry::Item {
+                icon: "view-dual-symbolic",
+                label: "左右拆分格子",
+                action: "split_cell_lr",
+                danger: false,
+                shortcut: None,
+                enabled: Some(crate::tabs::has_cell),
+            },
+            MenuEntry::Item {
+                icon: "view-continuous-symbolic",
+                label: "上下拆分格子",
+                action: "split_cell_ud",
+                danger: false,
+                shortcut: None,
+                enabled: Some(crate::tabs::has_cell),
+            },
+            MenuEntry::Item {
+                icon: "window-close-symbolic",
+                label: "关闭本格",
+                action: "close_cell",
+                danger: true,
+                shortcut: None,
+                enabled: Some(crate::tabs::has_cell),
+            },
         ],
     ),
     (

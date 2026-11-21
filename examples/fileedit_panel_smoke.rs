@@ -503,9 +503,16 @@ fn main() {
     // ---- 4) 拖回子标签栏 ⇒ 变回子页签；再拖回来 ⇒ 变回编辑区 ----
     let eid = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
     // ⚠️ **走跟拖放落点一样的路**：先解析负载，再调用同一个转换函数。
+    //
+    // ⚠️ 阶段 145：负载统一成 `<kind>:<id>`（旧的 `pp-editor:<id>` 仍认）。
     let payload = format!("pp-editor:{eid}");
-    let pid = puttyplus::panel::subtabs::parse_editor_payload(&payload)
+    let (kind, pid) = puttyplus::layout::dnd::parse_page_payload(&payload)
         .expect("拖放负载应当能解析出编辑器 id");
+    assert_eq!(
+        kind,
+        puttyplus::layout::dnd::PageKindTag::Editor,
+        "负载里的种类应当是编辑器"
+    );
     assert_eq!(pid, eid, "负载里的 id 跟编辑器对不上");
     assert!(
         sub.move_editor_to_main(pid),

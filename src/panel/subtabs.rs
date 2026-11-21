@@ -40,26 +40,47 @@ use gtk::gdk;
 use gtk::prelude::*;
 use crate::i18n::tr;
 
-/// 编辑器拖动用的自定义 mime（阶段 108）。
+/// 拖放负载用的 mime（阶段 145 统一）。
 ///
 /// ⚠️ **不能用 `text/plain`**：文件面板的拖放也用字符串（远端路径行）
 /// ⇒ 混用的话，拖编辑器标签到文件列表上会被当成"拖路径"⇒ 误触发下载。
-pub const EDITOR_MIME: &str = "application/x-puttyplus-editor";
+pub const PAGE_MIME: &str = crate::layout::dnd::PAGE_MIME;
 
-/// 拖动负载：`pp-editor:<id>`。
-fn editor_payload(id: u64) -> String {
-    format!("pp-editor:{id}")
-}
-
-/// 解析拖动负载 → 编辑器 id（阶段 108）。
-pub fn parse_editor_payload(s: &str) -> Option<u64> {
-    s.trim()
-        .strip_prefix("pp-editor:")
-        .and_then(|v| v.trim().parse::<u64>().ok())
-}
+/// 拖拽负载的种类（阶段 145：统一成一种协议）。
+pub use crate::layout::dnd::PageKindTag;
 
 /// 子标签标题的最大显示列数（超了省略号收尾，完整标题进 tooltip）。
 const MAX_TITLE_CHARS: i32 = 24;
+
+/// **边缘落点的宽度**（像素）—— 离边这么近才算"拖到边上要拆分"。
+const EDGE_MARGIN: f64 = 24.0;
+
+/// 落点命中了哪儿（阶段 145）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    /// 页签栏（⇒ 插入）。
+    TabBar,
+    /// 某条边（⇒ 拆分）。
+    Edge(crate::layout::dnd::SplitZone),
+    /// 不接。
+    None,
+}
+
+impl Hit {
+    /// 落点 ⇒ **跨格子的动作**（`None` = 不接这个拖拽）。
+    fn into_move(self, x: f64, me: &SubTabs) -> Option<crate::layout::dnd::PageMove> {
+        match self {
+            Hit::TabBar => {
+                // 插入位置 = 落点落在第几个页签之前。
+                let xs = me.page_head_xs();
+                let idx = crate::layout::dnd::insert_index_at(&xs, x);
+                Some(crate::layout::dnd::PageMove::Into(Some(idx)))
+            }
+            Hit::Edge(z) => Some(crate::layout::dnd::PageMove::Split(z)),
+            Hit::None => None,
+        }
+    }
+}
 
 /// 标题的**显示列宽**（中日韩字符按两列算，其余按一列）。
 ///
@@ -105,12 +126,67 @@ pub enum PageKind {
     Docker,
 }
 
+impl PageKind {
+    /// 拖拽负载里的**种类标签**（阶段 145）。
+    pub fn tag(&self) -> PageKindTag {
+        match self {
+            PageKind::Terminal => PageKindTag::Terminal,
+            PageKind::Db => PageKindTag::Db,
+            PageKind::Docker => PageKindTag::Docker,
+            PageKind::Other => PageKindTag::Other,
+        }
+    }
+
+    /// 从拖拽负载的种类标签**认回来**（阶段 145）。
+    ///
+    /// ⚠️ **编辑器不是子页签**（它是编辑区里的东西）⇒ 落到 `Other`。
+    pub fn from_tag(tag: PageKindTag) -> PageKind {
+        match tag {
+            PageKindTag::Terminal => PageKind::Terminal,
+            PageKindTag::Db => PageKind::Db,
+            PageKindTag::Docker => PageKind::Docker,
+            PageKindTag::Editor | PageKindTag::Other => PageKind::Other,
+        }
+    }
+}
+
+/// 一个子页的**内容**（跨格子搬运时整体搬走）。
+///
+/// ⚠️ **为什么要单独一个结构**：搬运 = 先 `take_page`（**静默**摘下来）
+///    再 `insert_page`（放进目标格子）⇒ 中间这一刻页签"哪儿都不在"。
+///
+/// ⚠️ **`on_close` 不可克隆**（`Box<dyn Fn>`）⇒ 只能**搬**，不能复制。
+pub struct PageData {
+    /// 页签 id（**搬过去不变**）。
+    ///
+    /// ⚠️ **为什么必须不变**：上层按页签 id 记着东西（`Tab.term_sub_id`、
+    ///    `Tab.layouts` 的键…）⇒ 换了 id ⇒ 「重新连接终端」「分屏树」全对不上。
+    pub id: u64,
+    /// 页签标题。
+    pub title: String,
+    /// 页签图标名（`None` = 不要图标）。
+    pub icon: Option<String>,
+    /// 这一页是什么。
+    pub kind: PageKind,
+    /// 页内容（notebook 的 child）。
+    pub widget: gtk::Widget,
+    /// 关闭前的确认（搬过来还带着）。
+    pub on_close: Option<Box<dyn Fn() -> bool>>,
+}
+
 /// 一个子页。
 struct SubPage {
     id: u64,
     title: String,
     /// 页签头上的标题标签（改名时要用）
     label: gtk::Label,
+    /// 页签图标名（**搬走时要重建图标** ⇒ 得记住名字）。
+    icon: Option<String>,
+    /// 页签头**整个 widget**（图标 ＋ 标题 ＋ ×）。
+    ///
+    /// ⚠️ **为什么存它**（阶段 145）：算「插到第几个页签之前」要靠**页签头
+    ///   的横坐标** ⇒ GTK 没有公开页签栏 API ⇒ 自己记着头 widget 的位置。
+    head: gtk::Box,
     /// 页内容（notebook 的 child）
     widget: gtk::Widget,
     /// 这一页是**什么**（阶段 66：DB 页要独占宽度）
@@ -300,7 +376,6 @@ pub struct SubTabs {
     /// 空编辑区时的提示（**停靠区**：把编辑器拖回来）。
     editor_hint: gtk::Label,
     pages: RefCell<Vec<SubPage>>,
-    next_id: Cell<u64>,
     /// 「+」按钮的菜单由外部提供（建终端 / 建数据库连接是上层的业务）。
     ///
     /// 回调拿到菜单容器与弹层本身：菜单项点完要自己把弹层收起。
@@ -317,6 +392,25 @@ pub struct SubTabs {
     /// **可以有多个**：终端页签要收掉自己的 SSH 会话，数据库页签要断开
     /// 连接——各管各的，谁的东西谁自己注册（`add_close_hook`）。
     close_hooks: RefCell<Vec<Rc<dyn Fn(u64)>>>,
+    /// **跨格子搬页签**的回调（阶段 145）。
+    ///
+    /// `(页 id, 动作)` ⇒ 动作为 [`crate::layout::dnd::PageMove`]。
+    ///
+    /// ⚠️ **为什么挂在 `SubTabs` 上**：落点只知道"自己"这个格子 ⇒ 得把
+    ///    "往哪搬"这件事交给上层（`CellTree`）⇒ 它才知道别的格子在哪。
+    move_hook: RefCell<Option<Rc<dyn Fn(u64, crate::layout::dnd::PageMove) -> bool>>>,
+    /// 「**这个格子空了**」的回调（阶段 145）。
+    ///
+    /// ⚠️ **为什么与 `close_hooks` 分开**：`close_hooks` 说的是"这个**页签**
+    ///    没了"（终端页签要收会话）；这里说的是"这个**格子**空了"
+    ///    （格子要从树里摘掉）⇒ 两件事、两套钩子。
+    empty_hook: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+    /// **蓝色插入符**（拖到页签栏上时显示在那儿）。
+    caret: gtk::Box,
+    /// **边缘高亮条**（拖到格子边上时亮起来的那条）。
+    ///
+    /// 四条边各一个 ⇒ 拖到哪条边就亮哪条。
+    edges: [gtk::Box; 4],
 }
 
 impl SubTabs {
@@ -361,6 +455,23 @@ impl SubTabs {
         btn_box.set_margin_end(4);
         btn_box.set_margin_top(2);
 
+        // ---- **蓝色插入符**（阶段 145）----
+        //
+        // 拖到页签栏上时，在**插入位置**显示一条蓝色竖线。
+        //
+        // ⚠️ **挂在 `main_group` 上**（不是 notebook）：`main_group` 的主
+        //   子控件就是 notebook ⇒ 两者的坐标**重合** ⇒ 用 notebook 的 x
+        //   摆插入符，位置正好落在页签栏里。
+        let caret = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        caret.add_css_class("pp-drop-caret");
+        caret.set_halign(gtk::Align::Start);
+        caret.set_valign(gtk::Align::Start);
+        caret.set_visible(false);
+        // ⚠️ **不能抢指针**（`can_target = false`）⇒ 否则它会挡住落点
+        //   ⇒ 拖放管线接不上（页签栏那个接收器收不到）。
+        caret.set_can_target(false);
+        main_group.add_overlay(&caret);
+
         // ---- **侧栏**（阶段 137）：左右分栏里那一栏 ----
         //
         // ⚠️ **为什么是另一个 notebook**：每个「栏」要有**自己的页签栏**
@@ -392,6 +503,31 @@ impl SubTabs {
         // 连接页的内容 = 工作区。
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&work));
+
+        // ---- **边缘高亮条**（阶段 145）----
+        //
+        // 拖到格子**边上**时，那条边亮起来（蓝条）⇒ 用户看得见"要劈开了"。
+        //
+        // ⚠️ **四条各一个 widget**（不是一条带方向的）⇒ 亮哪条一目了然。
+        // ⚠️ **不能抢指针**（`can_target = false`）⇒ 落点判定照旧走
+        //   notebook 那个接收器。
+        let mut edge_left = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let mut edge_right = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let mut edge_top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let mut edge_bottom = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        for (e, cls, ha, va) in [
+            (&mut edge_left, "pp-drop-edge-left", gtk::Align::Start, gtk::Align::Fill),
+            (&mut edge_right, "pp-drop-edge-right", gtk::Align::End, gtk::Align::Fill),
+            (&mut edge_top, "pp-drop-edge-top", gtk::Align::Fill, gtk::Align::Start),
+            (&mut edge_bottom, "pp-drop-edge-bottom", gtk::Align::Fill, gtk::Align::End),
+        ] {
+            e.add_css_class(cls);
+            e.set_halign(ha);
+            e.set_valign(va);
+            e.set_visible(false);
+            e.set_can_target(false);
+            overlay.add_overlay(e);
+        }
 
         // ---- 编辑区（阶段 107/108）：终端与文件编辑器同窗同时显示 ----
         //
@@ -449,11 +585,14 @@ impl SubTabs {
             page_editor_hosts: RefCell::new(std::collections::HashMap::new()),
             editor_hint: hint,
             pages: RefCell::new(Vec::new()),
-            next_id: Cell::new(1),
             new_hook: RefCell::new(None),
             add_btn: add.clone(),
             new_pop: RefCell::new(None),
             close_hooks: RefCell::new(Vec::new()),
+            move_hook: RefCell::new(None),
+            empty_hook: RefCell::new(None),
+            caret: caret.clone(),
+            edges: [edge_left, edge_right, edge_top, edge_bottom],
         });
 
         // 点击「+」→ 弹菜单（内容由上层给）
@@ -476,8 +615,9 @@ impl SubTabs {
             });
         }
 
-        // 阶段 108：页签栏是「把编辑器拖回去」的落点。
-        sub.attach_undock_target();
+        // 阶段 145：格子级的拖放接收器（页签栏插入 ＋ 四边拆分）。
+        // 阶段 108 的老规矩（编辑器拖回页签栏）也在这儿。
+        sub.attach_cell_target();
         // 阶段 108：编辑区是「把编辑器拖回来」的落点（**挂在编辑区自己身上**）。
         sub.attach_dock_target();
         // 阶段 137：侧栏是「停到分栏里」的落点；工作区左右边缘是「开分栏」。
@@ -495,6 +635,20 @@ impl SubTabs {
     /// 注册「+」按钮的菜单内容（调用方往里塞菜单项）。
     pub fn set_new_hook<F: Fn(&gtk::Box, &gtk::Popover) + 'static>(&self, f: F) {
         *self.new_hook.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// 把**关闭钩子**复制给另一个容器（阶段 145：新格子也得收会话）。
+    ///
+    /// ⚠️ **为什么只复制关闭钩子、不复制「+」菜单钩子**：
+    ///    - 关闭钩子是**按页签 id** 找东西的（`on_term_page_closed`）⇒
+    ///      页签搬到哪个格子都认得 ⇒ 复制过去就对了；
+    ///    - 「+」菜单钩子是**闭包**，它建的东西要落在**哪个格子**里
+    ///      ⇒ 得由上层按格子重新装（见 `CellTree::set_new_cell_hook`）。
+    pub fn copy_close_hooks_to(&self, other: &Rc<SubTabs>) {
+        let hooks = self.close_hooks.borrow().clone();
+        for h in hooks {
+            other.close_hooks.borrow_mut().push(h);
+        }
     }
 
     /// 尾部的「+」按钮（**测试钩子**）。
@@ -559,12 +713,46 @@ impl SubTabs {
         content: gtk::Widget,
         on_close: Option<Box<dyn Fn() -> bool>>,
     ) -> u64 {
-        let id = self.next_id.get();
-        self.next_id.set(id + 1);
+        let id = crate::layout::dnd::alloc_page_id();
         content.set_hexpand(true);
         content.set_vexpand(true);
 
-        // 页签头：[图标][标题][×]，跟主标签栏一个样式
+        let (head, label, close) = self.build_page_head(icon, title);
+        self.nb.append_page(&content, Some(&head));
+        self.pages.borrow_mut().push(SubPage {
+            id,
+            title: title.to_string(),
+            label,
+            icon: icon.map(|s| s.to_string()),
+            head: head.clone(),
+            widget: content.clone(),
+            kind,
+            on_close,
+        });
+
+        // × → 关页（先问 on_close）
+        {
+            let me = Rc::clone(self);
+            close.connect_clicked(move |_| {
+                me.close_page(id);
+            });
+        }
+        // ⚠️ **页签头能拖**（阶段 145）⇒ 可以拖到别的格子去。
+        self.attach_page_drag(&head, id, kind);
+        id
+    }
+
+    /// 建一个子页的**页签头**：[图标][标题][×]。
+    ///
+    /// ⚠️ **为什么抽出来**（阶段 145）：跨格子搬运时要把页签**整个搬过去**
+    ///    ⇒ 页签头得能重建（不能只搬内容 widget）。
+    ///
+    /// 返回 `(头, 标题标签, 关闭键)`——标题标签要留着改名，关闭键要接回调。
+    fn build_page_head(
+        &self,
+        icon: Option<&str>,
+        title: &str,
+    ) -> (gtk::Box, gtk::Label, gtk::Button) {
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         head.set_margin_start(4);
         head.set_margin_end(2);
@@ -596,25 +784,119 @@ impl SubTabs {
         close.set_focusable(false);
         close.set_tooltip_text(Some(tr("关闭这个子标签")));
         head.append(&close);
+        (head, label, close)
+    }
 
-        self.nb.append_page(&content, Some(&head));
-        self.pages.borrow_mut().push(SubPage {
+    /// **静默**摘下一个子页（**不触发 close 钩子**）⇒ 返回它的内容。
+    ///
+    /// ⚠️ **为什么不走 `remove_page`**：那个会通知上层"这个页签没了"
+    ///    （终端页签的钩子要**收掉 SSH 会话**！）⇒ 跨格子搬运时不能触发
+    ///    ⇒ 搬过去还是同一个会话。
+    ///
+    /// ⚠️ **只摘不销毁**：`widget` 交给调用方（下一个 `insert_page` 接上）。
+    pub fn take_page(&self, id: u64) -> Option<PageData> {
+        let idx = self.pages.borrow().iter().position(|p| p.id == id);
+        let Some(idx) = idx else { return None };
+        let page = {
+            let mut pages = self.pages.borrow_mut();
+            pages.remove(idx)
+        };
+        // 从 notebook 里摘下来（**不销毁**：GTK4 只是脱离父容器）。
+        if let Some(num) = self.nb.page_num(&page.widget) {
+            self.nb.remove_page(Some(num));
+        }
+        Some(PageData {
+            id: page.id,
+            title: page.title,
+            icon: page.icon,
+            kind: page.kind,
+            widget: page.widget,
+            on_close: page.on_close,
+        })
+    }
+
+    /// 把一个子页**放进**这个容器（跨格子搬运的另一半）。
+    ///
+    /// `index` = 插到第几个页签之前（`None` = 追加到最后）。
+    ///
+    /// ⚠️ **页内容 widget 不能同时挂进两个 notebook** ⇒ 调用方必须**先**
+    ///    `take_page`（摘下来）再 `insert_page`（挂上去）。
+    pub fn insert_page(self: &Rc<Self>, data: PageData, index: Option<usize>) -> u64 {
+        // ⚠️ **沿用原来的 id**（不重新分配）⇒ 上层按 id 记的东西不会失配。
+        let id = data.id;
+        data.widget.set_hexpand(true);
+        data.widget.set_vexpand(true);
+        let (head, label, close) = self.build_page_head(data.icon.as_deref(), &data.title);
+        match index {
+            Some(i) => {
+                self.nb.insert_page(&data.widget, Some(&head), Some(i as u32));
+            }
+            None => {
+                self.nb.append_page(&data.widget, Some(&head));
+            }
+        }
+        // ⚠️ **`pages` 的顺序要跟页签顺序一致**（同格子里挪位置时，
+        //    `page_ids()` 才对得上）。
+        let new_page = SubPage {
             id,
-            title: title.to_string(),
+            title: data.title,
             label,
-            widget: content.clone(),
-            kind,
-            on_close,
-        });
-
-        // × → 关页（先问 on_close）
+            icon: data.icon,
+            head: head.clone(),
+            widget: data.widget,
+            kind: data.kind,
+            on_close: data.on_close,
+        };
+        let mut pages = self.pages.borrow_mut();
+        match index {
+            Some(i) if i < pages.len() => pages.insert(i, new_page),
+            _ => pages.push(new_page),
+        }
+        drop(pages);
         {
             let me = Rc::clone(self);
             close.connect_clicked(move |_| {
                 me.close_page(id);
             });
         }
+        self.attach_page_drag(&head, id, data.kind);
         id
+    }
+
+    /// 给子页的页签头挂**拖拽源**（阶段 145）⇒ 页签能拖到别的格子。
+    ///
+    /// ⚠️ **闭包不抓 `self`**（载荷是纯数据）⇒ 没有引用环。
+    fn attach_page_drag(&self, widget: &impl IsA<gtk::Widget>, id: u64, kind: PageKind) {
+        let src = gtk::DragSource::new();
+        src.set_actions(gdk::DragAction::MOVE);
+        let payload = crate::layout::dnd::encode_payload(kind.tag(), id);
+        src.set_content(Some(&gdk::ContentProvider::for_bytes(
+            PAGE_MIME,
+            &glib::Bytes::from(payload.as_bytes()),
+        )));
+        widget.add_controller(src);
+    }
+
+    /// 所有子页的 id（**按页签顺序**）。
+    pub fn page_ids(&self) -> Vec<u64> {
+        self.pages.borrow().iter().map(|p| p.id).collect()
+    }
+
+    /// 页签头的横坐标（**相对 notebook**）⇒ 算「插到第几个之前」。
+    ///
+    /// ⚠️ **量不出来就当 0**（还没布局完 ⇒ 插到最前面，寧可插前也别插错位）。
+    fn page_head_xs(&self) -> Vec<f64> {
+        let pages = self.pages.borrow();
+        let mut out = Vec::with_capacity(pages.len());
+        for p in pages.iter() {
+            let x = p
+                .head
+                .translate_coordinates(&self.nb, 0.0, 0.0)
+                .map(|(x, _)| x)
+                .unwrap_or(0.0);
+            out.push(x);
+        }
+        out
     }
 
     /// 关掉某个子页。返回是否真关了。
@@ -658,6 +940,14 @@ impl SubTabs {
         let hooks = self.close_hooks.borrow().clone();
         for f in hooks {
             f(id);
+        }
+        // ⚠️ **格子空了 ⇒ 通知上层把它摘掉**（阶段 145：关掉一个格子里的最后
+        //   一个页签 ⇒ 该格子自动关闭，父节点收拢）。
+        if self.pages.borrow().is_empty() {
+            let hook = self.empty_hook.borrow().clone();
+            if let Some(f) = hook {
+                f();
+            }
         }
         true
     }
@@ -1023,13 +1313,14 @@ impl SubTabs {
 
     /// 给编辑器的小标签 / 页签头挂**拖拽源**（阶段 108）。
     ///
-    /// 负载 = `pp-editor:<id>`，落点自己读（见 `read_editor_payload`）。
+    /// 负载 = `editor:<id>`（阶段 145 统一协议），落点自己读
+    /// （见 `read_page_payload`）。
     fn attach_editor_drag(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>, id: u64) {
         let src = gtk::DragSource::new();
         src.set_actions(gdk::DragAction::MOVE);
-        let payload = editor_payload(id);
+        let payload = crate::layout::dnd::encode_payload(PageKindTag::Editor, id);
         src.set_content(Some(&gdk::ContentProvider::for_bytes(
-            EDITOR_MIME,
+            PAGE_MIME,
             &glib::Bytes::from(payload.as_bytes()),
         )));
         // ⚠️ **拖动一开始就把「编辑区所在的那一页」切到前台**（阶段 108）。
@@ -1626,10 +1917,10 @@ impl SubTabs {
     ///    页签栏的落点归它，这里只管**内容区**与**边缘**。
     fn attach_work_target(self: &Rc<Self>) {
         let dst = gtk::DropTargetAsync::new(
-            Some(gdk::ContentFormats::new(&[EDITOR_MIME])),
+            Some(gdk::ContentFormats::new(&[PAGE_MIME])),
             gdk::DragAction::MOVE,
         );
-        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(EDITOR_MIME));
+        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(PAGE_MIME));
         // 边缘判定：左右各 22% ⇒ 那儿开分栏；中间 ⇒ 回主栏。
         let zone_of = |x: f64, w: i32| -> u8 {
             if w <= 0 {
@@ -1659,7 +1950,7 @@ impl SubTabs {
                 return false;
             };
             let zone = zone_of(x, me.work.width());
-            let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| match zone {
+            let cb: Rc<dyn Fn(PageKindTag, u64)> = editor_only(move |id| match zone {
                 0 => {
                     me.set_side_left(true);
                     me.move_editor_to_side(id);
@@ -1672,7 +1963,7 @@ impl SubTabs {
                     me.move_editor_to_main(id);
                 }
             });
-            read_editor_payload(&drop, cb);
+            read_page_payload(&drop, cb);
             true
         });
         self.work.add_controller(dst);
@@ -1681,10 +1972,10 @@ impl SubTabs {
     /// **侧栏**的拖放接收器（阶段 137）：拖到侧栏里 ⇒ 停到侧栏。
     fn attach_side_target(self: &Rc<Self>) {
         let dst = gtk::DropTargetAsync::new(
-            Some(gdk::ContentFormats::new(&[EDITOR_MIME])),
+            Some(gdk::ContentFormats::new(&[PAGE_MIME])),
             gdk::DragAction::MOVE,
         );
-        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(EDITOR_MIME));
+        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(PAGE_MIME));
         dst.connect_drag_enter(move |_d, _drop, _x, _y| gdk::DragAction::MOVE);
         dst.connect_drag_motion(move |_d, _drop, _x, _y| gdk::DragAction::MOVE);
         let me = Rc::downgrade(self);
@@ -1692,10 +1983,10 @@ impl SubTabs {
             let Some(me) = me.upgrade() else {
                 return false;
             };
-            let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| {
+            let cb: Rc<dyn Fn(PageKindTag, u64)> = editor_only(move |id| {
                 me.move_editor_to_side(id);
             });
-            read_editor_payload(&drop, cb);
+            read_page_payload(&drop, cb);
             true
         });
         self.side_nb.add_controller(dst);
@@ -1720,10 +2011,10 @@ impl SubTabs {
     /// ⇒ 真正的解法是 `attach_editor_drag` 里的 **drag-begin 切回终端页**。
     fn attach_dock_target(self: &Rc<Self>) {
         let dst = gtk::DropTargetAsync::new(
-            Some(gdk::ContentFormats::new(&[EDITOR_MIME])),
+            Some(gdk::ContentFormats::new(&[PAGE_MIME])),
             gdk::DragAction::MOVE,
         );
-        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(EDITOR_MIME));
+        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(PAGE_MIME));
         dst.connect_drag_enter(move |_d, _drop, _x, _y| gdk::DragAction::MOVE);
         dst.connect_drag_motion(move |_d, _drop, _x, _y| gdk::DragAction::MOVE);
         let me = Rc::downgrade(self);
@@ -1731,55 +2022,163 @@ impl SubTabs {
             let Some(me) = me.upgrade() else {
                 return false;
             };
-            let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| {
+            let cb: Rc<dyn Fn(PageKindTag, u64)> = editor_only(move |id| {
                 me.move_editor_to_bottom(id);
             });
-            read_editor_payload(&drop, cb);
+            read_page_payload(&drop, cb);
             true
         });
         self.editor_area.add_controller(dst);
     }
 
-    /// 页签栏（把编辑器拖回去）的拖放接收器（阶段 108）。
+    /// **格子级**的拖放接收器（阶段 145）。
     ///
-    /// ⚠️ GTK4 **没有公开** notebook 页签栏的 API ⇒ 只能把接收器挂在
-    /// notebook 上，再用「落点 y < 页签栏高度」判断是不是拖到了页签栏。
-    fn attach_undock_target(self: &Rc<Self>) {
+    /// 一个接收器管**两件事**（都挂在 notebook 上）：
+    ///
+    /// 1. **页签栏**（`y < 页签栏高度`）⇒ **插入**：页签进这个格子；
+    /// 2. **四条边**（离边 24px 内）⇒ **拆分**：这个格子被劈成两半。
+    ///
+    /// ⚠️ **为什么挂在 notebook 上**（而不是格子外壳）：GTK4 **没有公开**
+    ///    notebook 页签栏的 API ⇒ 只能挂在 notebook 上，再用「落点 y <
+    ///    页签栏高度」判断是不是拖到了页签栏（阶段 108 就是这么干的）。
+    ///    边同理：坐标是相对 notebook 的，而 notebook 铺满整个格子。
+    ///
+    /// ⚠️ **编辑器的老规矩也在这儿**（阶段 108）：拖**编辑器**到页签栏 ⇒
+    ///    变回一个子页签（`move_editor_to_main`）⇒ 这条不能丢。
+    fn attach_cell_target(self: &Rc<Self>) {
+        /// 落点算是哪种（页签栏 / 哪条边 / 不接）。
+        fn hit(nb: &gtk::Notebook, x: f64, y: f64) -> Hit {
+            if y < tab_strip_height(nb) as f64 {
+                return Hit::TabBar;
+            }
+            match crate::layout::dnd::zone_at(x, y, nb.width(), nb.height(), EDGE_MARGIN) {
+                Some(z) => Hit::Edge(z),
+                None => Hit::None,
+            }
+        }
         let dst = gtk::DropTargetAsync::new(
-            Some(gdk::ContentFormats::new(&[EDITOR_MIME])),
+            Some(gdk::ContentFormats::new(&[PAGE_MIME])),
             gdk::DragAction::MOVE,
         );
-        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(EDITOR_MIME));
+        dst.connect_accept(move |_d, drop| drop.formats().contain_mime_type(PAGE_MIME));
         let nb = self.nb.clone();
         dst.connect_drag_enter({
             let nb = nb.clone();
-            move |_d, _drop, x, y| {
-                if y < tab_strip_height(&nb) as f64 {
-                    gdk::DragAction::MOVE
-                } else {
-                    gdk::DragAction::empty()
+            move |_d, _drop, x, y| match hit(&nb, x, y) {
+                Hit::None => gdk::DragAction::empty(),
+                _ => gdk::DragAction::MOVE,
+            }
+        });
+        // ⚠️ **拖动过程中给反馈**（阶段 145）：蓝色插入符 ＋ 边缘高亮。
+        {
+            let me = Rc::downgrade(self);
+            dst.connect_drag_motion(move |_d, _drop, x, y| {
+                let Some(me) = me.upgrade() else {
+                    return gdk::DragAction::empty();
+                };
+                let h = hit(&me.nb, x, y);
+                me.show_drop_feedback(&h, x);
+                match h {
+                    Hit::None => gdk::DragAction::empty(),
+                    _ => gdk::DragAction::MOVE,
                 }
-            }
-        });
-        dst.connect_drag_motion(move |_d, _drop, _x, y| {
-            if y < tab_strip_height(&nb) as f64 {
-                gdk::DragAction::MOVE
-            } else {
-                gdk::DragAction::empty()
-            }
-        });
+            });
+        }
+        // 拖动离开 ⇒ 收起反馈（不收的话那根蓝线会一直杵在那儿）。
+        {
+            let me = Rc::downgrade(self);
+            dst.connect_drag_leave(move |_d, _drop| {
+                if let Some(me) = me.upgrade() {
+                    me.hide_drop_feedback();
+                }
+            });
+        }
         let me = Rc::downgrade(self);
-        dst.connect_drop(move |_d, drop, _x, _y| {
+        dst.connect_drop(move |_d, drop, x, y| {
             let Some(me) = me.upgrade() else {
                 return false;
             };
-            let cb: Rc<dyn Fn(u64)> = Rc::new(move |id| {
-                me.move_editor_to_main(id);
+            let h = hit(&me.nb, x, y);
+            me.hide_drop_feedback();
+            let Some(move_action) = h.into_move(x, &me) else {
+                return false;
+            };
+            let cb: Rc<dyn Fn(PageKindTag, u64)> = Rc::new(move |kind, id| match kind {
+                // ⚠️ **编辑器**拖到页签栏 = 变回子页签（阶段 108 的老规矩）。
+                PageKindTag::Editor => {
+                    if let crate::layout::dnd::PageMove::Into(_) = move_action {
+                        me.move_editor_to_main(id);
+                    }
+                }
+                // 其它种类 ⇒ 跨格子搬。
+                _ => {
+                    // ⚠️ **先把钩子 clone 出来再调**：`if let Some(f) =
+                    //   me.move_hook.borrow().clone()` 会让那个 `Ref` 一直活到
+                    //   `if let` 语句结束 ⇒ 钩子执行时 `move_hook` 还被借着
+                    //   ⇒ 钩子内部再借一次就 panic。
+                    let hook = me.move_hook.borrow().clone();
+                    if let Some(f) = hook {
+                        f(id, move_action);
+                    }
+                }
             });
-            read_editor_payload(&drop, cb);
+            read_page_payload(&drop, cb);
             true
         });
         self.nb.add_controller(dst);
+    }
+
+    /// 显示/收起拖放反馈（蓝色插入符 ＋ 边缘高亮）。
+    fn show_drop_feedback(&self, h: &Hit, x: f64) {
+        self.hide_drop_feedback();
+        match h {
+            Hit::TabBar => {
+                // 插入符摆在落点处（页签头的横坐标由我们自己量）。
+                let xs = self.page_head_xs();
+                let idx = crate::layout::dnd::insert_index_at(&xs, x);
+                let px = match (idx == 0, xs.get(idx)) {
+                    (true, _) => xs.first().copied().unwrap_or(2.0),
+                    (false, Some(&v)) => v,
+                    (false, None) => xs.last().copied().unwrap_or(2.0) + 40.0,
+                };
+                self.caret.set_margin_start(px as i32);
+                self.caret.set_height_request(tab_strip_height(&self.nb).max(12));
+                self.caret.set_visible(true);
+            }
+            Hit::Edge(z) => {
+                let i = match z {
+                    crate::layout::dnd::SplitZone::Left => 0,
+                    crate::layout::dnd::SplitZone::Right => 1,
+                    crate::layout::dnd::SplitZone::Top => 2,
+                    crate::layout::dnd::SplitZone::Bottom => 3,
+                };
+                self.edges[i].set_visible(true);
+            }
+            Hit::None => {}
+        }
+    }
+
+    /// 收起拖放反馈。
+    fn hide_drop_feedback(&self) {
+        self.caret.set_visible(false);
+        for e in self.edges.iter() {
+            e.set_visible(false);
+        }
+    }
+
+    /// 注册「跨格子搬页签」的回调（阶段 145）。
+    ///
+    /// `(页 id, 动作)` ⇒ 动作为 [`crate::layout::dnd::PageMove`]。
+    pub fn set_move_hook<F: Fn(u64, crate::layout::dnd::PageMove) -> bool + 'static>(&self, f: F) {
+        *self.move_hook.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// 注册「**这个格子空了**」的回调（阶段 145）。
+    ///
+    /// ⚠️ **不是"某个页签没了"**（那是 `add_close_hook`）——这里是"整个格子
+    ///    没内容了"⇒ 上层要把这个格子从树里摘掉。
+    pub fn set_empty_hook<F: Fn() -> bool + 'static>(&self, f: F) {
+        *self.empty_hook.borrow_mut() = Some(Rc::new(f));
     }
 
     /// 子页标题（页签头用）。
@@ -1914,14 +2313,14 @@ fn tab_strip_height(nb: &gtk::Notebook) -> i32 {
         .unwrap_or(40)
 }
 
-/// 读拖放负载（编辑器 id）⇒ 回调（阶段 108）。
+/// 读拖放负载（**种类 ＋ id**）⇒ 回调（阶段 145 统一协议）。
 ///
 /// ⚠️ **读完必须 `finish()`**：不 finish 的话源端一直以为这次拖拽没结束
 /// ⇒ 下一次拖拽可能被忽略（`dnd.rs` 里记过这个坑）。
 ///
 /// ⚠️ **要有超时兜底**：源端不应答时不能永远挂着（用户看到的就是
 /// "拖进去完全没反应"）。
-fn read_editor_payload(drop: &gdk::Drop, cb: Rc<dyn Fn(u64)>) {
+fn read_page_payload(drop: &gdk::Drop, cb: Rc<dyn Fn(PageKindTag, u64)>) {
     let drop_read = drop.clone();
     let drop_finish = drop.clone();
     // 「读完没有」：读回调与超时回调**谁先到谁算数**。
@@ -1940,7 +2339,7 @@ fn read_editor_payload(drop: &gdk::Drop, cb: Rc<dyn Fn(u64)>) {
         );
     }
     drop_read.read_async(
-        &[EDITOR_MIME],
+        &[PAGE_MIME],
         glib::Priority::DEFAULT,
         None::<&gtk::gio::Cancellable>,
         move |r| {
@@ -1954,9 +2353,9 @@ fn read_editor_payload(drop: &gdk::Drop, cb: Rc<dyn Fn(u64)>) {
                 if done.replace(true) {
                     return;
                 }
-                match parse_editor_payload(&text) {
-                    Some(id) => {
-                        cb(id);
+                match crate::layout::dnd::parse_page_payload(&text) {
+                    Some((kind, id)) => {
+                        cb(kind, id);
                         drop_finish.finish(gdk::DragAction::MOVE);
                     }
                     None => drop_finish.finish(gdk::DragAction::empty()),
@@ -1966,24 +2365,37 @@ fn read_editor_payload(drop: &gdk::Drop, cb: Rc<dyn Fn(u64)>) {
     );
 }
 
+/// 编辑器落点用：**只认 `Editor` 种类**的负载（别的种类一律不接）。
+///
+/// 干什么用（阶段 145）：负载统一成 `<kind>:<id>` 之后，编辑器那几个落点
+/// （底部编辑区 / 侧栏 / 主栏 / 工作区边缘）**不能**再对任何负载都动
+/// ⇒ 种类不对就当没这回事。
+fn editor_only(cb: impl Fn(u64) + 'static) -> Rc<dyn Fn(PageKindTag, u64)> {
+    Rc::new(move |kind, id| {
+        if kind == PageKindTag::Editor {
+            cb(id);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{display_width, parse_editor_payload, MAX_TITLE_CHARS};
+    use super::{display_width, MAX_TITLE_CHARS};
 
     #[test]
-    fn 拖放负载能解析出编辑器id() {
-        // 阶段 108：编辑器标签的拖放负载。
-        assert_eq!(parse_editor_payload("pp-editor:12"), Some(12));
-        assert_eq!(parse_editor_payload("pp-editor:0"), Some(0));
-        // 前后空白不算错（拖放数据偶尔带换行）
-        assert_eq!(parse_editor_payload(" pp-editor:7\n"), Some(7));
-        // 不是这个格式 ⇒ None
-        assert_eq!(parse_editor_payload(""), None);
-        assert_eq!(parse_editor_payload("/srv/a.txt"), None);
-        assert_eq!(parse_editor_payload("pp-editor:"), None);
-        assert_eq!(parse_editor_payload("pp-editor:abc"), None);
-        // 前缀对但后面是别的 ⇒ 不能瞎解析
-        assert_eq!(parse_editor_payload("editor:12"), None);
+    fn 旧负载仍然认得() {
+        // ⚠️ 阶段 145 把负载统一成 `<kind>:<id>`，但**旧格式还得认**
+        //    （阶段 108 的编辑器拖放负载 + 更早的裸 id）。
+        use crate::layout::dnd::{parse_page_payload, PageKindTag};
+        assert_eq!(
+            parse_page_payload("pp-editor:12"),
+            Some((PageKindTag::Editor, 12))
+        );
+        assert_eq!(parse_page_payload("42"), Some((PageKindTag::Editor, 42)));
+        assert_eq!(
+            parse_page_payload("editor:12"),
+            Some((PageKindTag::Editor, 12))
+        );
     }
 
     #[test]

@@ -1435,6 +1435,15 @@ popover.pp-menu separator { margin: 5px 4px; background-color: @pp_border; }
 .pp-term-status { margin: 4px 8px 2px 8px; }
 .pp-sidebar-head { margin: 0 2px; }
 .pp-dialog-root { margin: 14px 16px; }
+
+/* ⚠️ **阶段 145：跨格子拖放的反馈**。
+   - `.pp-drop-caret`：拖到页签栏上时的**蓝色插入符**（竖着一条）；
+   - `.pp-drop-edge-*`：拖到格子**边上**时**亮起来的那条边**。 */
+.pp-drop-caret { background-color: @pp_accent; min-width: 3px; }
+.pp-drop-edge-left { background-color: @pp_accent; min-width: 3px; }
+.pp-drop-edge-right { background-color: @pp_accent; min-width: 3px; }
+.pp-drop-edge-top { background-color: @pp_accent; min-height: 3px; }
+.pp-drop-edge-bottom { background-color: @pp_accent; min-height: 3px; }
 "#;
 
 /// 共用骨架：只列需要改的属性，靠 `@define-color` 给整套配色命名。

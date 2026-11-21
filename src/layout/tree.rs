@@ -117,6 +117,44 @@ pub fn split(node: &TreeNode, target: CellId, new_id: CellId, stacked: bool) -> 
     }
 }
 
+/// **拆分**（新格子在**前面**）—— 拖到某格**左边 / 上边**时用。
+///
+/// ⚠️ **与 [`split`] 的区别**：[`split`] 把新格子放在**后面**
+///    （拖到右边 / 下边）；这里放在**前面**（拖到左边 / 上边）。
+pub fn split_before(
+    node: &TreeNode,
+    target: CellId,
+    new_id: CellId,
+    stacked: bool,
+) -> Result<TreeNode, ()> {
+    match node {
+        TreeNode::Leaf(x) if *x == target => Ok(TreeNode::Split {
+            stacked,
+            a: Box::new(TreeNode::Leaf(new_id)),
+            b: Box::new(TreeNode::Leaf(target)),
+        }),
+        TreeNode::Leaf(_) => Err(()),
+        TreeNode::Empty => Err(()),
+        TreeNode::Split { stacked: s, a, b } => {
+            match split_before(a, target, new_id, stacked) {
+                Ok(na) => Ok(TreeNode::Split {
+                    stacked: *s,
+                    a: Box::new(na),
+                    b: b.clone(),
+                }),
+                Err(()) => {
+                    let nb = split_before(b, target, new_id, stacked)?;
+                    Ok(TreeNode::Split {
+                        stacked: *s,
+                        a: a.clone(),
+                        b: Box::new(nb),
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// **关闭**：把 `target` 那个叶子摘掉。
 ///
 /// - `Ok(tree)` ⇒ 关掉了（`tree` 可能是 [`TreeNode::Empty`]）；
@@ -222,6 +260,16 @@ pub struct CellTree {
     /// 这层 Box **没有留白**（间距 0、无 margin）⇒ 视觉上与今天一致。
     host: gtk::Box,
     next_id: std::cell::Cell<u64>,
+    /// **当前格子**（顶栏的「拆分格子 / 关闭本格」作用在它身上）。
+    ///
+    /// ⚠️ **怎么定"当前"**：谁被点过 / 谁刚切过页签 ⇒ 两个信号
+    ///    （`switch-page` ＋ 格子里的点击手势）⇒ 取最后动的那个。
+    current: std::cell::Cell<CellId>,
+    /// **新建格子时的回调**（阶段 145）。
+    ///
+    /// `(新格子编号, 新格子的容器)` ⇒ 上层给新格子装「+」菜单
+    /// （会话级的菜单钩子是**闭包**，搬不过去 ⇒ 得按格子重新装）。
+    new_cell_hook: RefCell<Option<Rc<dyn Fn(CellId, Rc<crate::panel::subtabs::SubTabs>)>>>,
 }
 
 impl CellTree {
@@ -234,8 +282,11 @@ impl CellTree {
             cells: RefCell::new(HashMap::from([(id, cell.clone())])),
             host: gtk::Box::new(gtk::Orientation::Vertical, 0),
             next_id: std::cell::Cell::new(2),
+            current: std::cell::Cell::new(id),
+            new_cell_hook: RefCell::new(None),
         });
         tree.host.append(cell_widget(&cell));
+        tree.wire_cell(id);
         tree
     }
 
@@ -311,6 +362,211 @@ impl CellTree {
         let id = CellId(self.next_id.get());
         self.next_id.set(id.0 + 1);
         id
+    }
+
+    /* ---------------- 阶段 145：跨格子 ---------------- */
+
+    /// 给一个格子**接上钩子**（跨格子搬页签 ＋ 格子空了）。
+    ///
+    /// ⚠️ **闭包只抓弱引用**（AGENTS.md 的引用环红线）：
+    ///    `CellTree` → 格子 → `SubTabs` → 钩子 → `CellTree` ⇒ 抓强引用就是环
+    ///    ⇒ 格子永远释放不掉。
+    fn wire_cell(self: &Rc<Self>, id: CellId) {
+        let Some(cell) = self.cell(id) else { return };
+        let tabs = cell.tabs.clone();
+        // 跨格子搬页签
+        {
+            let weak = Rc::downgrade(self);
+            tabs.set_move_hook(move |page_id, action| {
+                let Some(tree) = weak.upgrade() else {
+                    return false;
+                };
+                match action {
+                    crate::layout::dnd::PageMove::Into(idx) => {
+                        tree.move_page_into(page_id, id, idx)
+                    }
+                    crate::layout::dnd::PageMove::Split(zone) => {
+                        tree.split_cell_with_page(page_id, id, zone).is_some()
+                    }
+                }
+            });
+        }
+        // 格子空了 ⇒ 把它从树里摘掉
+        {
+            let weak = Rc::downgrade(self);
+            tabs.set_empty_hook(move || {
+                let Some(tree) = weak.upgrade() else {
+                    return false;
+                };
+                tree.close_cell(id)
+            });
+        }
+        // ⚠️ **记住"当前格子"**（阶段 145：顶栏的拆分/关闭作用在它身上）。
+        {
+            // ① 切页签 ⇒ 这个格子是当前的。
+            let weak = Rc::downgrade(self);
+            let nb = tabs.nb.clone();
+            nb.connect_switch_page(move |_nb, _p, _num| {
+                if let Some(tree) = weak.upgrade() {
+                    tree.current.set(id);
+                }
+            });
+        }
+        {
+            // ② 点一下这个格子 ⇒ 它是当前的。
+            //
+            // ⚠️ **手势事件会往祖先冒泡** ⇒ 点终端里也会触发 ⇒ 不用
+            //    给每个控件单独挂。
+            let weak = Rc::downgrade(self);
+            let nb = tabs.nb.clone();
+            let click = gtk::GestureClick::new();
+            click.connect_pressed(move |_g, _n, _x, _y| {
+                if let Some(tree) = weak.upgrade() {
+                    tree.current.set(id);
+                }
+            });
+            nb.add_controller(click);
+        }
+    }
+
+    /// 注册「新建格子时的回调」（阶段 145）。
+    pub fn set_new_cell_hook<F: Fn(CellId, Rc<crate::panel::subtabs::SubTabs>) + 'static>(
+        &self,
+        f: F,
+    ) {
+        *self.new_cell_hook.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// **当前格子**（顶栏的拆分/关闭作用在它身上）。
+    pub fn current_cell(&self) -> CellId {
+        self.current.get()
+    }
+
+    /// 把当前格子设成某个（搬完页签、切完页签后要跟上）。
+    pub fn set_current_cell(&self, id: CellId) {
+        self.current.set(id);
+    }
+
+    /// **拆一个格子** ⇒ 返回新格子的编号。
+    ///
+    /// `zone` 决定新格子在**哪一边**（左 / 右 / 上 / 下）。
+    ///
+    /// ⚠️ **新格子是空的**（只有一页签栏）⇒ 拖过来的页签再放进去。
+    pub fn split_cell(
+        self: &Rc<Self>,
+        target: CellId,
+        zone: crate::layout::dnd::SplitZone,
+    ) -> Option<CellId> {
+        let new_id = self.alloc_id();
+        // 先建内容（**空的 `SubTabs`**）。
+        let tabs = crate::panel::subtabs::SubTabs::new();
+        // ⚠️ **关闭钩子继承过来**：新格子里的终端页签被关掉时，
+        //    一样要收掉它的 SSH 会话。
+        if let Some(src) = self.cell(target) {
+            src.tabs.copy_close_hooks_to(&tabs);
+        }
+        let cell = Rc::new(Cell::new(new_id, tabs.clone()));
+        self.cells.borrow_mut().insert(new_id, cell);
+        // 改树形。
+        let tree = self.tree.borrow().clone();
+        let new_tree = if zone.new_first() {
+            split_before(&tree, target, new_id, zone.stacked())
+        } else {
+            split(&tree, target, new_id, zone.stacked())
+        };
+        let Ok(new_tree) = new_tree else {
+            // 拆不了（目标不在树里）⇒ 把刚建的格子撤掉。
+            self.cells.borrow_mut().remove(&new_id);
+            return None;
+        };
+        *self.tree.borrow_mut() = new_tree;
+        self.rebuild();
+        self.wire_cell(new_id);
+        self.current.set(new_id);
+        // 通知上层：新格子来了（给它装「+」菜单）。
+        let hook = self.new_cell_hook.borrow().clone();
+        if let Some(f) = hook {
+            f(new_id, tabs);
+        }
+        Some(new_id)
+    }
+
+    /// **关掉一个格子**（父节点自动收拢）。
+    ///
+    /// ⚠️ **最后一个格子不关**：关掉它 ⇒ 连接页就空了 ⇒ 用户连「+」按钮
+    ///    都看不到 ⇒ 没法再开终端（死路）⇒ 宁可留一个空格子。
+    pub fn close_cell(&self, id: CellId) -> bool {
+        if self.cell_count() <= 1 {
+            return false;
+        }
+        let tree = self.tree.borrow().clone();
+        let Ok(new_tree) = close(&tree, id) else {
+            return false;
+        };
+        *self.tree.borrow_mut() = new_tree;
+        self.cells.borrow_mut().remove(&id);
+        self.rebuild();
+        true
+    }
+
+    /// **哪个格子**装着这个页签（阶段 145：跨格子搬运要靠它找源格子）。
+    ///
+    /// ⚠️ **页签 id 是全局唯一的**（`layout::dnd::alloc_page_id`）⇒
+    ///    不会认错格子。
+    pub fn cell_of_page(&self, page_id: u64) -> Option<CellId> {
+        for id in self.ids() {
+            let Some(cell) = self.cell(id) else { continue };
+            if cell.tabs.has(page_id) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// 把一个页签**搬进**某个格子（插到 `index` 之前；`None` = 追加到最后）。
+    pub fn move_page_into(&self, page_id: u64, to: CellId, index: Option<usize>) -> bool {
+        let Some(from) = self.cell_of_page(page_id) else {
+            return false;
+        };
+        let Some(src) = self.cell(from) else {
+            return false;
+        };
+        let Some(dst) = self.cell(to) else {
+            return false;
+        };
+        // ⚠️ **先摘再挂**：页内容 widget 不能同时挂进两个 notebook
+        //    （GTK 会报 "already has a parent"）。
+        let Some(data) = src.tabs.take_page(page_id) else {
+            return false;
+        };
+        dst.tabs.insert_page(data, index);
+        // 源格子空了就关掉（**父节点收拢**）。
+        if from != to && src.tabs.page_count() == 0 {
+            self.close_cell(from);
+        }
+        true
+    }
+
+    /// 把一个页签**拆到**某个格子的边上（本格子被劈成两半）。
+    ///
+    /// 返回**新格子的编号**（页签就落在那儿）。
+    ///
+    /// ⚠️ **顺序很重要**：**先拆格子，再搬页签** ⇒
+    ///    - 拖的是**别的**格子的页签 ⇒ 新格子空着等它，源格子不受影响；
+    ///    - 拖的是**本格子自己**的页签 ⇒ 拆完本格子一分为二，页签搬进
+    ///      新的一半 ⇒ 原来那一半空了 ⇒ 收拢回去（等于"格子跟着页签走"）。
+    pub fn split_cell_with_page(
+        self: &Rc<Self>,
+        page_id: u64,
+        target: CellId,
+        zone: crate::layout::dnd::SplitZone,
+    ) -> Option<CellId> {
+        let new_id = self.split_cell(target, zone)?;
+        if self.move_page_into(page_id, new_id, None) {
+            Some(new_id)
+        } else {
+            None
+        }
     }
 }
 
@@ -510,5 +766,43 @@ mod tests {
     fn 深处的b分支也能拆() {
         let t = split(&grid2x2(), CellId(4), CellId(9), true).unwrap();
         assert_eq!(flatten(&t), vec![CellId(1), CellId(2), CellId(3), CellId(4), CellId(9)]);
+    }
+
+    /// `split_before`：新格子在**前面**（拖到左边 / 上边时用）。
+    #[test]
+    fn 拆分可以让新格子在前() {
+        let t = split_before(&leaf(1), CellId(1), CellId(2), false).unwrap();
+        assert_eq!(flatten(&t), vec![CellId(2), CellId(1)]);
+        match &t {
+            TreeNode::Split { stacked, a, b } => {
+                assert!(!stacked);
+                assert_eq!(**a, leaf(2), "新格子应当在前面");
+                assert_eq!(**b, leaf(1), "原格子应当在后面");
+            }
+            _ => panic!("拆完应该是 Split"),
+        }
+    }
+
+    #[test]
+    fn 拆分在前也认得到深处() {
+        // 目标在 b 分支的深处 ⇒ 新格子插在**它前面**，其余顺序不动。
+        let t = split_before(&grid2x2(), CellId(3), CellId(9), false).unwrap();
+        assert_eq!(
+            flatten(&t),
+            vec![CellId(1), CellId(2), CellId(9), CellId(3), CellId(4)],
+            "新格子应当插在 3 前面，其它格子的顺序不能变"
+        );
+        // 目标在 a 分支里也一样
+        let t = split_before(&grid2x2(), CellId(1), CellId(9), false).unwrap();
+        assert_eq!(
+            flatten(&t),
+            vec![CellId(9), CellId(1), CellId(2), CellId(3), CellId(4)]
+        );
+    }
+
+    #[test]
+    fn 拆分在前拆不到就报错() {
+        assert!(split_before(&leaf(1), CellId(9), CellId(2), false).is_err());
+        assert!(split_before(&TreeNode::Empty, CellId(1), CellId(2), false).is_err());
     }
 }

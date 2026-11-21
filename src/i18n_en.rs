@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2094] = [
+pub static EN: [(&str, &str); 2097] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -263,6 +263,7 @@ pub static EN: [(&str, &str); 2094] = [
     ("上一级", "Up one level"),
     ("上一页", "Previous page"),
     ("上下分屏", "Split vertically"),
+    ("上下拆分格子", "Split the cell vertically"),
     ("上传", "Upload"),
     ("上传 {v0} 个（{v1}）、建目录 {v2} 个、删除 {v3} 个", "Uploaded {v0} ({v1}), created {v2} directories, deleted {v3}"),
     ("上传…", "Upload…"),
@@ -440,6 +441,7 @@ pub static EN: [(&str, &str); 2094] = [
     ("关闭其它标签", "Close the other tabs"),
     ("关闭当前标签", "Close the current tab"),
     ("关闭当前终端", "Close the current terminal"),
+    ("关闭本格", "Close this cell"),
     ("关闭查找条 (Esc)", "Close the find bar (Esc)"),
     ("关闭查找条，焦点回终端", "Close the find bar and return the focus to the terminal"),
     ("关闭标签", "Close tab"),
@@ -830,6 +832,7 @@ pub static EN: [(&str, &str); 2094] = [
     ("工具", "Tools"),
     ("左侧双击表看数据", "Double-click a table on the left to see its data"),
     ("左右分屏", "Split horizontally"),
+    ("左右拆分格子", "Split the cell horizontally"),
     ("左边对象树里还没有表。\n先展开一个模式，选中要导入的表再来。", "There are no tables in the object tree on the left yet.\nExpand a schema, select the table to import and come back."),
     ("左边对象树里还没有表。\n先展开一个模式，选中要导出的表再来。", "There are no tables in the object tree on the left yet.\nExpand a schema, select the table to export and come back."),
     ("差异", "Difference"),
@@ -2109,3 +2112,4 @@ pub static EN: [(&str, &str); 2094] = [
     ("；{v0} 项类型冲突，不动", "; {v0} items have a type conflict and are left alone"),
     ("；远程另有 {v0} 个本地没有的（未勾选删除，不动）", "; the remote has {v0} more that are not local (deletion was not ticked, they are left alone)"),
 ];
+

@@ -134,6 +134,44 @@ fn put_back_terminal(term_page: &gtk::Paned, sibling: &gtk::Widget) {
     term_page.set_end_child(Some(sibling));
 }
 
+/// 给一个**格子容器**装上「+」菜单（阶段 145：每个格子都要能建终端）。
+///
+/// ⚠️ **为什么是函数而不是内联**：初始格子与后来拆出来的格子都要装
+///    ⇒ 写一遍就够（而且两个格子的行为必须**一样**）。
+///
+/// ⚠️ **闭包只抓弱引用**（AGENTS.md 的引用环红线）。
+fn install_cell_new_hook(
+    sub: &Rc<panel::subtabs::SubTabs>,
+    tabs: Option<Rc<Tabs>>,
+    pg_w: glib::WeakRef<gtk::Widget>,
+    st: &Rc<panel::PanelState>,
+) {
+    let st_w = Rc::downgrade(st);
+    let cell_sub = sub.clone();
+    sub.set_new_hook(move |vb, pop| {
+        let Some(t) = tabs.as_ref() else { return };
+        let Some(pg) = pg_w.upgrade() else { return };
+        let Some(st) = st_w.upgrade() else { return };
+        let t2 = t.clone();
+        let pg2 = pg.clone();
+        let pop2 = pop.clone();
+        let sub2 = cell_sub.clone();
+        crate::newmenu::build_menu(
+            crate::topmenus::NewEntry::SubTab,
+            vb,
+            crate::newmenu::NewCtx::with_session(),
+            move |action| {
+                pop2.popdown();
+                match action {
+                    // ⚠️ **建在"这个格子"里**（阶段 145）——不是老格子。
+                    "new_term" => t2.new_term_page_cwd_in(&pg2, sub2.clone(), None),
+                    other => crate::newmenu::run_in_session(&t2, &st, other),
+                }
+            },
+        );
+    });
+}
+
 /// 装"会话存活"钩子（阶段 65）：终端起来 / 结束 → 面板状态跟着变。
 ///
 /// ⚠️ 闭包只抓**弱引用**（AGENTS.md 的引用环红线）。
@@ -657,7 +695,25 @@ impl Tabs {
         // 连接页控件 = **子标签区的外层容器**（notebook + 尾部的「+」按钮），
         // 不是裸的 notebook —— 「+」要落在子标签栏那一行的最右端。
         let cell_tree = crate::layout::tree::CellTree::new(sub.clone());
+        // ⚠️ **阶段 145：新拆出来的格子也要能建终端** ⇒ 给它装同一套
+        //    「+」菜单（建在**它自己**里面）。
         let page = cell_tree.root().clone();
+        // ⚠️ **页面控件只抓弱引用**（AGENTS.md 引用环红线）：钩子存在
+        // `CellTree` 里，而 `CellTree` 存在 `Tab` 里，`Tab.page` 就是这个
+        // 控件 ⇒ 抓强引用 = Tab ⇄ CellTree 的环。
+        let page_weak: glib::WeakRef<gtk::Widget> = {
+            let mut wr = glib::WeakRef::new();
+            wr.set(Some(&page));
+            wr
+        };
+        {
+            let t = TABS.with(|w| w.borrow().clone());
+            let st2 = Rc::clone(&sp.st);
+            let pg2 = page_weak.clone();
+            cell_tree.set_new_cell_hook(move |_id, cell_sub| {
+                install_cell_new_hook(&cell_sub, t.clone(), pg2.clone(), &st2);
+            });
+        }
         page.set_hexpand(true);
         page.set_vexpand(true);
 
@@ -674,42 +730,14 @@ impl Tabs {
         // 最右端**（不是主标签头上——那儿已经不放图标了）。
         {
             let t = TABS.with(|w| w.borrow().clone());
-            let t_hook = t.clone();
             // ⚠️ **弱引用**（AGENTS.md 引用环红线）：钩子存在 SubTabs 里，
             // 而 SubTabs 又挂在 `sp.st` 里 ⇒ 抓强引用 = PanelState ⇄ SubTabs
             // 互相引用，面板永远释放不掉。
-            let st_w = Rc::downgrade(&sp.st);
+            //
             // ⚠️ 页面控件（Paned）**也**只能抓弱引用：Paned 的右孩子就是
             // SubTabs 的根控件 ⇒ 抓强引用 = Paned ⇄ SubTabs 的环，
             // 连接页关了也不回收。
-            let pg_w = page_w.downgrade();
-            sub.set_new_hook(move |vb, pop| {
-                let Some(t) = t_hook.as_ref() else { return };
-                let Some(pg) = pg_w.upgrade() else { return };
-                // 会话预置死（从哪儿来就属于哪儿）⇒ 动作落在**它自己的**会话里，
-                // 不是"当前会话"（用户切到别的标签页再点就不该建到那边去）。
-                let Some(st) = st_w.upgrade() else { return };
-                // ⚠️ **菜单项从「新建」动作表取**（阶段 68）：子标签的 `+`
-                // 只给"会话内能做"的（新建终端 / 新建数据库连接），
-                // 动作的**实现**只有一份（`newmenu::run_in`）。
-                let t2 = t.clone();
-                let pg2 = pg.clone();
-                let pop2 = pop.clone();
-                crate::newmenu::build_menu(
-                    crate::topmenus::NewEntry::SubTab,
-                    vb,
-                    crate::newmenu::NewCtx::with_session(),
-                    move |action| {
-                        pop2.popdown();
-                        match action {
-                            // 新建终端：在**这个连接**里再开一条独立的 SSH 会话
-                            "new_term" => t2.new_term_page(&pg2),
-                            // 新建数据库连接：落在**这个连接**的会话里
-                            other => crate::newmenu::run_in_session(&t2, &st, other),
-                        }
-                    },
-                );
-            });
+            install_cell_new_hook(&sub, t.clone(), page_weak.clone(), &sp.st);
             // 子页签被 × 关掉时通知：**终端页签 → 收掉它的 SSH 会话**。
             // （数据库页签的断开由 dbui 自己注册——谁的东西谁管。）
             let t2 = t.clone();
@@ -1058,7 +1086,7 @@ impl Tabs {
     ///
     /// 「在此处打开终端」用（见 `Tabs::open_term_at`）。
     pub fn new_term_page_cwd(&self, page: &gtk::Widget, dir: Option<&str>) {
-        let (sub, opts, active, panel_st) = {
+        let sub = {
             let tabs = self.tabs.borrow();
             let Some(t) = tabs.iter().find(|t| t.page == *page) else {
                 return;
@@ -1066,8 +1094,27 @@ impl Tabs {
             let Some(sub) = t.panel_st.sub_tabs.borrow().clone() else {
                 return;
             };
+            sub
+        };
+        self.new_term_page_cwd_in(page, sub, dir);
+    }
+
+    /// 新开终端子页签，**放进指定的容器**（阶段 145：新格子的「+」）。
+    ///
+    /// ⚠️ **为什么要有这一层**：阶段 145 之后**每个格子都有自己的页签栏**
+    ///    ⇒ 新格子的「+」建出来的终端得**落在那个格子里**，而不是老格子里。
+    pub fn new_term_page_cwd_in(
+        &self,
+        page: &gtk::Widget,
+        sub: Rc<panel::subtabs::SubTabs>,
+        dir: Option<&str>,
+    ) {
+        let (opts, active, panel_st) = {
+            let tabs = self.tabs.borrow();
+            let Some(t) = tabs.iter().find(|t| t.page == *page) else {
+                return;
+            };
             (
-                sub,
                 t.panel_st.opts.clone(),
                 Rc::clone(&t.active),
                 Rc::clone(&t.panel_st),
@@ -1142,6 +1189,38 @@ impl Tabs {
         }
         self.sync_broadcast();
         tp.terminal().grab_focus();
+    }
+
+    /// **左右 / 上下拆分当前格子**（阶段 145）。
+    ///
+    /// ⚠️ **作用在"当前格子"上**（最近点过 / 切过页签的那个）——
+    ///    与「左右分屏」（作用在终端面板上）是**两回事**。
+    pub fn split_cell(&self, page: &gtk::Widget, stacked: bool) {
+        let tree = {
+            let tabs = self.tabs.borrow();
+            let Some(t) = tabs.iter().find(|t| t.page == *page) else {
+                return;
+            };
+            t.cell_tree.clone()
+        };
+        let zone = if stacked {
+            crate::layout::dnd::SplitZone::Bottom
+        } else {
+            crate::layout::dnd::SplitZone::Right
+        };
+        tree.split_cell(tree.current_cell(), zone);
+    }
+
+    /// **关闭当前格子**（阶段 145）。
+    pub fn close_cell(&self, page: &gtk::Widget) {
+        let tree = {
+            let tabs = self.tabs.borrow();
+            let Some(t) = tabs.iter().find(|t| t.page == *page) else {
+                return;
+            };
+            t.cell_tree.clone()
+        };
+        tree.close_cell(tree.current_cell());
     }
 
     /// 在**某个标签**里新开一个终端页签，并让它 `cd` 到指定目录。
@@ -2346,6 +2425,25 @@ pub fn split_page(page: &gtk::Widget, stacked: bool) {
     if let Some(t) = TABS.with(|w| w.borrow().clone()) {
         t.split_page(page, stacked);
     }
+}
+
+/// **拆分当前格子**（阶段 145：顶栏「视图」菜单）。
+pub fn split_cell(page: &gtk::Widget, stacked: bool) {
+    if let Some(t) = TABS.with(|w| w.borrow().clone()) {
+        t.split_cell(page, stacked);
+    }
+}
+
+/// **关闭当前格子**（阶段 145：顶栏「视图」菜单）。
+pub fn close_cell(page: &gtk::Widget) {
+    if let Some(t) = TABS.with(|w| w.borrow().clone()) {
+        t.close_cell(page);
+    }
+}
+
+/// 当前**有没有格子**可拆（阶段 145：菜单项据此置灰）。
+pub fn has_cell() -> bool {
+    current_page().is_some()
 }
 
 /// 从指定面板分（右键菜单：右键哪块分哪块）。
