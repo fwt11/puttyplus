@@ -40,6 +40,7 @@ fn build(viewport: i32, show_mtime: bool) -> (gtk::ApplicationWindow, gtk::TreeV
         gtk::glib::Type::BOOL,   // 正在传输（呼吸背景）
         gtk::glib::Type::F32,    // 进度文案透明度（终态文案渐隐）
         gtk::glib::Type::I64,    // 终态文案的起始时刻
+        gtk::glib::Type::BOOL,   // 拖放目标行（阶段 106 加的 COL_DROP）
     ]);
     for (name, size, perm, mt) in [
         ("graph.tar.gz", "58M", "-rw-r--r--", "2026-02-08 16:31"),
@@ -64,6 +65,7 @@ fn build(viewport: i32, show_mtime: bool) -> (gtk::ApplicationWindow, gtk::TreeV
                 (11, &false),
                 (12, &1.0f32),
                 (13, &0i64),
+                (14, &false),
             ],
         );
     }

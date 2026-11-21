@@ -548,12 +548,13 @@ pub fn confirm_title<F: FnOnce(bool) + 'static>(
  */
 
 /// 表单根容器：16px 内边距 + 12px 行距。
+///
+/// ⚠️ **阶段 142：内边距改由 CSS 类 `pp-form-box` 控制**
+/// （原来是 `set_margin_*` 写死的 ⇒ 用户切密度时对话框纹丝不动）。
+/// ⇒ 删掉 `set_margin_*` 后，CSS（优先级 800）说了算 ⇒ **立即生效**。
 pub fn form_box() -> gtk::Box {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    b.set_margin_top(16);
-    b.set_margin_bottom(16);
-    b.set_margin_start(16);
-    b.set_margin_end(16);
+    b.add_css_class("pp-form-box");
     b
 }
 
@@ -611,10 +612,8 @@ pub fn info(parent: Option<&gtk::Window>, title: &str, body: &str) {
     dlg.set_default_size(360, -1);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    vbox.set_margin_top(14);
-    vbox.set_margin_bottom(14);
-    vbox.set_margin_start(16);
-    vbox.set_margin_end(16);
+    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-dialog-root` 控制**
+    vbox.add_css_class("pp-dialog-root");
 
     let body = gtk::Label::new(Some(body));
     body.set_xalign(0.0);

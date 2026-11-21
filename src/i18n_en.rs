@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2090] = [
+pub static EN: [(&str, &str); 2092] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1290,6 +1290,7 @@ pub static EN: [(&str, &str); 2090] = [
     ("替换凭据库失败: {e}", "Failed to replace the credential vault: {e}"),
     ("替换当前这一个匹配", "Replace this match"),
     ("替换所有匹配", "Replace all matches"),
+    ("最小留白，一屏能看到的行数最多", "Minimal spacing, the most rows visible at once"),
     ("最近连接", "Recent connections"),
     ("最近连接条数", "Number of recent connections"),
     ("有 {n} 个目标已存在：\n", "{n} targets already exist:\n"),
@@ -1821,6 +1822,7 @@ pub static EN: [(&str, &str); 2090] = [
     ("读表结构失败：{e}", "Reading the table structure failed: {e}"),
     ("读表结构返回的格式不对", "Reading the table structure returned an unexpected format"),
     ("调整伪终端大小失败", "Failed to resize the pseudoterminal"),
+    ("超紧凑", "Extra Compact"),
     ("超过 {v0} 层未处理", "More than {v0} levels were not processed"),
     ("跑在应用自己那条 SSH 连接上（不新建 SSH 连接、终端标签页关了也照样在）。\n堡垒机场景用它把内网服务映射到本机。格式与上面相同，行首 ! 同样是停用。", "It runs on the application's own SSH connection (no new SSH connection, and it keeps running after the terminal tab is closed).\nIn bastion setups it maps an intranet service to this machine. The format is the same as above, a leading ! disables the rule as well."),
     ("跟随系统", "Follow the system"),

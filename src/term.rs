@@ -739,10 +739,9 @@ impl TermPane {
             tr("重新建立这条 SSH 会话（和右键菜单里的「重新连接终端」是同一个动作）"),
         ));
         let banner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        banner.set_margin_top(4);
-        banner.set_margin_bottom(2);
-        banner.set_margin_start(8);
-        banner.set_margin_end(8);
+        // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-term-status` 控制**
+        //（原来是 `set_margin_*` 写死的 ⇒ 切密度时状态条不变）。
+        banner.add_css_class("pp-term-status");
         banner.set_halign(gtk::Align::Start);
         // ⚠️ **每个 chip 都要先把自己的可见标志置 false**。
         //

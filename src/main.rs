@@ -107,10 +107,17 @@ fn main() {
     let opts = std::sync::Arc::new(opts);
     let warnings = std::sync::Arc::new(warnings);
     app.connect_activate(move |app| {
+        // ⚠️ **密度必须在建界面之前套好**（阶段 142）：
+        // 代码层的密度值（文件列表的**列宽下限**、行高）是**控件建好时
+        // 定死**的 ⇒ 晚一步就按标准档建出来了（列宽 160 而不是 120）。
+        // ⇒ 主题仍留在建窗之后（它要刷已有控件的配色）。
+        density::load_saved();
         let (tabs, win) = build_main_window(app);
+        // ⚠️ 窗口是**刚建出来的** ⇒ `load_saved()` 里那次套类时它还不存在
+        // ⇒ 得补一次（不然要等 150ms 的巡检器才套上 ⇒ 首帧闪一下标准档）。
+        density::tag(&win);
         // 主题/密度要在建界面之前套好，否则首帧先画成默认样式再跳一次
         theme::load_saved();
-        density::load_saved();
         if has_host {
             tabs.open(&opts);
             // 首个标签 append 不触发 switch_page，这里手动同步窗口标题

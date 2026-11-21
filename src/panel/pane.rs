@@ -184,6 +184,9 @@ pub struct FileCols {
 fn setup_trailing(col: &gtk::TreeViewColumn, min_width: i32, r: &gtk::CellRendererText) {
     col.set_min_width(min_width);
     r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    // ⚠️ **纵向内边距归零**（阶段 142）：行高由渲染器的 padding 决定
+    //    ⇒ 这里不归零，行高就被这些列顶住、密度压不动。
+    zero_vertical_pad(r);
 }
 
 /// 大小列的**下限**宽度（列头「大小」两个字 + 内边距装得下）。
@@ -191,6 +194,19 @@ pub const SIZE_COL_MIN_W: i32 = 64;
 
 /// 单元格左右内边距（列宽 = 文字宽 + 这个 + 余量）。
 const SIZE_CELL_PAD: i32 = 12;
+
+/// 右侧列的渲染器：**纵向**内边距归零（横向保留默认的 2px）。
+///
+/// ⚠️ **为什么**（阶段 142 实测，GTK 4.18）：
+/// TreeView 的**行高由单元格渲染器自己的 padding 决定**
+/// （CSS 那个 `treeview.view cell` 节点压根不存在 ⇒ 压不动）。
+/// 默认每边 2px 会让这些列比名称列高 4px ⇒ **行高被它们顶住**
+/// ⇒ 密度就压不动文件列表。
+/// ⇒ 纵向一律归零：**行高统一由名称列的自绘渲染器**按密度算
+/// （[`crate::density::row_padding`]）⇒ 三档 23 / 21 / 19px。
+fn zero_vertical_pad(r: &gtk::CellRendererText) {
+    gtk::prelude::CellRendererExt::set_padding(r, 2, 0);
+}
 
 /// 大小列的最终宽度：**内容要装得下的宽度** 与 **用户拉过的宽度**，取更宽的。
 ///
@@ -214,7 +230,11 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     // ⚠️ 阶段 76 / 审计 P1-15：原来 90px ⇒ 340px 宽的面板里名称列实际
     // 只剩约 120px，`AndroidStudioProje`、`Calibre 书库` 这些被硬裁。
     // 「修改时间」列默认藏起来之后，名称列能拿到 160px。
-    col_name.set_min_width(160);
+    //
+    // ⚠️ **阶段 142：下限随密度走**（160 / 120 / 100）—— 窄面板里
+    //    160px 的名称列会把「大小」列挤掉 ⇒ 紧凑档收窄。
+    //    （列宽**用户拖过就记住**，这个值只是**下限**。）
+    col_name.set_min_width(crate::density::pick(160, 120, 100));
     // 列宽固定：长文件名**不撑列**，而是在列内左右滑动，右侧列保持可见
     col_name.set_sizing(gtk::TreeViewColumnSizing::Fixed);
     let r_name = super::namecell::NameCellRenderer::new();
@@ -263,7 +283,9 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
         let col = gtk::TreeViewColumn::new();
         col.set_title(tr("权限"));
         let r = gtk::CellRendererText::new();
-        setup_trailing(&col, 72, &r);
+        // ⚠️ **阶段 142：下限随密度走**（72 / 56 / 48）—— 权限串是
+        //    「drwxr-xr-x」十个字符，56px 仍装得下（紧凑档）。
+        setup_trailing(&col, crate::density::pick(72, 56, 48), &r);
         col.set_resizable(true);
         col.pack_start(&r, false);
         col.add_attribute(&r, "text", COL_PERM);
@@ -276,7 +298,10 @@ pub fn add_file_columns(view: &gtk::TreeView, remote: bool) -> FileCols {
     let r = gtk::CellRendererText::new();
     // 原来这里写死 min_width(108)：一个不可压缩的下限，正好是把横向滚动条
     // 逼出来的帮凶之一。现在改成"可收缩 + 小下限"。
-    setup_trailing(&col_mtime, 120, &r);
+    //
+    // ⚠️ **阶段 142：下限随密度走**（120 / 100 / 88）—— 窄面板里
+    //    120px 的时间列会把名称列挤没。
+    setup_trailing(&col_mtime, crate::density::pick(120, 100, 88), &r);
     col_mtime.set_resizable(true);
     col_mtime.pack_start(&r, false);
     col_mtime.add_attribute(&r, "text", COL_MTIME);
@@ -969,9 +994,9 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
     entry.add_css_class("pp-path");
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    toolbar.set_margin_start(6);
-    toolbar.set_margin_end(4);
-    toolbar.set_margin_bottom(4);
+    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-pane-toolbar` 控制**
+    //（原来是 `set_margin_*` 写死的 ⇒ 切密度时工具条不变）。
+    toolbar.add_css_class("pp-pane-toolbar");
     let status_lbl = gtk::Label::new(None);
 
     fn icon_btn(icon: &str, tooltip: &str) -> gtk::Button {
@@ -1020,10 +1045,9 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
 
     /* ---- 第一行：面板名 + 连接状态 + 主传输动作 ---- */
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    header.set_margin_top(6);
-    header.set_margin_bottom(2);
-    header.set_margin_start(8);
-    header.set_margin_end(6);
+    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-pane-head` 控制**
+    //（原来是 `set_margin_*` 写死的 ⇒ 切密度时面板头不变）。
+    header.add_css_class("pp-pane-head");
 
     let title = gtk::Label::new(None);
     title.set_markup(if remote { tr("<b>远程</b>") } else { tr("<b>本地</b>") });
@@ -1257,6 +1281,9 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
 
     let col_icon = gtk::TreeViewColumn::new();
     let r_pix = gtk::CellRendererPixbuf::new();
+    // ⚠️ **纵向内边距归零**（阶段 142）：图标只有 16px，纵向留白会让它
+    //    在超紧凑档（行高 19px）里反而成为"最高的那列" ⇒ 行高压不下去。
+    gtk::prelude::CellRendererExt::set_padding(&r_pix, 2, 0);
     col_icon.pack_start(&r_pix, false);
     col_icon.add_attribute(&r_pix, "icon-name", COL_ICON);
     // 列表是建好窗口之后才填数据的：列在空模型时量出来的宽度会一直保持 0，

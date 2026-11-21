@@ -461,7 +461,10 @@ impl DbTree {
         //    渲染器，emoji 由字体（Noto Color Emoji）自己上色。
         let r_icon = gtk::CellRendererText::new();
         // 图标与文字之间留点空隙（贴太近看着挤成一坨）
-        r_icon.set_padding(4, 2);
+        // ⚠️ **阶段 142：纵向 padding 归零** ⇒ 行距交给 CSS 的
+        //    `treeview.view cell { padding }` 管 ⇒ 改密度立即生效。
+        //    横向的 4px 留着（只影响列内间距，不影响行高）。
+        r_icon.set_padding(4, 0);
         c.pack_start(&r_icon, false);
         c.add_attribute(&r_icon, "text", COL_ICON as i32);
 

@@ -87,7 +87,22 @@ mod imp {
         fn preferred_height<P: IsA<gtk::Widget>>(&self, widget: &P) -> (i32, i32) {
             let layout = widget.create_pango_layout(Some("Ag"));
             let (_, h) = layout.pixel_size();
-            (h + 4, h + 4)
+            // ⚠️ **行高按密度算**（阶段 142）：
+            //    GTK 4.18 的 TreeView **行高由单元格渲染器自己决定**
+            //    （CSS 的 `treeview.view cell { padding }` 那个节点
+            //    **压根不存在** ⇒ 压不动 ⇒ 别再指望 CSS）。
+            //    ⇒ 这里给文字高度加上「每边 2/1/0px」的纵向留白
+            //    （[`crate::density::row_padding`]）。
+            //
+            //    ⚠️ **这个值是"测量时"读的**（不是建渲染器时定死）
+            //    ⇒ 换密度后只要树重排一次，行高立刻跟着变
+            //    （重排由 [`crate::density::apply_density`] 触发）。
+            //
+            //    ⚠️ 去掉这 4px **不会裁到自绘内容**：呼吸背景与拖放高亮
+            //    都是按 `cell_area`（cell 的**完整**区域，含 padding）画的
+            //    ⇒ 高度变小 ⇒ 背景条随之变短，不会被裁。
+            let pad = crate::density::row_padding() * 2;
+            (h + pad, h + pad)
         }
 
         fn snapshot<P: IsA<gtk::Widget>>(

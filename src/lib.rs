@@ -610,4 +610,115 @@ mod lint_tests {
             bad.join("\n")
         );
     }
+
+    /* ---------------- 界面留白：CSS 化（阶段 142）----------------
+     *
+     * 背景：GTK 里 **CSS provider 的优先级（USER=800）高于 widget 自己的
+     * inline style（APPLICATION=600）** ⇒ 只要把留白交给 CSS，用户在
+     * 「首选项 → 界面密度」里切档位就**立刻生效**；写死在代码里的
+     * `set_margin_*` 则纹丝不动。
+     *
+     * 这两条 lint 守住这个约定：
+     * ① 挂了留白类的控件，**不许再**用 `set_margin_*`（否则 CSS 被盖掉）；
+     * ② 每个留白类**都得有 CSS 规则**（否则静默失效 ⇒ 界面少一块留白，
+     *    而且没人看得出来）。
+     */
+
+    /// 阶段 142 迁到 CSS 的那批留白类。
+    const PP_SPACING_CLASSES: [&str; 9] = [
+        "pp-form-box",
+        "pp-dialog-root",
+        "pp-settings-root",
+        "pp-setting-row",
+        "pp-pane-toolbar",
+        "pp-pane-head",
+        "pp-term-status",
+        "pp-sidebar-head",
+        "pp-sidebar",
+    ];
+
+    /// ⚠️ **回归钉**：留白类不许再配硬编码 `set_margin_*`。
+    ///
+    /// 为什么：CSS 优先级高于 widget 的 inline style ⇒ 两个都写的话，
+    /// **CSS 赢**（这正是我们要的）—— 但读代码的人会以为
+    /// `set_margin_*` 才是生效的那个 ⇒ 以后改 CSS 规则却"没反应"。
+    #[test]
+    fn 留白类不许配硬编码margin() {
+        /// `add_css_class` 前后这么多行内不许出现 `set_margin_`。
+        /// （够覆盖"建控件 → 设 margin"这种挨着的写法。）
+        const WINDOW: usize = 10;
+
+        let mut files = Vec::new();
+        rust_files(&src_dir(), &mut files);
+        let mut bad = Vec::new();
+        for f in files {
+            let Ok(src) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || t.starts_with("///") || t.starts_with('*') {
+                    continue;
+                }
+                let Some(cls) = PP_SPACING_CLASSES
+                    .iter()
+                    .find(|c| line.contains(&format!("\"{c}\"")))
+                else {
+                    continue;
+                };
+                let lo = i.saturating_sub(WINDOW);
+                let hi = (i + WINDOW + 1).min(lines.len());
+                for l in &lines[lo..hi] {
+                    let lt = l.trim_start();
+                    // ⚠️ **块注释也要跳**（`/* … */` 的正文行以 `*` 开头）：
+                    // 否则这条 lint 会**把自己脚下的说明文字**扫出来
+                    //（说明里就写着那些类名与 `set_margin_*`）⇒ 自我误报。
+                    if lt.starts_with("//") || lt.starts_with("///") || lt.starts_with('*')
+                    {
+                        continue;
+                    }
+                    if lt.contains("set_margin_") {
+                        bad.push(format!(
+                            "{}:{}: {} （类 {cls}）",
+                            f.display(),
+                            i + 1,
+                            l.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "留白类旁边的 set_margin_* 会让人以为它在生效（其实 CSS 优先级更高，\
+             它是死的）⇒ 删掉它，改由 CSS 统一管：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// ⚠️ **回归钉**：每个留白类**都得有 CSS 规则**。
+    ///
+    /// 为什么：加了类名却没写规则 ⇒ 静默失效（GTK 不报错）⇒
+    /// 界面少一块留白，谁都看不出来是哪一步丢的。
+    #[test]
+    fn 留白类都得有_css规则() {
+        let css = {
+            let mut s = String::new();
+            for f in ["src/theme.rs", "src/density.rs"] {
+                let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+                s.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+            s
+        };
+        for cls in PP_SPACING_CLASSES {
+            // CSS 里出现 `.类名` 且后面跟着 `{`、`,` 或 `:` 才算一条规则
+            let has_rule = css.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with(&format!(".{cls}"))
+                    && (t.contains('{') || t.ends_with(','))
+            });
+            assert!(has_rule, "留白类 .{cls} 没有 CSS 规则（会静默失效）");
+        }
+    }
 }

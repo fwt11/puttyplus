@@ -725,7 +725,12 @@ fn apply_eventually(t: Theme, attempt: u32) {
 }
 
 /// USER 优先级：盖过 Adwaita 的默认样式，但让位于用户自己写的 gtk.css。
-const PRIORITY_USER: u32 = 800;
+///
+/// ⚠️ **公开出来是为了让密度模块能断言优先级顺序**：
+/// GTK4 里**跨 provider 不比特异性** ⇒ 密度 CSS（`density::PRIORITY`）
+/// 必须比这个高，否则主题里 `treeview.view cell { padding }` 这类规则
+/// 会把紧凑档的行高顶掉（切一次主题就失效）。
+pub const PRIORITY_USER: u32 = 800;
 
 /// 启动时套用已保存的主题/配色。
 pub fn load_saved() {
@@ -1161,7 +1166,11 @@ button.pp-empty-primary { margin-top: 6px; }
 /* 侧边栏与内容区之间的界线：浅色主题下两侧都是白底，没这条线会糊成一片。
    ⚠️ 阶段 93：**整条侧栏一个底色**（跟窗口一致），里面的树透明——
    以前树是白卡片、上面是灰底，过滤框底下突然贴了块白板。 */
-.pp-sidebar { border-right: 1px solid @pp_border; background-color: @pp_bg; }
+.pp-sidebar {
+  /* ⚠️ **阶段 142：margin 从 `set_margin_*` 搬到这里** ⇒ 密度切换立即生效 */
+  margin: 8px 4px 8px 6px;
+  border-right: 1px solid @pp_border; background-color: @pp_bg;
+}
 .pp-sidebar treeview.view { background-color: transparent; }
 /* 分屏：活动面板描边（outline 不吃布局，不会把终端挤动） */
 .pp-pane-active { outline: 1px solid alpha(@pp_accent, 0.55); outline-offset: -1px; }
@@ -1411,6 +1420,21 @@ popover.pp-menu modelbutton {
 }
 popover.pp-menu modelbutton:hover { background-color: @pp_hover; }
 popover.pp-menu separator { margin: 5px 4px; background-color: @pp_border; }
+
+/* ⚠️ **阶段 142：这些留白从代码搬到了 CSS**。
+   原因：GTK 里 **CSS provider 的优先级（USER=800）高于 widget 自己的
+   inline style（APPLICATION=600）** ⇒ 把 `set_margin_*` 删掉、让 CSS 说了算，
+   用户在「首选项 → 界面密度」里切档位时**立刻生效**；
+   以前这些数值写死在代码里 ⇒ 切了密度界面纹丝不动。
+   （margin 简写顺序 = 上 右 下 左，同 CSS。） */
+.pp-form-box { margin: 16px; }
+.pp-settings-root { margin: 16px 18px; }
+.pp-setting-row { margin: 7px 12px; }
+.pp-pane-toolbar { margin: 6px 4px 4px 6px; }
+.pp-pane-head { margin: 6px 6px 2px 8px; }
+.pp-term-status { margin: 4px 8px 2px 8px; }
+.pp-sidebar-head { margin: 0 2px; }
+.pp-dialog-root { margin: 14px 16px; }
 "#;
 
 /// 共用骨架：只列需要改的属性，靠 `@define-color` 给整套配色命名。

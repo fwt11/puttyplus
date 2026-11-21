@@ -368,10 +368,9 @@ fn find_notebook_cls(w: &gtk::Widget) -> Option<gtk::Notebook> {
 /// 建某一页的内容。
 pub fn build_page(page: Page) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 14);
-    root.set_margin_top(16);
-    root.set_margin_bottom(16);
-    root.set_margin_start(18);
-    root.set_margin_end(18);
+    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-settings-root` 控制**
+    //（原来这四行 `set_margin_*` 写死 ⇒ 切密度时首选项不变）。
+    root.add_css_class("pp-settings-root");
     match page {
         Page::Appearance => appearance_page(&root),
         Page::Terminal => terminal_page(&root),
@@ -391,10 +390,9 @@ fn appearance_page(root: &gtk::Box) {
         sec.append(&section(tr("界面语言")));
 
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row.set_margin_top(7);
-        row.set_margin_bottom(7);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
+        // ⚠️ **阶段 142：行距改由 CSS 类 `pp-setting-row` 控制**
+        //（原来写死 7+7 ⇒ 每个设置项多占 14px 纵向 ⇒ 对话框偏高）。
+        row.add_css_class("pp-setting-row");
         let lbl = gtk::Label::new(Some(tr("界面语言")));
         lbl.set_xalign(0.0);
         lbl.set_hexpand(true);
@@ -481,11 +479,13 @@ fn appearance_page(root: &gtk::Box) {
         sec.append(&section(tr("界面密度")));
 
         let cur = density::density();
-        let items = [
-            (Density::Normal.label(), Density::Normal.hint()),
-            (Density::Compact.label(), Density::Compact.hint()),
-        ];
-        let cur_idx = if cur == Density::Compact { 1 } else { 0 };
+        // ⚠️ **三档**（阶段 142）：标准 / 紧凑 / 超紧凑。
+        //    档位表用 `Density::ALL` ⇒ 以后加档位只改 density.rs 一处。
+        let items: Vec<(&str, &str)> = Density::ALL
+            .iter()
+            .map(|d| (d.label(), d.hint()))
+            .collect();
+        let cur_idx = Density::ALL.iter().position(|d| *d == cur).unwrap_or(0);
         let (seg, hint, btns) = segmented(&items, cur_idx);
         sec.append(&seg);
         sec.append(&hint);
@@ -497,10 +497,8 @@ fn appearance_page(root: &gtk::Box) {
                 if !b.is_active() {
                     return;
                 }
-                let d = if i == 0 {
-                    Density::Normal
-                } else {
-                    Density::Compact
+                let Some(d) = Density::ALL.get(i).copied() else {
+                    return;
                 };
                 if density::density() != d {
                     density::set_density(d);
@@ -688,10 +686,9 @@ fn terminal_page(root: &gtk::Box) {
             .unwrap_or(0) as u32;
 
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row.set_margin_top(7);
-        row.set_margin_bottom(7);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
+        // ⚠️ **阶段 142：行距改由 CSS 类 `pp-setting-row` 控制**
+        //（原来写死 7+7 ⇒ 每个设置项多占 14px 纵向 ⇒ 对话框偏高）。
+        row.add_css_class("pp-setting-row");
         let lbl = gtk::Label::new(Some(tr("字体")));
         lbl.set_xalign(0.0);
         row.append(&lbl);
@@ -705,10 +702,8 @@ fn terminal_page(root: &gtk::Box) {
 
         // ---- 字号 ----
         let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row2.set_margin_top(7);
-        row2.set_margin_bottom(7);
-        row2.set_margin_start(12);
-        row2.set_margin_end(12);
+        // ⚠️ **阶段 142：行距改由 CSS 类 `pp-setting-row` 控制**
+        row2.add_css_class("pp-setting-row");
         let lbl2 = gtk::Label::new(Some(tr("字号")));
         lbl2.set_xalign(0.0);
         let spin = gtk::SpinButton::with_range(9.0, 40.0, 0.5);
@@ -1071,10 +1066,8 @@ fn columns_dialog() {
         &[(tr("关闭"), gtk::ResponseType::Close)],
     );
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    root.set_margin_top(12);
-    root.set_margin_bottom(12);
-    root.set_margin_start(14);
-    root.set_margin_end(14);
+    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-settings-root` 控制**
+    root.add_css_class("pp-settings-root");
 
     for remote in [true, false] {
         let title = if remote {
@@ -1134,10 +1127,8 @@ fn option_row(title: &str, hint: &str) -> (gtk::ListBoxRow, gtk::Image) {
     let row = gtk::ListBoxRow::new();
     row.set_activatable(true);
     let h = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    h.set_margin_top(7);
-    h.set_margin_bottom(7);
-    h.set_margin_start(12);
-    h.set_margin_end(12);
+    // ⚠️ **阶段 142：行距改由 CSS 类 `pp-setting-row` 控制**
+    h.add_css_class("pp-setting-row");
 
     let t = gtk::Label::new(Some(title));
     t.set_xalign(0.0);
@@ -1205,10 +1196,8 @@ fn palette_row(p: Palette) -> (gtk::ListBoxRow, gtk::Image) {
     let row = gtk::ListBoxRow::new();
     row.set_activatable(true);
     let h = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    h.set_margin_top(6);
-    h.set_margin_bottom(6);
-    h.set_margin_start(12);
-    h.set_margin_end(12);
+    // ⚠️ **阶段 142：行距改由 CSS 类 `pp-setting-row` 控制**
+    h.add_css_class("pp-setting-row");
 
     let name = gtk::Label::new(Some(p.label()));
     name.set_xalign(0.0);

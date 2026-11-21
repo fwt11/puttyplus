@@ -254,15 +254,14 @@ impl Sidebar {
     pub fn new(tabs: Rc<Tabs>) -> Rc<Sidebar> {
         let box_ = gtk::Box::new(gtk::Orientation::Vertical, 6);
         box_.add_css_class("pp-sidebar");
-        box_.set_margin_top(8);
-        box_.set_margin_bottom(8);
-        box_.set_margin_start(6);
-        box_.set_margin_end(4);
+        // ⚠️ **阶段 142：内边距改由 CSS 的 `.pp-sidebar` 控制**
+        //（原来这四行 `set_margin_*` 是写死的 ⇒ 切密度时侧栏不变）。
+        // ⇒ 删掉之后 CSS 说了算 ⇒ **立即生效**。
 
         // ---- 标题 + 刷新 ----
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        head.set_margin_start(2);
-        head.set_margin_end(2);
+        // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-sidebar-head` 控制**
+        head.add_css_class("pp-sidebar-head");
         let title = gtk::Label::new(None);
         // ⚠️ 阶段 81（审计 P2-8）：侧栏列的是**连接**（最近 / 自定义 /
         // ssh config 三组都是连接），叫「会话」跟菜单里的「连接」对不上
@@ -433,15 +432,21 @@ impl Sidebar {
         let col = gtk::TreeViewColumn::new();
         // ⚠️ 阶段 93：**给行加内边距**。CellRenderer 的 padding 会把
         // **行高**撑开——以前行与行之间贴得死紧，二十来条看着像一堵墙。
+        //
+        // ⚠️ **阶段 142：纵向 padding 归零** ⇒ 行距交给 CSS 的
+        //    `treeview.view cell { padding }` 管 ⇒ **改密度立即生效**。
+        //    以前这 3px 是写死的 ⇒ 紧凑档压不动侧栏的行高
+        //    （CSS 管不到 CellRenderer 自己的 padding）。
         let r_icon = gtk::CellRendererPixbuf::new();
         // ⚠️ 阶段 93：**图标和文字之间要留空隙**。以前 padding 是 0
         // ⇒ 图标直接贴在字上（"🕐最近"），一眼看去挤成一坨。
-        r_icon.set_padding(5, 3);
+        //    ⚠️ **横向的 5px 留着**（只影响列内间距，不影响行高）。
+        r_icon.set_padding(5, 0);
         col.pack_start(&r_icon, false);
         col.add_attribute(&r_icon, "icon-name", COL_ICON);
         let r_txt = gtk::CellRendererText::new();
         r_txt.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        r_txt.set_padding(0, 3);
+        r_txt.set_padding(0, 0);
         col.pack_start(&r_txt, true);
         col.add_attribute(&r_txt, "markup", COL_TEXT);
         view.append_column(&col);
