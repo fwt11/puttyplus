@@ -8,7 +8,8 @@ PuTTY 兼容的 SSH 终端 + SFTP 图形客户端，**双实现并存且功能�
   仓库（`git@github.com:fwt11/puttyplus.git`），改完 push 即发布。
 - `c/` — 对照基线。C（GTK3 + VTE + libssh），**已冻结**（Rust 的功能改动不再反向
   移植）；只保留作命令行契约的历史依据，**不入库**（本地排除，见末节）。
-- `README.md` 用户文档（参数兼容表、堡垒机场景）；`docs/功能说明.md` 功能细节
+- `README.md` 用户文档（**只说功能**：特色置顶 + 下载 + 构建，2026-11-21 用户
+  要求大幅精简——项目定位不再局限堡垒机场景）；`docs/功能说明.md` 功能细节
   （`docs/功能说明-内部.md` 是内部版，含阶段号，**已入库**）。
 - ⚠️ **2026-11-11 起：台账全部入库**（`AGENTS.md` / `RESUME.md` /
   `tools/ROADMAP.md` / `tools/FEATURE_PARITY.md` / `tools/DBX_PLAN.md` /
