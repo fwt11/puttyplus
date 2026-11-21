@@ -5,6 +5,9 @@
 **SSH 终端 + 文件传输 + 数据库 + Docker 容器，一个窗口全搞定。**
 Linux / Windows 双平台，单文件程序，界面全中文。
 
+> 在找 **PuTTY / WinSCP / Xshell / FinalShell** 的替代品？PuTTY 的命令行参数这里全认，
+> WinSCP 式的双栏文件传输、集成式的数据库与容器管理，都在同一个程序里。
+
 ![连上服务器：终端 + 远程/本地双栏文件](docs/images/终端.png)
 
 ## 特色
