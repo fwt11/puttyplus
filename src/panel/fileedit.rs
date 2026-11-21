@@ -1314,6 +1314,13 @@ fn build(
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     toolbar.add_css_class("pp-toolbar");
 
+    // ⚠️ **阶段 143：工具栏瘦身**（原来 12 个按钮 ＋ 2 根分隔条，
+    //    窄面板里文件名都被挤没了）：
+    //    **常驻（7）**：撤销、重做、复制、粘贴、查找、保存、重新载入
+    //    **收进 ⋯（5）**：替换、跳转到行、自动换行、缩小/放大字号
+    //    ⇒ 全都有快捷键（Ctrl+H / Ctrl+G / Ctrl++ …）⇒ 收进菜单不丢能力。
+    let overflow = crate::layout::header::Overflow::new(tr("更多操作"));
+
     // ⚠️ **纯图标按钮**（用户 2026-10-28：主界面尽量少用文字）：
     // 说明文字挪进 tooltip。
     //
@@ -1342,18 +1349,12 @@ fn build(
     find_btn.add_css_class("flat");
     find_btn.set_tooltip_text(Some(tr("查找 (Ctrl+F)")));
 
-    let replace_btn = crate::a11y::icon_button("edit-find-replace-symbolic");
-    replace_btn.add_css_class("flat");
-    replace_btn.set_tooltip_text(Some(tr("替换 (Ctrl+H)")));
+    // ⚠️ **阶段 143：这三个收进 `⋯` 菜单**（工具栏只留 7 个）。
+    //    菜单行是**图标 ＋ 文字 ＋ 快捷键** ⇒ 比纯图标按钮好认。
+    let replace_btn = overflow.action_button("edit-find-replace-symbolic", "替换");
 
     // 「自动换行」是个开关，用 ToggleButton（按下=开着）
-    let wrap_btn = gtk::ToggleButton::new();
-    wrap_btn.add_css_class("flat");
-    wrap_btn.set_child(Some(&gtk::Image::from_icon_name(
-        "format-justify-fill-symbolic",
-    )));
-    crate::a11y::watch_tooltip(&wrap_btn);
-    wrap_btn.set_tooltip_text(Some(tr("自动换行")));
+    let wrap_btn = overflow.toggle_button("format-justify-fill-symbolic", "自动换行", false);
 
     let copy_btn = crate::a11y::icon_button("edit-copy-symbolic");
     copy_btn.add_css_class("flat");
@@ -1363,17 +1364,11 @@ fn build(
     paste_btn.add_css_class("flat");
     paste_btn.set_tooltip_text(Some(tr("粘贴 (Ctrl+V)")));
 
-    let goto_btn = crate::a11y::icon_button("go-jump-symbolic");
-    goto_btn.add_css_class("flat");
-    goto_btn.set_tooltip_text(Some(tr("跳转到行 (Ctrl+G)")));
+    let goto_btn = overflow.action_button("go-jump-symbolic", "跳转到行");
 
-    let zoom_in_btn = crate::a11y::icon_button("zoom-in-symbolic");
-    zoom_in_btn.add_css_class("flat");
-    zoom_in_btn.set_tooltip_text(Some(tr("放大字号 (Ctrl++)")));
+    let zoom_in_btn = overflow.action_button("zoom-in-symbolic", "放大字号");
 
-    let zoom_out_btn = crate::a11y::icon_button("zoom-out-symbolic");
-    zoom_out_btn.add_css_class("flat");
-    zoom_out_btn.set_tooltip_text(Some(tr("缩小字号 (Ctrl+-)")));
+    let zoom_out_btn = overflow.action_button("zoom-out-symbolic", "缩小字号");
 
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
@@ -1387,20 +1382,13 @@ fn build(
     // 按钮在右，视线得先扫过文件名才知道这是哪个文件）。
     toolbar.append(&undo_btn);
     toolbar.append(&redo_btn);
-    let sep1 = gtk::Separator::new(gtk::Orientation::Vertical);
-    toolbar.append(&sep1);
     toolbar.append(&copy_btn);
     toolbar.append(&paste_btn);
     toolbar.append(&find_btn);
-    toolbar.append(&replace_btn);
-    toolbar.append(&goto_btn);
-    toolbar.append(&wrap_btn);
-    toolbar.append(&zoom_out_btn);
-    toolbar.append(&zoom_in_btn);
-    let sep2 = gtk::Separator::new(gtk::Orientation::Vertical);
-    toolbar.append(&sep2);
     toolbar.append(&save_btn);
     toolbar.append(&reload_btn);
+    // ⚠️ **阶段 143**：`⋯`（低频动作：替换 / 跳转 / 换行 / 缩放）
+    toolbar.append(&overflow.button);
     toolbar.append(&spacer);
     if has_sub {
         // 子标签：标题进工具栏（HeaderBar 整个不显示）
@@ -3486,6 +3474,28 @@ fn too_large_msg(path: &str, size: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠️ **回归钉**（阶段 143）：收进 `⋯` 的按钮**不许**再直接进工具栏。
+    ///
+    /// 为什么：编辑器工具栏原来 12 个按钮 ＋ 2 根分隔条 ⇒ 窄面板里
+    /// 文件名都被挤没了 ⇒ 阶段 143 把「替换 / 跳转 / 自动换行 / 缩放」
+    /// 收进 `⋯`（它们全都有快捷键 ⇒ 能力没丢）。
+    #[test]
+    fn 低频按钮不在工具栏上() {
+        let src = include_str!("fileedit.rs");
+        for btn in [
+            "replace_btn",
+            "goto_btn",
+            "wrap_btn",
+            "zoom_in_btn",
+            "zoom_out_btn",
+        ] {
+            assert!(
+                !src.contains(&format!("toolbar.append(&{btn})")),
+                "「{btn}」又回到工具栏上了 ⇒ 工具栏又变胖（阶段 143 收进 ⋯ 了）"
+            );
+        }
+    }
 
     #[test]
     fn hex_模式一律不能保存() {

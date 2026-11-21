@@ -17,6 +17,7 @@ pub mod i18n;
 pub mod i18n_en;
 pub mod keymgr;
 pub mod keyui;
+pub mod layout;
 pub mod menu;
 pub mod newmenu;
 pub mod notify;
@@ -631,7 +632,7 @@ mod lint_tests {
         "pp-settings-root",
         "pp-setting-row",
         "pp-pane-toolbar",
-        "pp-pane-head",
+        "pp-panel-head",
         "pp-term-status",
         "pp-sidebar-head",
         "pp-sidebar",

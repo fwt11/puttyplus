@@ -1431,7 +1431,7 @@ popover.pp-menu separator { margin: 5px 4px; background-color: @pp_border; }
 .pp-settings-root { margin: 16px 18px; }
 .pp-setting-row { margin: 7px 12px; }
 .pp-pane-toolbar { margin: 6px 4px 4px 6px; }
-.pp-pane-head { margin: 6px 6px 2px 8px; }
+.pp-panel-head { margin: 6px 6px 2px 8px; }
 .pp-term-status { margin: 4px 8px 2px 8px; }
 .pp-sidebar-head { margin: 0 2px; }
 .pp-dialog-root { margin: 14px 16px; }

@@ -96,18 +96,31 @@ def main() -> int:
             return 1
 
     keys = [k for k, _ in entries]
-    if len(set(keys)) != len(keys):
-        print("表里有重复的 key ⇒ 先去重再排", file=sys.stderr)
-        return 1
+    dup = [k for k in set(keys) if keys.count(k) > 1]
+    if dup:
+        # ⚠️ 重复的 key 会让**二分查找**漏掉一条 ⇒ 保留**先出现的**那条
+        #    （表是排好序的 ⇒ 先出现的就是排在前面的那条）。
+        print(f"表里有 {len(dup)} 个重复 key，去重（保留先出现的）：{dup[:5]}")
+        seen = set()
+        uniq = []
+        for k, v in entries:
+            if k in seen:
+                continue
+            seen.add(k)
+            uniq.append((k, v))
+        entries = uniq
 
     entries.sort(key=lambda kv: kv[0].encode("utf-8"))
-    if [k for k, _ in entries] == keys:
-        print("已经排好序了")
-        return 0
-
     new_body = [f"    ({rust_quote(k)}, {rust_quote(v)})," for k, v in entries]
     out = lines[: start + 1] + new_body + lines[end:]
-    open(PATH, "w", encoding="utf-8").write("\n".join(out))
+    text = "\n".join(out)
+    text = re.sub(
+        r"pub static EN: \[\(&str, &str\); \d+\] = \[",
+        "pub static EN: [(&str, &str); %d] = [" % len(entries),
+        text,
+        count=1,
+    )
+    open(PATH, "w", encoding="utf-8").write(text)
     print(f"重排完成：{len(entries)} 条")
     return 0
 

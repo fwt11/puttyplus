@@ -201,6 +201,17 @@ const COMPACT_CSS: &str = r#"
   padding: 0 4px;
 }
 
+/* ⚠️ **顶栏菜单项**（阶段 143）：菜单栏标题是"入口"、字号不能压过正文
+   ⇒ 这里只收**高度**（1.8em → 1.5em，约 32px），不动字号。 */
+.pp-compact button.pp-menubar-item {
+  min-height: 1.5em;
+  padding: 0 3px;
+}
+.pp-xcompact button.pp-menubar-item {
+  min-height: 1.4em;
+  padding: 0 2px;
+}
+
 /* ⚠️ **对话框底部动作区**（阶段 142 补）：
    按钮的 `min-width: 64px` 是**最小宽度**——只设 padding 压不掉 ⇒
    这里必须显式 `min-width: 0`，否则「确定/取消」还是一排大按钮。 */
@@ -287,7 +298,7 @@ const COMPACT_CSS: &str = r#"
 .pp-compact .pp-settings-root { margin: 8px 9px; }
 .pp-compact .pp-setting-row { margin: 3px 6px; }
 .pp-compact .pp-pane-toolbar { margin: 3px 2px 2px 3px; }
-.pp-compact .pp-pane-head { margin: 3px 3px 1px 4px; }
+.pp-compact .pp-panel-head { margin: 3px 3px 1px 4px; }
 .pp-compact .pp-term-status { margin: 2px 4px 1px 4px; }
 .pp-compact .pp-sidebar { margin: 4px 2px 4px 3px; }
 .pp-compact .pp-sidebar-head { margin: 0 1px; }
@@ -369,7 +380,7 @@ const XCOMPACT_CSS: &str = r#"
 .pp-xcompact .pp-settings-root { margin: 5px 6px; }
 .pp-xcompact .pp-setting-row { margin: 1px 4px; }
 .pp-xcompact .pp-pane-toolbar { margin: 2px 1px 1px 2px; }
-.pp-xcompact .pp-pane-head { margin: 2px 2px 0 3px; }
+.pp-xcompact .pp-panel-head { margin: 2px 2px 0 3px; }
 .pp-xcompact .pp-term-status { margin: 1px 3px 0 3px; }
 .pp-xcompact .pp-sidebar { margin: 3px 1px 3px 2px; }
 .pp-xcompact .pp-sidebar-head { margin: 0; }

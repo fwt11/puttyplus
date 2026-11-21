@@ -1045,9 +1045,9 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
 
     /* ---- 第一行：面板名 + 连接状态 + 主传输动作 ---- */
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-pane-head` 控制**
+    // ⚠️ **阶段 142：内边距改由 CSS 类 `pp-panel-head` 控制**
     //（原来是 `set_margin_*` 写死的 ⇒ 切密度时面板头不变）。
-    header.add_css_class("pp-pane-head");
+    header.add_css_class(crate::layout::header::HEAD_CLASS);
 
     let title = gtk::Label::new(None);
     title.set_markup(if remote { tr("<b>远程</b>") } else { tr("<b>本地</b>") });
@@ -1095,6 +1095,11 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
     box_.append(&header);
 
     /* ---- 第二行：路径 + 导航 + 次级操作（收进 ⋯） ---- */
+    //
+    // ⚠️ **阶段 143：工具栏瘦身**（原来是 9 个控件，挤得路径框都快没了）：
+    // **常驻**：路径框 + 重连 + 主目录 + 刷新 + 传输队列（带角标 ⇒ 有信息增量）
+    // **收进 `⋯`**：显示/隐藏隐藏文件、跟随终端目录、目录镜像
+    // （⇒ 远程 6 个控件、本地 5 个；计划要求「≤5 + ⋯」）。
     toolbar.append(&entry);
 
     if remote {
@@ -1119,28 +1124,35 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
         refresh.connect_clicked(move |_| super::on_refresh(&st2, remote));
     }
     toolbar.append(&refresh);
-    let hidden = icon_toggle("view-conceal-symbolic", tr("显示/隐藏 隐藏文件"));
-    hidden.set_active(false);
+    // ⚠️ **阶段 143：低频项收进 `⋯`**（原来 9 个控件把路径框挤没了）。
+    // 收进菜单的：显示/隐藏隐藏文件、跟随终端目录、目录镜像。
+    let overflow = crate::layout::header::Overflow::new(tr("更多操作"));
     {
         let st2 = Rc::clone(st);
-        hidden.connect_toggled(move |b| {
-            st2.set_pane_show_hidden(remote, b.is_active());
-            super::on_refresh(&st2, remote);
-        });
+        overflow.toggle(
+            "view-conceal-symbolic",
+            "显示/隐藏 隐藏文件",
+            false,
+            move |on| {
+                st2.set_pane_show_hidden(remote, on);
+                super::on_refresh(&st2, remote);
+            },
+        );
     }
-    toolbar.append(&hidden);
 
     if remote {
-        let follow_btn = icon_toggle(
-            "emblem-synchronizing-symbolic",
-            tr("跟随终端目录（约 2 秒一次轮询，OSC 7 即时）\n按下 = 开启"),
-        );
-        follow_btn.set_active(true);
-        {
+        // ⚠️ **跟随终端目录**的开关住在 ⋯ 菜单里（阶段 143 收进去的）
+        //    ⇒ 存进 PanelState 的就是**菜单里那一个** ⇒ 别的代码改它时，
+        //    菜单里的勾选态也跟着变（不会出现两个开关各说各话）。
+        let follow_btn = {
             let st2 = Rc::clone(st);
-            follow_btn.connect_toggled(move |b| st2.follow.set(b.is_active()));
-        }
-        toolbar.append(&follow_btn);
+            overflow.toggle(
+                "emblem-synchronizing-symbolic",
+                "跟随终端目录",
+                true,
+                move |on| st2.follow.set(on),
+            )
+        };
         st.follow_btn.replace(Some(follow_btn));
 
         // 传输队列：会话级窗口，但传东西时经常要看，直接放按钮不藏进 ⋯。
@@ -1178,16 +1190,16 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
     } else {
         // 目录镜像：把本地当前目录单向推到远端当前目录，源在本地，
         // 入口跟着源走（以前挂在远程面板的 ⋯ 里，语义是反的）。
-        let mirror = icon_btn(
-            "document-send-symbolic",
-            tr("目录镜像（本地 → 远程）\n扫描差异、先预览再执行；删除远程多余文件需另行确认"),
-        );
         {
             let st2 = Rc::clone(st);
-            mirror.connect_clicked(move |_| super::mirrorui::open(&st2));
+            overflow.action(
+                "document-send-symbolic",
+                "目录镜像（本地 → 远程）",
+                move || super::mirrorui::open(&st2),
+            );
         }
-        toolbar.append(&mirror);
     }
+    toolbar.append(&overflow.button);
 
     box_.append(&toolbar);
 
