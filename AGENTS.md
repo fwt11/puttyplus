@@ -206,6 +206,18 @@ Windows CI：`.github/workflows/ci-windows.yml`（**独立文件，不动 `ci.ym
   `Unblock-File` 清标记即可运行；这不是文件损坏，别往二进制兼容上猜。
 - ⚠️ `.iss` / PowerShell 脚本要 **UTF-8 带 BOM**（英文 runner 上没 BOM 的
   中文按系统代码页解读必乱码）。
+- ⚠️ **Inno 6.x 的 `ChineseSimplified.isl` 在 `Languages\Unofficial\`
+  子目录**（中文翻译属"非官方维护"批次，新版才移回根目录）⇒ 写
+  `Languages\ChineseSimplified.isl` 根路径在 CI 上必挂「文件不存在」
+  （ISCC 退出码 1，2026-11-21 实测）。现在 `.iss` 的 `MessagesFile` 走
+  `{#LangFile}` 占位，由 ci-windows.yml / win_installer.ps1 按
+  「Unofficial → 根目录 → Default.isl（英文兜底）」的查找链传进来——
+  **将来再加语言或换版本，别把查找链删了**。
+- ⚠️ **查 CI 失败日志的路数**：匿名拿不到日志（API 403「Must have admin
+  rights」、网页也要登录）⇒ 能看的只有 job 的 steps 列表 + Annotations
+  （`/commits/<sha>/check-runs` 匿名可读，但常常只有「exit code N」）⇒
+  靠「哪一步挂了 + 本机复现该步」定位（本机有同款环境：C:\gtk、
+  CARGO_TARGET_DIR=C:\Users\fwt\t）。
 
 ⚠️ **Windows 上的 SSH 走哪条路（阶段 3，用户 2026-11-10 拍板）**：
 **PATH 里有 `ssh.exe`（或 `plink.exe`）⇒ 就 spawn 它**（终端里跑的是用户

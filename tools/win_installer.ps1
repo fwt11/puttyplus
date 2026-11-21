@@ -78,7 +78,21 @@ Say "staging：$stage\bin（exe + DLL）+ $stage\share\icons"
 
 # ------------------------------------------------------- 4) 打安装包
 Say "ISCC：$iscc"
-& $iscc "/DAppVersion=$ver" "/DStageDir=$stage_abs" "tools\windows-installer.iss"
+# ⚠️ 简体中文语言文件在 Inno 6.x 的 Languages\Unofficial\ 下（非官方维护
+#    批次；写 Languages\ 根路径 ISCC 必挂，2026-11-21 CI 实测）。新版可能
+#    移回根目录 ⇒ 依次找，都找不到退回英文 Default.isl（不挂，只降级）。
+$innoDir = Split-Path $iscc -Parent
+$lang = @("Languages\Unofficial\ChineseSimplified.isl",
+          "Languages\ChineseSimplified.isl") |
+  ForEach-Object { Join-Path $innoDir $_ } |
+  Where-Object { Test-Path $_ } |
+  Select-Object -First 1
+if (-not $lang) {
+    Write-Warning "没找到 ChineseSimplified.isl ⇒ 安装器界面退回英文"
+    $lang = Join-Path $innoDir "Default.isl"
+}
+Say "语言文件：$lang"
+& $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stage_abs" "tools\windows-installer.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC 失败（退出码 $LASTEXITCODE）" }
 $out = Join-Path $stage "puttyplus-windows-x86_64-setup.exe"
 if (-not (Test-Path $out)) { throw "ISCC 成功但找不到 $out" }

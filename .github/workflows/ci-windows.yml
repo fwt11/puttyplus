@@ -414,11 +414,27 @@ jobs:
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y --no-progress
           }
+          if (-not (Test-Path $iscc)) { throw "choco 装完还是找不到 ISCC：$iscc" }
+          # ⚠️ 简体中文语言文件在 6.x 的 Languages\Unofficial\ 下（中文翻译
+          #    属"非官方维护"批次；直接写 Languages\ 根路径 ISCC 必挂，
+          #    2026-11-21 实测）。新版可能移回根目录 ⇒ 依次找，都找不到
+          #    就退回英文 Default.isl（安装器界面变英文，但不挂）。
+          $innoDir = Split-Path $iscc -Parent
+          $lang = @("Languages\Unofficial\ChineseSimplified.isl",
+                    "Languages\ChineseSimplified.isl") |
+            ForEach-Object { Join-Path $innoDir $_ } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          if (-not $lang) {
+            Write-Warning "没找到 ChineseSimplified.isl ⇒ 安装器界面退回英文"
+            $lang = Join-Path $innoDir "Default.isl"
+          }
+          Write-Host "语言文件：$lang"
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
             Select-Object -First 1).Matches[0].Groups[1].Value
           # ⚠️ ISCC 解析相对路径是相对脚本目录（tools\）⇒ StageDir 传绝对路径
           $stageAbs = Join-Path $PWD "release-windows"
-          & $iscc "/DAppVersion=$ver" "/DStageDir=$stageAbs" tools\windows-installer.iss
+          & $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stageAbs" tools\windows-installer.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item "release-windows\puttyplus-windows-x86_64-setup.exe" |
             Format-List Name, Length, LastWriteTime

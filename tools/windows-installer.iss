@@ -30,6 +30,16 @@
 #define StageDir "release-windows"
 #endif
 
+# 简体中文语言文件的位置由调用方解析后用 /DLangFile= 传入（见
+# win_installer.ps1 / ci-windows.yml 的查找链）。
+# ⚠️ **Inno 6.x 的 ChineseSimplified.isl 在 Languages\Unofficial\ 子目录**
+#    （中文翻译属于"非官方维护"那一批，新版才移回根目录）⇒ 直接写
+#    Languages\ChineseSimplified.isl 在 CI 上必挂"文件不存在"（ISCC 退出码
+#    1，2026-11-21 实测踩过）。缺省值就是 6.7.x 的官方路径。
+#ifndef LangFile
+#define LangFile "compiler:Languages\Unofficial\ChineseSimplified.isl"
+#endif
+
 [Setup]
 ; AppId 用固定 GUID ⇒ 升级/卸载认得出来是同一个程序。
 ; ⚠️ 别换这个 GUID：换了之后老安装装不进新版本（互相视为不同程序）。
@@ -52,7 +62,7 @@ SolidCompression=yes
 WizardStyle=modern
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinese"; MessagesFile: "{#LangFile}"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
