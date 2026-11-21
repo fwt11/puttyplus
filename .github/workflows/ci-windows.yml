@@ -434,8 +434,23 @@ jobs:
             Select-Object -First 1).Matches[0].Groups[1].Value
           # ⚠️ ISCC 解析相对路径是相对脚本目录（tools\）⇒ StageDir 传绝对路径
           $stageAbs = Join-Path $PWD "release-windows"
-          & $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stageAbs" tools\windows-installer.iss
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # staging 自检：把数量打进日志（将来再挂，先看这里的数字）
+          $nDll = @(Get-ChildItem "release-windows\bin\*.dll").Count
+          $nIco = @(Get-ChildItem "release-windows\share\icons" -Recurse -File).Count
+          Write-Host "staging：exe=$(Test-Path 'release-windows\bin\puttyplus.exe') dll=$nDll 图标文件=$nIco"
+          if (-not (Test-Path "release-windows\bin\puttyplus.exe")) { throw "staging 缺 puttyplus.exe" }
+          if ($nDll -lt 40) { throw "staging 的 DLL 只有 $nDll 个（应该 ~68）" }
+          if ($nIco -lt 100) { throw "staging 的图标文件只有 $nIco 个" }
+          # ⚠️ ISCC 的输出要**接住再打**：直接失败时把最后 25 行用 ::error::
+          #    发出去 ⇒ 变成注解，匿名也能从 API 读到真实错误（日志要登录）。
+          $out = & $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stageAbs" tools\windows-installer.iss 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host "$_" }
+          if ($code -ne 0) {
+            ($out | Select-Object -Last 25) |
+              ForEach-Object { Write-Host "::error::ISCC: $_" }
+            exit $code
+          }
           Get-Item "release-windows\puttyplus-windows-x86_64-setup.exe" |
             Format-List Name, Length, LastWriteTime
 

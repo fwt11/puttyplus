@@ -46,6 +46,8 @@
 AppId={{3BBC686E-DF08-4F54-A62E-831881D4F3C0}
 AppName=PuTTYPlus
 AppVersion={#AppVersion}
+; [Icons] 里用了 {group} ⇒ 必须给 DefaultGroupName（不给部分版本直接编译错）
+DefaultGroupName=PuTTYPlus
 DefaultDirName={autopf}\PuTTYPlus
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes

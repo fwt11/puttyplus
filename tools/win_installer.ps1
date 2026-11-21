@@ -92,7 +92,14 @@ if (-not $lang) {
     $lang = Join-Path $innoDir "Default.isl"
 }
 Say "语言文件：$lang"
-& $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stage_abs" "tools\windows-installer.iss"
+$out = & $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stage_abs" "tools\windows-installer.iss" 2>&1
+$code = $LASTEXITCODE
+$out | ForEach-Object { Write-Host "$_" }
+if ($code -ne 0) {
+    Write-Host "---- ISCC 失败输出的最后 25 行 ----"
+    $out | Select-Object -Last 25 | ForEach-Object { Write-Host "  $_" }
+    throw "ISCC 失败（退出码 $code）"
+}
 if ($LASTEXITCODE -ne 0) { throw "ISCC 失败（退出码 $LASTEXITCODE）" }
 $out = Join-Path $stage "puttyplus-windows-x86_64-setup.exe"
 if (-not (Test-Path $out)) { throw "ISCC 成功但找不到 $out" }
