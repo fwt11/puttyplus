@@ -47,6 +47,12 @@ pub fn tab_title_label(title: &str) -> gtk::Label {
 pub struct Tab {
     pub page: gtk::Widget,
     pub panel_st: Rc<panel::PanelState>,
+    /// **格子树**（阶段 144）：这一页的格子结构。
+    ///
+    /// ⚠️ **为什么要在 `Tab` 里存着**：`CellTree` 持有连接页的**根容器**
+    /// （那层 Box）⇒ `CellTree` 一掉，根容器跟着掉 ⇒ **页面 widget 就没了**
+    /// ⇒ 必须有个长命的地方拿着它（`Tab` 跟着连接页一起活）。
+    pub cell_tree: Rc<crate::layout::tree::CellTree>,
     /// 该标签的终端（Ctrl+F 搜索用）
     pub term: crate::termview::TermView,
     /// 标签头（远程经 OSC 0/2 设置标题时更新文字）
@@ -642,9 +648,16 @@ impl Tabs {
                 }
             });
         }
+        // 连接页控件 = **格子树**（阶段 144）。
+        //
+        // ⚠️ **初始状态 = 一个叶子格子**，那个格子里装的就是**现有的整页
+        // `SubTabs`** ⇒ **界面与今天完全一致**（阶段 144 的硬验收）。
+        // 以后（阶段 145/146）格子可以横竖自由拆分 ⇒ 面板能自由组合。
+        //
         // 连接页控件 = **子标签区的外层容器**（notebook + 尾部的「+」按钮），
         // 不是裸的 notebook —— 「+」要落在子标签栏那一行的最右端。
-        let page = sub.root().clone();
+        let cell_tree = crate::layout::tree::CellTree::new(sub.clone());
+        let page = cell_tree.root().clone();
         page.set_hexpand(true);
         page.set_vexpand(true);
 
@@ -809,6 +822,7 @@ impl Tabs {
         self.tabs.borrow_mut().push(Tab {
             page: page_w.clone(),
             panel_st: sp.st.clone(),
+            cell_tree: cell_tree.clone(),
             term: tp.terminal().clone(),
             label,
             dot,
