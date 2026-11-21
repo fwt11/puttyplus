@@ -441,14 +441,22 @@ jobs:
           if (-not (Test-Path "release-windows\bin\puttyplus.exe")) { throw "staging 缺 puttyplus.exe" }
           if ($nDll -lt 40) { throw "staging 的 DLL 只有 $nDll 个（应该 ~68）" }
           if ($nIco -lt 100) { throw "staging 的图标文件只有 $nIco 个" }
-          # ⚠️ ISCC 的输出要**接住再打**：直接失败时把最后 25 行用 ::error::
-          #    发出去 ⇒ 变成注解，匿名也能从 API 读到真实错误（日志要登录）。
+          # ⚠️ ISCC 的输出要**接住再打**：失败时把最后 25 行发成注解，
+          #    匿名也能从 API 读到真实错误（日志要登录）。
+          # ⚠️ **必须拼成一条多行注解**：GitHub 每个 step 只保留**前 10 条**
+          #    ::error:: 注解（2026-11-21 实测：逐行发 ⇒ banner 占满 10 条、
+          #    真正报错那行被截掉）。换行转义成 %0A、% 转义成 %25。
           $out = & $iscc "/DAppVersion=$ver" "/DLangFile=$lang" "/DStageDir=$stageAbs" tools\windows-installer.iss 2>&1
           $code = $LASTEXITCODE
           $out | ForEach-Object { Write-Host "$_" }
           if ($code -ne 0) {
-            ($out | Select-Object -Last 25) |
-              ForEach-Object { Write-Host "::error::ISCC: $_" }
+            $tail = ($out | Select-Object -Last 25 | ForEach-Object {
+              $s = "$_"
+              $s = $s -replace '%', '%25'
+              $s = $s -replace "`r", ''
+              $s
+            }) -join '%0A'
+            Write-Host "::error::ISCC 失败（退出码 $code），输出尾部：%0A$tail"
             exit $code
           }
           Get-Item "release-windows\puttyplus-windows-x86_64-setup.exe" |

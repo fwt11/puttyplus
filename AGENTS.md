@@ -213,6 +213,15 @@ Windows CI：`.github/workflows/ci-windows.yml`（**独立文件，不动 `ci.ym
   `{#LangFile}` 占位，由 ci-windows.yml / win_installer.ps1 按
   「Unofficial → 根目录 → Default.isl（英文兜底）」的查找链传进来——
   **将来再加语言或换版本，别把查找链删了**。
+- ⚠️ **`.iss` 注释只能用 `;` 不能用 `#`**（2026-11-21 连挂两轮 CI 才定位）：
+  行首 `#` 是 Inno 预处理器（ISPP）的**指令前缀**，`#` 后面不是已知指令
+  （define/if/...）＝「Unknown preprocessor directive」⇒ ISCC 在
+  **Preprocessing 阶段**就退出码 1（编译阶段一行都到不了）——`# 中文`
+  注释行的锅；`#ifndef/#define/#endif` 本身没事。
+- ⚠️ **`::error::` 注解每个 step 只保留前 10 条**（2026-11-21 实测：逐行发
+  ISCC 输出 ⇒ banner 占满 10 条、真正报错那行被截掉）⇒ 要发就拼成
+  **一条多行注解**（换行转义 `%0A`、`%` 转义 `%25`，见 ci-windows.yml）；
+  注解从 check-runs 的 annotations API 匿名可读。
 - ⚠️ **查 CI 失败日志的路数**：匿名拿不到日志（API 403「Must have admin
   rights」、网页也要登录）⇒ 能看的只有 job 的 steps 列表 + Annotations
   （`/commits/<sha>/check-runs` 匿名可读，但常常只有「exit code N」）⇒

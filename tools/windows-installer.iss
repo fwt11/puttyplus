@@ -30,12 +30,18 @@
 #define StageDir "release-windows"
 #endif
 
-# 简体中文语言文件的位置由调用方解析后用 /DLangFile= 传入（见
-# win_installer.ps1 / ci-windows.yml 的查找链）。
-# ⚠️ **Inno 6.x 的 ChineseSimplified.isl 在 Languages\Unofficial\ 子目录**
-#    （中文翻译属于"非官方维护"那一批，新版才移回根目录）⇒ 直接写
-#    Languages\ChineseSimplified.isl 在 CI 上必挂"文件不存在"（ISCC 退出码
-#    1，2026-11-21 实测踩过）。缺省值就是 6.7.x 的官方路径。
+; 简体中文语言文件的位置由调用方解析后用 /DLangFile= 传入（见
+; win_installer.ps1 / ci-windows.yml 的查找链）。
+;
+; ⚠️ **本文件的注释只能用 ; 不能用 #**：行首 # 是 Inno 预处理器（ISPP）
+;    的指令前缀，# 后面不是已知指令（define/if/...）＝「Unknown
+;    preprocessor directive」⇒ ISCC 在 Preprocessing 阶段就退出码 1
+;    （2026-11-21 实测：连挂两轮 CI 才定位到，# 开头的中文注释行的锅）。
+;
+; ⚠️ **Inno 6.x 的 ChineseSimplified.isl 在 Languages\Unofficial\ 子目录**
+;    （中文翻译属于"非官方维护"那一批，新版才移回根目录）⇒ 直接写
+;    Languages\ChineseSimplified.isl 在 CI 上必挂"文件不存在"（ISCC 退出码
+;    1，2026-11-21 实测踩过）。缺省值就是 6.7.x 的官方路径。
 #ifndef LangFile
 #define LangFile "compiler:Languages\Unofficial\ChineseSimplified.isl"
 #endif
