@@ -270,6 +270,11 @@ pub struct CellTree {
     /// `(新格子编号, 新格子的容器)` ⇒ 上层给新格子装「+」菜单
     /// （会话级的菜单钩子是**闭包**，搬不过去 ⇒ 得按格子重新装）。
     new_cell_hook: RefCell<Option<Rc<dyn Fn(CellId, Rc<crate::panel::subtabs::SubTabs>)>>>,
+    /// **根分割条位置**变化的回调（阶段 146：文件面板的宽度记在这儿）。
+    ///
+    /// ⚠️ **为什么挂在树里**：根分割条（树根处的那个 Paned）**每次重画都会
+    ///    重建** ⇒ 谁想盯着它都得重新挂一次 ⇒ 干脆由树来挂。
+    root_pos_hook: RefCell<Option<Rc<dyn Fn(i32)>>>,
 }
 
 impl CellTree {
@@ -284,6 +289,7 @@ impl CellTree {
             next_id: std::cell::Cell::new(2),
             current: std::cell::Cell::new(id),
             new_cell_hook: RefCell::new(None),
+            root_pos_hook: RefCell::new(None),
         });
         tree.host.append(cell_widget(&cell));
         tree.wire_cell(id);
@@ -335,6 +341,31 @@ impl CellTree {
         if let Some(w) = widget {
             self.host.append(&w);
         }
+        // 根分割条**换了新的** ⇒ 重新挂一次位置监听。
+        self.wire_root_paned();
+    }
+
+    /// **根分割条**（树根处的那个 Paned）—— 只有一个格子时没有。
+    pub fn root_paned(&self) -> Option<gtk::Paned> {
+        self.host
+            .first_child()
+            .and_then(|w| w.downcast::<gtk::Paned>().ok())
+    }
+
+    /// 把「根分割条位置变了」的回调挂到当前的根分割条上。
+    fn wire_root_paned(&self) {
+        let Some(p) = self.root_paned() else { return };
+        let Some(f) = self.root_pos_hook.borrow().clone() else {
+            return;
+        };
+        let f2 = f.clone();
+        p.connect_notify_local(Some("position"), move |p, _| f2(p.position()));
+    }
+
+    /// 注册「根分割条位置变了」的回调（阶段 146：文件面板的宽度记在这儿）。
+    pub fn set_root_pos_hook<F: Fn(i32) + 'static>(&self, f: F) {
+        *self.root_pos_hook.borrow_mut() = Some(Rc::new(f));
+        self.wire_root_paned();
     }
 
     /// 当前的树（**快照**，纯数据）。

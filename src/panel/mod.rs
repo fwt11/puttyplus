@@ -106,14 +106,23 @@ pub struct PanelState {
     /// 是"程序在疯狂重连"）。
     /// ⇒ 成功了就清掉（下一条操作还能自愈），又失败了就报给用户并清掉。
     pub retried: Cell<bool>,
-    /// 文件面板**当前的宿主 Paned**（阶段 98：文本编辑页也能托管它）。
+    /// 文件面板**当前所在格子的容器**（阶段 146：文件面板独立成格之后）。
     ///
     /// ⚠️ **为什么留一份强引用**：GTK4 里容器被销毁（finalize）时会把它
-    /// 的子控件一起 `gtk_widget_destroy` ⇒ **宿主页签一关，文件面板就跟着
+    /// 的子控件一起 `gtk_widget_destroy` ⇒ **格子一关，文件面板就跟着
     /// 没了**（`PanelState` 手里那个 Rust 引用救不回来——widget 已经被标成
-    /// 「不可再用」）。留一份强引用 ⇒ 宿主 Paned 不会被 finalize ⇒ 文件
-    /// 面板安全等到下一次搬家（`host_file_panel` 把它挪走时才放手）。
-    pub file_host: RefCell<Option<gtk::Paned>>,
+    /// 「不可再用」）。留一份强引用 ⇒ 宿主不会被 finalize ⇒ 文件面板
+    /// 安全等到下一次搬家。
+    ///
+    /// ⚠️ **搬家时要跟着换**（阶段 146 的验收点）：文件面板那一页被拖到
+    ///    别的格子 ⇒ 宿主也变了 ⇒ 这个字段必须**同步**（见
+    ///    `SubTabs::set_moved_hook`）。
+    pub file_host: RefCell<Option<gtk::Widget>>,
+    /// **文件面板那一页**的 id（阶段 146：文件面板独立成格之后）。
+    ///
+    /// ⚠️ **干什么用**：面板搬进别的格子时，靠它认出"搬的是文件面板"
+    ///    （页签 id 搬家时**不变** ⇒ 认得出来）。
+    pub file_page_id: Cell<u64>,
     /// **正在连接 / 重连**（避免连点好几次，连一次就够）。
     pub connecting: Cell<bool>,
     /// 用户输入了路径、但**当时没连着** ⇒ 记在这儿，连上之后接着跳过去。
@@ -374,6 +383,7 @@ impl SftpPanel {
             conn_ok: Cell::new(false),
             file_w: Cell::new(340),
             file_host: RefCell::new(None),
+            file_page_id: Cell::new(0),
             conn_dead: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_retry: RefCell::new(None),
             retry_ops: RefCell::new(HashMap::new()),
@@ -608,7 +618,7 @@ pub fn host_file_panel(st: &Rc<PanelState>, host: &gtk::Paned) {
     host.set_position(st.file_w.get());  // 宽度按记忆值复位
     // ⚠️ **记住新宿主（强引用）**：见 `PanelState::file_host` 的注释——
     // 宿主页签被关掉时，宿主 Paned 还得活着，文件面板才不会被连带销毁。
-    *st.file_host.borrow_mut() = Some(host.clone());
+    *st.file_host.borrow_mut() = Some(host.clone().upcast());
 }
 
 /// 让宿主的分割条位置**同步回** `file_w`（搬家之后宽度得跟着走）。

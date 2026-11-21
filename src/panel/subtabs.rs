@@ -399,6 +399,13 @@ pub struct SubTabs {
     /// ⚠️ **为什么挂在 `SubTabs` 上**：落点只知道"自己"这个格子 ⇒ 得把
     ///    "往哪搬"这件事交给上层（`CellTree`）⇒ 它才知道别的格子在哪。
     move_hook: RefCell<Option<Rc<dyn Fn(u64, crate::layout::dnd::PageMove) -> bool>>>,
+    /// 「**有页签被搬进来了**」的回调（阶段 146）。
+    ///
+    /// 传**页签 id**（搬动时 id 不变 ⇒ 上层认得出是哪一个）。
+    ///
+    /// ⚠️ **干什么用**：文件面板那一页被拖到别的格子 ⇒ 它的**宿主**也变了
+    ///    ⇒ `PanelState.file_host` 必须跟着换（否则记的还是旧格子）。
+    moved_hook: RefCell<Option<Rc<dyn Fn(u64)>>>,
     /// 「**这个格子空了**」的回调（阶段 145）。
     ///
     /// ⚠️ **为什么与 `close_hooks` 分开**：`close_hooks` 说的是"这个**页签**
@@ -590,6 +597,7 @@ impl SubTabs {
             new_pop: RefCell::new(None),
             close_hooks: RefCell::new(Vec::new()),
             move_hook: RefCell::new(None),
+            moved_hook: RefCell::new(None),
             empty_hook: RefCell::new(None),
             caret: caret.clone(),
             edges: [edge_left, edge_right, edge_top, edge_bottom],
@@ -860,6 +868,11 @@ impl SubTabs {
             });
         }
         self.attach_page_drag(&head, id, data.kind);
+        // ⚠️ **通知上层**：有页签搬进这个格子了（阶段 146：宿主要跟着换）。
+        let hook = self.moved_hook.borrow().clone();
+        if let Some(f) = hook {
+            f(id);
+        }
         id
     }
 
@@ -2173,6 +2186,13 @@ impl SubTabs {
         *self.move_hook.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// 注册「**有页签被搬进来了**」的回调（阶段 146）。
+    ///
+    /// 传页签 id（搬动时 id 不变）。
+    pub fn set_moved_hook<F: Fn(u64) + 'static>(&self, f: F) {
+        *self.moved_hook.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// 注册「**这个格子空了**」的回调（阶段 145）。
     ///
     /// ⚠️ **不是"某个页签没了"**（那是 `add_close_hook`）——这里是"整个格子
@@ -2411,6 +2431,38 @@ mod tests {
     fn 纯英文按一列算() {
         assert_eq!(display_width("terminal"), 8);
         assert_eq!(display_width(""), 0);
+    }
+
+    /// 阶段 146：页签搬进另一个格子时 ⇒ **通知上层**（`file_host` 要跟着换）。
+    ///
+    /// ⚠️ **页签 id 搬家时不变** ⇒ 上层靠 id 认得出"搬的是文件面板"。
+    #[test]
+    fn 搬进来的页签会通知上层() {
+        use gtk::prelude::*;
+        if !gtk::is_initialized_main_thread() {
+            let _ = std::panic::catch_unwind(|| gtk::init());
+        }
+        if !gtk::is_initialized_main_thread() || gtk::gdk::Display::default().is_none() {
+            eprintln!("跳过 搬进来的页签会通知上层：本机没有显示服务");
+            return;
+        }
+        let sub = crate::panel::subtabs::SubTabs::new();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u64>::new()));
+        {
+            let seen = seen.clone();
+            sub.set_moved_hook(move |id| seen.borrow_mut().push(id));
+        }
+        let w = gtk::Label::new(Some("x"));
+        let id = sub.add_page("x", w.upcast::<gtk::Widget>(), None);
+        // 先摘再挂（跨格子搬运的正规做法）。
+        let data = sub.take_page(id).expect("应当能摘下来");
+        let id2 = sub.insert_page(data, None);
+        assert_eq!(id2, id, "搬完家页签 id 变了 ⇒ 上层认不出是哪个页签");
+        assert_eq!(
+            *seen.borrow(),
+            vec![id],
+            "搬进来的页签应当通知上层（file_host 靠它换宿主）"
+        );
     }
 
     #[test]

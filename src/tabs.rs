@@ -122,16 +122,15 @@ fn term_container(pane: &TermPane) -> gtk::Paned {
 ///
 /// ⇒ 兄弟终端要塞回**终端容器**那一格，塞到「终端子页」那格会把
 /// 整个编辑区顶掉。
-fn put_back_terminal(term_page: &gtk::Paned, sibling: &gtk::Widget) {
-    // 终端列（竖向）的上半 = 终端容器（横向）
-    if let Some(col) = term_page.end_child().and_downcast::<gtk::Paned>() {
-        if let Some(wrap) = col.start_child().and_downcast::<gtk::Paned>() {
-            wrap.set_start_child(Some(sibling));
-            return;
-        }
+fn put_back_terminal(term_col: &gtk::Paned, sibling: &gtk::Widget) {
+    // ⚠️ **阶段 146**：终端子页的内容**就是终端列**（竖向 Paned）
+    //    ⇒ 终端列的上半 = 终端容器（横向）。
+    if let Some(wrap) = term_col.start_child().and_downcast::<gtk::Paned>() {
+        wrap.set_start_child(Some(sibling));
+        return;
     }
-    // 兜底：没有那两层 ⇒ 直接塞回终端子页（老布局）
-    term_page.set_end_child(Some(sibling));
+    // 兜底：没有那层 ⇒ 直接塞回终端列的上半。
+    term_col.set_start_child(Some(sibling));
 }
 
 /// 给一个**格子容器**装上「+」菜单（阶段 145：每个格子都要能建终端）。
@@ -169,6 +168,28 @@ fn install_cell_new_hook(
                 }
             },
         );
+    });
+}
+
+/// 盯着「文件面板那一页搬去哪儿了」（阶段 146：`file_host` 要跟着换）。
+///
+/// ⚠️ **为什么每个格子都要挂一遍**：文件面板可能被拖到**任何**一个格子里
+///    ⇒ 谁接到它，谁就得更新 `PanelState.file_host`。
+///
+/// ⚠️ **闭包只抓弱引用**（AGENTS.md 引用环红线）。
+fn watch_file_host(
+    sub: &Rc<panel::subtabs::SubTabs>,
+    st: &Rc<panel::PanelState>,
+    file_page: Rc<Cell<u64>>,
+) {
+    let stw = Rc::downgrade(st);
+    let nb = sub.nb.clone();
+    sub.set_moved_hook(move |pid| {
+        let Some(st) = stw.upgrade() else { return };
+        if file_page.get() == pid {
+            // ⚠️ **宿主换了**：这一格子的 notebook 现在装着文件面板。
+            *st.file_host.borrow_mut() = Some(nb.clone().upcast());
+        }
     });
 }
 
@@ -582,12 +603,15 @@ impl Tabs {
         // 拖文件到终端 = 上传到当前远程目录
         panel::enable_drop_upload(&sp.st, tp.terminal());
 
-        // 终端子页的内容 = 「文件面板｜终端」的横向 Paned。
+        // 终端子页的内容 = **终端列**（竖向 Paned：上＝终端、下＝编辑区）。
+        //
+        // ⚠️ **阶段 146：文件面板独立成格** ⇒ 终端子页里**不再**有文件面板
+        //    ⇒ 以前那层「文件面板｜终端列」的横向 Paned **拆掉了**
+        //    （文件面板自己去自己的格子 ⇒ 见下面「文件面板独立成格」）。
         //
         // ⚠️ 终端面板的父容器**仍然是** `term_container()` 那层 Paned
         //（分屏逻辑要求「目标面板的父容器是 Paned」——AGENTS.md 记过这个
-        // 隐式契约），所以外面这层 Paned 只管文件面板的宽度。
-        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        // 隐式契约）⇒ 那层不能拆。
         let term_wrap = term_container(&tp);
         // 阶段 108：**终端列** = 竖向 Paned（上＝终端、下＝编辑区）。
         //
@@ -598,19 +622,11 @@ impl Tabs {
         term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_col.set_hexpand(true);
         term_col.set_vexpand(true);
-        term_page.set_end_child(Some(term_col.upcast_ref::<gtk::Widget>()));
         // 面板宽度：用上次会话记忆（默认 340：280 时工具栏 + 路径框挤在一起，
         // 路径永远只显示后半截）
         let pos = crate::settings::sftp_pane_pos();
         let init_w = if pos > 120 { pos } else { 340 };
         sp.st.file_w.set(init_w);
-        // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）
-        crate::settings::clamp_paned_start(&term_page, 0.38, 520);
-        term_page.set_hexpand(true);
-        term_page.set_vexpand(true);
-        // 文件面板的家：先记它的宿主（宽度变化要同步回 file_w），再挂进去
-        panel::track_file_width(&sp.st, &term_page);
-        panel::host_file_panel(&sp.st, &term_page);
         // 阶段 108：编辑区住进**终端列**（没有编辑器时它自己藏起来）。
         sub.host_editor_area(&term_col);
         // 终端页签带图标：主标签头已经不放图标了，"这一页是终端"由子页签
@@ -619,7 +635,7 @@ impl Tabs {
             Some("utilities-terminal-symbolic"),
             tr("终端"),
             panel::subtabs::PageKind::Terminal,
-            term_page.clone().upcast(),
+            term_col.clone().upcast(),
             None,
         );
         *sp.st.sub_tabs.borrow_mut() = Some(sub.clone());
@@ -660,7 +676,9 @@ impl Tabs {
                     if sub.mark_editor_host_tracked(eid) {
                         panel::track_file_width(&st, &host);
                     }
-                    panel::host_file_panel(&st, &host);
+                    // ⚠️ **阶段 146：文件面板不再跟着编辑器主栏页搬家**
+                    //    （它在自己的格子里 ⇒ 一直可见 ⇒ 用户要的是
+                    //    「编辑器旁边有 sftp」，现在**一直**在旁边）。
                     return;
                 }
                 let kind = sub.kind_by_page_num(num);
@@ -677,13 +695,12 @@ impl Tabs {
                     return;
                 }
                 // 拿不到宿主就**静默不动**：界面不崩、不空半个页面。
-                let Some(host) = sub.paned_by_page_num(num) else { return };
-                panel::host_file_panel(&st, &host);
-                // 阶段 108：编辑区跟着**当前终端页**走（跟文件面板一个
-                // 规矩）⇒ 切到别的终端页签时，编辑器也得跟过去。
-                if let Some(col) = host.end_child().and_downcast::<gtk::Paned>() {
-                    sub.host_editor_area(&col);
-                }
+                //
+                // ⚠️ **阶段 146**：终端页的内容现在**就是终端列**（竖向
+                //   Paned）⇒ 编辑区直接住进去（不用再从外面那层横向
+                //   Paned 里掏）。
+                let Some(col) = sub.paned_by_page_num(num) else { return };
+                sub.host_editor_area(&col);
             });
         }
         // 连接页控件 = **格子树**（阶段 144）。
@@ -706,13 +723,70 @@ impl Tabs {
             wr.set(Some(&page));
             wr
         };
+        // ⚠️ **文件面板那一页的 id**（搬家时 id 不变 ⇒ 靠它认出是它）。
+        let file_page = Rc::new(Cell::new(0u64));
         {
             let t = TABS.with(|w| w.borrow().clone());
             let st2 = Rc::clone(&sp.st);
             let pg2 = page_weak.clone();
+            let fp2 = file_page.clone();
             cell_tree.set_new_cell_hook(move |_id, cell_sub| {
                 install_cell_new_hook(&cell_sub, t.clone(), pg2.clone(), &st2);
+                // 新格子也可能成为文件面板的新家 ⇒ 一样要盯着。
+                watch_file_host(&cell_sub, &st2, fp2.clone());
             });
+        }
+        // ---- 阶段 146：文件面板**独立成格** ----
+        //
+        // 默认布局仍是「**文件在左、终端在右**」⇒ 老用户第一眼观感不变。
+        //
+        // ⚠️ **行为变更**（计划里写明）：文件面板不再"跟着当前终端页签搬家"
+        //    （阶段 97 的语义）⇒ 切终端页签时面板**不再搬家**（其实更好：
+        //    面板不闪了）。
+        //
+        // ⚠️ **文件面板仍是会话级的一个 widget** ⇒ 它进的是**一个格子里的
+        //    一页** ⇒ 拖这一页就能把它搬到别的格子（阶段 145 的搬运）。
+        {
+            let file_cell = cell_tree
+                .split_cell(
+                    crate::layout::cell::CellId(1),
+                    crate::layout::dnd::SplitZone::Left,
+                )
+                .expect("初始格子应当能拆");
+            // 文件面板那一页：内容就是文件面板自己的根控件。
+            let file_sub = cell_tree.cell(file_cell).unwrap().tabs.clone();
+            let file_pid = file_sub.add_page_icon_kind(
+                Some("folder-symbolic"),
+                tr("文件"),
+                panel::subtabs::PageKind::Other,
+                sp.st.root.clone().upcast(),
+                None,
+            );
+            file_page.set(file_pid);
+            // ⚠️ **记下文件面板那一页的 id**（搬家时靠它认出是它）。
+            sp.st.file_page_id.set(file_pid);
+            // ⚠️ **宿主**：文件面板现在住在文件格子的 notebook 里。
+            *sp.st.file_host.borrow_mut() = Some(file_sub.nb.clone().upcast());
+            // 终端格子也要盯着（文件面板可能被拖回它那儿）。
+            watch_file_host(&sub, &sp.st, file_page.clone());
+            watch_file_host(&file_sub, &sp.st, file_page.clone());
+            // 宽度：文件格子的宽度 = **树根分割条**的位置。
+            if let Some(p) = cell_tree.root_paned() {
+                p.set_position(sp.st.file_w.get());
+                // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）
+                crate::settings::clamp_paned_start(&p, 0.38, 520);
+            }
+            // 拖分割条 ⇒ 记住宽度（**弱引用**：AGENTS.md 引用环红线）。
+            {
+                let stw = Rc::downgrade(&sp.st);
+                cell_tree.set_root_pos_hook(move |pos| {
+                    if let Some(st) = stw.upgrade() {
+                        st.file_w.set(pos);
+                    }
+                });
+            }
+            // ⚠️ **当前格子**还是终端格子（不是刚拆出来的文件格子）。
+            cell_tree.set_current_cell(crate::layout::cell::CellId(1));
         }
         page.set_hexpand(true);
         page.set_vexpand(true);
@@ -856,7 +930,9 @@ impl Tabs {
             dot,
             // 阶段 97：`Tab.paned` 指的是**主终端子页内**那个 Paned
             //（左＝文件面板、右＝终端），不再是连接页的 Paned。
-            paned: term_page,
+            // ⚠️ **阶段 146**：`Tab.paned` 现在指的是**终端列**（竖向
+            //    Paned）——文件面板那层横向 Paned 已经拆了。
+            paned: term_col.clone(),
             term_pane: tp.clone(),
             // 布局树按子页签存：主终端子页签一棵
             layouts: RefCell::new(vec![(term_sub_id, PaneLayout::Leaf(tp.clone()))]),
@@ -1148,27 +1224,21 @@ impl Tabs {
                 });
             }
         }
-        // 阶段 97：额外终端页签也是「文件面板｜终端列」的 Paned，
-        // **左格先空着**（文件面板只有一个父级，用户切过来时才搬进来）。
-        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        // ⚠️ **阶段 146**：额外终端页签的内容**就是终端列**（文件面板已经
+        //    独立成格了 ⇒ 这里不再有「文件面板｜终端列」那层 Paned）。
         let term_wrap = term_container(&tp);
         // 阶段 108：终端列 = 竖向 Paned（上＝终端、下＝编辑区）。
         let term_col = gtk::Paned::new(gtk::Orientation::Vertical);
         term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_col.set_hexpand(true);
         term_col.set_vexpand(true);
-        term_page.set_end_child(Some(term_col.upcast_ref::<gtk::Widget>()));
-        term_page.set_hexpand(true);
-        term_page.set_vexpand(true);
-        // 宽度跟着记忆走（切过去时文件面板会按它复位）
-        panel::track_file_width(&panel_st, &term_page);
         // 阶段 108：编辑区也住进这一列（切过来时它跟着走）。
         sub.host_editor_area(&term_col);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
             panel::subtabs::PageKind::Terminal,
-            term_page.upcast(),
+            term_col.clone().upcast(),
             None,
         );
         sub.switch_to(id);
@@ -1380,28 +1450,21 @@ impl Tabs {
         // 拖文件到终端 = 上传到当前远程目录
         panel::enable_drop_upload(&st, tp.terminal());
 
-        // 阶段 97：重建的主终端页签也是「文件面板｜终端列」的 Paned，
-        // **把文件面板搬回来**（用户 × 掉终端页签时它只是"寄存"着，
-        // 没被销毁——`PanelState` 一直持有它）。
-        let term_page = gtk::Paned::new(gtk::Orientation::Horizontal);
+        // ⚠️ **阶段 146**：重建的主终端页签内容**就是终端列**（文件面板
+        //    在自己的格子里 ⇒ 不再需要"把它搬回来"这一步）。
         let term_wrap = term_container(&tp);
         // 阶段 108：终端列 = 竖向 Paned（上＝终端、下＝编辑区）。
         let term_col = gtk::Paned::new(gtk::Orientation::Vertical);
         term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_col.set_hexpand(true);
         term_col.set_vexpand(true);
-        term_page.set_end_child(Some(term_col.upcast_ref::<gtk::Widget>()));
-        term_page.set_hexpand(true);
-        term_page.set_vexpand(true);
-        panel::track_file_width(&st, &term_page);
-        panel::host_file_panel(&st, &term_page);
         // 阶段 108：编辑区住进这一列。
         sub.host_editor_area(&term_col);
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
             panel::subtabs::PageKind::Terminal,
-            term_page.clone().upcast(),
+            term_col.clone().upcast(),
             None,
         );
         sub.switch_to(id);
@@ -1415,8 +1478,9 @@ impl Tabs {
             t.term_sub_id.set(id);
             t.term = tp.terminal().clone();
             t.term_pane = tp.clone();
-            // `Tab.paned` 指的是主终端页签里那个 Paned ⇒ 跟着换
-            t.paned = term_page;
+            // `Tab.paned` 指的是主终端页签里那个 Paned（**阶段 146 之后
+            // 是终端列**）⇒ 跟着换
+            t.paned = term_col.clone();
             // 原来的 pane 已经跟着子页签一起被丢掉了，布局重置成单块
             //
             // ⚠️ 阶段 37：布局树**按子页签存**，重建后是新的一棵（新 id）；
@@ -1861,6 +1925,14 @@ impl Tabs {
                 )
             })
             .collect()
+    }
+
+    /// 某个连接页的**格子树**（阶段 146/147：面板怎么组合的都在里面）。
+    pub fn cell_tree_for(&self, page: &gtk::Widget) -> Option<Rc<crate::layout::tree::CellTree>> {
+        let tabs = self.tabs.borrow();
+        tabs.iter()
+            .find(|t| t.page == *page)
+            .map(|t| t.cell_tree.clone())
     }
 
     /// 指定标签页的面板状态（标签右键菜单用：对着哪个标签操作就是哪一份）。
@@ -2465,6 +2537,11 @@ pub fn close_pane(page: &gtk::Widget, pane: &TermPane) {
     if let Some(t) = TABS.with(|w| w.borrow().clone()) {
         t.close_pane(page, pane);
     }
+}
+
+/// 某个连接页的**格子树**（阶段 146/147）。
+pub fn cell_tree_for(page: &gtk::Widget) -> Option<Rc<crate::layout::tree::CellTree>> {
+    TABS.with(|w| w.borrow().clone()).and_then(|t| t.cell_tree_for(page))
 }
 
 /// 指定标签页的面板状态（终端右键菜单用：对着哪个标签操作就是哪一份）。

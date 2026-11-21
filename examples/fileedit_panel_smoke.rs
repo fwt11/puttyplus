@@ -52,12 +52,12 @@ fn pump(ms: u64) {
     }
 }
 
-/// 文件面板现在的宿主（它左边那个 Paned = 终端子页）。
-fn host_of(st: &puttyplus::panel::PanelState) -> gtk::Paned {
-    st.root
-        .parent()
-        .and_downcast::<gtk::Paned>()
-        .expect("文件面板应当挂在某个 Paned 的左格里")
+/// 文件面板现在的宿主（**阶段 146：它自己一格** ⇒ 父级是格子的容器）。
+///
+/// ⚠️ **不再是 Paned 的左格**：文件面板独立成格了（默认布局仍是"文件在左、
+///   终端在右"，但那是**格子树的分割条**，不是终端页里的 Paned）。
+fn host_of(st: &puttyplus::panel::PanelState) -> gtk::Widget {
+    st.root.parent().expect("文件面板应当挂在某个格子里")
 }
 
 /// 终端控件（阶段 107 的核心断言：编辑器开着的时候它**仍然可见**）。
@@ -348,16 +348,21 @@ fn main() {
     // ---- 1) 布局：文件面板｜终端列（横向），终端列 = 终端｜编辑区（竖向） ----
     assert_eq!(sub.current_kind(), PageKind::Terminal, "第一页应当是终端");
     assert!(st.root.is_mapped(), "终端页时文件面板应当显示在屏幕上");
-    let term_host = host_of(&st);
+    let _file_host = host_of(&st);
+    // ⚠️ **阶段 146**：文件面板的宽度 = **格子树根分割条**的位置。
+    let tree = tabs
+        .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
+        .expect("应当有格子树");
+    let root_paned = tree.root_paned().expect("两个格子 ⇒ 树根是分割条");
     assert_eq!(
-        term_host.position(),
+        root_paned.position(),
         340,
-        "终端页里文件面板的宽度不对：{}",
-        term_host.position()
+        "文件格子的宽度不对：{}",
+        root_paned.position()
     );
-    // 阶段 108：终端子页的右半是**终端列**（竖向 Paned）
-    let term_col = term_host
-        .end_child()
+    // 阶段 108：终端子页的内容**就是终端列**（竖向 Paned）
+    let term_col = sub
+        .paned_by_page_num(0)
         .and_downcast::<gtk::Paned>()
         .expect("阶段 108：终端子页右半应当是终端列（竖向 Paned）");
     let pages_before = sub.page_count();
@@ -416,12 +421,17 @@ fn main() {
         st.root.parent().is_some(),
         "文件面板被连带销毁了（开编辑器不该动它）"
     );
-    let still_term = host_of(&st);
+    let _still_term = host_of(&st);
+    let root_paned2 = tabs
+        .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
+        .expect("应当有格子树")
+        .root_paned()
+        .expect("两个格子 ⇒ 树根是分割条");
     assert_eq!(
-        still_term.position(),
+        root_paned2.position(),
         340,
-        "文件面板宽度变了：{}",
-        still_term.position()
+        "文件格子的宽度变了：{}",
+        root_paned2.position()
     );
 
     // ---- 阶段 108 的核心：编辑区在**终端列**里，与终端**同宽** ----
@@ -552,17 +562,24 @@ fn main() {
         .nb
         .page_num(&host.clone().upcast::<gtk::Widget>())
         .expect("编辑器应当是一个子页签");
-    // ⚠️ **左边那一格必须是文件面板**（这才是「编辑器旁边有 sftp」）。
-    let left = host
-        .start_child()
-        .expect("宿主左边应当摆着 SFTP 文件面板");
-    // ⚠️ **用 `==` 比较，不要比指针**：`glib::Object` 是 `*mut GObject` 的
-    // 透明包装 ⇒ `as *const _` 拿到的是**栈上 Rust 包装**的地址 ⇒ 每次都
-    // 不同（这个坑把我绕了好几轮）⇒ gtk4-rs 的 `PartialEq` 才是按 GObject
-    // 指针比较的。
+    // ⚠️ **阶段 146**：编辑器这一页的宿主**左边不再摆文件面板**了 ——
+    //    文件面板**独立成格**（在终端格子左边那一格）⇒ 它一直可见，
+    //    「编辑器旁边有 sftp」照样成立（而且更稳：切页签时它不闪）。
+    //
+    // ⇒ 断言改成：**文件面板仍在格子里、且没被搬走**。
     assert!(
-        left.upcast_ref::<gtk::Widget>() == st.root.upcast_ref::<gtk::Widget>(),
-        "编辑器左边应当是 **SFTP 文件列表**（用户 2026-11-15：「编辑器旁边要有 sftp」）"
+        st.root.parent().is_some(),
+        "文件面板被连带销毁了（编辑器拖出去不该动它）"
+    );
+    let file_cell_tree = tabs
+        .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
+        .expect("应当有格子树");
+    let file_cell = file_cell_tree
+        .cell_of_page(st.file_page_id.get())
+        .expect("文件面板那一页应当还在某个格子里");
+    assert!(
+        file_cell_tree.cell(file_cell).is_some(),
+        "文件面板那一页应当还在树上"
     );
     assert_eq!(
         sub.nb.current_page(),
@@ -598,7 +615,7 @@ fn main() {
         "文件名标签没被画出来（在页签头上却看不见 = 还是丢了）"
     );
     println!(
-        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、**左边 SFTP 列表 ｜ 右边编辑器**、文件名「{t}」还在 ✓",
+        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、**SFTP 列表在旁边的格子里**（阶段 146）、文件名「{t}」还在 ✓",
         n = pages_before + 1,
         t = fname.text()
     );
@@ -619,7 +636,7 @@ fn main() {
         st.root.parent().is_some(),
         "拖回编辑区后文件面板应当还挂在终端页的宿主上（不能被宿主销毁带走）"
     );
-    println!("[5] 拖回编辑区：又变回编辑区里的编辑器、SFTP 列表回到终端页 ✓");
+    println!("[5] 拖回编辑区：又变回编辑区里的编辑器、SFTP 列表**一直在自己那格**里 ✓");
 
     // ---- 5b) **真的**拖一次（xdotool 驱动 X 指针）→ 拖到子标签栏 ----
     //
