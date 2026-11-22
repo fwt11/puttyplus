@@ -322,6 +322,18 @@ jobs:
         #    example 也编一遍 ⇒ 直接失败。
         # ⚠️ GTK 相关的那几个用例会**按设计跳过**（gtk::init() 在 libtest 的
         #    子线程上起不来）⇒ 与 Linux 上不给 DISPLAY 时的行为一致。
+        #
+        # ⚠️ **看门狗**（2026-11-22 加；v0.9.3 那轮踩的坑）：
+        #    那一轮这一步跑了 **109 分钟**，被 job 的 120 分钟上限砍掉 ⇒
+        #    **job 日志与 artifact 都要登录才拿得到** ⇒ 公开注解只有一句
+        #    "exceeded the maximum execution time of 2h0m0s"
+        #    ⇒ **查不出是哪个用例卡住**。
+        #    ⇒ 这里自己限时 **45 分钟**（含编译约 10 分钟，余量充足）：
+        #      超时就把**卡住的那个用例**报成一条**公开可读**的注解。
+        #    ⚠️ **为什么能精确点名**：libtest 的 pretty 输出在**用例开始时**
+        #    就打印 `test <名字> ... `，跑完才补 `ok`
+        #    ⇒ 卡住的用例在日志里就是**「开了头、没结果」的那一行**
+        #    （本机用 scratch crate 实测过，不是猜的）。
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
@@ -333,21 +345,101 @@ jobs:
           New-Item -ItemType Directory -Force $home | Out-Null
           $env:HOME = $home
           $env:USERPROFILE = $home
-          cargo test --lib --locked 2>&1 | Tee-Object -FilePath test.log
-          if ($LASTEXITCODE -ne 0) {
+
+          # ---- 看门狗：后台跑测试，自己限时 ----
+          # ⚠️ 日志放**工作目录**（不是 RUNNER_TEMP）⇒ 末尾「上传契约日志」
+          #    那一步照样收得到（它写的是相对路径）。
+          $testLog = Join-Path $PWD "test.log"
+          $errLog  = Join-Path $PWD "test.err"
+          $limitMs = 45 * 60 * 1000
+          $p = Start-Process -FilePath "cargo" `
+               -ArgumentList @("test", "--lib", "--locked") `
+               -NoNewWindow -PassThru `
+               -RedirectStandardOutput $testLog -RedirectStandardError $errLog
+          if (-not $p.WaitForExit($limitMs)) {
+            Write-Host "::error::Windows 单元测试超时（45 分钟）⇒ 卡在哪个用例见下一条注解"
+            taskkill /T /F /PID $p.Id | Out-Null
+            Start-Sleep -Seconds 2
+            # ---- 解析日志：找出「开了头、没结果」的用例（= 卡住的那个）----
+            $stuck = @()
+            $done = @()
+            $began = $false
+            foreach ($l in (Get-Content $testLog -ErrorAction SilentlyContinue)) {
+              if ($l -match '^running (\d+) tests$') { $began = $true }
+              if ($l -match '^test (.+) \.\.\. ok$') { $done += $Matches[1] }
+              elseif ($l -match '^test (.+) \.\.\. $') { $stuck += $Matches[1] }
+            }
+            if ($stuck.Count -eq 0) {
+              if (-not $began) {
+                Write-Host "::error::连「running N tests」都没出现 ⇒ 测试二进制可能没起来（编译/链接卡住）"
+              } else {
+                Write-Host "::error::没有「开了头没结果」的用例 ⇒ 卡在跑完之后的收尾阶段（退出/析构/线程收尾）"
+                if ($done.Count -gt 0) {
+                  $tail = @($done | Select-Object -Last 10) -join ' | '
+                  Write-Host "::error::最后跑完的 10 个用例：$tail"
+                }
+              }
+            } else {
+              $names = ($stuck -join ' | ')
+              if ($names.Length -gt 4000) { $names = $names.Substring(0, 4000) }
+              $names = $names -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
+              Write-Host "::error::卡住的用例（共 $($stuck.Count) 个；已跑完 $($done.Count) 个）：$names"
+              # ---- 最后一个跑完的用例（帮助定位卡在哪一步之后）----
+              if ($done.Count -gt 0) {
+                $last = $done[$done.Count - 1] -replace '%', '%25'
+                Write-Host "::error::卡住前最后跑完的用例：$last"
+              }
+              # ---- **单独重跑那个用例**（限时 5 分钟）⇒ 看到它卡在哪一步 ----
+              $one = $stuck[0]
+              if ($one -notmatch '[\s"]') {
+                $solo = Join-Path $PWD "solo.log"
+                Write-Host "---- 单独重跑：$one（限时 5 分钟）----"
+                $q = Start-Process -FilePath "cargo" `
+                     -ArgumentList @("test", "--lib", "--locked", "--", "--exact", $one, "--nocapture") `
+                     -NoNewWindow -PassThru `
+                     -RedirectStandardOutput $solo -RedirectStandardError (Join-Path $PWD "solo.err")
+                if (-not $q.WaitForExit(5 * 60 * 1000)) {
+                  taskkill /T /F /PID $q.Id | Out-Null
+                  Start-Sleep -Seconds 1
+                  Write-Host "::error::单独重跑也卡住 ⇒ 卡在用例内部（下面的输出停在最后一行）"
+                }
+                Get-Content $solo -ErrorAction SilentlyContinue |
+                  Select-Object -Last 25 | ForEach-Object { Write-Host $_ }
+              }
+            }
+            Write-Host "---- test.log 末尾 30 行 ----"
+            Get-Content $testLog -Tail 30 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            Write-Host "---- test.err 末尾 15 行 ----"
+            Get-Content $errLog -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            # ---- **还活着的子进程**：抓「spawn 出去的孙进程继承了 stdout
+            #      管道 ⇒ 父进程永远等不到 EOF」这一类真凶（Windows 特有）----
+            $alive = @(Get-Process -ErrorAction SilentlyContinue |
+                       Where-Object { $_.ProcessName -match 'puttyplus|ssh|tar|bash|^sh$|agent' } |
+                       ForEach-Object { "$($_.ProcessName)($($_.Id))" })
+            if ($alive.Count -gt 0) {
+              Write-Host "::error::还活着的相关进程（共 $($alive.Count) 个）：$($alive -join ' | ')"
+            } else {
+              Write-Host "（没有发现还活着的 puttyplus/ssh/tar 之类进程）"
+            }
+            exit 1
+          }
+          $p.WaitForExit()
+          Get-Content $testLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+          Get-Content $errLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+          if ($p.ExitCode -ne 0) {
             # ⚠️ **失败清单要单独一条注解**：以前是把 test.log 的尾巴
             #    （含 backtrace）塞进一条注解 ⇒ 8000 字符上限一截，
             #    **只看得到前一两条失败**（第 7、9 轮都因此漏看了别的失败）。
             #    ⇒ 第一条注解只放**全部失败用例名**（挤成一行 ⇒ 不会被截断），
             #      第二条注解放关键信息（panic 位置 + 左右值）。
-            $failed = @(Select-String -Path test.log -Pattern '^---- (.+) stdout ----$' |
+            $failed = @(Select-String -Path $testLog -Pattern '^---- (.+) stdout ----$' |
                        ForEach-Object { $_.Matches[0].Groups[1].Value })
             if (-not $failed) { $failed = @("(没抓到用例名，去 artifact 里看 test.log)") }
             $names = ($failed -join ' | ')
             $names = $names -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
             Write-Host "::error::Windows 单元测试失败，共 $($failed.Count) 条：$names"
 
-            $details = @(Select-String -Path test.log -Pattern 'panicked at|assertion|left:|right:|Err value' |
+            $details = @(Select-String -Path $testLog -Pattern 'panicked at|assertion|left:|right:|Err value' |
                          Select-Object -First 60 | ForEach-Object { $_.Line.Trim() })
             $d = ($details -join ' | ')
             if ($d.Length -gt 6000) { $d = $d.Substring(0, 6000) }
@@ -509,4 +601,5 @@ jobs:
             contract.log
             selftest.log
             test.log
+            test.err
           if-no-files-found: warn
