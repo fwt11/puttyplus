@@ -122,7 +122,16 @@ pub struct PanelState {
     ///
     /// ⚠️ **干什么用**：面板搬进别的格子时，靠它认出"搬的是文件面板"
     ///    （页签 id 搬家时**不变** ⇒ 认得出来）。
+    ///
+    /// ⚠️ **阶段 146b**：用户把「文件」那个页签**关掉**之后，这一页会**重新
+    ///    建**（id 变）⇒ 这里是**活的**，谁想知道文件面板是哪一个都读它。
     pub file_page_id: Cell<u64>,
+    /// **文件面板那个格子容器**（阶段 146b：关掉之后要能再接回来）。
+    ///
+    /// ⚠️ **为什么留一份强引用**：格子被关掉 ⇒ 那个容器就没人引用了 ⇒
+    ///    下次想「再显示文件面板」时**连容器都没了**（得从头造一个空的，
+    ///    而空容器没有文件面板那一页）⇒ 留在这儿 ⇒ 关了也能接回来。
+    pub file_sub: RefCell<Option<Rc<subtabs::SubTabs>>>,
     /// **正在连接 / 重连**（避免连点好几次，连一次就够）。
     pub connecting: Cell<bool>,
     /// 用户输入了路径、但**当时没连着** ⇒ 记在这儿，连上之后接着跳过去。
@@ -384,6 +393,7 @@ impl SftpPanel {
             file_w: Cell::new(340),
             file_host: RefCell::new(None),
             file_page_id: Cell::new(0),
+            file_sub: RefCell::new(None),
             conn_dead: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_retry: RefCell::new(None),
             retry_ops: RefCell::new(HashMap::new()),

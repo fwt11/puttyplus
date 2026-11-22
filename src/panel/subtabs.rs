@@ -52,9 +52,6 @@ pub use crate::layout::dnd::PageKindTag;
 /// 子标签标题的最大显示列数（超了省略号收尾，完整标题进 tooltip）。
 const MAX_TITLE_CHARS: i32 = 24;
 
-/// **边缘落点的宽度**（像素）—— 离边这么近才算"拖到边上要拆分"。
-const EDGE_MARGIN: f64 = 24.0;
-
 /// 落点命中了哪儿（阶段 145）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hit {
@@ -418,10 +415,11 @@ pub struct SubTabs {
     empty_hook: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     /// **蓝色插入符**（拖到页签栏上时显示在那儿）。
     caret: gtk::Box,
-    /// **边缘高亮条**（拖到格子边上时亮起来的那条）。
+    /// **落点高亮框**（阶段 146b：xterminal 那种「整块亮起来」）。
     ///
-    /// 四条边各一个 ⇒ 拖到哪条边就亮哪条。
-    edges: [gtk::Box; 4],
+    /// ⚠️ **盖住的是「新格子要占的那一半」**（拆左/右/上/下）或**页签栏
+    ///    那一行**（插入）⇒ 用户一眼看出会落在哪儿 ⇒ 不用精准对准。
+    drop_frame: gtk::Box,
 }
 
 impl SubTabs {
@@ -483,6 +481,27 @@ impl SubTabs {
         caret.set_can_target(false);
         main_group.add_overlay(&caret);
 
+        // ---- **落点高亮框**（阶段 146b：xterminal 那种「整块亮起来」）----
+        //
+        // ⚠️ **为什么不再用「四条窄边条」**：用户 2026-11-22 提的（照
+        //    xterminal）——**整个要落进去的区域亮起来**，用户**不用精准
+        //    对准某个点**，而且框本身就是**指引**（一眼看出会落在哪儿）。
+        //
+        // ⚠️ **框的位置跟着指针走**：拆左/右/上/下 ⇒ 框盖住**新格子要占的
+        //    那一半**；落在页签栏 ⇒ 框盖住**页签栏那一行**（＋ 蓝色竖线指出
+        //    确切插入位置）。
+        //
+        // ⚠️ **挂在 `main_group` 上**（不是 notebook）：`main_group` 的主
+        //   子控件就是 notebook ⇒ 两者的坐标**重合** ⇒ 用 notebook 的尺寸
+        //   摆框，位置正好对得上。
+        let drop_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        drop_frame.add_css_class("pp-drop-frame");
+        drop_frame.set_visible(false);
+        // ⚠️ **不能抢指针**（`can_target = false`）⇒ 否则它会挡住落点
+        //   ⇒ 拖放管线接不上（页签栏那个接收器收不到）。
+        drop_frame.set_can_target(false);
+        main_group.add_overlay(&drop_frame);
+
         // ---- **侧栏**（阶段 137）：左右分栏里那一栏 ----
         //
         // ⚠️ **为什么是另一个 notebook**：每个「栏」要有**自己的页签栏**
@@ -514,31 +533,6 @@ impl SubTabs {
         // 连接页的内容 = 工作区。
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&work));
-
-        // ---- **边缘高亮条**（阶段 145）----
-        //
-        // 拖到格子**边上**时，那条边亮起来（蓝条）⇒ 用户看得见"要劈开了"。
-        //
-        // ⚠️ **四条各一个 widget**（不是一条带方向的）⇒ 亮哪条一目了然。
-        // ⚠️ **不能抢指针**（`can_target = false`）⇒ 落点判定照旧走
-        //   notebook 那个接收器。
-        let mut edge_left = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let mut edge_right = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let mut edge_top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        let mut edge_bottom = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        for (e, cls, ha, va) in [
-            (&mut edge_left, "pp-drop-edge-left", gtk::Align::Start, gtk::Align::Fill),
-            (&mut edge_right, "pp-drop-edge-right", gtk::Align::End, gtk::Align::Fill),
-            (&mut edge_top, "pp-drop-edge-top", gtk::Align::Fill, gtk::Align::Start),
-            (&mut edge_bottom, "pp-drop-edge-bottom", gtk::Align::Fill, gtk::Align::End),
-        ] {
-            e.add_css_class(cls);
-            e.set_halign(ha);
-            e.set_valign(va);
-            e.set_visible(false);
-            e.set_can_target(false);
-            overlay.add_overlay(e);
-        }
 
         // ---- 编辑区（阶段 107/108）：终端与文件编辑器同窗同时显示 ----
         //
@@ -604,7 +598,7 @@ impl SubTabs {
             moved_hook: RefCell::new(None),
             empty_hook: RefCell::new(None),
             caret: caret.clone(),
-            edges: [edge_left, edge_right, edge_top, edge_bottom],
+            drop_frame: drop_frame.clone(),
         });
 
         // 点击「+」→ 弹菜单（内容由上层给）
@@ -960,13 +954,23 @@ impl SubTabs {
         }
         // ⚠️ **格子空了 ⇒ 通知上层把它摘掉**（阶段 145：关掉一个格子里的最后
         //   一个页签 ⇒ 该格子自动关闭，父节点收拢）。
-        if self.pages.borrow().is_empty() {
+        self.notify_empty();
+        true
+    }
+
+    /// **这一格空了 ⇒ 通知上层把它摘掉**（阶段 145）。
+    ///
+    /// ⚠️ **判据是「notebook 里还有没有页」**（不是「`pages` 列表空不空」）：
+    ///    **编辑器那一页不在 `pages` 里**（它在 `editor_pages` 里）⇒ 只看
+    ///    `pages` 会把「还开着编辑器的那一格」误判成空的 ⇒ 关掉终端页签就把
+    ///    整格（含编辑器）一起端掉 ⇒ **编辑器凭空消失**。
+    fn notify_empty(&self) {
+        if self.nb.n_pages() == 0 {
             let hook = self.empty_hook.borrow().clone();
             if let Some(f) = hook {
                 f();
             }
         }
-        true
     }
 
     /// 改子页的标题（页签头上显示的字）。
@@ -1486,6 +1490,13 @@ impl SubTabs {
                         self.nb.remove_page(Some(num));
                     }
                 }
+                // ⚠️ **这一格现在空了 ⇒ 收拢它**（阶段 146b）。
+                //
+                // ⚠️ **为什么编辑器走了也要收拢**：编辑区（编辑器本体）是
+                //    **跟着终端列**显示的（终端列搬到哪个格子就在哪儿显示）⇒
+                //    编辑器搬走以后这一格**确实什么都不剩** ⇒ 不收拢就是一个
+                //    空灰壳（用户 2026-11-22 报的「中间留了一个空白」）。
+                self.notify_empty();
             }
             EditorPlace::Side => {
                 // 侧栏那一页 ⇒ 从侧栏的 notebook 里摘掉。
@@ -1704,6 +1715,18 @@ impl SubTabs {
         // 用户要看的是**终端页**（编辑区在终端列下方）⇒ 顺便把文件面板搬回
         // 终端页的宿主（`switch-page` 回调做这件事）。
         self.show_editor_host_page();
+        // ⚠️ **这一格现在空了 ⇒ 收拢它**（阶段 146b：用户 2026-11-22 报的
+        //    「拖走之后中间留了一个空白」）。
+        //
+        // ⚠️ **为什么编辑器走了也要收拢**：编辑区（编辑器本体）是**跟着终端
+        //    列**显示的（终端列搬到哪个格子就在哪儿显示）⇒ 编辑器搬走以后
+        //    这一格**确实什么都不剩** ⇒ 不收拢就是一个空灰壳。
+        //
+        // ⚠️ **为什么这里安全**：编辑区这个 widget 还挂在**别的格子**的终端
+        //    列里（GTK 引用计数）⇒ 收拢这一格不会把它销毁 ⇒ 编辑器照常用
+        //    （它的登记在这个 `SubTabs` 里，而这个 `SubTabs` 被
+        //    `PanelState.sub_tabs` 持着 ⇒ 不会跟着格子一起释放）。
+        self.notify_empty();
         true
     }
 
@@ -2064,11 +2087,15 @@ impl SubTabs {
     ///    变回一个子页签（`move_editor_to_main`）⇒ 这条不能丢。
     fn attach_cell_target(self: &Rc<Self>) {
         /// 落点算是哪种（页签栏 / 哪条边 / 不接）。
+        ///
+        /// ⚠️ **阶段 146b**：页签栏之外**整块格子都是拆分落点**（按指针
+        ///    离哪条边更近来定方向）⇒ 用户**不用精准对准**（用户
+        ///    2026-11-22 提的，照 xterminal）。
         fn hit(nb: &gtk::Notebook, x: f64, y: f64) -> Hit {
             if y < tab_strip_height(nb) as f64 {
                 return Hit::TabBar;
             }
-            match crate::layout::dnd::zone_at(x, y, nb.width(), nb.height(), EDGE_MARGIN) {
+            match crate::layout::dnd::zone_by_position(x, y, nb.width(), nb.height()) {
                 Some(z) => Hit::Edge(z),
                 None => Hit::None,
             }
@@ -2145,11 +2172,23 @@ impl SubTabs {
         self.nb.add_controller(dst);
     }
 
-    /// 显示/收起拖放反馈（蓝色插入符 ＋ 边缘高亮）。
+    /// 显示/收起拖放反馈（**落点高亮框** ＋ 蓝色插入符）。
+    ///
+    /// ⚠️ **阶段 146b：整个格子都是落点**（不再是「边缘 24px 那条窄带」）
+    ///    ⇒ 用户 2026-11-22 提的（照 xterminal）：**不用精准对准**，
+    ///    而且**框本身就是指引**（一眼看出会落在哪儿）。
     fn show_drop_feedback(&self, h: &Hit, x: f64) {
         self.hide_drop_feedback();
+        let nb_w = self.nb.width();
+        let nb_h = self.nb.height();
         match h {
             Hit::TabBar => {
+                // 插入 ⇒ 框盖住**页签栏那一行**（＋ 竖线指出确切位置）。
+                let strip = tab_strip_height(&self.nb).max(12);
+                self.drop_frame.set_halign(gtk::Align::Fill);
+                self.drop_frame.set_valign(gtk::Align::Start);
+                self.drop_frame.set_size_request(nb_w.max(1), strip);
+                self.drop_frame.set_visible(true);
                 // 插入符摆在落点处（页签头的横坐标由我们自己量）。
                 let xs = self.page_head_xs();
                 let idx = crate::layout::dnd::insert_index_at(&xs, x);
@@ -2159,17 +2198,22 @@ impl SubTabs {
                     (false, None) => xs.last().copied().unwrap_or(2.0) + 40.0,
                 };
                 self.caret.set_margin_start(px as i32);
-                self.caret.set_height_request(tab_strip_height(&self.nb).max(12));
+                self.caret.set_height_request(strip);
                 self.caret.set_visible(true);
             }
             Hit::Edge(z) => {
-                let i = match z {
-                    crate::layout::dnd::SplitZone::Left => 0,
-                    crate::layout::dnd::SplitZone::Right => 1,
-                    crate::layout::dnd::SplitZone::Top => 2,
-                    crate::layout::dnd::SplitZone::Bottom => 3,
+                // 拆分 ⇒ 框盖住**新格子要占的那一半**。
+                use crate::layout::dnd::SplitZone;
+                let (ha, va, w, hh) = match z {
+                    SplitZone::Left => (gtk::Align::Start, gtk::Align::Fill, nb_w / 2, nb_h),
+                    SplitZone::Right => (gtk::Align::End, gtk::Align::Fill, nb_w / 2, nb_h),
+                    SplitZone::Top => (gtk::Align::Fill, gtk::Align::Start, nb_w, nb_h / 2),
+                    SplitZone::Bottom => (gtk::Align::Fill, gtk::Align::End, nb_w, nb_h / 2),
                 };
-                self.edges[i].set_visible(true);
+                self.drop_frame.set_halign(ha);
+                self.drop_frame.set_valign(va);
+                self.drop_frame.set_size_request(w.max(1), hh.max(1));
+                self.drop_frame.set_visible(true);
             }
             Hit::None => {}
         }
@@ -2178,9 +2222,7 @@ impl SubTabs {
     /// 收起拖放反馈。
     fn hide_drop_feedback(&self) {
         self.caret.set_visible(false);
-        for e in self.edges.iter() {
-            e.set_visible(false);
-        }
+        self.drop_frame.set_visible(false);
     }
 
     /// 注册「跨格子搬页签」的回调（阶段 145）。
@@ -2475,5 +2517,52 @@ mod tests {
         let long = "x".repeat(100);
         let w = display_width(&long).max(4) as i32;
         assert!(w.min(MAX_TITLE_CHARS) <= MAX_TITLE_CHARS);
+    }
+
+    /// **阶段 146b：编辑器搬走 ⇒ 那一格空了 ⇒ 要收拢**。
+    ///
+    /// ⚠️ **用户 2026-11-22 报的**：把编辑器从一格拖到别处之后，原来那一格
+    ///    **没有收拢** ⇒ 中间留了一大片空白（看着像坏了）。
+    ///
+    /// ⚠️ **为什么这一格确实空了**：编辑区（编辑器本体）是**跟着终端列**
+    ///    显示的（终端列搬到哪个格子就在哪儿显示）⇒ 编辑器搬走以后，这一格
+    ///    里**什么都不剩** ⇒ 就该收拢。
+    #[test]
+    fn 编辑器搬走那一格会收拢() {
+        use gtk::prelude::*;
+        if !gtk::is_initialized_main_thread() {
+            let _ = std::panic::catch_unwind(|| gtk::init());
+        }
+        if !gtk::is_initialized_main_thread() || gtk::gdk::Display::default().is_none() {
+            eprintln!("跳过 编辑器搬走那一格会收拢：本机没有显示服务");
+            return;
+        }
+        let sub = crate::panel::subtabs::SubTabs::new();
+        let emptied = std::rc::Rc::new(std::cell::Cell::new(false));
+        {
+            let e = emptied.clone();
+            sub.set_empty_hook(move || {
+                e.set(true);
+                true
+            });
+        }
+        // 这一格**只有**编辑器（主栏那一页）。
+        let content = gtk::Label::new(Some("编辑器正文"));
+        let id = sub.add_editor(
+            7,
+            None,
+            None,
+            "a.txt",
+            content.upcast::<gtk::Widget>(),
+            None,
+        );
+        assert_eq!(sub.nb.n_pages(), 1, "编辑器在主栏 ⇒ notebook 里应当有一页");
+        // 把它搬到「底部编辑区」⇒ notebook 空了 ⇒ 那一格该收拢。
+        assert!(sub.move_editor_to_bottom(id), "应当能搬到编辑区");
+        assert_eq!(sub.nb.n_pages(), 0, "编辑器已经不在主栏了");
+        assert!(
+            emptied.get(),
+            "编辑器搬走之后这一格空了 ⇒ 应当收拢（不然就是一个空灰壳）"
+        );
     }
 }

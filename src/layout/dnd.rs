@@ -132,36 +132,38 @@ impl SplitZone {
     }
 }
 
-/// 边缘判定：离哪条边最近就往哪边拆。
+/// **按指针位置判拆分方向**（阶段 146b）。
 ///
-/// ⚠️ **只在边缘 `margin` 像素内才算拆分落点** ⇒ 格子中间是「不接受」
-///    （不然用户往中间一放，格子就被劈开了）。
+/// ⚠️ **为什么不用「边缘 24px」那条窄带**（用户 2026-11-22 提的，照
+///    xterminal）：**整个格子都是落点** ⇒ 用户**不用精准对准某条边** ⇒
+///    拖到哪半边就往哪边拆 ⇒ 拖放顺手得多。
+///
+/// ⚠️ **按「离哪条边更近」判方向**（不是按象限）⇒ 指针在角上时也不会
+///    左右上下乱跳（角上离两条边一样近 ⇒ 取横向）。
 ///
 /// ⚠️ **量不出尺寸时返回 `None`**（还没布局完 ⇒ 别乱拆）。
-pub fn zone_at(x: f64, y: f64, w: i32, h: i32, margin: f64) -> Option<SplitZone> {
+pub fn zone_by_position(x: f64, y: f64, w: i32, h: i32) -> Option<SplitZone> {
     if w <= 0 || h <= 0 {
         return None;
     }
     let (w, h) = (w as f64, h as f64);
-    let m = margin.min(w / 2.0).min(h / 2.0);
-    if m <= 0.0 {
-        return None;
+    let (dx_l, dx_r) = (x, w - x);
+    let (dy_t, dy_b) = (y, h - y);
+    let min_dx = dx_l.min(dx_r);
+    let min_dy = dy_t.min(dy_b);
+    if min_dx <= min_dy {
+        Some(if dx_l <= dx_r {
+            SplitZone::Left
+        } else {
+            SplitZone::Right
+        })
+    } else {
+        Some(if dy_t <= dy_b {
+            SplitZone::Top
+        } else {
+            SplitZone::Bottom
+        })
     }
-    let mut best: Option<(f64, SplitZone)> = None;
-    for (d, z) in [
-        (x, SplitZone::Left),
-        (w - x, SplitZone::Right),
-        (y, SplitZone::Top),
-        (h - y, SplitZone::Bottom),
-    ] {
-        if d < 0.0 || d > m {
-            continue;
-        }
-        if best.is_none_or(|(bd, _)| d < bd) {
-            best = Some((d, z));
-        }
-    }
-    best.map(|(_, z)| z)
 }
 
 /// 插入位置：把落点 x 换算成**第几个页签之前**。
@@ -258,24 +260,40 @@ mod tests {
 
     #[test]
     fn 边缘判定认四条边() {
-        // 400×300 的格子，边缘 24px
-        assert_eq!(zone_at(5.0, 150.0, 400, 300, 24.0), Some(SplitZone::Left));
-        assert_eq!(zone_at(395.0, 150.0, 400, 300, 24.0), Some(SplitZone::Right));
-        assert_eq!(zone_at(200.0, 5.0, 400, 300, 24.0), Some(SplitZone::Top));
-        assert_eq!(zone_at(200.0, 295.0, 400, 300, 24.0), Some(SplitZone::Bottom));
-        // 中间 ⇒ 不算落点
-        assert_eq!(zone_at(200.0, 150.0, 400, 300, 24.0), None);
+        // 400×300 的格子：靠左 ⇒ 往左拆，靠右 ⇒ 往右拆
+        assert_eq!(zone_by_position(5.0, 150.0, 400, 300), Some(SplitZone::Left));
+        assert_eq!(
+            zone_by_position(395.0, 150.0, 400, 300),
+            Some(SplitZone::Right)
+        );
+        assert_eq!(
+            zone_by_position(200.0, 5.0, 400, 300),
+            Some(SplitZone::Top)
+        );
+        assert_eq!(
+            zone_by_position(200.0, 295.0, 400, 300),
+            Some(SplitZone::Bottom)
+        );
+    }
+
+    #[test]
+    fn 整个格子都是落点() {
+        // ⚠️ **阶段 146b**：不再有「边缘 24px」那条窄带 ⇒ 中间也能落
+        //    （用户 2026-11-22 提的：不用精准对准）。
+        let z = zone_by_position(200.0, 150.0, 400, 300);
+        assert!(z.is_some(), "中间也该有落点（不然用户要精准对准才拖得动）");
+        // 角上 ⇒ 取横向（离两条边一样近时的稳定选择）
+        assert_eq!(zone_by_position(2.0, 2.0, 400, 300), Some(SplitZone::Left));
+        assert_eq!(
+            zone_by_position(398.0, 2.0, 400, 300),
+            Some(SplitZone::Right)
+        );
     }
 
     #[test]
     fn 量不出尺寸就不判边缘() {
-        assert_eq!(zone_at(0.0, 0.0, 0, 300, 24.0), None);
-        assert_eq!(zone_at(0.0, 0.0, 400, 0, 24.0), None);
-        // ⚠️ **边缘宽度会夹到格子的一半**（不会超过）⇒ 极小的格子里
-        //    整块都算边缘（这种格子本来就没法再拆了）。
-        assert_eq!(zone_at(1.0, 150.0, 40, 300, 24.0), Some(SplitZone::Left));
-        // 正常的格子：中间不是边缘。
-        assert_eq!(zone_at(200.0, 150.0, 400, 300, 24.0), None);
+        assert_eq!(zone_by_position(0.0, 0.0, 0, 300), None);
+        assert_eq!(zone_by_position(0.0, 0.0, 400, 0), None);
     }
 
     #[test]

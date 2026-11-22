@@ -622,7 +622,14 @@ impl CellTree {
 
     /// **当前格子**（顶栏的拆分/关闭作用在它身上）。
     pub fn current_cell(&self) -> CellId {
-        self.current.get()
+        let cur = self.current.get();
+        if self.cell(cur).is_some() {
+            return cur;
+        }
+        // ⚠️ **当前格子可能已经被关掉了**（那一格空了 ⇒ 自动收拢）⇒ 这时
+        //    回退到**第一个格子** ⇒ 不然顶栏那两个动作会**静默失灵**
+        //    （用户点了没反应）。
+        self.ids().first().copied().unwrap_or(cur)
     }
 
     /// 把当前格子设成某个（搬完页签、切完页签后要跟上）。
@@ -640,9 +647,25 @@ impl CellTree {
         target: CellId,
         zone: crate::layout::dnd::SplitZone,
     ) -> Option<CellId> {
+        self.attach_cell(
+            crate::panel::subtabs::SubTabs::new(),
+            target,
+            zone,
+        )
+    }
+
+    /// **拆一个格子，新格子用给定的容器**（阶段 146b）。
+    ///
+    /// ⚠️ **什么时候用这个**：容器是**已有的**、只是不在树里了 ⇒ 比如
+    ///    用户把「文件」页签关掉之后，那个格子收拢了 ⇒ 容器也没人引用了
+    ///    ⇒ 想把它**接回来**时用它（`split_cell` 只能造**空**的）。
+    pub fn attach_cell(
+        self: &Rc<Self>,
+        tabs: Rc<crate::panel::subtabs::SubTabs>,
+        target: CellId,
+        zone: crate::layout::dnd::SplitZone,
+    ) -> Option<CellId> {
         let new_id = self.alloc_id();
-        // 先建内容（**空的 `SubTabs`**）。
-        let tabs = crate::panel::subtabs::SubTabs::new();
         // ⚠️ **关闭钩子继承过来**：新格子里的终端页签被关掉时，
         //    一样要收掉它的 SSH 会话。
         if let Some(src) = self.cell(target) {
@@ -676,6 +699,18 @@ impl CellTree {
         Some(new_id)
     }
 
+    /// **哪个格子**装着这个容器（阶段 146b：找文件面板那个格子）。
+    pub fn cell_of_container(
+        &self,
+        tabs: &Rc<crate::panel::subtabs::SubTabs>,
+    ) -> Option<CellId> {
+        self.ids().into_iter().find(|id| {
+            self.cell(*id)
+                .map(|c| Rc::ptr_eq(&c.tabs, tabs))
+                .unwrap_or(false)
+        })
+    }
+
     /// **关掉一个格子**（父节点自动收拢）。
     ///
     /// ⚠️ **最后一个格子不关**：关掉它 ⇒ 连接页就空了 ⇒ 用户连「+」按钮
@@ -691,6 +726,13 @@ impl CellTree {
         *self.tree.borrow_mut() = new_tree;
         self.cells.borrow_mut().remove(&id);
         self.rebuild();
+        // ⚠️ **关掉的正好是「当前格子」⇒ 换一个**（不然顶栏的
+        //    「拆分格子 / 关闭本格」会打在一个已经不存在的格子上）。
+        if self.current.get() == id {
+            if let Some(next) = self.ids().first().copied() {
+                self.current.set(next);
+            }
+        }
         // ⚠️ **布局变了**（阶段 147：存盘）。
         self.notify_changed();
         true

@@ -344,6 +344,17 @@ pub const TOP_MENUS: &[(&str, &[MenuEntry])] = &[
                 shortcut: None,
                 enabled: Some(crate::tabs::has_cell),
             },
+            // ⚠️ **阶段 146b：把文件面板接回来**——「文件」那个页签可以手动
+            //    关掉 ⇒ 关掉之后文件面板就没了 ⇒ **得有个再打开的入口**
+            //    （用户 2026-11-22 提的）。
+            MenuEntry::Item {
+                icon: "folder-symbolic",
+                label: "显示文件面板",
+                action: "show_file_panel",
+                danger: false,
+                shortcut: None,
+                enabled: Some(crate::tabs::file_panel_hidden),
+            },
         ],
     ),
     (

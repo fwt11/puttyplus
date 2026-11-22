@@ -392,6 +392,12 @@ pub fn app_menubar(
             crate::tabs::close_cell(&page);
         }
     });
+    // ⚠️ **阶段 146b：把文件面板接回来**（用户把「文件」页签关掉之后）。
+    act!("show_file_panel", || {
+        if let Some(page) = crate::tabs::current_page() {
+            crate::tabs::show_file_panel(&page);
+        }
+    });
     act!("broadcast", || crate::tabs::toggle_broadcast());
     act!("log", || {
         if let Some(page) = crate::tabs::current_page() {

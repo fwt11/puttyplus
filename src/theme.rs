@@ -1436,14 +1436,18 @@ popover.pp-menu separator { margin: 5px 4px; background-color: @pp_border; }
 .pp-sidebar-head { margin: 0 2px; }
 .pp-dialog-root { margin: 14px 16px; }
 
-/* ⚠️ **阶段 145：跨格子拖放的反馈**。
+/* ⚠️ **阶段 145/146b：跨格子拖放的反馈**。
    - `.pp-drop-caret`：拖到页签栏上时的**蓝色插入符**（竖着一条）；
-   - `.pp-drop-edge-*`：拖到格子**边上**时**亮起来的那条边**。 */
+   - `.pp-drop-frame`：**落点高亮框**（阶段 146b，照 xterminal）——
+     **整块要落进去的区域亮起来** ⇒ 用户不用精准对准，而且框本身就是
+     指引（一眼看出会落在哪儿）。⚠️ 用 `border` ＋ 半透明底色（不是实心）
+     ⇒ 底下的内容还看得见（知道自己在往哪儿拖）。 */
 .pp-drop-caret { background-color: @pp_accent; min-width: 3px; }
-.pp-drop-edge-left { background-color: @pp_accent; min-width: 3px; }
-.pp-drop-edge-right { background-color: @pp_accent; min-width: 3px; }
-.pp-drop-edge-top { background-color: @pp_accent; min-height: 3px; }
-.pp-drop-edge-bottom { background-color: @pp_accent; min-height: 3px; }
+.pp-drop-frame {
+  border: 2px solid @pp_accent;
+  border-radius: 4px;
+  background-color: alpha(@pp_accent, 0.16);
+}
 "#;
 
 /// 共用骨架：只列需要改的属性，靠 `@define-color` 给整套配色命名。
