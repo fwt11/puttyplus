@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/fwt11/puttyplus/actions/workflows/ci.yml/badge.svg)](https://github.com/fwt11/puttyplus/actions/workflows/ci.yml)
 
-**SSH 终端 + 文件传输 + 数据库 + Docker 容器，一个窗口全搞定。**
-Linux / Windows 双平台，单文件程序，界面全中文。
+这个软件的最大特点是，我们只需要 **一个** 到远程服务器的`SSH`连接，然后 **SSH 终端 + 文件传输 + 数据库 + Docker 容器 + 端口映射** 就可以都通过这个连接来管理。不像其他软件那样，终端、SFTP、端口映射等等需要单独一个连接。在某些情况下，这非常方便。
+
+Linux / Windows 双平台，单文件程序。
 
 > 在找 **PuTTY / WinSCP / Xshell / FinalShell** 的替代品？PuTTY 的命令行参数这里全认，
 > WinSCP 式的双栏文件传输、集成式的数据库与容器管理，都在同一个程序里。
