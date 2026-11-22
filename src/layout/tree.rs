@@ -228,12 +228,16 @@ fn detach(w: &gtk::Widget) {
 /// 把一棵树画成 widget（**递归**：Split ⇒ 一个 Paned）。
 ///
 /// ⚠️ **空树没有 widget**（`Empty` ⇒ `None`）⇒ 调用方自己决定"空着显示什么"。
-fn widget_for(node: &TreeNode, cells: &HashMap<CellId, Rc<Cell>>) -> Option<gtk::Widget> {
+fn widget_for(
+    node: &TreeNode,
+    cells: &HashMap<CellId, Rc<Cell>>,
+    pos: &SplitPos,
+) -> Option<gtk::Widget> {
     match node {
         TreeNode::Leaf(id) => cells.get(id).map(|c| cell_widget(c).clone().upcast()),
         TreeNode::Split { stacked, a, b } => {
-            let wa = widget_for(a, cells)?;
-            let wb = widget_for(b, cells)?;
+            let wa = widget_for(a, cells, pos)?;
+            let wb = widget_for(b, cells, pos)?;
             let paned = gtk::Paned::new(if *stacked {
                 gtk::Orientation::Vertical
             } else {
@@ -241,9 +245,86 @@ fn widget_for(node: &TreeNode, cells: &HashMap<CellId, Rc<Cell>>) -> Option<gtk:
             });
             paned.set_start_child(Some(&wa));
             paned.set_end_child(Some(&wb));
+            // ⚠️ **阶段 150：把分割条的位置恢复回来**——重画时 Paned 全换了，
+            //    不恢复的话**用户拖出来的宽度就没了**（文件面板会突然变得很
+            //    宽：GTK4 的默认 position 是**第一个子控件的自然宽度**）。
+            if let Some(v) = split_key(node).and_then(|k| pos.get(&k).copied()) {
+                paned.set_position(v);
+            }
             Some(paned.upcast())
         }
         TreeNode::Empty => None,
+    }
+}
+
+/// 树节点的身份：**两侧的第一个叶子格子**。
+///
+/// ⚠️ **为什么用这个当分割条的 key**（阶段 150）：重画时**所有 Paned 都会
+///    被重新造一遍** ⇒ 分割条的位置会丢 ⇒ 得能认出「重画前后的**同一个**
+///    分割条」。
+///    - 用「位置序号」⇒ 拆分 / 关闭后**顺序变了** ⇒ 会认错；
+///    - 用「下面的全部叶子集合」⇒ 拆分后集合变了 ⇒ 认不出；
+///    - 用「**两侧的第一个叶子**」⇒ 拆分右半时左半还是那个格子、右半的
+///      第一个叶子也还是那个格子 ⇒ **key 不变** ⇒ 位置能保住。
+fn split_key(node: &TreeNode) -> Option<(CellId, CellId)> {
+    let TreeNode::Split { a, b, .. } = node else {
+        return None;
+    };
+    Some((first_leaf(a)?, first_leaf(b)?))
+}
+
+/// 某个节点里**最左边的那个叶子**（`TreeNode::Split` 里 `a` 那一侧）。
+fn first_leaf(node: &TreeNode) -> Option<CellId> {
+    match node {
+        TreeNode::Leaf(id) => Some(*id),
+        TreeNode::Split { a, .. } => first_leaf(a),
+        TreeNode::Empty => None,
+    }
+}
+
+/// 分割条位置表：**key = 分割条的身份** ⇒ 值 = 它的 position。
+type SplitPos = HashMap<(CellId, CellId), i32>;
+
+/// 从**旧 widget 树**里收集每个分割条的位置（同步走旧树节点）。
+///
+/// ⚠️ **为什么必须走旧树**：光看 widget 树**认不出**哪个 Paned 是哪个分割
+///    条 ⇒ 得靠树节点给出身份（`split_key`）。
+/// ⚠️ **为什么配对不会错**：`widget_for` 一直是「`a` 放左、`b` 放右」⇒
+///    树与 widget 一一对应。
+fn collect_positions(widget: &gtk::Widget, node: &TreeNode, out: &mut SplitPos) {
+    let TreeNode::Split { a, b, .. } = node else {
+        return;
+    };
+    let Some(p) = widget.downcast_ref::<gtk::Paned>() else {
+        return;
+    };
+    if let Some(key) = split_key(node) {
+        out.insert(key, p.position());
+    }
+    if let Some(sc) = p.start_child() {
+        collect_positions(&sc, a, out);
+    }
+    if let Some(ec) = p.end_child() {
+        collect_positions(&ec, b, out);
+    }
+}
+
+/// 按位置表**恢复**分割条的位置（重画之后调）。
+fn restore_positions(widget: &gtk::Widget, node: &TreeNode, pos: &SplitPos) {
+    let TreeNode::Split { a, b, .. } = node else {
+        return;
+    };
+    let Some(p) = widget.downcast_ref::<gtk::Paned>() else {
+        return;
+    };
+    if let Some(v) = split_key(node).and_then(|k| pos.get(&k).copied()) {
+        p.set_position(v);
+    }
+    if let Some(sc) = p.start_child() {
+        restore_positions(&sc, a, pos);
+    }
+    if let Some(ec) = p.end_child() {
+        restore_positions(&ec, b, pos);
     }
 }
 
@@ -362,6 +443,15 @@ pub struct CellTree {
     /// ⚠️ **为什么挂在树里**：根分割条（树根处的那个 Paned）**每次重画都会
     ///    重建** ⇒ 谁想盯着它都得重新挂一次 ⇒ 干脆由树来挂。
     root_pos_hook: RefCell<Option<Rc<dyn Fn(i32)>>>,
+    /// **「重画完了」的回调**（阶段 150）。
+    ///
+    /// ⚠️ **为什么要有**：重画会把**所有 Paned 换掉** ⇒ 上层挂在旧 Paned
+    ///    上的东西（**宽度上限的监听**）跟着没了 ⇒ 文件面板会失去上限 ⇒
+    ///    **变得很宽**（用户 2026-11-22 报的）⇒ 得有个地方重挂。
+    ///
+    /// ⚠️ **闭包只抓弱引用**（AGENTS.md 引用环红线）：树 → 钩子 → 树 = 环
+    ///    ⇒ 树永远释放不掉。
+    rebuilt_hook: RefCell<Option<Rc<dyn Fn()>>>,
     /// **布局变了**的回调（阶段 147：存盘）。
     ///
     /// ⚠️ **什么时候叫**：树形变了（拆分 / 关闭格子）或页签搬动了 ⇒
@@ -382,6 +472,7 @@ impl CellTree {
             current: std::cell::Cell::new(id),
             new_cell_hook: RefCell::new(None),
             root_pos_hook: RefCell::new(None),
+            rebuilt_hook: RefCell::new(None),
             changed_hook: RefCell::new(None),
         });
         tree.host.append(cell_widget(&cell));
@@ -419,7 +510,18 @@ impl CellTree {
     ///
     /// ⚠️ **只换根容器里的 child** ⇒ 外面的连接页 widget 不用换
     /// ⇒ 页面不会闪。
+    ///
+    /// ⚠️ **阶段 150：分割条的位置必须保住**——重画会把**所有 Paned 重新
+    ///    造一遍** ⇒ 位置会掉回 GTK 默认值（**第一个子控件的自然宽度**）
+    ///    ⇒ 用户拖出来的宽度就没了（用户 2026-11-22 报：「拖动并放置之后，
+    ///    文件管理器的宽度就会变化，变得很宽」）。
     pub fn rebuild(&self) {
+        // ⚠️ **先把旧位置记下来**（Paned 马上要被换掉 ⇒ 不记就丢了）。
+        let mut pos: SplitPos = HashMap::new();
+        if let Some(old) = self.host.first_child() {
+            let tree = self.tree.borrow().clone();
+            collect_positions(&old, &tree, &mut pos);
+        }
         // ⚠️ **先把旧树拆下来**：Paned 的孩子得**先摘**，
         // 否则同一个 widget 不能同时挂两个父 ⇒ GTK 报 "already has a parent"。
         if let Some(old) = self.host.first_child() {
@@ -429,13 +531,27 @@ impl CellTree {
         let widget = {
             let tree = self.tree.borrow();
             let cells = self.cells.borrow();
-            widget_for(&tree, &cells)
+            widget_for(&tree, &cells, &pos)
         };
         if let Some(w) = widget {
             self.host.append(&w);
         }
+        // ⚠️ **再恢复一次**：GTK 分配时会把 position **夹到合法范围**
+        //    （两个子控件的最小宽之和）⇒ 刚建好时设的值可能被改 ⇒ 这里
+        //    按 key 再设一次（这时子控件的最小宽已知了 ⇒ 不会再被改）。
+        if let Some(w) = self.host.first_child() {
+            let tree = self.tree.borrow();
+            restore_positions(&w, &tree, &pos);
+        }
         // 根分割条**换了新的** ⇒ 重新挂一次位置监听。
         self.wire_root_paned();
+        // ⚠️ **阶段 150：告诉上层「重画完了」**——根分割条的位置要按
+        //    **记忆的宽度**复位，而且「宽度上限」的监听也得重挂（旧的
+        //    Paned 没了 ⇒ 监听跟着没了 ⇒ 文件面板会失去上限 ⇒ 变得很宽）。
+        let hook = self.rebuilt_hook.borrow().clone();
+        if let Some(f) = hook {
+            f();
+        }
     }
 
     /// **根分割条**（树根处的那个 Paned）—— 只有一个格子时没有。
@@ -459,6 +575,27 @@ impl CellTree {
     pub fn set_root_pos_hook<F: Fn(i32) + 'static>(&self, f: F) {
         *self.root_pos_hook.borrow_mut() = Some(Rc::new(f));
         self.wire_root_paned();
+    }
+
+    /// 注册「**重画完了**」的回调（阶段 150）。
+    ///
+    /// ⚠️ **干什么用**：重画会把所有 Paned 换掉 ⇒ 上层得在这里把
+    ///    **根分割条按记忆的宽度复位**、并**重挂宽度上限的监听**。
+    ///
+    /// ⚠️ **闭包只抓弱引用**（AGENTS.md 引用环红线）。
+    pub fn set_rebuilt_hook<F: Fn() + 'static>(&self, f: F) {
+        *self.rebuilt_hook.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// **立刻跑一次「重画完了」的回调**（阶段 150）。
+    ///
+    /// ⚠️ **为什么需要**：刚建好树的时候还没装钩子 ⇒ 初次也得按**记忆的
+    ///    宽度**复位一次（否则文件面板一开始就是 GTK 默认宽度 ⇒ 很宽）。
+    pub fn apply_rebuilt(&self) {
+        let hook = self.rebuilt_hook.borrow().clone();
+        if let Some(f) = hook {
+            f();
+        }
     }
 
     /// 当前的树（**快照**，纯数据）。
@@ -611,6 +748,7 @@ impl CellTree {
             current: std::cell::Cell::new(CellId(1)),
             new_cell_hook: RefCell::new(None),
             root_pos_hook: RefCell::new(None),
+            rebuilt_hook: RefCell::new(None),
             changed_hook: RefCell::new(None),
         });
         // 每个格子都接上钩子（跨格子搬运 ＋ 格子空了）。

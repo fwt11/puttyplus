@@ -1018,10 +1018,31 @@ impl Tabs {
             }
         }
         // 宽度：文件格子的宽度 = **树根分割条**的位置。
-        if let Some(p) = cell_tree.root_paned() {
-            p.set_position(sp.st.file_w.get());
-            // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）
-            crate::settings::clamp_paned_start(&p, 0.38, 520);
+        //
+        // ⚠️ **阶段 150：这一步现在由「重画完了」的钩子统一做**——
+        //    拖放 / 拆分之后格子树会**重画** ⇒ 所有 Paned 都换了新的 ⇒
+        //    根分割条的位置掉回 GTK 默认值（**第一个子控件的自然宽度**）
+        //    ⇒ 文件面板一下子变得很宽（用户 2026-11-22 报的）。
+        //    ⇒ 宽度复位 ＋ **宽度上限的监听重挂**都得跟着重画走。
+        {
+            let stw = Rc::downgrade(&sp.st);
+            let treew = Rc::downgrade(&cell_tree);
+            cell_tree.set_rebuilt_hook(move || {
+                let (Some(st), Some(tree)) = (stw.upgrade(), treew.upgrade()) else {
+                    return;
+                };
+                let Some(p) = tree.root_paned() else { return };
+                // 宽度按**记忆值**复位。
+                p.set_position(st.file_w.get());
+                // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）。
+                // ⚠️ **必须每次重画都重挂**：监听挂在 Paned 上 ⇒ Paned 换了
+                //    就没了 ⇒ 不重挂 ⇒ 文件面板失去上限 ⇒ 变得很宽。
+                crate::settings::clamp_paned_start(
+                    &p,
+                    crate::settings::SFTP_PANE_MAX_FRAC,
+                    crate::settings::SFTP_PANE_MAX_PX,
+                );
+            });
         }
         // 拖分割条 ⇒ 记住宽度（**弱引用**：AGENTS.md 引用环红线）。
         {
@@ -1032,6 +1053,8 @@ impl Tabs {
                 }
             });
         }
+        // ⚠️ **初次也要复位一次**（钩子刚装上，之前的建树没走过它）。
+        cell_tree.apply_rebuilt();
         page.set_hexpand(true);
         page.set_vexpand(true);
 
