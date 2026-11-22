@@ -1519,27 +1519,10 @@ notebook > header > tabs > tab:hover { background-color: @pp_hover; }
    深色主题下就是"黑壳子里的白纸" */
 notebook > stack { background-color: @pp_panel; }
 
-/* ---- 编辑区（阶段 107：终端与文件编辑器同窗同时显示） ---- */
-/* 编辑区在连接页下半：一条小标签栏 + 编辑器正文。 */
-.pp-editor-area { background-color: @pp_panel; border-top: 1px solid @pp_border; }
-.pp-editor-tabs { background-color: @pp_bg; }
-/* 小标签栏上的一个文件标签：像页签，但更矮（编辑区不是页签区）。 */
-.pp-editor-tab {
-  padding: 1px 2px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-}
-.pp-editor-tab:hover { background-color: @pp_hover; }
-/* 当前那个：给底色 + 边框（用户一眼看出正在看哪个文件）。 */
-.pp-editor-tab-active {
-  background-color: @pp_panel;
-  border-color: @pp_border;
-}
-/* 文件名那个按钮：别让它自己有底色（否则跟整块标签的底色打架）。 */
-button.pp-editor-tab-name { background-color: transparent; border-color: transparent; }
-button.pp-editor-tab-name:hover { background-color: @pp_hover; }
-/* 空编辑区的提示（阶段 108：编辑区空着时它是「停靠区」）。 */
-.pp-editor-hint { color: @pp_dim; font-size: 9pt; }
+/* ⚠️ **阶段 151：编辑区那套 CSS 全删了**——「底部编辑区」退役 ⇒
+   `.pp-editor-area` / `.pp-editor-tabs` / `.pp-editor-tab` /
+   `.pp-editor-tab-active` / `.pp-editor-tab-name` / `.pp-editor-hint`
+   **都没有控件在用了**（编辑器恒为格子里的页签 ⇒ 用普通页签样式）。 */
 
 button, .circular, .flat {
   background-image: none;

@@ -1637,12 +1637,13 @@ fn main() {
             sub3.page_count() >= 1,
             "容器页没进子标签"
         );
-        check!(
-            "⑰ 编辑区搬到了容器页（不用去 term 界面找）",
-            dockerui::editor_area_in_docker_page_for_test(&panel3.st),
-            "编辑区还在终端列里"
-        );
-        // 加一个编辑器 ⇒ 编辑区露出来，而且**还在容器页里**。
+        // ⚠️ **阶段 151：不再有「编辑区」**——编辑器恒为**格子里的页签**
+        //   （阶段 149）⇒ 容器页的 compose 文件也是这么打开的（阶段 138：
+        //   `open_compose_path` 走 `fileedit::open_remote`）⇒ 用户点完就
+        //   看到编辑器，**不需要**「搬到容器页下面」这套。
+        //
+        // 加一个编辑器 ⇒ 它是**格子里的一个页签**（页签数 +1）。
+        let pages_before3 = sub3.page_count();
         let dummy = gtk::Box::new(gtk::Orientation::Vertical, 0);
         //
         // ⚠️ 参数顺序：`id, 模式图标, 位置图标, 标题, 内容, 关闭回调`
@@ -1650,14 +1651,14 @@ fn main() {
         sub3.add_editor(9001, None, None, "冒烟", dummy.upcast(), None);
         pump(200);
         check!(
-            "⑰ 编辑区露出来了（开着编辑器却看不见 = 功能等于没有）",
-            sub3.editor_area_visible(),
-            "编辑区是隐的"
+            "⑰ 编辑器是格子里的一个页签（与容器页并列）",
+            sub3.editor_place(9001) == Some(subtabs::EditorPlace::Main),
+            format!("编辑器停在 {:?}", sub3.editor_place(9001))
         );
         check!(
-            "⑰ 编辑器还在容器页里",
-            dockerui::editor_area_in_docker_page_for_test(&panel3.st),
-            "编辑区被搬走了"
+            "⑰ 编辑器真的露出来了（页签数 +1）",
+            sub3.page_count() == pages_before3 + 1,
+            format!("页签数 {} → {}", pages_before3, sub3.page_count())
         );
         // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张「编辑器在容器页里」。
         if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {

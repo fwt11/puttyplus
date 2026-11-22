@@ -631,20 +631,6 @@ pub fn host_file_panel(st: &Rc<PanelState>, host: &gtk::Paned) {
     *st.file_host.borrow_mut() = Some(host.clone().upcast());
 }
 
-/// 让宿主的分割条位置**同步回** `file_w`（搬家之后宽度得跟着走）。
-///
-/// ⚠️ **只有当前正托管文件面板的那个框才算数**：别的框 position=0，
-/// 照样写回会把记住的宽度冲成 0（用户下次打开就变成默认宽度了）。
-pub fn track_file_width(st: &Rc<PanelState>, host: &gtk::Paned) {
-    let stw = Rc::downgrade(st);
-    host.connect_notify_local(Some("position"), move |p, _| {
-        let Some(st) = stw.upgrade() else { return };
-        if st.root.parent().as_ref() == Some(p.upcast_ref::<gtk::Widget>()) {
-            st.file_w.set(p.position());
-        }
-    });
-}
-
 /* ---------------- 断线自愈：失败 ⇒ 重连一次 ⇒ 重试原来的操作（阶段 99） ---------------- */
 
 /// 「连接断了」时**要重试**的那条操作（阶段 99）。

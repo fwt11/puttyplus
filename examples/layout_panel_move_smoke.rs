@@ -146,11 +146,14 @@ fn check(app: &gtk::Application) {
         term_col.start_child().is_some(),
         "终端分屏的上半没了"
     );
+    // ⚠️ **阶段 151**：「底部编辑区」退役 ⇒ 终端列**没有下半了**
+    // （下半以前是编辑区 ⇒ 白占终端列的下半 ⇒ 用户 2026-11-22 报的
+    //  「中间那一块是什么」）。
     assert!(
-        term_col.end_child().is_some(),
-        "终端分屏的下半（编辑区）没了"
+        term_col.end_child().is_none(),
+        "编辑区退役了 ⇒ 终端列不该再有下半"
     );
-    println!("[4] 终端分屏树不受影响（终端列上下两半都在）✔");
+    println!("[4] 终端分屏树不受影响（终端列上半＝终端容器，下半空着）✔");
 
     println!("layout_panel_move_smoke: OK");
 }

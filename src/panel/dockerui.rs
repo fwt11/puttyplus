@@ -5748,10 +5748,6 @@ pub fn mount(st: &Rc<PanelState>) {
             None,
         );
         ui.tab_id.set(id);
-        // ⚠️ **登记编辑区的落点**（阶段 113 之后）：用户在容器页点
-        //   「编辑 compose 文件」⇒ 编辑器要**就在容器界面下面**，
-        //   马上能看见（用户 2026-11-16 报的「跑到 term 界面去了」）。
-        sub.set_page_editor_host(id, ui.column.clone());
         // 关掉这个页签 ⇒ 停掉自动刷新（否则定时器还在跑，白费连接）。
         let u = Rc::downgrade(&ui);
         sub.add_close_hook(move |cid| {
@@ -5770,21 +5766,10 @@ pub fn mount(st: &Rc<PanelState>) {
     if let Some(num) = sub.nb.page_num(&ui.page) {
         sub.nb.set_current_page(Some(num));
     }
-    // ⚠️ **把编辑区搬到这个页面来**（用户 2026-11-16：「编辑器打开了，却
-    //   不在容器界面，用户会找不到 ⇒ 应该打开之后用户马上能看到，
-    //   不要跑到 term 界面」）。
-    //
-    //   编辑区是**一个共享的 widget** ⇒ 它同一时刻只能待在一页里 ⇒ 之前
-    //   它住在**终端列**下面 ⇒ 用户在容器页打开编辑器时，编辑器建好了
-    //   却**藏在 term 界面里**。
-    //
-    //   ⚠️ **为什么这里再做一遍**（tabs.rs 的切页回调也会做）：那个回调
-    //   只在**真的连接页**里才有 ⇒ 这里自己再做一次（幂等，重复调用
-    //   没有副作用）。
-    let tab = ui.tab_id.get();
-    if tab != 0 {
-        sub.host_editor_area_for_page(tab);
-    }
+    // ⚠️ **阶段 151：不再有「编辑区」** ⇒ 不用把编辑区搬到容器页。
+    //   容器页的 compose 文件**在格子页签栏里打开**（阶段 138 起就是这么
+    //   做的 ⇒ `open_compose_path` 走 `fileedit::open_remote`）⇒ 用户
+    //   点完就看到编辑器，**不需要**「搬到容器页下面」这套。
     refresh(st, &ui);
 }
 
@@ -6394,19 +6379,6 @@ pub fn loading_spinners_for_test(st: &Rc<PanelState>) -> (bool, bool, bool) {
         ui.spin_big.is_visible(),
         ui.spin.is_spinning(),
     )
-}
-
-/// 测试钩子：**编辑区是不是挂在容器页这一列**。
-///
-/// ⚠️ **干什么用**（用户 2026-11-16）：「编辑 docker-compose 文件」点了
-///   以后，编辑器打开了**却不在容器界面** ⇒ 用户会找不到 ⇒ 断言「编辑区
-///   的宿主是容器页那根 Paned」⇒ 钉住「编辑器就在容器界面下面」。
-pub fn editor_area_in_docker_page_for_test(st: &Rc<PanelState>) -> bool {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return false };
-    let Some(sub) = st.sub_tabs() else { return false };
-    let area = sub.editor_area_widget();
-    area.parent().and_downcast::<gtk::Paned>() == Some(ui.column.clone())
 }
 
 /// 测试钩子：**切到监控页**（**阶段 114**）。

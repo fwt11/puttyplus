@@ -192,73 +192,6 @@ fn watch_file_host(sub: &Rc<panel::subtabs::SubTabs>, st: &Rc<panel::PanelState>
     });
 }
 
-/// 给一个容器装「**切页签 ⇒ 编辑区跟着走**」的钩子。
-///
-/// ⚠️ **为什么每个容器都要装**（阶段 147）：还原出来的格子也能建终端 ⇒
-///    里面的编辑区得跟别的格子一样跟着当前页走。
-///
-/// ⚠️ **闭包只抓弱引用**（AGENTS.md 引用环红线）：notebook 的信号处理器
-///    不能抓着 SubTabs / 面板的强引用（引用环 ⇒ 面板永远释放不掉）。
-fn install_switch_page_hook(
-    sub: &Rc<panel::subtabs::SubTabs>,
-    st: &Rc<panel::PanelState>,
-) {
-    let subw = Rc::downgrade(sub);
-    // ⚠️ 面板状态也只抓**弱引用**：面板状态里挂着子标签容器，
-    // 抓强引用就成环（面板永远释放不掉）。
-    let stw = Rc::downgrade(st);
-    // ⚠️ 用 **`switch-page`** 信号，不是 `notify::current-page`——
-    // GTK4 的 `GtkNotebook:current-page` **改了也不发通知**
-    // （实测：set_current_page 之后 notify 回调一次都不跑）。
-    //
-    // ⚠️ `switch-page` 是**切换之前**发的 ⇒ 那时 `current_kind()`
-    //    还是旧页的 ⇒ 得按传进来的**页序号**查种类。
-    //
-    // ⚠️ gtk4-rs 0.11 的 `connect_switch_page` 回调**没有返回值**
-    // （GTK 那边返回 false 可以挡住切换，这套用不上—we 不需要挡）。
-    sub.nb.connect_switch_page(move |_nb, _page, num| {
-        let Some(sub) = subw.upgrade() else { return };
-        let Some(st) = stw.upgrade() else { return };
-        // ⚠️ **阶段 121**：切到「拖回子标签栏的编辑器」那一页 ⇒ 把
-        // **文件面板搬过去**（那一页是「文件面板｜编辑器」的 Paned ⇒
-        // 编辑器**旁边有 SFTP 列表**，跟阶段 107 之前一个样子）。
-        //
-        // ⚠️ 文件面板是**会话级的一个 widget** ⇒ 同一时刻只能在一个
-        //    宿主里 ⇒ 搬过去之前 `host_file_panel` 会先把它从旧宿主
-        //    摘下来 ⇒ 切走时再搬回来（终端页那半边就是这么做的）。
-        if let Some((eid, host)) = sub.editor_host_by_page_num(num) {
-            // 宽度回调**只挂一次**（同一个宿主挂多次 ⇒ 回调越积越多）。
-            if sub.mark_editor_host_tracked(eid) {
-                panel::track_file_width(&st, &host);
-            }
-            // ⚠️ **阶段 146：文件面板不再跟着编辑器主栏页搬家**
-            //    （它在自己的格子里 ⇒ 一直可见 ⇒ 用户要的是
-            //    「编辑器旁边有 sftp」，现在**一直**在旁边）。
-            return;
-        }
-        let kind = sub.kind_by_page_num(num);
-        if kind != panel::subtabs::PageKind::Terminal {
-            // ⚠️ **阶段 113 之后**：别的页也可能**自己登记了编辑区
-            //   的落点**（容器页就是）⇒ 把编辑区搬过去 ⇒ 用户在
-            //   容器页点「编辑 compose 文件」⇒ **编辑器就在容器
-            //   界面下面**，马上能看见（用户 2026-11-16 报的
-            //   「跑到 term 界面去了」）。
-            //
-            // ⚠️ **文件面板不动**：它是会话级的一个 widget ⇒ 待在
-            //   终端页里（容器页没有文件面板）。
-            sub.host_editor_area_for_page_num(num);
-            return;
-        }
-        // 拿不到宿主就**静默不动**：界面不崩、不空半个页面。
-        //
-        // ⚠️ **阶段 146**：终端页的内容现在**就是终端列**（竖向
-        //   Paned）⇒ 编辑区直接住进去（不用再从外面那层横向
-        //   Paned 里掏）。
-        let Some(col) = sub.paned_by_page_num(num) else { return };
-        sub.host_editor_area(&col);
-    });
-}
-
 /* ---------------- 阶段 147：布局的存与还原 ---------------- */
 
 /// **默认布局**（阶段 147）：文件在左、终端在右。
@@ -896,8 +829,9 @@ impl Tabs {
         let pos = crate::settings::sftp_pane_pos();
         let init_w = if pos > 120 { pos } else { 340 };
         sp.st.file_w.set(init_w);
-        // 阶段 108：编辑区住进**终端列**（没有编辑器时它自己藏起来）。
-        sub.host_editor_area(&term_col);
+        // ⚠️ **阶段 151：编辑区不再住进终端列**（编辑器恒为格子里的页签 ⇒
+        //    「停靠区」没人用 ⇒ 白占终端列的下半 ⇒ 用户 2026-11-22 问的
+        //    「中间那一块是什么」就是这个）。
         // 终端页签带图标：主标签头已经不放图标了，"这一页是终端"由子页签
         // 自己的图标说（标签头只留状态点 + 标题 + ×）。
         let term_sub_id = sub.add_page_icon_kind(
@@ -994,14 +928,12 @@ impl Tabs {
             for id in cell_tree.ids() {
                 let Some(c) = cell_tree.cell(id) else { continue };
                 install_cell_new_hook(&c.tabs, t.clone(), pg3.clone(), &st2);
-                install_switch_page_hook(&c.tabs, &st2);
                 watch_file_host(&c.tabs, &st2);
             }
             // 以后**新拆出来**的格子也一样要装（钩子是闭包，搬不过去）。
             let t3 = t.clone();
             cell_tree.set_new_cell_hook(move |_id, cell_sub| {
                 install_cell_new_hook(&cell_sub, t3.clone(), pg3.clone(), &st2);
-                install_switch_page_hook(&cell_sub, &st2);
                 // 新格子也可能成为文件面板的新家 ⇒ 一样要盯着。
                 watch_file_host(&cell_sub, &st2);
             });
@@ -1475,8 +1407,7 @@ impl Tabs {
         term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_col.set_hexpand(true);
         term_col.set_vexpand(true);
-        // 阶段 108：编辑区也住进这一列（切过来时它跟着走）。
-        sub.host_editor_area(&term_col);
+        // ⚠️ **阶段 151：编辑区不再住进这一列**（见上面的说明）。
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),
@@ -1775,8 +1706,7 @@ impl Tabs {
         term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_col.set_hexpand(true);
         term_col.set_vexpand(true);
-        // 阶段 108：编辑区住进这一列。
-        sub.host_editor_area(&term_col);
+        // ⚠️ **阶段 151：编辑区不再住进这一列**（见上面的说明）。
         let id = sub.add_page_icon_kind(
             Some("utilities-terminal-symbolic"),
             tr("终端"),

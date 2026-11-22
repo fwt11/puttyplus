@@ -1,4 +1,4 @@
-//! **终端与文件编辑器同窗同时显示 + 编辑器可拖动停靠**的冒烟（阶段 107/108）。
+//! **文件编辑器在格子里的页签 + 可拖动停靠**的冒烟（阶段 149/151）。
 //!
 //! **背景**：
 //! - 用户 2026-11-14：「终端和文件编辑可以放在同一个窗口中，同时显示」；
@@ -6,21 +6,17 @@
 //!   占用文件列表的空间。而且我希望也可以拖动它的 tab，把它拖动到原来
 //!   修改之前的位置，这样更灵活些。」
 //!
-//! 阶段 107 把编辑区放在**连接页底部**（横跨整页 ⇒ 压在文件列表上方）。
-//! 阶段 108 改成：编辑区住在**终端列**里（终端子页里那个竖向 Paned 的下半）
-//! ⇒ **与终端同宽**、**不占文件列表的空间**；而且编辑器能在
-//! 「编辑区 ⇄ 子标签栏」之间**拖动**（拖回子标签栏 = 变回子页签，
-//! 跟阶段 107 之前一样）。
+//! 阶段 107/108 的「编辑区」（编辑器住在**终端列下面**）在**阶段 151 退役**
+//! （用户 2026-11-22：「中间那一块是什么」⇒「它没有用就不应该存在」）⇒
+//! 编辑器**恒为格子里的一个页签**（与终端并列）⇒「终端与编辑器同屏上下」
+//! 改由**拆格子**实现。
 //!
 //! **断言**：
-//! 1. 布局：终端子页 = 横向 Paned（左＝文件面板，右＝**终端列**），
-//!    终端列 = 竖向 Paned（上＝终端，下＝**编辑区**）；
-//! 2. 打开文件 ⇒ 编辑区在**终端列**里，**与终端等宽**、**左边缘对齐**、
-//!    **不压到文件列表**，且**终端仍然可见**（阶段 107 的核心）；
-//! 3. 拖放零件真的装上了（编辑器标签有拖拽源、页签栏与终端列有接收器）；
-//! 4. 「拖回子标签栏」⇒ 编辑器变成一个子页签（页签数 +1、编辑区藏起来）；
-//!    「拖回来」⇒ 又变回编辑区里的编辑器（页签数复原、编辑区露出来）；
-//! 5. 改内容 ⇒ 标题带「●」脏标记；全关 ⇒ 编辑区藏起来。
+//! 1. 布局：文件面板**独立成格**（阶段 146）⇒ 宽度 = 格子树根分割条的位置；
+//! 2. 打开文件 ⇒ 编辑器是**主栏里的一个页签**（与终端并列）；
+//! 3. 拖放零件真的装上了（编辑器**页签头**有拖拽源、页签栏有接收器）；
+//! 4. 挪到**侧栏** ⇒ 再挪回**主栏**（两个停靠位都通）；
+//! 5. 改内容 ⇒ 标题带「●」脏标记；全关 ⇒ 编辑器没了、终端还在。
 //!
 //! ```text
 //! xvfb-run -a cargo run --example fileedit_panel_smoke
@@ -28,7 +24,7 @@
 
 use gtk::prelude::*;
 use puttyplus::args::ConnOptions;
-use puttyplus::panel::subtabs::PageKind;
+use puttyplus::panel::subtabs::{EditorPlace, PageKind};
 
 /// 退出时把临时 ini 与临时文件删掉（别留垃圾）。
 struct TempFiles(Vec<std::path::PathBuf>);
@@ -345,7 +341,7 @@ fn main() {
     let st = tabs.current_panel_state().expect("应有当前面板");
     let sub = st.sub_tabs().expect("应有子标签容器");
 
-    // ---- 1) 布局：文件面板｜终端列（横向），终端列 = 终端｜编辑区（竖向） ----
+    // ---- 1) 布局：文件面板**独立成格**（阶段 146）＋ 终端格子 ----
     assert_eq!(sub.current_kind(), PageKind::Terminal, "第一页应当是终端");
     assert!(st.root.is_mapped(), "终端页时文件面板应当显示在屏幕上");
     let _file_host = host_of(&st);
@@ -383,11 +379,12 @@ fn main() {
         "编辑器应当与终端**并列为一个页签**（阶段 137 的默认）"
     );
     assert_eq!(sub.editor_count(), 1, "应当有一个编辑器");
-    // ⚠️ 底部编辑区**仍然露着**（它兼作「停靠区」⇒ 用户能把编辑器拖回去）
-    //    ⇒ 判据是「编辑器**不在**那儿」，不是「那块看不见」。
-    assert!(
-        sub.editor_is_docked(eid0) == Some(false),
-        "默认**不该**停在底部编辑区（那是另一个停靠位，要拖过去）"
+    // ⚠️ **阶段 151**：编辑器**恒为格子里的页签**（主栏）⇒ 判据是
+    //    「停在主栏」，不再是「不在底部编辑区」（那块已经退役了）。
+    assert_eq!(
+        sub.editor_place(eid0),
+        Some(EditorPlace::Main),
+        "默认应当停在主栏（与终端并列的页签）"
     );
     // 终端**还在**（只是切到了编辑器那一页 ⇒ 终端页的内容暂时不在屏幕上）。
     let term = term_widget(&st);
@@ -398,104 +395,24 @@ fn main() {
     // ⚠️ **阶段 137 的默认形态**拍一张（用户要看的「与 term 并列的 tab」）。
     shot("/tmp/fileedit_main_tab.png");
 
-    // ---- 2b) 挪到**底部编辑区** ⇒ 与终端同宽、不压文件列表 ----
-    //
-    // ⚠️ 底部编辑区**还在**（阶段 107 的形态）⇒ 三个停靠位都能用：
-    //    主栏（默认）/ 底部 / 侧栏（阶段 137 新增）。
+    // ---- 3) 拖放零件真的装上了（阶段 149：编辑器是页签 ⇒ 拖拽源在**页签头**上）----
+    let host0 = sub
+        .editor_host(eid0)
+        .expect("编辑器作为页签 ⇒ 应当有自己的宿主 Paned");
+    let head0 = sub
+        .nb
+        .tab_label(&host0.clone().upcast::<gtk::Widget>())
+        .expect("编辑器应当有页签头");
     assert!(
-        sub.move_editor_to_bottom(eid0),
-        "编辑器没能挪到底部编辑区"
-    );
-    pump(400);
-    assert!(
-        sub.editor_area_visible(),
-        "编辑区应当露出来（用户开着编辑器却看不见 = 功能等于没有）"
-    );
-    // ⚠️ **核心断言**：停到底部时，终端**仍然可见** ⇒ 这就是"同窗同时显示"。
-    assert!(
-        term.is_mapped(),
-        "编辑器停到底部后终端不见了（阶段 107 的核心：两个要同时显示）"
-    );
-    // 文件面板**不再**搬进编辑器页 ⇒ 一直待在终端页里。
-    assert!(
-        st.root.parent().is_some(),
-        "文件面板被连带销毁了（开编辑器不该动它）"
-    );
-    let _still_term = host_of(&st);
-    let root_paned2 = tabs
-        .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
-        .expect("应当有格子树")
-        .root_paned()
-        .expect("两个格子 ⇒ 树根是分割条");
-    assert_eq!(
-        root_paned2.position(),
-        340,
-        "文件格子的宽度变了：{}",
-        root_paned2.position()
-    );
-
-    // ---- 阶段 108 的核心：编辑区在**终端列**里，与终端**同宽** ----
-    let area = sub.editor_area_widget();
-    let area_host = area
-        .parent()
-        .and_downcast::<gtk::Paned>()
-        .expect("阶段 108：编辑区应当挂在终端列（竖向 Paned）里");
-    assert!(
-        area_host == term_col,
-        "阶段 108：编辑区没住进终端列（编辑区应当与终端同宽）"
-    );
-    // 与终端**等宽**、**左边缘对齐**
-    //
-    // ⚠️ **允许 4px 的差**：Paned 的**分隔条（handle）**本身占 1~2px ⇒
-    // 终端那一格比编辑区那格窄那么一点点（文件面板那侧也一样）。
-    let tx = term
-        .compute_point(&area, &gtk::graphene::Point::new(0.0, 0.0))
-        .expect("终端与编辑区要能互相换算坐标")
-        .x() as f64;
-    assert!(
-        tx.abs() <= 1.0,
-        "编辑器与终端左边缘没对齐（差 {tx}px）"
-    );
-    let dw = (term.width() - area.width()).abs();
-    assert!(
-        dw <= 4,
-        "编辑器与终端不等宽：终端 {}px、编辑器 {}px（差 {dw}px）",
-        term.width(),
-        area.width()
-    );
-    // **不占文件列表的空间**：编辑区左边缘（换算到文件面板那边）
-    // 必须在文件面板右边。
-    let ex = area
-        .compute_point(&st.root, &gtk::graphene::Point::new(0.0, 0.0))
-        .expect("编辑区与文件面板要能互相换算坐标")
-        .x() as f64;
-    let fw = st.root.width() as f64;
-    assert!(
-        ex >= fw - 0.5,
-        "编辑器压在文件列表上了：编辑器左边缘 {ex}px < 文件面板宽 {fw}px"
-    );
-    println!(
-        "[2] 编辑区在终端列里：与终端同宽（{w}px）、不压文件列表（{ex} >= {fw}）✓",
-        w = area.width(),
-        ex = ex,
-        fw = fw
-    );
-    shot("/tmp/fileedit_panel.png");
-
-    // ---- 3) 拖放零件真的装上了（阶段 108） ----
-    assert!(
-        tree_has_drag_source(&area),
-        "编辑区上没装拖拽源（编辑器标签拖不动 = 功能等于没有）"
+        tree_has_drag_source(&head0),
+        "编辑器页签头上没装拖拽源（编辑器拖不动 = 功能等于没有）"
     );
     assert!(
         has_drop_target(&sub.nb),
-        "页签栏上没装拖放接收器（编辑器拖不回子标签栏 = 功能等于没有）"
+        "页签栏上没装拖放接收器（编辑器拖不进格子 = 功能等于没有）"
     );
-    assert!(
-        has_drop_target(&area),
-        "编辑区上没装停靠接收器（编辑器拖不回编辑区 = 功能等于没有）"
-    );
-    println!("[3] 拖放零件齐了：拖拽源 + 页签栏接收器 + 停靠接收器 ✓");
+    println!("[3] 拖放零件齐了：页签头拖拽源 + 页签栏接收器 ✓");
+
     // ---- 3b) 页签上要标出「这个文件在哪台机器上」（用户 2026-11-19）----
     //
     // ⚠️ **为什么重要**：页签上只有**文件名** ⇒ 「ntluser.ini」是这台
@@ -510,7 +427,7 @@ fn main() {
         "可编辑的文件还应当保留「铅笔」图标（现在有：{icons:?}）"
     );
     println!("[3b] 页签图标齐了：位置（电脑）+ 模式（铅笔）✓");
-    // ---- 4) 拖回子标签栏 ⇒ 变回子页签；再拖回来 ⇒ 变回编辑区 ----
+    // ---- 4) 挪到**侧栏** ⇒ 再挪回**主栏**（阶段 151：只剩这两个停靠位）----
     let eid = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
     // ⚠️ **走跟拖放落点一样的路**：先解析负载，再调用同一个转换函数。
     //
@@ -524,25 +441,28 @@ fn main() {
         "负载里的种类应当是编辑器"
     );
     assert_eq!(pid, eid, "负载里的 id 跟编辑器对不上");
-    assert!(
-        sub.move_editor_to_main(pid),
-        "编辑器没能挪回主栏页签（阶段 137 的核心）"
-    );
+    // ⚠️ **先挪到侧栏**（阶段 137 的另一个停靠位）⇒ 再挪回主栏。
+    assert!(sub.move_editor_to_side(pid), "编辑器没能挪到侧栏");
     pump(400);
     assert_eq!(
-        sub.editor_is_docked(pid),
-        Some(false),
-        "编辑器应当已经不在编辑区里了"
+        sub.editor_place(pid),
+        Some(EditorPlace::Side),
+        "编辑器应当停在侧栏"
+    );
+    assert_eq!(sub.side_page_count(), 1, "侧栏应当有一个页签");
+    assert!(sub.move_editor_to_main(pid), "编辑器没能挪回主栏页签");
+    pump(400);
+    assert_eq!(
+        sub.editor_place(pid),
+        Some(EditorPlace::Main),
+        "编辑器应当回到主栏（与终端并列的页签）"
     );
     assert_eq!(
         sub.page_count(),
         pages_before + 1,
-        "拖回子标签栏后应当多一个子页签"
+        "挪回主栏后应当多一个子页签"
     );
-    assert!(
-        sub.editor_area_visible(),
-        "编辑器被拖到子标签栏后，编辑区应当**留成停靠区**（不然用户没地方拖回来）"
-    );
+
     // ⚠️ **拖出去后，那一页的左边就是 SFTP 文件列表**（阶段 121，用户
     // 2026-11-15：「**编辑器旁边要有 sftp**，就像我们修改将 term 和编辑器能
     // 同时显示之前那样」）。
@@ -553,11 +473,11 @@ fn main() {
     // 形态）⇒ 切过去就是「左边列表、右边编辑器」。
     let ewidget = sub
         .editor_widget(pid)
-        .expect("拖出去后应当还有编辑器正文");
+        .expect("编辑器应当还有正文");
     let _ = &ewidget; // 编辑器正文本身（页签头挂在宿主上，见下）
     let host = sub
         .editor_host(pid)
-        .expect("编辑器拖到子标签栏后应当有自己的宿主（文件面板｜编辑器）");
+        .expect("编辑器应当有自己的宿主（文件面板｜编辑器）");
     let enum_page = sub
         .nb
         .page_num(&host.clone().upcast::<gtk::Widget>())
@@ -569,7 +489,7 @@ fn main() {
     // ⇒ 断言改成：**文件面板仍在格子里、且没被搬走**。
     assert!(
         st.root.parent().is_some(),
-        "文件面板被连带销毁了（编辑器拖出去不该动它）"
+        "文件面板被连带销毁了（编辑器挪来挪去不该动它）"
     );
     let file_cell_tree = tabs
         .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
@@ -584,13 +504,13 @@ fn main() {
     assert_eq!(
         sub.nb.current_page(),
         Some(enum_page),
-        "拖出去后应当切到编辑器那一页（那一页左边就是 SFTP 列表）"
+        "挪回主栏后应当切到编辑器那一页"
     );
     assert!(
         st.root.is_mapped(),
-        "拖出去后 **SFTP 文件列表应当还在屏幕上**（编辑器旁边那一列）"
+        "挪来挪去之后 **SFTP 文件列表应当还在屏幕上**（编辑器旁边那一列）"
     );
-    // ⚠️ **页签头上必须有文件名**（阶段 117 回归：拖出去后文件名不见了）。
+    // ⚠️ **页签头上必须有文件名**（阶段 117 回归：挪来挪去后文件名不见了）。
     //
     // 根因：GTK 的 `GtkButton` 私下记着 `priv->child` ⇒ 把 Label 从按钮里
     // 搬走之后，按钮销毁时还会**再摘一次** ⇒ 文件名凭空消失。
@@ -599,7 +519,7 @@ fn main() {
         .tab_label(&host.clone().upcast::<gtk::Widget>())
         .expect("应当有页签头");
     let fname = head_file_label(&head).expect(
-        "页签头上必须有文件名标签（拖到子标签栏后文件名不见了 = 回归）",
+        "页签头上必须有文件名标签（文件名不见了 = 回归）",
     );
     assert!(
         fname.text().contains("pp_fileedit_panel_smoke"),
@@ -615,180 +535,33 @@ fn main() {
         "文件名标签没被画出来（在页签头上却看不见 = 还是丢了）"
     );
     println!(
-        "[4] 拖回子标签栏：变成子页签（{n} 个）、编辑区留成停靠区、**SFTP 列表在旁边的格子里**（阶段 146）、文件名「{t}」还在 ✓",
+        "[4] 挪到侧栏再挪回主栏：还是子页签（{n} 个）、**SFTP 列表在旁边的格子里**（阶段 146）、文件名「{t}」还在 ✓",
         n = pages_before + 1,
         t = fname.text()
     );
-    shot("/tmp/fileedit-undock.png");
+    shot("/tmp/fileedit-side-roundtrip.png");
 
-    // 再拖回来
-    assert!(sub.move_editor_to_bottom(pid), "编辑器没能挪回底部编辑区");
-    pump(400);
-    assert_eq!(sub.editor_is_docked(pid), Some(true), "编辑器应当停回编辑区");
-    assert_eq!(
-        sub.page_count(),
-        pages_before,
-        "拖回来后子页签数应当复原"
-    );
-    assert!(sub.editor_area_visible(), "编辑区应当重新露出来");
-    // ⚠️ **文件面板要跟着回终端页**（它住在编辑区所在的那一页里）。
-    assert!(
-        st.root.parent().is_some(),
-        "拖回编辑区后文件面板应当还挂在终端页的宿主上（不能被宿主销毁带走）"
-    );
-    println!("[5] 拖回编辑区：又变回编辑区里的编辑器、SFTP 列表**一直在自己那格**里 ✓");
-
-    // ---- 5b) **真的**拖一次（xdotool 驱动 X 指针）→ 拖到子标签栏 ----
-    //
-    // ⚠️ 这一段验的是「拖放接线真的通」：拖拽源 → 负载 → 接收器 →
-    // 转换。前面那几步是直接调转换函数，**没经过 GTK 的拖放管线**。
-    let has_xdo = std::process::Command::new("xdotool")
-        .args(["--version"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !has_xdo {
-        println!("[5b] ⚠️ 没有 xdotool ⇒ 真拖拽这一段没验（转换逻辑前面验过）");
-    } else {
-        // ⚠️ **有模态对话框就不能拖**：它抓走输入 ⇒ 父窗口收不到事件。
-        //    （连接失败时面板弹的那个「SFTP 连接失败」就是它。）
-        let extra = extra_windows(&window_wid());
-        if !extra.is_empty() {
-            println!(
-                "[5b] ⚠️ 有模态对话框挡着（{}）⇒ 真拖拽跳过（转换逻辑前面已验）",
-                extra.join("、")
-            );
-            // 编辑器本来就还停在编辑区（这次没拖）⇒ 确认一下就好
-            assert_eq!(sub.editor_is_docked(eid), Some(true), "应当还停在编辑区");
-            println!("[5b] （跳过的部分不影响其余断言）");
-        } else {
-            let tab = sub
-                .editor_tab_widget(eid)
-                .expect("编辑区里应当有小标签");
-            let (ox, oy) = window_origin("fileedit panel smoke");
-            // 起点：小标签上那个名字按钮（用户就是这么拖的）
-            let name_btn = find_button(&tab).expect("小标签里应当有个名字按钮");
-            let p = name_btn
-                .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
-                .expect("要能算出按钮在窗口里的位置");
-            // 终点：子标签栏（notebook 的顶部一条）
-            let q = sub
-                .nb
-                .compute_point(&win, &gtk::graphene::Point::new(80.0, 6.0))
-                .expect("要能算出页签栏在窗口里的位置");
-            let from = (ox + p.x() as i32, oy + p.y() as i32);
-            let to = (ox + q.x() as i32, oy + q.y() as i32);
-            println!(
-                "[5b] 真拖拽：从 ({}, {}) 拖到 ({}, {})",
-                from.0, from.1, to.0, to.1
-            );
-            let h = std::thread::spawn(move || real_drag(from, to));
-            // ⚠️ **主线程要继续转主循环**：拖拽事件得有人处理。
-            while !h.is_finished() {
-                pump(30);
-            }
-            let _ = h.join();
-            pump(600);
-            assert_eq!(
-                sub.editor_is_docked(eid),
-                Some(false),
-                "真拖拽没把编辑器拖回子标签栏（拖放管线没通）"
-            );
-            assert_eq!(
-                sub.page_count(),
-                pages_before + 1,
-                "真拖拽之后应当多一个子页签"
-            );
-            println!("[5b] 真拖拽成功：编辑器拖回了子标签栏 ✓");
-
-            // ---- 5c) 再**真拖**回去：从子标签栏拖回终端列的底部 ----
-            //
-            // ⚠️ 得先切回终端页：编辑区藏在终端列里，终端页不显示 ⇒
-            //    拖放目标（终端列）也不显示。
-            let term_id = sub.id_by_title("终端").expect("应当有终端子页签");
-            sub.switch_to(term_id);
-            pump(400);
-            // 起点：子标签栏上那个编辑器的页签头
-            //
-            // ⚠️ **页签头挂在「宿主 Paned」上**（阶段 121：那一页的内容是
-            //    「文件面板｜编辑器」）⇒ 要按宿主查，不能拿编辑器正文去查。
-            let host = sub
-                .editor_host(eid)
-                .expect("拖到子标签栏后应当有宿主（文件面板｜编辑器）");
-            let head = sub.nb.tab_label(&host).expect("编辑器的页签头");
-            let p = head
-                .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
-                .expect("要能算出页签头的位置");
-            // 终点：**编辑区**那条（停靠区）
-            //
-            // ⚠️ 编辑器被拖到子标签栏去了 ⇒ 编辑区只剩一条小标签栏
-            //    （留着当停靠区用）⇒ 落点就按它算。
-            let q = area
-                .compute_point(&win, &gtk::graphene::Point::new(40.0, 8.0))
-                .expect("要能算出编辑区的位置");
-            let from = (ox + p.x() as i32, oy + p.y() as i32);
-            let to = (ox + q.x() as i32, oy + q.y() as i32);
-            println!(
-                "[5c] 真拖拽（拖回）：从 ({}, {}) 拖到 ({}, {})",
-                from.0, from.1, to.0, to.1
-            );
-            // ⚠️ **拖之前先确认「停靠区」在屏幕上**（阶段 108 的关键）：
-            //    编辑区住在**终端页**里 ⇒ 那一页不显示 ⇒ 停靠区也不显示
-            //    ⇒ 拖放管线根本接不上（真拖拽白拖一场）。
-            assert!(
-                area.is_mapped(),
-                "停靠区没在屏幕上（编辑区应当在终端页里露着）"
-            );
-            let h = std::thread::spawn(move || real_drag(from, to));
-            while !h.is_finished() {
-                pump(30);
-            }
-            let _ = h.join();
-            pump(600);
-            assert_eq!(
-                sub.editor_is_docked(eid),
-                Some(true),
-                "真拖拽没把编辑器拖回编辑区（停靠区没接住）"
-            );
-            assert!(
-                sub.editor_area_visible(),
-                "拖回编辑区后编辑区应当露出来"
-            );
-            // ⚠️ **拖动过程中停靠区得一直在屏幕上**（阶段 108 的关键修复）：
-            //    GTK 的 notebook **按下页签就切页**（`gtknotebook.c`）⇒ 用户
-            //    一按住编辑器的页签头，notebook 就切到「编辑器」那一页 ⇒
-            //    编辑器正文盖住整页 ⇒ **停靠区（落点）被藏起来** ⇒ 拖放
-            //    管线接不上（接收器连 `accept` 都不触发）。
-            //    ⇒ 拖动**开始**时切回终端页（见 `subtabs.rs` 的 drag-begin）。
-            assert!(
-                area.is_mapped(),
-                "拖完之后停靠区应当还在屏幕上（拖动开始时应切回终端页）"
-            );
-            println!("[5c] 真拖拽（拖回）成功：编辑器停回了终端列下面 ✓");
-        }
-    }
-
-    // ---- 6) 再开一个 ⇒ 编辑区 2 个；关掉 ⇒ 1 个；全关 ⇒ 编辑区藏起来 ----
+    // ---- 5) 再开一个 ⇒ 两个编辑器；关掉 ⇒ 1 个；全关 ⇒ 0 个 ----
     puttyplus::panel::fileedit::open_local(&st, tmp_two.to_str().unwrap(), false);
     pump(700);
     assert_eq!(sub.editor_count(), 2, "应当有两个编辑器");
-    // ⚠️ **阶段 137**：默认是**主栏页签** ⇒ 新开的文件**并列为一个页签**。
+    // ⚠️ **阶段 137/149**：新开的文件**与终端并列为一个页签** ⇒ 子页签 +1。
     //
-    // ⚠️ **注意**：第一个文件这时**停在底部编辑区**（[5] 拖回去的）⇒ 它
-    //   **不占**子页签 ⇒ 子页签只多一个（终端 + 第二个文件）。
+    // ⚠️ **阶段 149**：编辑器**恒为格子里的页签** ⇒ 两个文件 = 两个页签。
     assert_eq!(
         sub.page_count(),
-        pages_before + 1,
-        "新开的文件应当与终端并列为一个页签（阶段 137 的默认）：现在 {n} 个，之前 {b} 个",
+        pages_before + 2,
+        "两个文件应当各占一个页签（阶段 149）：现在 {n} 个，之前 {b} 个",
         n = sub.page_count(),
         b = pages_before
     );
     println!(
-        "[6] 两个文件：2 个编辑器、子页签 {n} 个（终端 + 新开的那个）✓",
-        n = pages_before + 1
+        "[5] 两个文件：2 个编辑器、子页签 {n} 个（终端 + 两个文件）✓",
+        n = pages_before + 2
     );
 
-    // 改内容 ⇒ 标题带「●」脏标记（阶段 107 的小标签栏）
+
+    // 改内容 ⇒ 标题带「●」脏标记（阶段 107）
     assert!(
         puttyplus::panel::fileedit::type_into(&st, tmp_txt.to_str().unwrap(), "dirty\n"),
         "往编辑器里插字失败"
@@ -799,7 +572,7 @@ fn main() {
         dirty_title.contains('●'),
         "脏标记没进小标签标题：{dirty_title}"
     );
-    println!("[7] 脏标记进了小标签标题：{dirty_title} ✓");
+    println!("[6] 脏标记进了页签标题：{dirty_title} ✓");
 
     // 关掉一个 ⇒ 1 个
     let e1 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_txt.to_str().unwrap());
@@ -809,12 +582,8 @@ fn main() {
     );
     pump(400);
     assert_eq!(sub.editor_count(), 1, "应当剩一个编辑器");
-    assert!(
-        sub.editor_area_visible(),
-        "还有一个编辑器开着 ⇒ 编辑区不该藏起来"
-    );
 
-    // 全关 ⇒ 编辑区藏起来（界面跟没开过编辑器一样）
+    // 全关 ⇒ 编辑器没了（界面跟没开过编辑器一样）
     let e2 = puttyplus::panel::fileedit::editor_id_for(&st, tmp_two.to_str().unwrap());
     assert!(
         puttyplus::panel::fileedit::close_editor_by_id(&st, e2),
@@ -822,12 +591,92 @@ fn main() {
     );
     pump(400);
     assert_eq!(sub.editor_count(), 0, "应当没有编辑器了");
-    assert!(
-        !sub.editor_area_visible(),
-        "没有编辑器时编辑区应当藏起来（别占着半屏）"
-    );
     assert!(term.is_mapped(), "终端还在（编辑器全关了也不该影响它）");
-    println!("[8] 全部关掉：编辑区藏起来了、终端还在 ✓");
+    println!("[7] 全部关掉：编辑器没了、终端还在 ✓");
+
+    // ---- 8) **真的**拖一次（xdotool 驱动 X 指针）⇒ 拖到**文件面板那一格** ----
+    //
+    // ⚠️ 这一段验的是「拖放接线真的通」：拖拽源 → 负载 → 接收器 → 转换。
+    //    前面那几步是直接调转换函数，**没经过 GTK 的拖放管线**。
+    //
+    // ⚠️ **为什么拖到「文件面板那一格」**：编辑器现在是**格子里的页签**
+    //    （阶段 149）⇒ 拖到**同一格**的页签栏等于原地不动 ⇒ 拖到
+    //    **另一格**才看得出「真搬走了」（阶段 146 起文件面板自己一格）。
+    let has_xdo = std::process::Command::new("xdotool")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_xdo {
+        println!("[8] ⚠️ 没有 xdotool ⇒ 真拖拽这一段没验（转换逻辑前面验过）");
+    } else {
+        // ⚠️ **有模态对话框就不能拖**：它抓走输入 ⇒ 父窗口收不到事件。
+        //    （连接失败时面板弹的那个「SFTP 连接失败」就是它。）
+        let extra = extra_windows(&window_wid());
+        if !extra.is_empty() {
+            println!(
+                "[8] ⚠️ 有模态对话框挡着（{}）⇒ 真拖拽跳过（转换逻辑前面已验）",
+                extra.join("、")
+            );
+        } else {
+            // ⚠️ **另开一个文件**来拖（别把正在用的那个拖走 ⇒ 后面的断言会乱）。
+            let tmp_drag = std::env::temp_dir().join(format!(
+                "pp_fileedit_panel_drag_{}.txt",
+                std::process::id()
+            ));
+            std::fs::write(&tmp_drag, "drag\n").expect("写临时文件");
+            puttyplus::panel::fileedit::open_local(&st, tmp_drag.to_str().unwrap(), false);
+            pump(700);
+            let did =
+                puttyplus::panel::fileedit::editor_id_for(&st, tmp_drag.to_str().unwrap());
+            let tree2 = tabs
+                .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
+                .expect("应当有格子树");
+            let term_cell = tree2
+                .cell_of_page(did)
+                .expect("编辑器应当在终端那一格");
+            // 起点：编辑器**页签头**（用户就是这么拖的）。
+            let host = sub
+                .editor_host(did)
+                .expect("编辑器在主栏 ⇒ 应当有宿主（文件面板｜编辑器）");
+            let head = sub.nb.tab_label(&host).expect("编辑器的页签头");
+            let p = head
+                .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
+                .expect("要能算出页签头的位置");
+            // 终点：**文件面板那一格**的页签栏（窗口左上方那条）。
+            let file_cell_id = tree2
+                .cell_of_page(st.file_page_id.get())
+                .expect("文件面板那一页应当还在某个格子里");
+            let file_cell = tree2.cell(file_cell_id).expect("文件面板那一格");
+            let file_nb = file_cell.tabs.nb.clone();
+            let q = file_nb
+                .compute_point(&win, &gtk::graphene::Point::new(40.0, 6.0))
+                .expect("要能算出文件面板那格页签栏的位置");
+            let (ox, oy) = window_origin("fileedit panel smoke");
+            let from = (ox + p.x() as i32, oy + p.y() as i32);
+            let to = (ox + q.x() as i32, oy + q.y() as i32);
+            println!("[8] 真拖拽：从 ({}, {}) 拖到 ({}, {})", from.0, from.1, to.0, to.1);
+            let h = std::thread::spawn(move || real_drag(from, to));
+            // ⚠️ **主线程要继续转主循环**：拖拽事件得有人处理。
+            while !h.is_finished() {
+                pump(30);
+            }
+            let _ = h.join();
+            pump(800);
+            // ⚠️ **断言「真搬走了」**：编辑器现在在**文件面板那一格**里。
+            let now_cell = tree2
+                .cell_of_page(did)
+                .expect("编辑器应当还在某个格子里");
+            assert_eq!(
+                now_cell, file_cell_id,
+                "真拖拽没把编辑器搬到文件面板那一格（拖放管线没通）"
+            );
+            assert_ne!(now_cell, term_cell, "编辑器还在原来那一格");
+            println!("[8] 真拖拽成功：编辑器搬到了文件面板那一格 ✓");
+            let _ = std::fs::remove_file(&tmp_drag);
+        }
+    }
+
 
     println!("fileedit_panel_smoke: OK");
 }

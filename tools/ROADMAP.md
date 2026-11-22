@@ -5179,6 +5179,69 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
   完成了就关机」⇒ **只有这个 tag 的 CI 成功**才执行；失败 ⇒ **不许关**，
   把原因报给用户。
 
+## 四之三十八、2026-11-22：阶段 151 —— 退役「底部编辑区」（用户 2026-11-22 18:37 的两张截图）
+
+- **用户原话**（18:37 截图 + 18:39 文字）：
+  - 「**中间那一块是什么**」⇒ 截图中终端列下方那块显示「把编辑器拖回这里停靠」
+    的空白块；
+  - 「**它还有用没，没有用就去掉。它是收起来的，但我把它拉大了，我感觉它没用
+    了就不应该存在**」。
+
+### 那块是什么
+
+- 阶段 107/108 的老机制「**编辑区**」：编辑器**住在终端列的下面**（一个竖向
+  Paned 的下半），上半是终端 ⇒ 「终端与编辑器同屏上下显示」。
+- 阶段 149 之后编辑器**恒为格子里的页签** ⇒ 这套**没人用**了 ⇒ 它只剩
+  「白占终端列的下半」＋ 一句过时的提示「把编辑器拖回这里停靠」。
+- ⚠️ 用户能**把它拉大** ⇒ 说明它还是一块**真实存在的 widget** ⇒ 留着就是
+  「一个能拖大、但没用的空白」。
+
+### 做法：彻底退役（不是藏起来）
+
+- `EditorPlace` 从**三态收敛为两态**（`Main` 主栏页签 / `Side` 侧栏页签）⇒
+  **底部编辑区这个停靠位从数据模型里消失**（不是「暂时不用」）。
+- 删掉整套「编辑区」控件：`editor_area`（容器）/ `editor_tabs`（小标签栏）/
+  `editor_stack`（内容栈）/ `editor_hint`（「把编辑器拖回这里停靠」那句提示）
+  / `editor_host`（终端列那个竖 Paned 宿主）/ `page_editor_hosts`（容器页的
+  落点登记）/ `tracked_editor_hosts`（宽度回调的挂载记录）。
+- 删掉一整批配套 API：`host_editor_area` / `editor_area_widget` /
+  `set_page_editor_host` / `host_editor_area_for_page(_num)` /
+  `host_editor_area_for_page_num` / `build_editor_tab` / `move_editor_to_bottom` /
+  `editor_is_docked` / `editor_host_by_page_num` / `mark_editor_host_tracked` /
+  `refresh_editor_area` / `layout_editor_area` / `attach_dock_target` /
+  `editor_tab_widget`。
+- `tabs.rs` 的「切页签 ⇒ 编辑区跟着走」钩子**整个删掉**（它现在什么都不做）
+  ⇒ `tabs.rs` 的 `install_switch_page_hook` 也没了。
+- `dockerui.rs`：容器页**不再登记编辑区落点**、不再把编辑区搬过去。
+  - ⚠️ **功能不退化**：阶段 138 起容器页的 compose 文件就是**在格子页签栏里
+    打开**的（`open_compose_path` → `fileedit::open_remote`）⇒ 用户点完就看到
+    编辑器，**不需要**「搬到容器页下面」这套。
+- `panel::track_file_width` 一并删（它只服务于编辑区宿主的宽度回调 ⇒ 而
+  文件面板的宽度**阶段 146 起由根分割条管** ⇒ 这条路径会往 `file_w` 写 0）。
+- CSS（`.pp-editor-area` / `.pp-editor-tabs` / `.pp-editor-tab` /
+  `.pp-editor-tab-active` / `.pp-editor-tab-name` / `.pp-editor-hint`）与
+  文案「把编辑器拖回这里停靠」一并清掉。
+
+### 保留的
+
+- **侧栏停靠位（`Side`）保留**——用户 2026-11-19 明确要过「tab 可以自由停靠
+  在多个位置（像 vscode）」⇒ 主栏 ＋ 侧栏两个位置。
+- **终端列那个竖向 Paned 保留**（`Tab.paned` / `paned_by_page_num` 依赖它）：
+  它现在的上半 = 终端容器、下半空着 ⇒ **实测终端铺满整格（722/722）⇒ 界面
+  上看不出痕迹**。
+
+### 验证
+
+- **界面实测**：终端页整格铺满（终端列 854×722、上半 722 ⇒ **没有留白**）；
+  编辑器那一格只有「终端 / 编辑器」两个页签，**没有中间那块**。
+- 冒烟改：`editor_dock_smoke`（重写：主栏 ⇄ 侧栏两个停靠位）、
+  `fileedit_panel_smoke`（删掉编辑区那一大段；真拖拽改成「拖到文件面板
+  那一格」⇒ 验跨格搬运的**真实 GTK 管线**）、`docker_ui_smoke`（编辑区那条
+  改成「编辑器是格子里的一个页签」）、`layout_panel_move_smoke`（终端列下半
+  断言改成「下半空着」）。
+- 全量：lib **949 passed / 0 failed**；`cargo check --examples` 全过；
+  12 个冒烟全过；命令行契约 **PASS=73 FAIL=0**。
+
 ## 四之三十七、2026-11-22：阶段 150 —— 拖放之后分割条不再跳位（用户 2026-11-22 的反馈）
 
 - **用户原话**：「**拖动并放置之后，文件管理器的宽度就会变化，变得很宽**」。
