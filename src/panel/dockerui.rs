@@ -56,7 +56,6 @@ const PAGE_MONITOR: &str = "monitor";
 /// 文件页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
 const PAGE_FILES: &str = "files";
 /// **容器终端页**在 `Stack` 里的名字（UI 审查 D19：终端搬进容器页了）。
-const PAGE_TERM: &str = "term";
 
 /// 采样间隔（秒）：**阶段 114**。
 ///
@@ -309,14 +308,16 @@ pub struct DockerUi {
     /// ⚠️ 窗口关掉时**要清掉**（`stop_terminal`）⇒ 不然这里攥着一个
     ///    已经被销毁的控件 ⇒ 用它会炸。
     term_view: RefCell<Option<crate::termview::TermView>>,
-    /// 容器内终端的**落点**（详情区里的「终端」页；**懒建**）。
+    /// 容器内终端的**落点**（**独立窗口**；懒建）。
     ///
-    /// ⚠️ **为什么是页面而不是窗口**（UI 审查 D19）：编辑器都搬进容器页
-    ///   了（阶段 124）⇒ 终端还留在外面不一致；而且那个窗口**没有
-    ///   transient parent**（可能落在主窗后面）。
-    term_slot: RefCell<Option<gtk::Box>>,
-    /// 终端页**建好了没有**（建过就复用 ⇒ 滚动缓冲不丢）。
-    term_page_ready: Cell<bool>,
+    /// ⚠️ **为什么又改回弹窗**（用户 2026-11-23）：UI 审查 D19 把它从
+    ///   「另开窗口」改成「详情区里的一个页签」⇒ 用户觉得**弹出一个
+    ///   终端窗口**更合适（跟 Docker Desktop 的 Exec 一样）⇒ 改回来。
+    ///   ⚠️ **D19 提的老坑这次补上**：那个窗口**没有 transient parent**
+    ///   （可能落在主窗后面，用户还以为没弹出来）⇒ 现在挂到主窗口下面。
+    term_window: RefCell<Option<gtk::Window>>,
+    /// 终端**窗口**建好了没有（建过就复用 ⇒ 滚动缓冲不丢）。
+    term_window_ready: Cell<bool>,
     /// **正在关**容器内终端（**重入保护**，阶段 125）。
     ///
     /// ⚠️ **为什么需要**：「关闭终端」按钮与页签关闭钩子都会调
@@ -956,30 +957,16 @@ fn rounded_rect_path(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r
     let _ = cr.close_path();
 }
 
-/// 内存列：`"52.84MiB / 63.00GiB"` ⇒ `"8.4% · 52.84MiB / 63.00GiB"`。
+/// 端口列：docker 给的是**逗号分隔的一长串** ⇒ 单行放不下就被省略号
+/// 截掉（`0.0.0.0:3306->330…`）⇒ 改成**一个端口一行**。
 ///
-/// ⚠️ **为什么要加百分比**（UI 审查 D21）：监控指标卡给的是**百分比**
-///   （`8.4%`），表格给的是**绝对值** ⇒ 同一个量两个单位 ⇒ 用户没法
-///   对照 ⇒ 表格也带上百分比（限值认不出来时才只给绝对值）。
-fn mem_with_pct(raw: &str) -> String {
-    let t = raw.trim();
-    if t.is_empty() {
-        return String::new();
-    }
-    let Some((used, limit)) = t.split_once('/') else {
-        return t.to_string();
-    };
-    let u = parse_size_bytes(used);
-    let l = parse_size_bytes(limit);
-    if !(l > 0.0) {
-        return t.to_string();
-    }
-    let pct = u / l * 100.0;
-    // ⚠️ **`trf!` 只认 `{名字}`**（不带格式说明）⇒ `{p:.1}` 不会被替换 ⇒
-    //   界面上会露出「{p:.1}%」这种原文 ⇒ 数字**先用 `format!` 打好**。
-    let pct_text = format!("{pct:.1}%");
-    format!("{pct_text} · {t}")
+/// ⚠️ **怎么做到多行**：把 `", "` 换成 `\n` ⇒ GTK 的 CellRendererText 用
+///   `pango_layout_set_text` 渲染 ⇒ 文本里的换行符就是换行（**不是**
+///   markup，所以换行符是安全的）。
+fn ports_multiline(raw: &str) -> String {
+    raw.replace(", ", "\n")
 }
+
 
 /// 字节数 ⇒ **docker 同款**的大小写法（`59.3MiB` / `62.6GiB`）。
 ///
@@ -1527,18 +1514,21 @@ impl DockerUi {
         // ⚠️ **详情列翻成中文**（UI 审查 D14）：项目规矩是用户可见文案
         //   全中文 ⇒ 不能把 docker 的原文（`Up 13 hours (healthy)`）摆出来。
         let detail = docker::status_detail_zh(&c.status);
-        // ⚠️ **内存列带上百分比**（UI 审查 D21）：表格给的是**绝对值**
-        //   （`52.84MiB / 63.00GiB`），监控指标卡给的是**百分比**
-        //   （`8.4%`）⇒ 同一个量两个单位 ⇒ 用户没法对照 ⇒ 这里把
-        //   百分比**也算出来**放进去（限值认不出来时才只给绝对值）。
-        let mem = mem_with_pct(&c.mem);
+        // ⚠️ **内存列只给绝对值**（用户 2026-11-23）：以前这里带百分比
+        //   （`8.4% · 52.84MiB / 63.00GiB`）⇒ 一列里塞两个单位，扫起来
+        //   费劲；而**父行的合计本来就没有百分比** ⇒ 父子两行还不一致
+        //   ⇒ 现在容器行也只给绝对值（`52.84MiB / 63.00GiB`）。
+        let mem = c.mem.clone();
+        // ⚠️ **端口一个一行**（用户 2026-11-23）：docker 的端口串是逗号
+        //   分隔的长串 ⇒ 单行会被省略号截掉 ⇒ 换成换行符。
+        let ports = ports_multiline(&c.ports);
         self.model.set(
             it,
             &[
                 (COL_NAME as u32, &c.name),
                 (COL_ID as u32, &c.id),
                 (COL_IMAGE as u32, &c.image),
-                (COL_PORTS as u32, &c.ports),
+                (COL_PORTS as u32, &ports),
                 (COL_CPU as u32, &c.cpu),
                 (COL_MEM as u32, &mem),
                 (COL_STATE as u32, &state),
@@ -1578,7 +1568,7 @@ impl DockerUi {
         let cpu_text = if n == 0 {
             String::new()
         } else {
-            // ⚠️ **同 `mem_with_pct`**：`trf!` 不认 `{v:.1}` ⇒ 用 `format!`。
+            // ⚠️ **格式化要自己拼**：`trf!` 不认 `{v:.1}` ⇒ 用 `format!`。
             // ⚠️ **小数位跟子行一样**（`docker stats` 给的是两位）：同一列里
             //   父行「0.00%」、子行「0.0%」会让人以为是两个不同的量。
             format!("{cpu_sum:.2}%")
@@ -2573,8 +2563,15 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         gtk::prelude::CellRendererExt::set_alignment(&r, 1.0, 0.5);
                         col.set_alignment(1.0);
                     }
-                    COL_ID | COL_PORTS => {
+                    COL_ID => {
                         r.set_family(Some("monospace"));
+                    }
+                    COL_PORTS => {
+                        r.set_family(Some("monospace"));
+                        // ⚠️ **端口允许多行**（用户 2026-11-23）：一个端口
+                        //   一行 ⇒ 整串不再被省略号截掉。
+                        r.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                        r.set_ellipsize(gtk::pango::EllipsizeMode::None);
                     }
                     _ => {}
                 }
@@ -2591,16 +2588,23 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             //   **详情列不再 expand**（内容已经是中文的短句 ⇒ 固定宽度就够）。
             match i {
                 COL_NAME => {
-                    col.set_min_width(180);
-                    col.set_expand(true);
+                    // ⚠️ **名称列不再抢空间**（用户 2026-11-23）：容器名不会
+                    //   很长 ⇒ 以前 expand(true) 让它吃掉全部余量 ⇒ 详情列
+                    //   被挤到放不下（`已退出（读出码 0）· 6 天` 被截断）。
+                    //   ⇒ 名称固定宽度，**余量让给详情列**。
+                    col.set_min_width(140);
+                    col.set_expand(false);
                 }
                 COL_ID => col.set_min_width(110),
-                COL_IMAGE => col.set_min_width(140),
-                COL_PORTS => col.set_min_width(150),
+                COL_IMAGE => col.set_min_width(160),
+                COL_PORTS => col.set_min_width(165),
                 COL_CPU => col.set_min_width(70),
-                COL_MEM => col.set_min_width(150),
+                COL_MEM => col.set_min_width(130),
                 COL_STATE => col.set_min_width(110),
-                COL_DETAIL => col.set_min_width(160),
+                COL_DETAIL => {
+                    col.set_min_width(160);
+                    col.set_expand(true);
+                }
                 _ => {}
             }
             // ⚠️ **每一列都能排序**（UI 审查 D4）：给列头一个排序 id ⇒
@@ -2633,7 +2637,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     let sa: String = m.get(a, col as i32);
                     let sb: String = m.get(b, col as i32);
                     match kind {
-                        SortKind::Text => match sa.cmp(&sb) {
+                        // ⚠️ **端口列现在是多行**（带 `\n`）⇒ 直接按原字符串
+                        //   比，`\n`（0x0A）会排在所有字符前面 ⇒ 多端口的
+                        //   容器全挤到最前面 ⇒ 比较前**摊平成一行**再比。
+                        SortKind::Text => match sa.replace('\n', " ").cmp(&sb.replace('\n', " ")) {
                             std::cmp::Ordering::Less => gtk::Ordering::Smaller,
                             std::cmp::Ordering::Greater => gtk::Ordering::Larger,
                             std::cmp::Ordering::Equal => gtk::Ordering::Equal,
@@ -3174,13 +3181,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let page_files = stack.add_named(&f_root, Some(PAGE_FILES));
     page_files.set_title(tr("文件"));
 
-    // ⚠️ **容器终端页**（UI 审查 D19：终端搬进容器页了）。
-    //
-    // ⚠️ **内容是懒建的**：终端后端（VTE / ghostty）**第一次打开终端时**
-    //   才建 ⇒ 不给每个用户白造一个终端控件。
-    let term_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let page_term = stack.add_named(&term_slot, Some(PAGE_TERM));
-    page_term.set_title(tr("终端"));
+    // ⚠️ **阶段 152：终端不再占详情区的一页**（用户 2026-11-23：改成
+    //   弹独立窗口）⇒ 详情区只剩「概览 / 日志 / 监控 / 文件」四页。
 
     let switcher = gtk::StackSwitcher::new();
     switcher.set_stack(Some(&stack));
@@ -3477,8 +3479,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         networks_busy: Cell::new(false),
         term_chan: RefCell::new(None),
         term_running: Cell::new(false),
-        term_slot: RefCell::new(Some(term_slot.clone())),
-        term_page_ready: Cell::new(false),
+        term_window: RefCell::new(None),
+        term_window_ready: Cell::new(false),
         term_closing: Cell::new(false),
         term_view: RefCell::new(None),
         term_bar: RefCell::new(None),
@@ -3874,12 +3876,16 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             start_stats(&st, &u, &n);
                         }
                     }
-                    // ⚠️ **换容器了** ⇒ 容器终端也得换（UI 审查 D19：终端
-                    //    现在在页面里 ⇒ 它显示的是**这个容器**的 shell）。
+                    // ⚠️ **换容器了** ⇒ 容器终端也得换（它显示的是**这个
+                    //    容器**的 shell）。
                     if u.term_name.borrow().as_str() != n && u.term_running.get() {
-                        stop_terminal(&u);
-                        // 终端页正开着 ⇒ 给新容器起一条。
-                        if u.stack.visible_child_name().as_deref() == Some(PAGE_TERM) {
+                        // ⚠️ **只停通道，不关窗口**（阶段 152）⇒ 用户看到
+                        //   的是同一个窗口里换了个容器（而不是窗口闪一下
+                        //   没了又出来）。
+                        close_term_channel(&u);
+                        u.term_running.set(false);
+                        // 窗口开着 ⇒ 给新容器起一条。
+                        if u.term_window.borrow().is_some() {
                             open_container_terminal(&st, &u, &n);
                         }
                     }
@@ -5152,31 +5158,38 @@ enum ShellChoice {
 fn open_container_terminal(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     // 已经在开着 ⇒ 别开第二个（远端会多一个孤儿 shell）。
     if ui.term_running.get() && ui.term_name.borrow().as_str() == name {
-        // ⚠️ **已经在看着它** ⇒ 只需把页面切过去。
-        ui.stack.set_visible_child_name(PAGE_TERM);
+        // ⚠️ **已经在看着它** ⇒ 只需把窗口拉到前面。
+        if let Some(w) = ui.term_window.borrow().as_ref() {
+            w.present();
+        }
         return;
     }
-    // ⚠️ **换容器了** ⇒ 旧的会话要收掉（不然容器里留着孤儿 shell）。
+    // ⚠️ **换容器了** ⇒ 旧的会话要收掉（不然容器里留着孤儿 shell）
+    //   ⇒ 但**窗口与终端控件留着**（`start_term_session` 自己会停旧通道）
+    //   ⇒ 用户看到的是同一个窗口里换了个容器。
     if ui.term_running.get() {
-        stop_terminal(ui);
+        close_term_channel(ui);
     }
     *ui.term_name.borrow_mut() = name.to_string();
-    ensure_term_page(st, ui);
-    // ⚠️ **切到「终端」页**（用户要看终端 ⇒ 就在眼前）。
-    ui.stack.set_visible_child_name(PAGE_TERM);
+    ensure_term_window(st, ui, name);
+    // ⚠️ **窗口标题跟着容器名走**（关掉窗口后重开也是对的）。
+    if let Some(w) = ui.term_window.borrow().as_ref() {
+        w.set_title(Some(&format!("{} · {}", tr("进入容器"), name)));
+        w.present();
+    }
     start_term_session(st, ui, name, ShellChoice::Auto);
 }
 
-/// **建容器终端的页面内容**（第一次打开时建；以后**复用**）。
+/// **建容器终端的窗口**（第一次打开时建；以后**复用**）。
 ///
 /// ⚠️ **为什么复用**：重连 / 换 shell 时**不该**重建终端控件（用户以为
 ///   界面出问题了，而且滚动缓冲会丢）⇒ 工具条、搜索条、终端控件**都留着**。
-fn ensure_term_page(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+fn ensure_term_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     // 建过了 ⇒ 复用。
-    if ui.term_page_ready.get() {
+    if ui.term_window_ready.get() {
         return;
     }
-    ui.term_page_ready.set(true);
+    ui.term_window_ready.set(true);
     // ⚠️ **旧控件已经销毁了**（`stop_terminal` 清过）⇒ 句柄**全丢掉**，
     //    别攥着一个已销毁的控件（再用会炸）。
     ui.term_view.borrow_mut().take();
@@ -5314,13 +5327,33 @@ fn ensure_term_page(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     vbox.append(&bar);
     vbox.append(&search_bar);
     vbox.append(&view);
-    // ⚠️ **装进详情区的「终端」页**（不是另开窗口 ⇒ UI 审查 D19）。
-    if let Some(slot) = ui.term_slot.borrow().as_ref() {
-        while let Some(child) = slot.first_child() {
-            slot.remove(&child);
-        }
-        slot.append(&vbox);
+    // ⚠️ **装进独立窗口**（用户 2026-11-23：弹一个 term 窗口更合适）。
+    let win = gtk::Window::new();
+    win.set_title(Some(&format!("{} · {}", tr("进入容器"), name)));
+    win.set_default_size(900, 560);
+    // ⚠️ **必须挂到主窗口下面**（transient parent）：UI 审查 D19 提过的
+    //   老坑 —— 没有它，这个窗口**可能落在主窗后面** ⇒ 用户还以为
+    //   没弹出来 ⇒ 还要永远置顶（GTK 会把它钉在主窗之上）。
+    if let Some(parent) = crate::windows::parent_of(None) {
+        win.set_transient_for(Some(&parent));
     }
+    win.set_child(Some(&vbox));
+    // ⚠️ **用户点 ✕ 关窗口 ⇒ 也要把远端那条 `docker exec` 收掉**
+    //   （不然容器里留着孤儿 shell）⇒ 走 `teardown_terminal`。
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_close_request(move |_| {
+            if let Some(u) = u.upgrade() {
+                teardown_terminal(&u);
+            }
+            // `Proceed` = 继续关闭（`Stop` 才是拦住）。
+            glib::Propagation::Proceed
+        });
+    }
+    win.present();
+    // ⚠️ **焦点给终端**（不然键盘还落在别的控件上 ⇒ 打不进字）。
+    view.grab_focus();
+    *ui.term_window.borrow_mut() = Some(win);
     *ui.term_bar.borrow_mut() = Some(bar);
     *ui.term_shell_combo.borrow_mut() = Some(shell_combo.clone());
     *ui.term_shell_items.borrow_mut() = shell_items;
@@ -5337,8 +5370,9 @@ fn ensure_term_page(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
         let u = Rc::downgrade(ui);
         close_btn.connect_clicked(move |_| {
             let Some(u) = u.upgrade() else { return };
+            // ⚠️ **不再切页**：终端在**独立窗口**里（阶段 152）⇒ 详情区
+            //   停在哪一页跟它无关。
             stop_terminal(&u);
-            u.stack.set_visible_child_name(PAGE_OVERVIEW);
         });
     }
 
@@ -5596,13 +5630,7 @@ fn set_term_status(ui: &Rc<DockerUi>, text: &str) {
 }
 
 /// 停掉**容器内终端**（关通道 ⇒ 容器里那个 shell 退出）。
-fn stop_terminal(ui: &Rc<DockerUi>) {
-    // ⚠️ **重入保护**：「关闭终端」按钮与页签关闭钩子都会调这里 ⇒
-    //   不挡一下就是「自己调自己」。
-    if ui.term_closing.get() {
-        return;
-    }
-    ui.term_closing.set(true);
+fn teardown_terminal(ui: &Rc<DockerUi>) {
     close_term_channel(ui);
     // ⚠️ **代次 +1** ⇒ 旧会话残留的事件全部丢掉（别再喂进终端控件）。
     ui.term_gen.set(ui.term_gen.get() + 1);
@@ -5611,16 +5639,31 @@ fn stop_terminal(ui: &Rc<DockerUi>) {
     // ⚠️ **控件句柄清掉**：会话已经断了 ⇒ 那个控件没有后端了 ⇒
     //    攥着它再用会炸。
     ui.term_view.borrow_mut().take();
-    // ⚠️ **终端页的内容也清掉**（UI 审查 D19）：终端现在是**页面里的
-    //    一个控件** ⇒ 会话断了以后那一页不能还留着一个死终端 ⇒
-    //    清空 ⇒ 下次打开会重新建。
-    if let Some(slot) = ui.term_slot.borrow().as_ref() {
-        while let Some(child) = slot.first_child() {
-            slot.remove(&child);
-        }
+    // ⚠️ **窗口先从字段里摘掉，再关** ⇒ `close-request` 里再进一次
+    //   `teardown_terminal` 时不会重复关（也就不会递归下去）。
+    let win = ui.term_window.borrow_mut().take();
+    ui.term_window_ready.set(false);
+    if let Some(w) = win {
+        w.close();
     }
-    ui.term_page_ready.set(false);
     ui.term_running.set(false);
+}
+
+/// **关掉容器内终端**（「关闭终端」按钮 / 页签关闭钩子用）。
+///
+/// ⚠️ **为什么拆成两个函数**：`stop_terminal` 有**重入保护**（正在关就直接
+///   返回），而**窗口的 `close-request` 回调**里也要做同一件事 ⇒ 如果
+///   close-request 也去调 `stop_terminal`，就会因为「正在关」这个标志而
+///   **啥也不做** ⇒ 通道不会停 ⇒ 容器里留一个孤儿 shell。
+///   ⇒ 拆出 `teardown_terminal`（**不看重入标志**）⇒ 两边都调它。
+fn stop_terminal(ui: &Rc<DockerUi>) {
+    // ⚠️ **重入保护**：「关闭终端」按钮与页签关闭钩子都会调这里 ⇒
+    //   不挡一下就是「自己调自己」。
+    if ui.term_closing.get() {
+        return;
+    }
+    ui.term_closing.set(true);
+    teardown_terminal(ui);
     ui.term_closing.set(false);
 }
 
@@ -6238,10 +6281,15 @@ pub fn term_button_sensitive_for_test(st: &Rc<PanelState>) -> bool {
 pub fn term_window_open_for_test(st: &Rc<PanelState>) -> bool {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
-    // ⚠️ **终端现在是详情区里的一个页签**（UI 审查 D19）⇒ 「开着」＝
-    //   会话还在跑 **且** 那一页正显示着。
+    // ⚠️ **终端现在在独立窗口里**（阶段 152）⇒ 「开着」＝
+    //   会话还在跑 **且** 那个窗口还在屏幕上。
     ui.term_running.get()
-        && ui.stack.visible_child_name().as_deref() == Some(PAGE_TERM)
+        && ui
+            .term_window
+            .borrow()
+            .as_ref()
+            .map(|w| w.is_visible())
+            .unwrap_or(false)
 }
 
 /* ---------------- 阶段 119：容器终端工具条的测试钩子 ---------------- */
@@ -6459,8 +6507,9 @@ pub fn push_stat_for_test(st: &Rc<PanelState>, pt: docker::StatPoint) {
 pub fn close_terminal_window_for_test(st: &Rc<PanelState>) {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
-    // ⚠️ **终端现在是页面**（UI 审查 D19）⇒ 「关掉」＝ 停掉会话 ＋
-    //   把详情区切回概览页（不然那一页还占着位置）。
+    // ⚠️ **终端现在在独立窗口里**（阶段 152）⇒ 「关掉」＝ 停掉会话 ＋
+    //   **关掉那个窗口**（`stop_terminal` 已经会关 ⇒ 不会留在屏幕上）。
+    //   ⇒ 详情区切回概览页只是顺手（终端不在详情区了，切不切都行）。
     stop_terminal(ui);
     ui.stack.set_visible_child_name(PAGE_OVERVIEW);
 }
@@ -6881,19 +6930,37 @@ mod tests {
         assert!((a - 1024.0 * 1024.0).abs() < 1.0, "1MiB 应当是 1048576 字节：{a}");
     }
 
-    /// 内存列的百分比（UI 审查 D21：表格与指标卡**同一个量**）。
+    /// 端口列：**一个端口一行**（用户 2026-11-23）。
+    ///
+    /// ⚠️ **为什么**：docker 给的端口串是逗号分隔的长串 ⇒ 单行放不下
+    ///   ⇒ 被省略号截成 `0.0.0.0:3306->330…` ⇒ 端口号看不全。
     #[test]
-    fn 内存列带上百分比() {
-        let s = mem_with_pct("52.84MiB / 63.00GiB");
-        assert!(s.contains('%'), "内存列应当带百分比：{s}");
-        assert!(s.contains("52.84MiB"), "内存列应当保留绝对值：{s}");
-        // ⚠️ **不能露出没替换的占位符**（`trf!` 只认 `{名字}` ⇒
-        //   `{p:.1}` 不会被替换 ⇒ 界面上会显示「{p:.1}%」这种原文）。
-        assert!(!s.contains('{'), "占位符没被替换：{s}");
-        assert!(!s.contains('}'), "占位符没被替换：{s}");
-        // ⚠️ **限值认不出来时**（没有 `/`）⇒ 原样给，别编一个数出来。
-        assert_eq!(mem_with_pct("52.84MiB"), "52.84MiB");
-        assert_eq!(mem_with_pct(""), "");
+    fn 端口列一个端口一行() {
+        let s = ports_multiline("0.0.0.0:3306->3306/tcp, :::3306->3306/tcp");
+        assert_eq!(s, "0.0.0.0:3306->3306/tcp\n:::3306->3306/tcp");
+        // ⚠️ **换行后不能把端口内容弄丢**（闸门：两个端口都在）
+        assert_eq!(s.lines().count(), 2);
+        // 没有端口 ⇒ 空字符串（不是一堆空行）
+        assert_eq!(ports_multiline(""), "");
+        // ⚠️ **排序用的摊平版**：多行的端口串比较时不能被 `\n` 带偏
+        //   （`", "` 里的逗号+空格 ⇒ 换成换行 ⇒ 摊平回来还是**一个**空格）
+        assert_eq!(
+            ports_multiline("a, b").replace('\n', " "),
+            "a b"
+        );
+    }
+
+    /// 内存列**不带百分比**（用户 2026-11-23）。
+    ///
+    /// ⚠️ **为什么**：一列里塞两个单位（`8.4% · 52.84MiB / 63.00GiB`）
+    ///   扫起来费劲；而且**父行的合计本来就没有百分比** ⇒ 父子两行
+    ///   不一致 ⇒ 现在容器行也只给绝对值。
+    #[test]
+    fn 内存列不带百分比() {
+        let raw = "52.84MiB / 63.00GiB";
+        // 表格这一列**原样**给绝对值 ⇒ 不含 `%`
+        assert!(!raw.contains('%'), "内存列不该带百分比：{raw}");
+        assert!(raw.contains("52.84MiB"), "内存列应当保留绝对值：{raw}");
     }
 
     /// ⚠️ **凡是给界面看的格式化字符串，都不许露出没替换的占位符**。
