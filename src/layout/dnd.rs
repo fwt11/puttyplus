@@ -39,6 +39,8 @@ pub enum PageKindTag {
     Docker,
     /// 编辑器（阶段的 137 三态：主栏 / 底部 / 侧栏）。
     Editor,
+    /// **文件面板页**（阶段 146：文件面板独立成格之后，它是一格里的**一页**）。
+    Files,
     /// 其它（不认识就按"其它"处理，别丢数据）。
     Other,
 }
@@ -51,6 +53,7 @@ impl PageKindTag {
             PageKindTag::Db => "db",
             PageKindTag::Docker => "docker",
             PageKindTag::Editor => "editor",
+            PageKindTag::Files => "files",
             PageKindTag::Other => "other",
         }
     }
@@ -62,6 +65,7 @@ impl PageKindTag {
             "db" | "database" => Some(PageKindTag::Db),
             "docker" | "container" => Some(PageKindTag::Docker),
             "editor" | "edit" => Some(PageKindTag::Editor),
+            "files" | "file" => Some(PageKindTag::Files),
             "other" => Some(PageKindTag::Other),
             _ => None,
         }

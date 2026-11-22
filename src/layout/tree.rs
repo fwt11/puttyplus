@@ -247,6 +247,89 @@ fn widget_for(node: &TreeNode, cells: &HashMap<CellId, Rc<Cell>>) -> Option<gtk:
     }
 }
 
+/// 树 → **可存盘的布局**（只记形状 ＋ 页签种类）。
+fn snapshot_of(
+    node: &TreeNode,
+    cells: &HashMap<CellId, Rc<Cell>>,
+) -> crate::layout::persist::LayoutNode {
+    use crate::layout::persist::{LayoutNode, SlotKind};
+    match node {
+        TreeNode::Leaf(id) => {
+            let tabs = cells
+                .get(id)
+                .map(|c| {
+                    c.tabs
+                        .page_ids()
+                        .iter()
+                        .map(|pid| match c.tabs.kind_of(*pid) {
+                            crate::panel::subtabs::PageKind::Terminal => SlotKind::Terminal,
+                            crate::panel::subtabs::PageKind::Db => SlotKind::Db,
+                            crate::panel::subtabs::PageKind::Docker => SlotKind::Docker,
+                            crate::panel::subtabs::PageKind::Files => SlotKind::Files,
+                            crate::panel::subtabs::PageKind::Other => SlotKind::Other,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            LayoutNode::Leaf { tabs }
+        }
+        TreeNode::Split { stacked, a, b } => LayoutNode::Split {
+            stacked: *stacked,
+            a: Box::new(snapshot_of(a, cells)),
+            b: Box::new(snapshot_of(b, cells)),
+        },
+        TreeNode::Empty => LayoutNode::Leaf { tabs: Vec::new() },
+    }
+}
+
+/// 布局 → 树（`leaf_tabs` 按叶子顺序取用）。
+fn build_tree(
+    layout: &crate::layout::persist::LayoutNode,
+    leaf_tabs: &[Rc<crate::panel::subtabs::SubTabs>],
+    next: &mut usize,
+    next_id: &mut u64,
+) -> Option<TreeNode> {
+    use crate::layout::persist::LayoutNode;
+    match layout {
+        LayoutNode::Split { stacked, a, b } => Some(TreeNode::Split {
+            stacked: *stacked,
+            a: Box::new(build_tree(a, leaf_tabs, next, next_id)?),
+            b: Box::new(build_tree(b, leaf_tabs, next, next_id)?),
+        }),
+        LayoutNode::Leaf { .. } => {
+            let id = CellId(*next_id);
+            *next_id += 1;
+            *next = next.saturating_add(1);
+            Some(TreeNode::Leaf(id))
+        }
+    }
+}
+
+/// 树 → 格子表（按叶子顺序把容器配给格子）。
+fn collect_cells(
+    tree: &TreeNode,
+    leaf_tabs: &[Rc<crate::panel::subtabs::SubTabs>],
+    out: &mut HashMap<CellId, Rc<Cell>>,
+) {
+    let mut leaves: Vec<CellId> = Vec::new();
+    collect_leaf_ids(tree, &mut leaves);
+    for (i, id) in leaves.into_iter().enumerate() {
+        let Some(tabs) = leaf_tabs.get(i) else { continue };
+        out.insert(id, Rc::new(Cell::new(id, tabs.clone())));
+    }
+}
+
+fn collect_leaf_ids(node: &TreeNode, out: &mut Vec<CellId>) {
+    match node {
+        TreeNode::Leaf(id) => out.push(*id),
+        TreeNode::Split { a, b, .. } => {
+            collect_leaf_ids(a, out);
+            collect_leaf_ids(b, out);
+        }
+        TreeNode::Empty => {}
+    }
+}
+
 /// 格子树（**持有树 + 内容 + GTK 根容器**）。
 ///
 /// ⚠️ **阶段 144 的初始状态 = 一个叶子** ⇒ 界面与今天**逐像素一致**。
@@ -275,6 +358,11 @@ pub struct CellTree {
     /// ⚠️ **为什么挂在树里**：根分割条（树根处的那个 Paned）**每次重画都会
     ///    重建** ⇒ 谁想盯着它都得重新挂一次 ⇒ 干脆由树来挂。
     root_pos_hook: RefCell<Option<Rc<dyn Fn(i32)>>>,
+    /// **布局变了**的回调（阶段 147：存盘）。
+    ///
+    /// ⚠️ **什么时候叫**：树形变了（拆分 / 关闭格子）或页签搬动了 ⇒
+    ///    上层据此把布局写进设置文件（**节流**写，别拖一下分割条就写一次）。
+    changed_hook: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl CellTree {
@@ -290,6 +378,7 @@ impl CellTree {
             current: std::cell::Cell::new(id),
             new_cell_hook: RefCell::new(None),
             root_pos_hook: RefCell::new(None),
+            changed_hook: RefCell::new(None),
         });
         tree.host.append(cell_widget(&cell));
         tree.wire_cell(id);
@@ -468,6 +557,69 @@ impl CellTree {
         *self.new_cell_hook.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// 注册「**布局变了**」的回调（阶段 147：存盘）。
+    ///
+    /// ⚠️ **上层要节流**：拖分割条、连续搬页签都会触发 ⇒ 别一次就写一次
+    ///    设置文件。
+    pub fn set_changed_hook<F: Fn() + 'static>(&self, f: F) {
+        *self.changed_hook.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// 通知上层「布局变了」。
+    fn notify_changed(&self) {
+        let f = self.changed_hook.borrow().clone();
+        if let Some(f) = f {
+            f();
+        }
+    }
+
+    /* ---------------- 阶段 147：布局存盘 ---------------- */
+
+    /// 当前的布局（**可存盘**：只记形状 ＋ 页签种类，不记内容**）。
+    pub fn snapshot(&self) -> crate::layout::persist::LayoutNode {
+        let tree = self.tree.borrow().clone();
+        let cells = self.cells.borrow().clone();
+        snapshot_of(&tree, &cells)
+    }
+
+    /// 按一份布局**重建整棵树**（阶段 147：还原上次会话的布局）。
+    ///
+    /// `leaf_tabs` = 每个叶子的容器（**按叶子顺序**，长度必须对得上）。
+    ///
+    /// ⚠️ **对不上 ⇒ `None`**（调用方回退默认布局 ⇒ 绝不白屏）。
+    pub fn from_layout(
+        layout: &crate::layout::persist::LayoutNode,
+        leaf_tabs: Vec<Rc<crate::panel::subtabs::SubTabs>>,
+    ) -> Option<Rc<CellTree>> {
+        if leaf_tabs.len() != layout.cell_count() {
+            return None;
+        }
+        let mut next = 0usize;
+        let mut next_id = 1u64;
+        let tree = build_tree(layout, &leaf_tabs, &mut next, &mut next_id)?;
+        let mut cells = HashMap::new();
+        collect_cells(&tree, &leaf_tabs, &mut cells);
+        let tree = Rc::new(CellTree {
+            tree: RefCell::new(tree),
+            cells: RefCell::new(cells),
+            host: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            next_id: std::cell::Cell::new(next_id),
+            current: std::cell::Cell::new(CellId(1)),
+            new_cell_hook: RefCell::new(None),
+            root_pos_hook: RefCell::new(None),
+            changed_hook: RefCell::new(None),
+        });
+        // 每个格子都接上钩子（跨格子搬运 ＋ 格子空了）。
+        for id in tree.ids() {
+            tree.wire_cell(id);
+        }
+        // ⚠️ **必须把树画出来**：`CellTree::new` 是「建格子 ⇒ 挂上去」，
+        //    这里只建了格子 ⇒ 不画的话 `host` 是**空的** ⇒ 连接页**白屏**
+        //    （格子都在树上，但一个都看不见）。
+        tree.rebuild();
+        Some(tree)
+    }
+
     /// **当前格子**（顶栏的拆分/关闭作用在它身上）。
     pub fn current_cell(&self) -> CellId {
         self.current.get()
@@ -519,6 +671,8 @@ impl CellTree {
         if let Some(f) = hook {
             f(new_id, tabs);
         }
+        // ⚠️ **布局变了**（阶段 147：存盘）。
+        self.notify_changed();
         Some(new_id)
     }
 
@@ -537,6 +691,8 @@ impl CellTree {
         *self.tree.borrow_mut() = new_tree;
         self.cells.borrow_mut().remove(&id);
         self.rebuild();
+        // ⚠️ **布局变了**（阶段 147：存盘）。
+        self.notify_changed();
         true
     }
 
@@ -575,6 +731,9 @@ impl CellTree {
         if from != to && src.tabs.page_count() == 0 {
             self.close_cell(from);
         }
+        // ⚠️ **布局变了**（阶段 147：存盘）——页签换格子 ⇒ 每一格装的
+        //    是什么也变了。
+        self.notify_changed();
         true
     }
 

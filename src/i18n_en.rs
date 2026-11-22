@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2097] = [
+pub static EN: [(&str, &str); 2105] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -765,6 +765,7 @@ pub static EN: [(&str, &str); 2097] = [
     ("容器终端：{n}（{s}）", "Container terminal: {n} ({s})"),
     ("容器终端：{n}（输入 exit 可以退出）", "Container terminal: {n} (type exit to quit)"),
     ("容器里的目录", "Directory in the container"),
+    ("容器页需要重新连接。", "The container page needs to be reconnected."),
     ("容器（{n} 个）：", "Containers ({n}):"),
     ("密码", "Password"),
     ("密码优先（默认）", "Password first (default)"),
@@ -1167,6 +1168,7 @@ pub static EN: [(&str, &str); 2097] = [
     ("数据库会话已关闭", "The database session was closed"),
     ("数据库地址不能为空", "The database address must not be empty"),
     ("数据库工作台", "Database workbench"),
+    ("数据库工作台需要重新连接。", "The database workbench needs to be reconnected."),
     ("数据库服务器要求密码认证，但这条连接没有密码。", "The database server asks for password authentication, but this connection has no password."),
     ("数据库用户不能为空", "The database user must not be empty"),
     ("数据库的当前日期", "The database's current date"),
@@ -1207,6 +1209,7 @@ pub static EN: [(&str, &str); 2097] = [
     ("文件面板", "File panel"),
     ("文件面板宽度", "File panel width"),
     ("文件面板未连接", "The file panel is not connected"),
+    ("文件面板还没有连上。", "The file panel is not connected yet."),
     ("文件面板：{s} / 终端：{v0} / 数据库：{db}", "File panel: {s} / Terminal: {v0} / Database: {db}"),
     ("文本", "Text"),
     ("断开当前会话，用上面选的 shell 重新进入容器", "Disconnect the current session and enter the container again with the shell selected above"),
@@ -1688,7 +1691,9 @@ pub static EN: [(&str, &str); 2097] = [
     ("编辑…", "Edit…"),
     ("编辑中（改动未提交）", "Editing (changes not committed yet)"),
     ("编辑后的内容为 {v0}，超过内置查看/编辑上限 {v1}。\n请删掉部分内容，或复制到外部编辑器处理。", "The edited content is {v0}, over the built-in viewer/editor limit of {v1}.\nPlease remove some of the content, or copy it into an external editor."),
+    ("编辑器", "Editor"),
     ("编辑器查看上限", "Editor viewer limit"),
+    ("编辑器里的文件已经关闭了。", "The file open in the editor has been closed."),
     ("编辑快速命令", "Edit quick command"),
     ("编辑数据库连接", "Edit the database connection"),
     ("编辑这个数据库连接…", "Edit this database connection…"),
@@ -1881,6 +1886,8 @@ pub static EN: [(&str, &str); 2097] = [
     ("这一列", "this column"),
     ("这一列已恢复成按内容分配宽度", "This column is back to sizing itself by its content"),
     ("这一列的操作", "The actions of this column"),
+    ("这一格上次是终端。SSH 会话不会被保存，重新连接后请点「+」新建。", "This cell held a terminal last time. SSH sessions are not saved; after reconnecting, click the + button to create a new one."),
+    ("这一格的内容不会保留。", "The contents of this cell are not kept."),
     ("这一行还没有填任何值", "This row does not have any value yet"),
     ("这一页放的是「零散但确实得调」的设置：宽度、列、镜像规则。改完多半要新开窗口才看得出效果。", "This page holds the settings that are scattered but do need adjusting: widths, columns, mirror rules. You usually have to open a new window to see the effect."),
     ("这一页是只读的：普通查询结果不能改（表浏览页签才可编辑）", "This page is read-only: an ordinary query result cannot be changed (only the table browser tab can be edited)"),
@@ -2062,6 +2069,7 @@ pub static EN: [(&str, &str); 2097] = [
     ("隐藏这一列", "Hide this column"),
     ("需要另一个已连接 SFTP 的标签页。先在侧边栏打开目标服务器，再回来发送。", "Another tab with a connected SFTP is needed. Open the target server in the sidebar first, then come back and send."),
     ("需要密码", "A password is required"),
+    ("页面", "Page"),
     ("页面已经关了", "The page is already closed"),
     ("顶栏", "Top bar"),
     ("预检失败（退出码 {code}）", "The pre-check failed (exit code {code})"),

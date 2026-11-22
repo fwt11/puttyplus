@@ -8,4 +8,5 @@
 pub mod cell;
 pub mod dnd;
 pub mod header;
+pub mod persist;
 pub mod tree;

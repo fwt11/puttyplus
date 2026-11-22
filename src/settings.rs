@@ -587,7 +587,10 @@ fn field_key(key: &str, field: &str) -> String {
 /// 而会话名叫 "a=b" 完全可能）——静默丢失比报错更难查，所以这里
 /// 先清洗再补一段原键的哈希：清洗会撞车（"a:b" 与 "a_b" 都变成
 /// a_b），哈希后缀保证不同会话各占一行。
-fn safe_key(key: &str) -> String {
+///
+/// ⚠️ **阶段 147**：布局存盘也用会话键当键名 ⇒ 这里必须是 `pub(crate)`
+///    （会话名里同样可能有 `=` ⇒ 同样会被 glib 静默拒写）。
+pub(crate) fn safe_key(key: &str) -> String {
     let mut out = String::with_capacity(key.len() + 9);
     for ch in key.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':') {
