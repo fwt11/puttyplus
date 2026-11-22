@@ -298,7 +298,10 @@ fn plan_restore(
     // ⚠️ **只有文件容器里真有那一页才补**：用户把「文件」那个页签关掉
     //    之后就不该凭空多出一个空格子。
     let mut need = vec![SlotKind::Terminal];
-    if !file_sub.page_ids().is_empty() {
+    // ⚠️ **阶段 149：只认「文件面板那一页」**——编辑器也是一页（它也在
+    //    notebook 里）⇒ 用 `page_ids()` 会把「编辑器在文件面板格子里」
+    //    误判成「文件容器里有页」⇒ 凭空多出一个空格子。
+    if !file_sub.page_ids_of_kind(panel::subtabs::PageKind::Files).is_empty() {
         need.push(SlotKind::Files);
     }
     let layout = ensure_kinds(layout, &need);
@@ -309,7 +312,12 @@ fn plan_restore(
     // ⚠️ **页签 id 不变**（`insert_page` 沿用原 id）⇒ 上层按 id 记的
     //    东西不会失配 ⇒ 文件面板还是认得出是它。
     if roles.merge_files_into_terminal {
-        if let Some(fid) = file_sub.page_ids().first().copied() {
+        // ⚠️ **只取文件面板那一页**（阶段 149：编辑器也是一页 ⇒ 别取错）。
+        if let Some(fid) = file_sub
+            .page_ids_of_kind(panel::subtabs::PageKind::Files)
+            .first()
+            .copied()
+        {
             if let Some(data) = file_sub.take_page(fid) {
                 term_sub.insert_page(data, None);
             }

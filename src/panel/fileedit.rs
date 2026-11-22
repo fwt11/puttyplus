@@ -28,7 +28,6 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use gtk::gdk;
 use gtk::glib;
@@ -82,11 +81,20 @@ const ZOOM_CLASSES: [&str; 5] = [
 /// 默认字号档（缩放的中间那档）。
 const ZOOM_DEFAULT: usize = 2;
 
-/// 进程内唯一的编辑器 id（远端读写的回包靠它找回窗口）。
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
+/// 分配一个新的**全局唯一**编辑器 id。
+///
+/// ⚠️ **阶段 149：跟页签 id 用**同一个**分配器**——
+///
+///    以前这个计数器是**独立**的（也从 1 开始）⇒ 第一个编辑器 id=1、
+///    第一个终端页 id=1 ⇒ **撞号**。
+///    撞号的后果（阶段 149 踩到）：编辑器也要当「格子里的页签」⇒ 两边
+///    在**同一张登记表**里 ⇒ 同 id 的两条记录互相顶掉 ⇒ **终端页凭空
+///    消失**（`fileedit_panel_smoke` 当场炸出来）。
+///
+///    ⇒ 编辑器 id 与页签 id **必须全局唯一** ⇒ 统一用
+///    [`crate::layout::dnd::alloc_page_id`]。
 fn next_id() -> u64 {
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    crate::layout::dnd::alloc_page_id()
 }
 
 pub struct FileEdit {

@@ -1444,9 +1444,9 @@ popover.pp-menu separator { margin: 5px 4px; background-color: @pp_border; }
      ⇒ 底下的内容还看得见（知道自己在往哪儿拖）。 */
 .pp-drop-caret { background-color: @pp_accent; min-width: 3px; }
 .pp-drop-frame {
-  border: 2px solid @pp_accent;
-  border-radius: 4px;
-  background-color: alpha(@pp_accent, 0.16);
+  border: 3px solid @pp_accent;
+  border-radius: 6px;
+  background-color: alpha(@pp_accent, 0.22);
 }
 "#;
 

@@ -258,14 +258,18 @@ fn snapshot_of(
             let tabs = cells
                 .get(id)
                 .map(|c| {
+                    // ⚠️ **阶段 149：用 `slot_kinds()`**（按 notebook 页序）
+                    //    ⇒ **编辑器也在里面**（它也是格子里的页签）⇒ 存盘
+                    //    记得住「这一格开着个编辑器」。
                     c.tabs
-                        .page_ids()
-                        .iter()
-                        .map(|pid| match c.tabs.kind_of(*pid) {
+                        .slot_kinds()
+                        .into_iter()
+                        .map(|k| match k {
                             crate::panel::subtabs::PageKind::Terminal => SlotKind::Terminal,
                             crate::panel::subtabs::PageKind::Db => SlotKind::Db,
                             crate::panel::subtabs::PageKind::Docker => SlotKind::Docker,
                             crate::panel::subtabs::PageKind::Files => SlotKind::Files,
+                            crate::panel::subtabs::PageKind::Editor => SlotKind::Editor,
                             crate::panel::subtabs::PageKind::Other => SlotKind::Other,
                         })
                         .collect()
