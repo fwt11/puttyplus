@@ -951,10 +951,25 @@ forwards=<个数> remote_cmd=<set|->
 - **GTK4 的 `TreePath` 没有 `parent()`**（GTK3 有）：找父行得用
   `path.indices()` 拿下标，再 `TreePath::from_indices(&idxs[..len-1])` 重建父路径；
   写 `child.parent()` 会编译到 `MountOperation::parent` 上去（报"方法名不匹配"）；
-- **`cargo test --lib` 里的 GTK 用例会静默跳过**：测试跑在 libtest 子线程上，
-  `gtk::init()` 在非主线程起不来 → 菜单/CSS/通知那些用例在无头环境下全是
-  「跳过：本机没有显示服务」。**GTK 相关的断言必须放进 example 冒烟**
-  （冒烟在主线程跑，`gtk::init()` 成功），别指望单测兜底；
+- ⚠️⚠️ **`cargo test --lib` 里绝不许初始化 GTK**（2026-11-23 踩过，代价很大）：
+  测试跑在 libtest 的 **worker 线程**上 ⇒ **同一批测试里总有一个线程会抢到
+  GTK 的初始化权** ⇒ 只有那个测试会真跑、其余跳过 ⇒ **「哪些测试会碰 GTK」
+  取决于谁抢赢**（**会随测试增减而变**！）⇒ 而 GTK4 要求控件也在主线程上
+  创建 ⇒ **Windows 的 Win32 后端在 worker 线程里创建控件会挂住**
+  ⇒ ⚠️ **`catch_unwind` 只防 panic，防不住死锁**
+  ⇒ v0.9.3 那轮 Windows CI 的单测**卡了 109 分钟**被 job 上限砍掉，
+  **连带 Release 出不来**（job 日志与 artifact 都要登录才拿得到 ⇒ 当时连
+  「卡在哪个用例」都查不出来）。
+  ⇒ **规矩**：单测里**只认「主线程已经初始化好了」**
+  （`gtk::is_initialized_main_thread()` 在 worker 线程上恒为 false ⇒ 干净地
+  跳过）⇒ **GTK 相关的断言必须放进 example 冒烟**（冒烟在主线程跑，
+  `gtk::init()` 成功），别指望单测兜底。
+  ⚠️ **本地有 xvfb 时也别在单测里 init**（实测：worker 线程上 `gtk::init()`
+  在 X11 下**会成功**，于是那条测试就真跑了 ⇒ 行为**随测试增减而漂**）。
+  ⚠️ 顺带：**CI 的单测步骤要自己限时**（`.github/workflows/ci-windows.yml`
+  里限 45 分钟）⇒ 超时就把**卡住的那个用例**报成公开注解
+  （libtest 在用例**开始时**就打印 `test <名字> ... `，跑完才补 `ok`
+  ⇒ 卡住的那行是「**开了头、没结果**」⇒ 照这个就能精确点名）；
 - CellRenderer 必须 `column.pack_start()` 否则列空白（不报错）；
 - **`pack_start()` 不会绑定 `text` 属性**：还要显式
   `column.add_attribute(&renderer, "text", col)`（列号是 i32），否则单元格
