@@ -776,9 +776,14 @@ mod tests {
 
     #[test]
     fn 紧凑_css_能被_gtk_真解析() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **不能在这里 `gtk::init()`**（2026-11-23 修 Windows CI 卡死）：
+        //   libtest 把每个测试跑在**各自的 worker 线程**上，而 GTK4 要求
+        //   `gtk_init` **与控件创建都在主线程** ⇒ 在 worker 线程上初始化，
+        //   **Windows 的 Win32 后端会永久阻塞**（`catch_unwind` 只防 panic，
+        //   **防不住死锁**）⇒ v0.9.3 那轮 Windows CI 的单测卡了 109 分钟。
+        //   ⇒ 单测里**只认「主线程已经初始化好了」**（worker 线程上永远是
+        //   false ⇒ 干净地跳过）；**真跑这些检查的地方是 example 冒烟**
+        //   （`examples/` 里的冒烟跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() {
             eprintln!("跳过紧凑_css_能被_gtk_真解析：本机没有显示服务");
             return;
@@ -800,9 +805,14 @@ mod tests {
     /// **超紧凑那段 CSS 也要能被 GTK 真解析**（阶段 142）。
     #[test]
     fn 超紧凑_css_能被_gtk_真解析() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **不能在这里 `gtk::init()`**（2026-11-23 修 Windows CI 卡死）：
+        //   libtest 把每个测试跑在**各自的 worker 线程**上，而 GTK4 要求
+        //   `gtk_init` **与控件创建都在主线程** ⇒ 在 worker 线程上初始化，
+        //   **Windows 的 Win32 后端会永久阻塞**（`catch_unwind` 只防 panic，
+        //   **防不住死锁**）⇒ v0.9.3 那轮 Windows CI 的单测卡了 109 分钟。
+        //   ⇒ 单测里**只认「主线程已经初始化好了」**（worker 线程上永远是
+        //   false ⇒ 干净地跳过）；**真跑这些检查的地方是 example 冒烟**
+        //   （`examples/` 里的冒烟跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() {
             eprintln!("跳过超紧凑_css_能被_gtk_真解析：本机没有显示服务");
             return;

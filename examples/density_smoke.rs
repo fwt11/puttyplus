@@ -171,5 +171,36 @@ fn check(app: &gtk::Application) {
         "超紧凑档的顶栏应更矮：紧凑 {compact:?} vs 超紧凑 {xcompact:?}"
     );
 
+    // ---- 紧凑 / 超紧凑的 CSS 能不能被 GTK **真解析** ----
+    //
+    // ⚠️ **为什么这条检查搬到冒烟里**（2026-11-23）：它原来在 **lib 单测**
+    //   里，而它得**先 `gtk::init()`** ⇒ libtest 把每个测试跑在**各自的
+    //   worker 线程**上，而 GTK4 要求 `gtk_init` **在主线程** ⇒ 在 worker
+    //   线程上初始化，**Windows 的 Win32 后端会永久阻塞**（`catch_unwind`
+    //   只防 panic，**防不住死锁**）⇒ v0.9.3 那轮 Windows CI 的单测卡了
+    //   **109 分钟**被 job 上限砍掉。
+    //   ⇒ 单测里**不再初始化 GTK**（干净地跳过）⇒ **真检查搬到这里**
+    //   （example 跑在主线程上 ⇒ 安全，而且 CI 的 GUI 冒烟会跑它）。
+    for (name, css) in [
+        ("紧凑", density::css_text()),
+        ("超紧凑", density::xcompact_css_text()),
+    ] {
+        let p = gtk::CssProvider::new();
+        let errs = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        {
+            let errs = errs.clone();
+            p.connect_parsing_error(move |_, sec, err| {
+                let line = sec.start_location().lines() + 1;
+                errs.borrow_mut().push(format!("第 {line} 行：{err}"));
+            });
+        }
+        p.load_from_string(css);
+        assert!(
+            errs.borrow().is_empty(),
+            "{name} CSS 有解析错误：{:?}",
+            errs.borrow()
+        );
+    }
+
     println!("density_smoke: OK");
 }

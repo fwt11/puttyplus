@@ -616,9 +616,16 @@ mod tests {
     /// 才是最容易弹窗的地方（以前正是在那儿弹的）。只数一次会漏。
     #[test]
     fn 传输完成只发通知不弹窗() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到
+        //   GTK 的初始化权** ⇒ 只有那个测试会真跑、其余都跳过 ⇒ 也就是
+        //   说「哪些测试会碰 GTK」**取决于谁抢赢**（会随测试增减而变）⇒
+        //   而 GTK4 要求控件也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）
+        //   **worker 线程里创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的
+        //   单测卡了 109 分钟。
+        //   ⇒ **单测一律不初始化 GTK**（下面那个「主线程已初始化」的判断
+        //   在 worker 线程上永远为 false ⇒ 干净地跳过）；**需要真 GTK 的
+        //   检查在 example 冒烟里**（那些跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() {
             eprintln!("跳过传输完成只发通知不弹窗：本机没有显示服务");
             return;
@@ -644,9 +651,16 @@ mod tests {
     /// 失败的批次也**不弹窗**（失败明细在通知里，点通知才展开汇总）。
     #[test]
     fn 传输失败也不弹窗() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到
+        //   GTK 的初始化权** ⇒ 只有那个测试会真跑、其余都跳过 ⇒ 也就是
+        //   说「哪些测试会碰 GTK」**取决于谁抢赢**（会随测试增减而变）⇒
+        //   而 GTK4 要求控件也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）
+        //   **worker 线程里创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的
+        //   单测卡了 109 分钟。
+        //   ⇒ **单测一律不初始化 GTK**（下面那个「主线程已初始化」的判断
+        //   在 worker 线程上永远为 false ⇒ 干净地跳过）；**需要真 GTK 的
+        //   检查在 example 冒烟里**（那些跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() {
             return;
         }

@@ -460,9 +460,14 @@ mod tests {
 
     /// 没有显示服务就跳过（跟 theme.rs 的做法一致）。
     fn ensure_gtk() -> bool {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到 GTK
+        //   的初始化权** ⇒ 只有那个测试会真跑、其余跳过 ⇒ 「哪些测试会碰
+        //   GTK」**取决于谁抢赢**（会随测试增减而变！）⇒ 而 GTK4 要求控件
+        //   也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）**worker 线程里
+        //   创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的单测卡了 109 分钟。
+        //   ⇒ **只认「主线程已经初始化好了」**（worker 线程上永远 false ⇒
+        //   这几条干净地跳过）；**真跑它们的地方是 example 冒烟**。
         gtk::is_initialized_main_thread() && gtk::gdk::Display::default().is_some()
     }
 

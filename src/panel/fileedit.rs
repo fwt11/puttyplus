@@ -3661,9 +3661,16 @@ mod tests {
     /// 隐约浮着几个汉字。改成画成底色才真的隐形。
     #[test]
     fn 影子字符画成底色而不是透明() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到
+        //   GTK 的初始化权** ⇒ 只有那个测试会真跑、其余都跳过 ⇒ 也就是
+        //   说「哪些测试会碰 GTK」**取决于谁抢赢**（会随测试增减而变）⇒
+        //   而 GTK4 要求控件也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）
+        //   **worker 线程里创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的
+        //   单测卡了 109 分钟。
+        //   ⇒ **单测一律不初始化 GTK**（下面那个「主线程已初始化」的判断
+        //   在 worker 线程上永远为 false ⇒ 干净地跳过）；**需要真 GTK 的
+        //   检查在 example 冒烟里**（那些跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() || gdk::Display::default().is_none() {
             eprintln!("跳过 影子字符画成底色而不是透明：本机没有显示服务");
             return;
@@ -3693,9 +3700,16 @@ mod tests {
     /// 所以行号栏改成"挂新的先摘旧的"，同一位置永远只有一个 tag。
     #[test]
     fn 行号栏同一段只留一个tag() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到
+        //   GTK 的初始化权** ⇒ 只有那个测试会真跑、其余都跳过 ⇒ 也就是
+        //   说「哪些测试会碰 GTK」**取决于谁抢赢**（会随测试增减而变）⇒
+        //   而 GTK4 要求控件也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）
+        //   **worker 线程里创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的
+        //   单测卡了 109 分钟。
+        //   ⇒ **单测一律不初始化 GTK**（下面那个「主线程已初始化」的判断
+        //   在 worker 线程上永远为 false ⇒ 干净地跳过）；**需要真 GTK 的
+        //   检查在 example 冒烟里**（那些跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() || gdk::Display::default().is_none() {
             eprintln!("跳过 行号栏同一段只留一个tag：本机没有显示服务");
             return;
@@ -3728,9 +3742,16 @@ mod tests {
     /// 出来了"是发现不了 tag 被 GTK 拒掉的。没有显示服务就跳过。
     #[test]
     fn 高亮tag真的能贴到缓冲区上() {
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到
+        //   GTK 的初始化权** ⇒ 只有那个测试会真跑、其余都跳过 ⇒ 也就是
+        //   说「哪些测试会碰 GTK」**取决于谁抢赢**（会随测试增减而变）⇒
+        //   而 GTK4 要求控件也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）
+        //   **worker 线程里创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的
+        //   单测卡了 109 分钟。
+        //   ⇒ **单测一律不初始化 GTK**（下面那个「主线程已初始化」的判断
+        //   在 worker 线程上永远为 false ⇒ 干净地跳过）；**需要真 GTK 的
+        //   检查在 example 冒烟里**（那些跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() || gdk::Display::default().is_none() {
             eprintln!("跳过 高亮tag真的能贴到缓冲区上：本机没有显示服务");
             return;

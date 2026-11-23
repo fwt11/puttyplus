@@ -1903,9 +1903,16 @@ mod tests {
     #[test]
     fn css_能被_gtk_真解析() {
         // CssProvider 的构造要过 GTK 初始化，没有显示服务就跳过（并说清楚）
-        if !gtk::is_initialized_main_thread() {
-            let _ = std::panic::catch_unwind(|| gtk::init());
-        }
+        // ⚠️ **单测里绝不初始化 GTK**（2026-11-23）：libtest 把每个测试跑在
+        //   **各自的 worker 线程**上 ⇒ 同一批测试里**总有一个线程会抢到
+        //   GTK 的初始化权** ⇒ 只有那个测试会真跑、其余都跳过 ⇒ 也就是
+        //   说「哪些测试会碰 GTK」**取决于谁抢赢**（会随测试增减而变）⇒
+        //   而 GTK4 要求控件也在主线程上创建 ⇒ 在 Windows 上（Win32 后端）
+        //   **worker 线程里创建控件可能挂住** ⇒ v0.9.3 那轮 Windows CI 的
+        //   单测卡了 109 分钟。
+        //   ⇒ **单测一律不初始化 GTK**（下面那个「主线程已初始化」的判断
+        //   在 worker 线程上永远为 false ⇒ 干净地跳过）；**需要真 GTK 的
+        //   检查在 example 冒烟里**（那些跑在主线程上 ⇒ 安全）。
         if !gtk::is_initialized_main_thread() {
             eprintln!("跳过 css_能被_gtk_真解析：本机没有显示服务，CssProvider 起不来");
             return;
