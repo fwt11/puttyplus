@@ -110,7 +110,13 @@ const COL_RAW_STATE: usize = 6;
 /// ⇒ 摘掉这一列要挪 N_COLS 后面所有列号，没那份必要 ⇒ 先留着，
 /// 注释说明它已退役。
 const COL_STATE_MK: usize = 7;
-const N_COLS: usize = 8;
+/// **名称列的 markup**（阶段 162：让 compose 项目行**一眼就认出来**）。
+///
+/// ⚠️ **为什么单独一列**：`COL_NAME` 存的是**纯名字**（按名字找行、排序、
+///   拼路径都靠它）⇒ **不能**往里塞 `<b>` 之类标签 ⇒ 另开一列放**要画的
+///   那份**（容器行 = 空 ⇒ 画纯名字；项目行 = 粗体 ＋「compose」小字）。
+const COL_NAME_MK: usize = 8;
+const N_COLS: usize = 9;
 
 /// 行类型：**容器**（`COL_KIND` 的值）。
 const KIND_CONTAINER: &str = "container";
@@ -188,6 +194,20 @@ const ICON_START: &str = "pp-play";
 const ICON_STOP: &str = "pp-stop";
 /// 图标名：**重启**。
 const ICON_RESTART: &str = "view-refresh-symbolic";
+/// 图标名：**compose up**（**操作列**里用的，阶段 162）。
+///
+/// ⚠️ **为什么用「上下箭头」这一对**（用户 2026-11-24：「compose 项目的
+///   操作列中应该还有与 up 和 down 对应的按钮」）：
+///   - `go-up-symbolic` / `go-down-symbolic` 是 **docker compose 那两个
+///     命令的字面意思**（up / down）⇒ 一眼能对上；
+///   - ⚠️ **不用 `edit-copy-symbolic`（重建）**：那个图标是「复制」⇒ 放在
+///     一排 ▶ ■ ⟳ 里会读成「复制一份」⇒ 不是「按 compose 文件重新创建」；
+///   - ⚠️ **不用 `user-trash-symbolic`（销毁）**：那个是「删掉」⇒ 但 **down
+///     会删容器与网络** ⇒ 放在操作列里太吓人（其实有二次确认）⇒ down 用
+///     箭头（跟 up 成对），**「会删东西」这件事交给 tooltip 与确认框**。
+const ICON_COMPOSE_UP: &str = "go-up-symbolic";
+/// 图标名：**compose down**（**操作列**里用的；理由同 [`ICON_COMPOSE_UP`]）。
+const ICON_COMPOSE_DOWN: &str = "go-down-symbolic";
 /// 图标名：**编辑**。
 const ICON_EDIT: &str = "document-edit-symbolic";
 /// 图标名：**销毁**（垃圾桶）。
@@ -220,11 +240,33 @@ pub fn action_key(k: ActionKind) -> &'static str {
     }
 }
 
+/// **compose 项目行的名字**（阶段 162：加粗 ＋ 灰色小字「compose」）。
+///
+/// ⚠️ **为什么要有**（用户 2026-11-24：「compose 项目应该显著的区别于容器」）：
+///   光靠「有展开箭头」不够 ⇒ 一眼看不出那是个**项目**（还是一堆容器）。
+///   ⇒ 名字**加粗** ＋ 后面跟一个**灰色小字「compose」**。
+/// ⚠️ **名字要转义**（markup 里 `&` `<` 会坏事）。
+/// ⚠️ **「compose」是 docker 的产品名** ⇒ 中英文界面都这么写（不翻译）。
+fn project_name_markup(name: &str) -> String {
+    format!(
+        "<b>{n}</b> <span foreground=\"{c}\">compose</span>",
+        n = glib::markup_escape_text(name),
+        c = crate::theme::dim_hex()
+    )
+}
+
 /// **这一行的操作按钮**（**纯函数** ⇒ 单测能验，不用开 GTK）。
 ///
 /// ⚠️ **阶段 160：操作列只留「启动 / 停止 / 重启」**（用户 2026-11-24：
 ///   「操作列只保留启动、停止、重启，把其他的都移到右键菜单里」）
-///   ⇒ 两种行**都是 3 颗**⇒ 列宽统一、图标不多不少。
+///   ⇒ **容器行 3 颗**。
+///
+/// ⚠️ **阶段 162：compose 项目行还要 up / down**（用户 2026-11-24：
+///   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）
+///   ⇒ **项目行 5 颗**（启动 / 停止 / 重启 ＋ `docker compose up` ＋
+///   `docker compose down`）⇒ **两种行一眼就分得出来**。
+///   ⚠️ `up` / `down` **跟右键菜单里的「重建 / 销毁」是同一个动作**
+///   （`ComposeAction::Up` / `Down`）⇒ 同一件事，图标不同（菜单里有文字）。
 ///
 /// ⚠️ **能不能点看的是 `raw_state`**（docker 的**原始**状态），不是界面上的
 ///   中文标签 ⇒ 切到英文界面也不会判错。
@@ -235,8 +277,7 @@ pub fn row_actions(kind: &str, raw_state: &str) -> Vec<RowAction> {
     let none_running = raw_state == "exited";
     // ⚠️ **「重启」只在「有东西在跑」时能点**（全停着的项目重启它也没用）。
     let some_running = !none_running;
-    let _ = kind;
-    vec![
+    let mut acts = vec![
         RowAction {
             kind: ActionKind::Start,
             icon: ICON_START.into(),
@@ -252,7 +293,25 @@ pub fn row_actions(kind: &str, raw_state: &str) -> Vec<RowAction> {
             icon: ICON_RESTART.into(),
             enabled: some_running,
         },
-    ]
+    ];
+    // ⚠️ **阶段 162：只有 compose 项目行才有 up / down**
+    //   （容器没有「项目」这层 ⇒ 这两个命令对它没意义）。
+    if kind == KIND_PROJECT {
+        // ⚠️ **两个都一直能点**：`up` 是「按 compose 文件对齐一次」
+        //   （改了 compose 文件就想按这个）；`down` 是「拆掉整个项目」
+        //   （项目停着的时候也能拆）⇒ 灰掉反而挡路。
+        acts.push(RowAction {
+            kind: ActionKind::Up,
+            icon: ICON_COMPOSE_UP.into(),
+            enabled: true,
+        });
+        acts.push(RowAction {
+            kind: ActionKind::Down,
+            icon: ICON_COMPOSE_DOWN.into(),
+            enabled: true,
+        });
+    }
+    acts
 }
 
 /// **右键菜单里有哪些项**（**纯函数** ⇒ 单测能验）。
@@ -456,8 +515,10 @@ pub fn action_tooltip(a: &RowAction, is_project: bool, raw_state: &str) -> &'sta
             }
         }
         ActionKind::Restart => tr("重启这个容器"),
-        ActionKind::Down => tr("销毁这个 compose 项目（容器和网络会被删除）"),
-        ActionKind::Up => tr("按 compose 文件重新创建并启动这个项目"),
+        // ⚠️ **阶段 162**：up / down 在「操作」列里**只有图标没有字** ⇒
+        //   tooltip 得**写清楚跑的是哪条命令**（不然 ⌃/⌄ 看不出是啥）。
+        ActionKind::Down => tr("停掉并删除这个 compose 项目的容器与网络（docker compose down）"),
+        ActionKind::Up => tr("按 compose 文件重新创建并启动这个项目（docker compose up）"),
     }
 }
 
@@ -1375,17 +1436,20 @@ fn ports_multiline(raw: &str) -> String {
     raw.replace(", ", "\n")
 }
 
-/// 端口串 ⇒ **给人看的样子**（阶段 157）。
+/// 端口串 ⇒ **给人看的样子**（阶段 157 / 162）。
 ///
-/// ⚠️ **为什么要收拾**（用户 2026-11-23：「很不美」）：docker 的原始串把
-///   **同一个端口写了两遍**（IPv4 一条、IPv6 一条：
-///   `0.0.0.0:5432->5432/tcp` ＋ `[::]:5432->5432/tcp`）⇒ 一半的行在
-///   重复同一件事 ⇒ 端口列被撑得很宽、上下扫读很累。
-/// ⇒ 现在：**去重** ＋ **压缩**：
-///   - `0.0.0.0:5432->5432/tcp` ⇒ `5432/tcp`（通配地址丢掉）；
-///   - `127.0.0.1:9001->9001/tcp` ⇒ `127.0.0.1:9001/tcp`（**保留**：
-///     "只绑本机"是有用信息，不能丢）；
-///   - `9000->9001/tcp` ⇒ `9000→9001/tcp`（端口不同 ⇒ 映射关系要留）。
+/// ⚠️ **阶段 162：格式是「主机端口 : 容器端口」**（用户 2026-11-24：
+///   「端口应该显示为 主机端口：容器端口，但现在只有一个端口，不知道是什么」）
+///   ⇒ **两个端口都留着**（以前 `0.0.0.0:5432->5432/tcp` 被压成 `5432/tcp`
+///   ⇒ 用户根本不知道那个 5432 是主机上的还是容器里的）。
+///
+/// ⚠️ **写法跟 `docker run -p` 一样**（好认）：
+/// - `0.0.0.0:5432->5432/tcp` ⇒ `5432:5432/tcp`（通配地址丢掉，但**两个
+///   端口都留着**）；
+/// - `127.0.0.1:9001->9001/tcp` ⇒ `127.0.0.1:9001:9001/tcp`
+///   （**只绑本机**是有用信息，不能丢 ⇒ 地址留着）；
+/// - `9000->9001/tcp` ⇒ `9000:9001/tcp`（端口不同 ⇒ 映射关系要留）；
+/// - `5432/tcp` ⇒ `5432/tcp`（**只 EXPOSE、没发布** ⇒ 没有主机端口）。
 ///
 /// ⚠️ **完整端口串在详情弹窗里看得到**（这里只是给人扫一眼的摘要）。
 fn ports_pretty(raw: &str) -> String {
@@ -1414,15 +1478,13 @@ fn ports_pretty(raw: &str) -> String {
                     Some((p, pr)) => (p, Some(pr)),
                     None => (right, None),
                 };
-                let host_txt = match host {
-                    Some(h) if !h.is_empty() && !is_wildcard(h) => format!("{h}:"),
-                    _ => String::new(),
-                };
                 let proto_txt = proto.map(|p| format!("/{p}")).unwrap_or_default();
-                if lport == rport {
-                    format!("{host_txt}{rport}{proto_txt}")
-                } else {
-                    format!("{host_txt}{lport}→{rport}{proto_txt}")
+                // ⚠️ **阶段 162：主机端口 : 容器端口**（两个都留着）。
+                match host {
+                    Some(h) if !h.is_empty() && !is_wildcard(h) => {
+                        format!("{h}:{lport}:{rport}{proto_txt}")
+                    }
+                    _ => format!("{lport}:{rport}{proto_txt}"),
                 }
             }
             None => item.to_string(),
@@ -1912,6 +1974,8 @@ impl DockerUi {
                 (COL_PORTS as u32, &ports),
                 (COL_STATE as u32, &state),
                 (COL_KIND as u32, &KIND_CONTAINER),
+                // ⚠️ **阶段 162：容器行**没有特别标记 ⇒ 空（画纯名字）。
+                (COL_NAME_MK as u32, &String::new()),
                 // ⚠️ **原始状态**（阶段 155）：「操作」列里「启动 / 停止」哪个
                 //   能点 ⇒ 得知道 docker 说的原始状态（界面上的中文标签在
                 //   英文界面下会变 ⇒ 不能拿它判断）。
@@ -1955,6 +2019,14 @@ impl DockerUi {
             it,
             &[
                 (COL_NAME as u32, &name.to_string()),
+                // ⚠️ **阶段 162：项目行**要**一眼就跟容器行分得开**
+                //   ⇒ 名字**加粗** ＋ 后面跟一个**灰色小字「compose」**
+                //   （这是 docker 的产品名 ⇒ 中英文界面都这么写）。
+                //   ⚠️ 名字本身要**转义**（markup 里 `&` `<` 会出事）。
+                (
+                    COL_NAME_MK as u32,
+                    &project_name_markup(name),
+                ),
                 (COL_ID as u32, &String::new()),
                 (COL_IMAGE as u32, &img_text),
                 (COL_PORTS as u32, &String::new()),
@@ -2950,7 +3022,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             (COL_NAME, tr("名称")),
             (COL_ID, tr("ID")),
             (COL_IMAGE, tr("镜像")),
-            (COL_PORTS, tr("端口")),
+            (COL_PORTS, tr("端口（主机:容器）")),
             (COL_STATE, tr("状态")),
         ];
         for (model_col, t) in cols {
@@ -3013,6 +3085,29 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 // ⚠️ **阶段 157：ID / 端口两列改走 `cell_data_func`**
                 //   （要「收拾一下再显示」：ID 只留前 8 位、端口去重压缩）。
                 match model_col {
+                    COL_NAME => {
+                        // ⚠️ **阶段 162：名称列要能画 markup** ⇒ compose 项目行
+                        //   能**加粗** ＋ 后面跟一个灰色小字「compose」
+                        //   ⇒ 一眼就分得出「项目」和「容器」。
+                        //
+                        // ⚠️ **GTK4 没有 `use-markup` 属性**（那是 GTK3 的）
+                        //   ⇒ GTK4 是**两个属性**：`text`（**纯文字**，内部会
+                        //   自己转义）＋ `markup`（**原始 markup**）。
+                        col.set_cell_data_func(&r, move |_col, cell, model, iter| {
+                            let name: String = model.get(iter, COL_NAME as i32);
+                            let mk: String = model.get(iter, COL_NAME_MK as i32);
+                            let r = cell
+                                .downcast_ref::<gtk::CellRendererText>()
+                                .expect("名称列的渲染器必须是 CellRendererText");
+                            if mk.is_empty() {
+                                // ⚠️ **纯文字**：走 `text`（GTK4 自己转义
+                                //   ⇒ 名字里有 `&` 也不会把 markup 弄坏）。
+                                r.set_text(Some(&name));
+                            } else {
+                                r.set_markup(Some(&mk));
+                            }
+                        });
+                    }
                     COL_ID => {
                         col.set_cell_data_func(&r, move |_col, cell, model, iter| {
                             let full: String = model.get(iter, COL_ID as i32);
@@ -4541,14 +4636,27 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         let stw = Rc::downgrade(st);
         let u = Rc::downgrade(&ui);
         // **双击目录 ⇒ 进入；双击文件 ⇒ 看内容**。
-        f_view_cb.connect_row_activated(move |_, _, _| {
+        f_view_cb.connect_row_activated(move |_, path, _| {
             let Some(u) = u.upgrade() else { return };
             let Some(st) = stw.upgrade() else { return };
             let container = u.selected.borrow().clone();
             if container.is_empty() {
                 return;
             }
-            let Some((name, kind)) = files_selected(&u) else { return };
+            // ⚠️ **阶段 162：按 path 取「被双击的那一行」**
+            //   （以前问的是「当前选中行」⇒ 两者不一定一致 ⇒ 会动错行）。
+            let Some((name, kind)) = files_row_at(&u, path) else { return };
+            // ⚠️ **阶段 162：「..」⇒ 回上一级**（不是「进一个叫 `..` 的
+            //   目录」⇒ 那会拼出 `/media/..` 这种怪路径）。
+            if kind == "up" {
+                let cur = u.files_path.borrow().clone();
+                if cur.is_empty() {
+                    return;
+                }
+                let parent = crate::util::path_parent(&cur);
+                files_goto(&st, &u, &container, &parent);
+                return;
+            }
             let remote = files_remote_path(&u, &name);
             if kind == "dir" {
                 files_goto(&st, &u, &container, &remote);
@@ -4757,6 +4865,16 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     );
                     return;
                 };
+                // ⚠️ **阶段 162：「..」是上一级目录**，不是文件 ⇒ 说清楚。
+                if kind == "up" {
+                    let parent = host_window(&u, &st);
+                    crate::panel::dialogs::show_error(
+                        parent.as_ref(),
+                        &tr("这是上一级目录"),
+                        &tr("双击列表里的「..」就能回到上一级"),
+                    );
+                    return;
+                }
                 let remote = files_remote_path(&u, &name);
                 let is_dir = kind == "dir";
                 let top = host_window(&u, &st);
@@ -4812,6 +4930,16 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         parent.as_ref(),
                         &tr("看不了目录"),
                         &tr("目录请用「下载…」整个拉下来"),
+                    );
+                    return;
+                }
+                // ⚠️ **阶段 162：「..」是上一级目录**，不是文件 ⇒ 说清楚。
+                if kind == "up" {
+                    let parent = host_window(&u, &st);
+                    crate::panel::dialogs::show_error(
+                        parent.as_ref(),
+                        &tr("这是上一级目录"),
+                        &tr("双击列表里的「..」就能回到上一级"),
                     );
                     return;
                 }
@@ -8103,25 +8231,40 @@ mod tests {
     /* ---------------- 阶段 155：「操作」列的纯函数 ---------------- */
 
     /// ⚠️ **阶段 160：操作列只留 3 颗**（启动 / 停止 / 重启）——
-    ///   容器行与项目行**一样**（用户 2026-11-24：「操作列只保留启动、停止、
-    ///   重启，把其他的都移到右键菜单里」）。
+    ///   **容器行**（用户 2026-11-24：「操作列只保留启动、停止、重启，
+    ///   把其他的都移到右键菜单里」）。
+    /// ⚠️ **阶段 162：compose 项目行多 up / down 两颗**（用户 2026-11-24：
+    ///   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）
+    ///   ⇒ 项目行 5 颗、容器行 3 颗 ⇒ **两种行一眼就分得开**。
     #[test]
     fn 操作列只有启动停止重启三颗() {
-        for kind in [KIND_CONTAINER, KIND_PROJECT] {
-            let a = row_actions(kind, "running");
-            assert_eq!(a.len(), 3, "{kind} 行的操作列应当只有 3 颗");
-            let kinds: Vec<ActionKind> = a.iter().map(|x| x.kind).collect();
-            assert_eq!(
-                kinds,
-                vec![
-                    ActionKind::Start,
-                    ActionKind::Stop,
-                    ActionKind::Restart
-                ],
-                "{kind} 行的操作列应当只有 启动/停止/重启"
-            );
-        }
-        assert_eq!(action_col_icons_max(), 3);
+        let a = row_actions(KIND_CONTAINER, "running");
+        assert_eq!(a.len(), 3, "容器行的操作列应当只有 3 颗");
+        let kinds: Vec<ActionKind> = a.iter().map(|x| x.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ActionKind::Start,
+                ActionKind::Stop,
+                ActionKind::Restart
+            ],
+            "容器行的操作列应当只有 启动/停止/重启"
+        );
+        // 项目行：前 3 颗一样，后面多 up / down。
+        let p = row_actions(KIND_PROJECT, "running");
+        let pk: Vec<ActionKind> = p.iter().map(|x| x.kind).collect();
+        assert_eq!(
+            pk,
+            vec![
+                ActionKind::Start,
+                ActionKind::Stop,
+                ActionKind::Restart,
+                ActionKind::Up,
+                ActionKind::Down
+            ],
+            "项目行的操作列应当是 启动/停止/重启/up/down"
+        );
+        assert_eq!(action_col_icons_max(), 5);
     }
 
     /// ⚠️ **阶段 160：其它动作都进右键菜单了** ⇒ 操作列里**不该**再有它们。
@@ -8263,6 +8406,80 @@ mod tests {
         let en = |k: ActionKind| b.iter().find(|x| x.kind == k).map(|x| x.enabled);
         assert_eq!(en(ActionKind::Start), Some(true));
         assert_eq!(en(ActionKind::Stop), Some(false));
+    }
+
+    /// **阶段 162：compose 项目行比容器行多 up / down 两颗**（用户
+    /// 2026-11-24：「compose 项目的操作列中应该还有与 up 和 down 对应的
+    /// 按钮」）。
+    ///
+    /// ⚠️ **容器行不能有**（容器没有「项目」这层 ⇒ 那两个命令对它没意义）。
+    #[test]
+    fn 项目行多出上下两颗按钮() {
+        let c = row_actions(KIND_CONTAINER, "running");
+        assert_eq!(c.len(), 3, "容器行应当只有 启动/停止/重启：{c:?}");
+        assert!(
+            !c.iter().any(|a| a.kind == ActionKind::Up || a.kind == ActionKind::Down),
+            "容器行不该有 up/down：{c:?}"
+        );
+        // 项目行：启动 / 停止 / 重启 ＋ up ＋ down。
+        let p = row_actions(KIND_PROJECT, "running");
+        assert_eq!(p.len(), 5, "项目行应当 5 颗：{p:?}");
+        let kinds: Vec<ActionKind> = p.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds[0], ActionKind::Start);
+        assert_eq!(kinds[1], ActionKind::Stop);
+        assert_eq!(kinds[2], ActionKind::Restart);
+        assert_eq!(kinds[3], ActionKind::Up, "第 4 颗是 up");
+        assert_eq!(kinds[4], ActionKind::Down, "第 5 颗是 down");
+        // ⚠️ **up / down 一直能点**（项目停着也能 down；改了 compose 文件
+        //   也能 up ⇒ 灰掉反而挡路）。
+        let en = |k: ActionKind| p.iter().find(|x| x.kind == k).map(|x| x.enabled);
+        assert_eq!(en(ActionKind::Up), Some(true));
+        assert_eq!(en(ActionKind::Down), Some(true));
+        let stopped = row_actions(KIND_PROJECT, "exited");
+        let en = |k: ActionKind| stopped.iter().find(|x| x.kind == k).map(|x| x.enabled);
+        assert_eq!(en(ActionKind::Up), Some(true));
+        assert_eq!(en(ActionKind::Down), Some(true));
+        // ⚠️ **列宽按最多的那种行算** ⇒ 5 颗放得下。
+        assert_eq!(action_col_icons_max(), 5);
+    }
+
+    /// **阶段 162：compose 项目行的名字要一眼认出来**（粗体 ＋ 小字
+    /// 「compose」）。
+    #[test]
+    fn 项目行名字有标记() {
+        let mk = project_name_markup("proj");
+        assert!(mk.contains("<b>proj</b>"), "项目名要加粗：{mk}");
+        assert!(mk.contains("compose"), "要带「compose」标记：{mk}");
+        // ⚠️ **名字要转义**（markup 里 `&` `<` 会坏事）。
+        let mk2 = project_name_markup("a&b<c");
+        assert!(!mk2.contains("<c>"), "名字里的尖括号得转义：{mk2}");
+        assert!(mk2.contains("&amp;"), "名字里的 & 得转义：{mk2}");
+    }
+
+    /// **阶段 162：端口列是「主机端口 : 容器端口」**（用户 2026-11-24：
+    /// 「端口应该显示为 主机端口：容器端口，但现在只有一个端口，不知道
+    /// 是什么」）。
+    #[test]
+    fn 端口列显示主机端口和容器端口() {
+        // ⚠️ **两个端口都要在**（以前压成 `5432/tcp` ⇒ 用户不知道那是
+        //   主机上的还是容器里的）。
+        assert_eq!(ports_pretty("0.0.0.0:5432->5432/tcp"), "5432:5432/tcp");
+        assert_eq!(ports_pretty("127.0.0.1:9001->9001/tcp"), "127.0.0.1:9001:9001/tcp");
+        assert_eq!(ports_pretty("9000->9001/tcp"), "9000:9001/tcp");
+        // ⚠️ **只 EXPOSE、没发布** ⇒ 没有主机端口 ⇒ 原样。
+        assert_eq!(ports_pretty("5432/tcp"), "5432/tcp");
+        // IPv4 ＋ IPv6 两条同一个映射 ⇒ **去重**（只留一条）。
+        assert_eq!(
+            ports_pretty("0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp"),
+            "3306:3306/tcp"
+        );
+        // 多个端口 ⇒ **一个一行**。
+        assert_eq!(
+            ports_pretty("0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp"),
+            "80:80/tcp\n443:443/tcp"
+        );
+        // 没有端口 ⇒ 空。
+        assert_eq!(ports_pretty(""), "");
     }
 
     /// **项目三种状态**（全跑 / 全停 / 一半跑）⇒ 启停的可用性跟着变。
@@ -8938,6 +9155,29 @@ fn file_kind_key(k: docker::FileKind) -> &'static str {
 ///   **类型键**（`dir` / `file` …）；权限改成**通用写法**（不翻译）。
 fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
     ui.files.store.clear();
+    // ⚠️ **阶段 162：先加一行「..」**（回到上一级）。
+    //
+    // ⚠️ **为什么要有**（用户 2026-11-24：「容器的文件管理，文件夹中没有
+    //   ".."，进入文件夹就没法出来了」）：**文件管理器都有这一行** ⇒
+    //   双击它就往上走 ⇒ 不用去工具条上找那个不起眼的小箭头按钮。
+    // ⚠️ **根目录不加**（`/` 的上一级还是 `/` ⇒ 加了就是死循环）。
+    let cur = ui.files_path.borrow().clone();
+    if !cur.is_empty() && cur != "/" {
+        let row = ui.files.store.append(None);
+        ui.files.store.set(
+            &row,
+            &[
+                (FC_ICON as u32, &"go-up-symbolic"),
+                (FC_NAME as u32, &".."),
+                (FC_SIZE as u32, &tr("—")),
+                (FC_PERM as u32, &""),
+                (FC_TYPE as u32, &tr("上级目录")),
+                // ⚠️ **类型键是 "up"**（不是 "dir"）⇒ 双击时走「回上一级」
+                //   而不是「进这个叫 `..` 的目录」（那会拼出 `/media/..`）。
+                (FC_KIND as u32, &"up"),
+            ],
+        );
+    }
     for f in v {
         let name = f.name.clone();
         let kind_label = tr(f.kind.label()).to_string();
@@ -8972,6 +9212,23 @@ fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
 fn files_selected(ui: &Rc<DockerUi>) -> Option<(String, String)> {
     let sel = ui.files.view.selection();
     let (model, iter) = sel.selected()?;
+    let name: String = model.get(&iter, FC_NAME as i32);
+    let kind: String = model.get(&iter, FC_KIND as i32);
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, kind))
+}
+
+/// **某一行**（按 path）的**名字 ＋ 类型键**。
+///
+/// ⚠️ **为什么要有**（阶段 162）：双击的回调里**光有 path** ⇒
+///   以前是去问「**当前选中**的那一行」⇒ **点的是哪一行不一定等于
+///   选中的是哪一行**（程序化发信号、或选中被别处改掉时就会错位）
+///   ⇒ 现在**按 path 取** ⇒ 动的一定是用户双击的那一行。
+fn files_row_at(ui: &Rc<DockerUi>, path: &gtk::TreePath) -> Option<(String, String)> {
+    let model = ui.files.store.clone();
+    let iter = model.iter(path)?;
     let name: String = model.get(&iter, FC_NAME as i32);
     let kind: String = model.get(&iter, FC_KIND as i32);
     if name.is_empty() {
@@ -9267,6 +9524,43 @@ pub fn files_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String, String, 
         }
     }
     out
+}
+
+/// 测试钩子：**某一行名字列的 markup**（阶段 162）。
+///
+/// 干什么用：冒烟要验「compose 项目行的名字**带标记**、容器行的**没有**」。
+pub fn row_name_markup_for_test(st: &Rc<PanelState>, name: &str) -> String {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return String::new() };
+    let Some(it) = ui.find_iter(name) else { return String::new() };
+    ui.model.get(&it, COL_NAME_MK as i32)
+}
+
+/// 测试钩子：**双击文件表里的某一行**（阶段 162：验「..」能回到上一级）。
+///
+/// ⚠️ **走的是真的 `row-activated` 信号**（跟双击同一条路）⇒
+///   「..」的处理逻辑被真的验到（而不是绕过它）。
+pub fn files_activate_row_for_test(st: &Rc<PanelState>, name: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let model = ui.files.store.clone();
+    // ⚠️ **迭代器要自己推进**（`iter_next` 返回 bool）⇒ 写成
+    //   `while let Some(..) = iter` 会**永远停在第一行** ⇒ **死循环**
+    //   （2026-11-24 反向验证时踩到：找不到那一行就卡死 ⇒ 冒烟挂住）。
+    if let Some(mut it) = model.iter_first() {
+        loop {
+            let n: String = model.get(&it, FC_NAME as i32);
+            if n == name {
+                let path = model.path(&it);
+                ui.files.view.emit_row_activated(&path, None);
+                return true;
+            }
+            if !model.iter_next(&mut it) {
+                break;
+            }
+        }
+    }
+    false
 }
 
 /// 测试钩子：文件表每一行的**图标名**（阶段 140）。

@@ -201,10 +201,10 @@ fn main() {
         "应当有一列「操作」：{titles:?}"
     );
 
-    // ---- ② **只有 3 颗**（启动 / 停止 / 重启）—— 阶段 160 ----
+    // ---- ② **容器行 3 颗**（启动 / 停止 / 重启）—— 阶段 160 ----
     //
     // ⚠️ 用户 2026-11-24：「操作列只保留启动、停止、重启，把其他的都移到
-    //   右键菜单里」⇒ 容器行与项目行**一样**。
+    //   右键菜单里」⇒ **容器行**。
     let c_icons = dockerui::row_action_icons_for_test(&panel.st, "solo-a");
     let c_names: Vec<&str> = c_icons.iter().map(|(i, _)| i.as_str()).collect();
     println!("[信息] 容器行的操作图标：{c_names:?}");
@@ -214,14 +214,22 @@ fn main() {
         vec!["pp-play", "pp-stop", "view-refresh-symbolic"],
         "容器行应当只有 启动/停止/重启：{c_names:?}"
     );
+    // ⚠️ **阶段 162：compose 项目行还要 up / down**（用户 2026-11-24：
+    //   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）。
     let p_icons = dockerui::row_action_icons_for_test(&panel.st, "proj");
     let p_names: Vec<&str> = p_icons.iter().map(|(i, _)| i.as_str()).collect();
     println!("[信息] 项目行的操作图标：{p_names:?}");
-    assert_eq!(p_icons.len(), 3, "项目行应当 3 颗图标：{p_names:?}");
+    assert_eq!(p_icons.len(), 5, "项目行应当 5 颗图标：{p_names:?}");
     assert_eq!(
         p_names,
-        vec!["pp-play", "pp-stop", "view-refresh-symbolic"],
-        "项目行应当只有 启动/停止/重启：{p_names:?}"
+        vec![
+            "pp-play",
+            "pp-stop",
+            "view-refresh-symbolic",
+            "go-up-symbolic",
+            "go-down-symbolic"
+        ],
+        "项目行应当是 启动/停止/重启/up/down：{p_names:?}"
     );
 
     // ---- ③ 图标名在系统主题里真的存在（写错 ⇒ 空白方块）----
@@ -334,6 +342,21 @@ fn main() {
             Some("stop"),
             "项目行第 2 颗图标应当是「停止」"
         );
+        // ⚠️ **阶段 162：项目行第 4 颗 = up、第 5 颗 = down**
+        //   （用户 2026-11-24：「compose 项目的操作列中应该还有与 up 和
+        //   down 对应的按钮」）。
+        let (x3, y3) = action_icon_pos(&view, &pp, 3, n_proj).expect("应当算出 proj 行第 4 颗图标");
+        assert_eq!(
+            dockerui::hit_action_at_for_test(&panel.st, x3, y3).as_deref(),
+            Some("up"),
+            "项目行第 4 颗图标应当是「up」"
+        );
+        let (x4, y4) = action_icon_pos(&view, &pp, 4, n_proj).expect("应当算出 proj 行第 5 颗图标");
+        assert_eq!(
+            dockerui::hit_action_at_for_test(&panel.st, x4, y4).as_deref(),
+            Some("down"),
+            "项目行第 5 颗图标应当是「down」"
+        );
 
         // 容器行（独立容器）：⚠️ **阶段 160** ⇒ 第 1 颗 = 启动、第 2 颗 = 停止
         let cp = row_path(&view, "solo-a").expect("模型里应当有 solo-a 行");
@@ -396,6 +419,39 @@ fn main() {
         assert!(
             tip2.contains("重启"),
             "容器行「重启」图标的 tooltip 应当提到重启：{tip2:?}"
+        );
+
+        // ⚠️ **阶段 162：项目行第 4 / 5 颗（up / down）** ⇒ tooltip 得写清
+        //   跑的是**哪条命令**（不然 ⌃ / ⌄ 看不出是啥）。
+        let (x3, y3) = action_icon_pos(&view, &pp, 3, n_proj).expect("应当算出 proj 行第 4 颗图标");
+        let tip3 = dockerui::action_tooltip_at_for_test(&panel.st, x3, y3)
+            .expect("项目行第 4 颗图标应当有 tooltip");
+        println!("[信息] 项目行第 4 颗（up）的 tooltip：{tip3:?}");
+        assert!(
+            tip3.contains("compose up"),
+            "项目行「up」图标的 tooltip 应当写明是 docker compose up：{tip3:?}"
+        );
+        let (x4, y4) = action_icon_pos(&view, &pp, 4, n_proj).expect("应当算出 proj 行第 5 颗图标");
+        let tip4 = dockerui::action_tooltip_at_for_test(&panel.st, x4, y4)
+            .expect("项目行第 5 颗图标应当有 tooltip");
+        println!("[信息] 项目行第 5 颗（down）的 tooltip：{tip4:?}");
+        assert!(
+            tip4.contains("compose down"),
+            "项目行「down」图标的 tooltip 应当写明是 docker compose down：{tip4:?}"
+        );
+
+        // ⚠️ **阶段 162：项目行的名字带标记**（加粗 ＋「compose」），
+        //   **容器行没有** ⇒ 一眼就分得出「项目」和「容器」。
+        let proj_mk = dockerui::row_name_markup_for_test(&panel.st, "proj");
+        let solo_mk = dockerui::row_name_markup_for_test(&panel.st, "solo-a");
+        println!("[信息] 项目行的名字 markup：{proj_mk:?}");
+        assert!(
+            proj_mk.contains("<b>proj</b>") && proj_mk.contains("compose"),
+            "项目行的名字应当加粗并带「compose」标记：{proj_mk:?}"
+        );
+        assert!(
+            solo_mk.is_empty(),
+            "容器行的名字不该带标记：{solo_mk:?}"
         );
 
         // 悬停**不在图标上**的地方 ⇒ 没有 tooltip（不该乱弹）。

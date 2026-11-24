@@ -57,6 +57,21 @@ fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
+/// 截一张图（**可选**：`PP_DOCKER_SHOT=/path` 时才截）。
+///
+/// ⚠️ 用 ImageMagick 的 `import` 截整屏（Xvfb 下只有本程序）⇒ 截不到
+///   **不算测试失败**（只是没图）。
+fn shot(path: &str) {
+    match std::process::Command::new("import")
+        .args(["-window", "root", path])
+        .status()
+    {
+        Ok(s) if s.success() => println!("[信息] 截图已存：{path}"),
+        Ok(s) => println!("[信息] 截图命令退出码 {s}（没截到，不影响测试结果）"),
+        Err(e) => println!("[信息] 截图失败（{e}）——不影响测试结果"),
+    }
+}
+
 /// 文件页**这一轮请求结束了没有**（状态行不再说「正在读取」）。
 fn settled(st: &Rc<PanelState>) -> bool {
     !dockerui::files_status_for_test(st).contains("正在读取")
@@ -224,9 +239,11 @@ fn main() {
                 format!("路径栏是 {:?}", dockerui::files_entry_for_test(&panel.st))
             );
             let rows = dockerui::files_rows_for_test(&panel.st);
+            // ⚠️ **阶段 162：表格里现在有一行「..」**（回到上一级）
+            //   ⇒ 空目录 ⇒ **只有**「..」这一行，**没有**父目录的条目。
             check!(
-                "A3 空目录的表格是空的（不是父目录的行）",
-                rows.is_empty(),
+                "A3 空目录的表格里没有父目录的条目（只有「..」）",
+                rows.len() == 1 && rows[0].0 == "..",
                 format!("表格里还有 {} 行：{rows:?}", rows.len())
             );
         }
@@ -273,6 +290,65 @@ fn main() {
             dockerui::files_path_for_test(&panel.st)
         )
     );
+
+    // ================= D：「..」能回到上一级（阶段 162）=================
+    //
+    // ⚠️ **用户 2026-11-24**：「容器的文件管理，文件夹中没有 ".."，进入
+    //   文件夹就没法出来了」⇒ 文件管理器都有这一行 ⇒ 双击它就往上走。
+    {
+        // 根目录 ⇒ **没有**「..」（`/` 的上一级还是 `/`）。
+        dockerui::files_goto_for_test(&panel.st, "/");
+        wait_until(20_000, || {
+            dockerui::files_path_for_test(&panel.st) == "/"
+                && !dockerui::files_rows_for_test(&panel.st).is_empty()
+        });
+        let root_rows = dockerui::files_rows_for_test(&panel.st);
+        check!(
+            "D1 根目录里没有「..」",
+            !root_rows.iter().any(|r| r.0 == ".."),
+            format!("根目录里有「..」：{root_rows:?}")
+        );
+
+        // 进一个子目录 ⇒ **第一行就是「..」**。
+        let sub = root_rows
+            .iter()
+            .find(|r| r.1 == "目录" || r.1 == "Dir" || r.1 == "directory")
+            .map(|r| r.0.clone())
+            .unwrap_or_default();
+        if sub.is_empty() {
+            println!("[信息] 容器根目录里没找到子目录 ⇒ 跳过 D 段");
+        } else {
+            let target = format!("/{sub}");
+            dockerui::files_goto_for_test(&panel.st, &target);
+            wait_until(20_000, || {
+                dockerui::files_path_for_test(&panel.st) == target
+                    && !dockerui::files_rows_for_test(&panel.st).is_empty()
+            });
+            let rows = dockerui::files_rows_for_test(&panel.st);
+            check!(
+                "D2 子目录的第一行是「..」",
+                rows.first().map(|r| r.0.as_str()) == Some(".."),
+                format!("子目录 {target} 的第一行是 {:?}", rows.first())
+            );
+            // ⚠️ **截图看看**（`PP_DOCKER_SHOT=/tmp/x` 时才截 ⇒ 不影响测试）。
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                shot(&format!("{base}-files-up.png"));
+            }
+            // ⚠️ **双击「..」⇒ 真的回到上一级**（走真的 row-activated）。
+            let fired = dockerui::files_activate_row_for_test(&panel.st, "..");
+            check!("D3 「..」这一行能双击", fired, "没找到「..」这一行");
+            wait_until(20_000, || dockerui::files_path_for_test(&panel.st) == "/");
+            check!(
+                "D4 双击「..」真的回到上一级了",
+                dockerui::files_path_for_test(&panel.st) == "/",
+                format!(
+                    "当前目录还是 {:?}（状态={:?}）",
+                    dockerui::files_path_for_test(&panel.st),
+                    dockerui::files_status_for_test(&panel.st)
+                )
+            );
+        }
+    }
 
     let fails = FAILS.with(|f| f.borrow().clone());
     if fails.is_empty() {

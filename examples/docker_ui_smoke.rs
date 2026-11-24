@@ -614,9 +614,12 @@ fn main() {
             .and_then(|r| r.property::<Option<String>>("text"))
             .unwrap_or_default();
         println!("[信息] 名称列渲染器最后画出来的文字：{drawn:?}");
+        // ⚠️ **阶段 162：名称列开了 markup** ⇒ 「text」属性里放的是
+        //   **markup 源码**（项目行是 `<b>名字</b> <span…>compose</span>`）
+        //   ⇒ 判据改成「**里面含有**某个名字」。
         check!(
             "⑤ 表格真的把文字画出来了（不是一片空白）",
-            !drawn.is_empty() && shown0.iter().any(|n| n == &drawn),
+            !drawn.is_empty() && shown0.iter().any(|n| drawn.contains(n.as_str())),
             format!("名称列渲染器里没有字（画出来是空白）：{drawn:?}")
         );
 
@@ -1045,13 +1048,16 @@ fn main() {
                 let icons = dockerui::row_action_icons_for_test(&panel.st, "proj");
                 let names: Vec<&str> = icons.iter().map(|(i, _)| i.as_str()).collect();
                 println!("[信息] 项目行的操作图标：{names:?}");
-                // ⚠️ **阶段 160**：项目行也只剩 3 颗（编辑 / 销毁 / 重建进了右键菜单）。
+                // ⚠️ **阶段 162**：项目行**多 up / down 两颗**（用户 2026-11-24：
+                //   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）。
                 check!(
-                    "⑪ 项目行的「操作」列只有 3 颗图标（启动 / 停止 / 重启）",
-                    icons.len() == 3
+                    "⑪ 项目行的「操作」列有 5 颗图标（启动 / 停止 / 重启 / up / down）",
+                    icons.len() == 5
                         && names.contains(&"pp-play")
                         && names.contains(&"pp-stop")
-                        && names.contains(&"view-refresh-symbolic"),
+                        && names.contains(&"view-refresh-symbolic")
+                        && names.contains(&"go-up-symbolic")
+                        && names.contains(&"go-down-symbolic"),
                     format!("项目行的图标是：{names:?}")
                 );
                 // ⚠️ **项目全在跑 ⇒「启动」是灰的**（没得启动），

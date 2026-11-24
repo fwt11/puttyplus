@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2141] = [
+pub static EN: [(&str, &str); 2147] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -280,6 +280,7 @@ pub static EN: [(&str, &str); 2141] = [
     ("上次刷新 {t}", "Last refreshed at {t}"),
     ("上移", "Move up"),
     ("上移一行", "Move up one row"),
+    ("上级目录", "Parent directory"),
     ("下一个", "Next"),
     ("下一个匹配 (Enter)", "Next match (Enter)"),
     ("下一页", "Next page"),
@@ -391,6 +392,7 @@ pub static EN: [(&str, &str); 2141] = [
     ("值", "Value"),
     ("值太长，超出了列的类型长度", "The value is too long for the column type"),
     ("值的格式不对（跟列的类型对不上）", "The value has the wrong format (it does not match the column type)"),
+    ("停掉并删除这个 compose 项目的容器与网络（docker compose down）", "Stop and remove the containers and network of this compose project (docker compose down)"),
     ("停止", "Stop"),
     ("停止 {d}", "Stopped {d}"),
     ("停止位", "Stop bits"),
@@ -625,6 +627,7 @@ pub static EN: [(&str, &str); 2141] = [
     ("参数：{v0}", "Parameters: {v0}"),
     ("双击一条（或点「填入编辑器」）把它放回 SQL 编辑器，不自动执行——改完再点「执行」。", "Double-click an entry (or click \"Fill into editor\") to put it back into the SQL editor; it is not run automatically — edit it and click \"Execute\"."),
     ("双击一行直接打开：表/视图看数据，字段打开它所在的表，函数/过程/触发器/事件看定义。", "Double-click a row to open it directly: tables/views show data, a field opens the table it belongs to, functions/procedures/triggers/events show their definition."),
+    ("双击列表里的「..」就能回到上一级", "Double-click the \"..\" entry to go up one level"),
     ("双击容器行可进入 shell", "Double-click a container row to open a shell"),
     ("发送", "Send"),
     ("发送到其它服务器", "Send to another server"),
@@ -1109,6 +1112,7 @@ pub static EN: [(&str, &str); 2141] = [
     ("拿不到进程属性列表的大小", "Could not get the size of the process attribute list"),
     ("挂载", "Mounts"),
     ("按 compose 文件重新创建并启动这个项目", "Recreate and start this project from the compose file"),
+    ("按 compose 文件重新创建并启动这个项目（docker compose up）", "Recreate and start this project from its compose file (docker compose up)"),
     ("按列类型转义生成条件，填进 WHERE 框（填完可以接着改，按回车查库）", "Build the condition with type-aware quoting and insert it into the WHERE box (edit it further, then press Enter to query)"),
     ("按哪一列排序（不选就不排序）", "Which column to sort by (nothing selected means no sorting)"),
     ("按文件名过滤", "Filter by file name"),
@@ -1637,6 +1641,7 @@ pub static EN: [(&str, &str); 2141] = [
     ("端口转发 — PuTTYPlus", "Port forwarding — PuTTYPlus"),
     ("端口转发…", "Port forwarding…"),
     ("端口非法", "Invalid port"),
+    ("端口（主机:容器）", "Ports (host:container)"),
     ("端口，或 地址:端口", "port, or address:port"),
     ("端口：{c} → {ip}:{hp}", "Port: {c} → {ip}:{hp}"),
     ("端口：{c}（未发布）", "Port: {c} (not published)"),
@@ -1956,6 +1961,7 @@ pub static EN: [(&str, &str); 2141] = [
     ("这张表还没有列信息，过滤条件用不了", "This table has no column information yet, so filter conditions do not apply"),
     ("这张表还没有数据", "This table has no data yet"),
     ("这是 asciicast v1（2015 年的老格式），本程序只读 v2 / v3。\n可用 asciinema rec --format asciicast-v2 重录一遍。", "This is asciicast v1 (the old format from 2015), this program only reads v2 / v3.\nYou can record it again with asciinema rec --format asciicast-v2."),
+    ("这是上一级目录", "This is the parent directory"),
     ("这是带口令的旧式 PEM，应用内无法安全地输入口令转换。\n请在终端执行：\nssh-keygen -p -f {v0}", "This is a legacy PEM with a passphrase, it cannot be converted inside the application because the passphrase cannot be entered safely there.\nRun this in a terminal:\nssh-keygen -p -f {v0}"),
     ("这是当前会话的临时覆盖，优先于连接里的默认设置（连接编辑器 →「会话」页）。\n字号与响铃保存后立即生效；保活、终端类型、认证优先级需重新建立连接才生效（子进程环境与认证链都在启动时定下）。配置按会话名保存，同名会话共用一份。", "This is a temporary override for the current session and takes precedence over the defaults of the connection (connection editor → \"Session\" page).\nFont size and bell take effect as soon as they are saved; keepalive, terminal type and authentication priority need the connection to be established again (the subprocess environment and the authentication chain are fixed at startup). The settings are stored per session name, sessions with the same name share them."),
     ("这是视图，没有 CREATE TABLE 语句——视图的定义由数据库自己维护。", "This is a view, so there is no CREATE TABLE statement — the database maintains the view definition itself."),
