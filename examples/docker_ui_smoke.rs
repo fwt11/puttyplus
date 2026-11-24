@@ -3114,6 +3114,329 @@ fn main() {
             format!("状态行={msg:?}")
         );
     }
+    // ================= Q 组：阶段 166 —— 删卷 / 删网络 =================
+    //
+    // ⚠️ **只删自己造出来的那个卷**（`pp-smoke-vol-166`）⇒ 不碰用户真数据；
+    //   删**不存在的名字** ⇒ 验「失败要说清原因」。
+    {
+        // ---- 卷页 ----
+        // ⚠️ **先关掉详情窗**（概览 / 日志 / 文件）⇒ 它们是独立窗口 ⇒
+        //   不关就会盖在容器页上面 ⇒ 截图拍不到卷页。
+        dockerui::close_detail_windows_for_test(&panel2.st);
+        pump(300);
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_VOLUMES);
+        let mut waited = 0;
+        while waited < 30 && dockerui::volumes_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            waited += 1;
+        }
+        // ---- 操作条在（一个「删除」按钮）----
+        let (vlabel, vsens, vsel, vhint) = dockerui::volumes_actions_for_test(&panel2.st);
+        check!(
+            "㉕ 卷页有「删除」按钮",
+            vlabel == "删除",
+            format!("按钮={vlabel:?}")
+        );
+        check!(
+            "㉕ 没选卷时删除按钮是灰的",
+            !vsens && vsel.is_empty(),
+            format!("可点={vsens} 选中={vsel:?}")
+        );
+        check!(
+            "㉕ 没选卷时提示说「选中一个卷才能删除」",
+            vhint.contains("选中一个卷"),
+            format!("提示={vhint:?}")
+        );
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            // ⚠️ **先 pump 一下**（GTK 的重绘是异步的 ⇒ 不 pump 就截 ⇒
+            //   截到的是**上一帧**）。
+            pump(500);
+            shot(&format!("{base}-volumes.png"));
+        }
+
+        // ---- **造一个测试卷** ⇒ 走完整的删除流程 ----
+        let vol = "pp-smoke-vol-166";
+        let created = remote_cmd(&opts_f, &format!("docker volume create {vol}"));
+        // ⚠️ **造不出来就跳过**（别把环境问题算成程序问题）。
+        if !created.contains(vol) {
+            println!("[信息] 远端造不出测试卷（{created:?}）⇒ 跳过删除往返这一段");
+        } else {
+            // 等它进表
+            dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_VOLUMES);
+            let mut w1 = 0;
+            while w1 < 40
+                && !dockerui::volumes_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == vol)
+            {
+                pump(300);
+                w1 += 1;
+            }
+            check!(
+                "㉕ 测试卷进了卷表",
+                dockerui::volumes_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == vol),
+                format!("卷表={:?}", dockerui::volumes_rows_for_test(&panel2.st))
+            );
+            // ---- 选中它 ⇒ 按钮能点 ----
+            let picked = dockerui::select_volume_for_test(&panel2.st, vol);
+            let (_, vsens2, vsel2, vhint2) = dockerui::volumes_actions_for_test(&panel2.st);
+            check!(
+                "㉕ 选中卷后删除按钮能点了",
+                picked && vsens2 && vsel2 == vol,
+                format!("选中={vsel2:?} 可点={vsens2} 提示={vhint2:?}")
+            );
+            // ---- 删掉它 ⇒ 表里没了 ＋ 远端也没了 ----
+            dockerui::volumes_remove_named_for_test(&panel2.st, vol);
+            let mut w2 = 0;
+            let mut gone = false;
+            while w2 < 50 {
+                pump(300);
+                w2 += 1;
+                if !dockerui::volumes_rows_for_test(&panel2.st)
+                    .iter()
+                    .any(|r| r.0 == vol)
+                {
+                    gone = true;
+                    break;
+                }
+            }
+            check!("㉕ 删除后卷表里那一行没了", gone, "卷表里还有那个测试卷");
+            // ⚠️ **远端也要真没了**（别只信界面）。
+            let left = remote_cmd(&opts_f, &format!("docker volume ls -q | grep -c '^{vol}$'"));
+            check!(
+                "㉕ 远端那个卷真的没了",
+                left.trim() == "0",
+                format!("远端还剩：{left:?}")
+            );
+            // ---- 结果写进了状态行 ----
+            let mut w3 = 0;
+            let mut vmsg = String::new();
+            while w3 < 30 {
+                pump(200);
+                w3 += 1;
+                vmsg = dockerui::status_for_test(&panel2.st);
+                if vmsg.contains("已删除") {
+                    break;
+                }
+            }
+            check!(
+                "㉕ 删除结果写进了状态行",
+                vmsg.contains("已删除"),
+                format!("状态行={vmsg:?}")
+            );
+        }
+
+        // ---- **删不存在的卷** ⇒ 失败要说清原因 ----
+        dockerui::volumes_remove_named_for_test(&panel2.st, "pp-nonexistent-volume-166");
+        let mut w4 = 0;
+        let mut verr = String::new();
+        while w4 < 50 {
+            pump(200);
+            w4 += 1;
+            verr = dockerui::status_for_test(&panel2.st);
+            if verr.contains("失败") {
+                break;
+            }
+        }
+        check!(
+            "㉕ 删不存在的卷会给出中文原因",
+            verr.contains("删除卷")
+                && verr.contains("失败")
+                && verr.len() > 8
+                // ⚠️ **不能只剩「exit status 1」那种水话**（Docker 29 会多打
+                //   一行）⇒ 得带上 docker 真正的报错。
+                && !verr.contains("exit status"),
+            format!("状态行={verr:?}")
+        );
+        println!("[信息] 删不存在的卷 ⇒ 状态行：{verr:?}");
+
+        // ---- 网络页 ----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_NETWORKS);
+        let mut w5 = 0;
+        while w5 < 30 && dockerui::networks_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            w5 += 1;
+        }
+        let (nlabel, nsens, nsel, nhint) = dockerui::networks_actions_for_test(&panel2.st);
+        check!(
+            "㉕ 网络页有「删除」按钮",
+            nlabel == "删除",
+            format!("按钮={nlabel:?}")
+        );
+        check!(
+            "㉕ 没选网络时删除按钮是灰的",
+            !nsens && nsel.is_empty(),
+            format!("可点={nsens} 选中={nsel:?}")
+        );
+        check!(
+            "㉕ 没选网络时提示说「选中一个网络才能删除」",
+            nhint.contains("选中一个网络"),
+            format!("提示={nhint:?}")
+        );
+        // ---- **默认网络（bridge）** ⇒ 按钮要灰 ＋ 说清为什么 ----
+        let nets = dockerui::networks_rows_for_test(&panel2.st);
+        if nets.iter().any(|r| r.0 == "bridge") {
+            dockerui::select_network_for_test(&panel2.st, "bridge");
+            pump(200);
+            let (_, bsens, bsel, bhint) = dockerui::networks_actions_for_test(&panel2.st);
+            check!(
+                "㉕ 默认网络 bridge 的删除按钮是灰的",
+                !bsens && bsel == "bridge",
+                format!("可点={bsens} 选中={bsel:?}")
+            );
+            check!(
+                "㉕ 默认网络要说明为什么删不掉",
+                bhint.contains("默认网络"),
+                format!("提示={bhint:?}")
+            );
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                // ⚠️ **先 pump 一下**（GTK 的重绘是异步的 ⇒ 不 pump 就截 ⇒
+                //   截到的是**上一帧**）。
+                pump(500);
+                shot(&format!("{base}-networks-default.png"));
+            }
+        } else {
+            println!("[信息] 没有 bridge 网络 ⇒ 跳过默认网络这一段");
+        }
+        // ---- **普通网络** ⇒ 按钮能点 ----
+        let normal = nets
+            .iter()
+            .find(|r| r.0 != "bridge" && r.0 != "host" && r.0 != "none");
+        if let Some(r) = normal {
+            dockerui::select_network_for_test(&panel2.st, &r.0);
+            pump(200);
+            let (_, osens, osel, _) = dockerui::networks_actions_for_test(&panel2.st);
+            check!(
+                "㉕ 普通网络的删除按钮能点",
+                osens && osel == r.0,
+                format!("可点={osens} 选中={osel:?}")
+            );
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                // ⚠️ **先 pump 一下**（GTK 的重绘是异步的）。
+                pump(500);
+                shot(&format!("{base}-networks-picked.png"));
+            }
+        } else {
+            println!("[信息] 这台机器上只有默认网络 ⇒ 跳过普通网络这一段");
+        }
+        // ---- **删不存在的网络** ⇒ 失败要说清原因 ----
+        dockerui::networks_remove_named_for_test(&panel2.st, "pp-nonexistent-net-166");
+        let mut w6 = 0;
+        let mut nerr = String::new();
+        while w6 < 50 {
+            pump(200);
+            w6 += 1;
+            nerr = dockerui::status_for_test(&panel2.st);
+            if nerr.contains("失败") {
+                break;
+            }
+        }
+        check!(
+            "㉕ 删不存在的网络会给出中文原因",
+            nerr.contains("删除网络")
+                && nerr.contains("失败")
+                && nerr.len() > 8
+                // ⚠️ **不能只剩「exit status 1」那种水话**（Docker 29 会多打
+                //   一行）⇒ 得带上 docker 真正的报错。
+                && !nerr.contains("exit status"),
+            format!("状态行={nerr:?}")
+        );
+        println!("[信息] 删不存在的网络 ⇒ 状态行：{nerr:?}");
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            shot(&format!("{base}-networks-del.png"));
+        }
+    }
+    // ================= R 组：阶段 166 —— 刷新别把「选中」顶掉 =================
+    //
+    // ⚠️ **这条锁的是一个真 bug**：重建表格要 `store.clear()` ⇒ GTK 会**逐行**
+    //   发 `cursor-changed` ⇒ 「程序记着的选中」被清空 ⇒ 自动刷新（每 7 秒）
+    //   一来，删除按钮就变灰 ⇒ **用户根本点不到**。
+    {
+        // ---- 卷页 ----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_VOLUMES);
+        let mut waited = 0;
+        while waited < 30 && dockerui::volumes_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            waited += 1;
+        }
+        let vols = dockerui::volumes_rows_for_test(&panel2.st);
+        if let Some(v) = vols.iter().find(|r| !r.0.trim().is_empty()) {
+            let name = v.0.clone();
+            dockerui::select_volume_for_test(&panel2.st, &name);
+            pump(150);
+            let (_, s1, sel1, _) = dockerui::volumes_actions_for_test(&panel2.st);
+            check!(
+                "㉖ 选中卷后删除按钮是亮的",
+                s1 && sel1 == name,
+                format!("可点={s1} 选中={sel1:?}")
+            );
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                // ⚠️ **先 pump 一下**（GTK 的重绘是异步的）。
+                pump(500);
+                shot(&format!("{base}-volumes-picked.png"));
+            }
+            // ⚠️ **触发一次刷新**（切分段 ⇒ 重新取数 ⇒ 重建表格）。
+            dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_VOLUMES);
+            // 等刷新**真的回来**（状态行从「正在读取…」变回「共 N 个卷」）。
+            let mut w = 0;
+            while w < 40 {
+                pump(200);
+                w += 1;
+                if dockerui::status_for_test(&panel2.st).contains("个卷") {
+                    break;
+                }
+            }
+            let (_, s2, sel2, _) = dockerui::volumes_actions_for_test(&panel2.st);
+            check!(
+                "㉖ 刷新后卷的选中还在（按钮不会变灰）",
+                s2 && sel2 == name,
+                format!("可点={s2} 选中={sel2:?} 状态行={:?}", dockerui::status_for_test(&panel2.st))
+            );
+        } else {
+            println!("[信息] 这台机器上没有卷 ⇒ 跳过卷的刷新保选中这一段");
+        }
+
+        // ---- 镜像页**也一样**（阶段 120 的老坑，顺手一起验）----
+        dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_IMAGES);
+        let mut waited2 = 0;
+        while waited2 < 30 && dockerui::images_rows_for_test(&panel2.st).is_empty() {
+            pump(300);
+            waited2 += 1;
+        }
+        let imgs = dockerui::images_rows_for_test(&panel2.st);
+        if let Some(i) = imgs
+            .iter()
+            .position(|r| !r.0.trim().is_empty() && !r.1.is_empty() && r.1 != "<none>")
+        {
+            let picked = dockerui::images_select_for_test(&panel2.st, i as u32);
+            pump(150);
+            let (_, s1, sel1) = dockerui::images_actions_for_test(&panel2.st);
+            check!(
+                "㉖ 选中镜像后按钮是亮的",
+                s1 && sel1 == picked && !picked.is_empty(),
+                format!("可点={s1} 选中={sel1:?}")
+            );
+            dockerui::seg_show_for_test(&panel2.st, dockerui::SEG_IMAGES);
+            let mut w2 = 0;
+            while w2 < 40 {
+                pump(200);
+                w2 += 1;
+                if dockerui::status_for_test(&panel2.st).contains("个镜像") {
+                    break;
+                }
+            }
+            let (_, s2, sel2) = dockerui::images_actions_for_test(&panel2.st);
+            check!(
+                "㉖ 刷新后镜像的选中还在（按钮不会变灰）",
+                s2 && sel2 == picked,
+                format!("可点={s2} 选中={sel2:?} 状态行={:?}", dockerui::status_for_test(&panel2.st))
+            );
+        } else {
+            println!("[信息] 没有能选的镜像 ⇒ 跳过镜像的刷新保选中这一段");
+        }
+    }
     }
 
 

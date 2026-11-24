@@ -888,6 +888,26 @@ pub struct DockerUi {
     /// **网络表**（阶段 115）。
     networks_store: gtk::TreeStore,
     networks_view: gtk::TreeView,
+    /// 卷页的「删除」按钮（阶段 166）。
+    volumes_remove_btn: gtk::Button,
+    /// 网络页的「删除」按钮（阶段 166）。
+    networks_remove_btn: gtk::Button,
+    /// 卷 / 网络页的**提示标签**（当前选中了谁；没选就提示怎么才能操作）。
+    volumes_hint: gtk::Label,
+    networks_hint: gtk::Label,
+    /// **当前选中的卷 / 网络名**（空 = 没选）。
+    ///
+    /// ⚠️ **自己记一份**（跟 `images_selected` 一个套路）：GTK 的「选中」只是
+    ///   一行 ⇒ 得把它翻译成 docker 认的**名字** ⇒ 后面的命令才用得上。
+    volumes_selected: RefCell<String>,
+    networks_selected: RefCell<String>,
+    /// **删卷 / 删网络**的结果文字（**等列表刷新完再贴回状态行**）。
+    ///
+    /// ⚠️ **跟 `images_op_msg` 同一个坑**：操作做完会**重新列一遍** ⇒ 刷新
+    ///   那条消息（「共 N 个卷」）会把操作结果**冲掉** ⇒ 用户看不到
+    ///   「卷已删除」⇒ 结果得**刷新之后再贴回去**。
+    volumes_op_msg: RefCell<String>,
+    networks_op_msg: RefCell<String>,
     /// 三个分段**各自**的「正在取」标志（阶段 115）。
     ///
     /// ⚠️ **为什么不跟容器共用一个 `busy`**：容器正在刷新时，用户切到
@@ -952,6 +972,13 @@ pub struct DockerUi {
     /// ⚠️ 与 `selected` **互斥**：项目行是父行 ⇒ 选中它就不选容器。
     selected_project: RefCell<String>,
     /// 正在**程序性**地恢复选中（⇒ 别因此又去取一次详情）。
+    ///
+    /// ⚠️ **阶段 166：三个平表（镜像 / 卷 / 网络）的重建也用它** ——
+    ///   重建要 `store.clear()` ⇒ GTK 会**逐行**发 `cursor-changed`
+    ///   （每删掉一行发一次，最后一次是「没选中」）⇒ 光标处理器会把
+    ///   「程序记着的选中」**清成空** ⇒ 自动刷新（每 7 秒）一来，用户的
+    ///   选中就没了 ⇒ 删除按钮跟着变灰 ⇒ **用户点不到**。
+    /// ⇒ 重建那一段算「程序性」⇒ 用这个标志挡掉那些假的光标变化。
     restoring: Cell<bool>,
     /// **最近一次写操作的结果**（空 = 没执行过写操作）。
     ///
@@ -1017,6 +1044,17 @@ enum Msg {
     /// ⚠️ **`done`**：进度消息**不刷新**列表（每 100ms 刷一次 ⇒ 远端被
     ///    hammering）；只有**最后那条**才刷新。
     ImageOp { msg: String, done: bool },
+    /// **卷 / 网络写操作**的结果（阶段 166）。
+    ///
+    /// ⚠️ **为什么单开一个而不是复用 `ImageOp`**：镜像那条消息**固定**贴到
+    ///   镜像分段的状态行 ⇒ 卷 / 网络得**自己带分段**（`seg`）⇒ 否则卷的
+    ///   结果会贴到镜像那一行去。
+    SegOp {
+        /// 目标分段（`SEG_VOLUMES` / `SEG_NETWORKS`）。
+        seg: &'static str,
+        /// 中文结果文字。
+        msg: String,
+    },
 }
 
 /// 详情区的控件（阶段 110）。
@@ -3018,24 +3056,38 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     images_bar.append(&images_remove_btn);
     images_bar.append(&images_hint);
 
-    // 卷 / 网络两页：只加一条搜索栏。
+    // 卷 / 网络两页：搜索栏 ＋ **删除按钮**（阶段 166）。
     let volumes_search = gtk::SearchEntry::new();
     volumes_search.set_placeholder_text(Some(tr("搜索卷")));
     volumes_search.set_hexpand(true);
+    let volumes_remove_btn = gtk::Button::with_label(tr("删除"));
+    volumes_remove_btn.set_tooltip_text(Some(tr("删除这个卷（docker volume rm；卷里的数据会一起没了）")));
+    let volumes_hint = gtk::Label::new(Some(tr("选中一个卷才能删除")));
+    volumes_hint.set_xalign(0.0);
+    volumes_hint.add_css_class("dim-label");
     let volumes_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     volumes_bar.set_margin_start(6);
     volumes_bar.set_margin_end(6);
     volumes_bar.set_margin_top(4);
     volumes_bar.append(&volumes_search);
+    volumes_bar.append(&volumes_remove_btn);
+    volumes_bar.append(&volumes_hint);
 
     let networks_search = gtk::SearchEntry::new();
     networks_search.set_placeholder_text(Some(tr("搜索网络")));
     networks_search.set_hexpand(true);
+    let networks_remove_btn = gtk::Button::with_label(tr("删除"));
+    networks_remove_btn.set_tooltip_text(Some(tr("删除这个网络（docker network rm；用着它的容器会受影响）")));
+    let networks_hint = gtk::Label::new(Some(tr("选中一个网络才能删除")));
+    networks_hint.set_xalign(0.0);
+    networks_hint.add_css_class("dim-label");
     let networks_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     networks_bar.set_margin_start(6);
     networks_bar.set_margin_end(6);
     networks_bar.set_margin_top(4);
     networks_bar.append(&networks_search);
+    networks_bar.append(&networks_remove_btn);
+    networks_bar.append(&networks_hint);
 
     let (images_root, images_empty) = flat_page_with_bar(&images_view, Some(&images_bar));
     let (volumes_root, volumes_empty) = flat_page_with_bar(&volumes_view, Some(&volumes_bar));
@@ -3593,6 +3645,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         volumes_view: volumes_view.clone(),
         networks_store: networks_store.clone(),
         networks_view: networks_view.clone(),
+        volumes_remove_btn: volumes_remove_btn.clone(),
+        networks_remove_btn: networks_remove_btn.clone(),
+        volumes_hint: volumes_hint.clone(),
+        networks_hint: networks_hint.clone(),
+        volumes_selected: RefCell::new(String::new()),
+        networks_selected: RefCell::new(String::new()),
+        volumes_op_msg: RefCell::new(String::new()),
+        networks_op_msg: RefCell::new(String::new()),
         images_busy: Cell::new(false),
         busy_pending: Cell::new(false),
         images_pending: Cell::new(false),
@@ -3709,6 +3769,52 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         }
         update_images_actions(&ui);
     }
+    // ---- 阶段 166：卷 / 网络的**删除**接线 ----
+    //
+    // ⚠️ **跟镜像页一个套路**：选中变了 ⇒ 记住选中的是谁 ＋ 按钮跟着变。
+    {
+        let u = Rc::downgrade(&ui);
+        let view = volumes_view.clone();
+        view.connect_cursor_changed(move |v| {
+            let Some(u) = u.upgrade() else { return };
+            on_volumes_cursor_changed(&u, v);
+        });
+    }
+    {
+        let u = Rc::downgrade(&ui);
+        let view = networks_view.clone();
+        view.connect_cursor_changed(move |v| {
+            let Some(u) = u.upgrade() else { return };
+            on_networks_cursor_changed(&u, v);
+        });
+    }
+    {
+        let stw = Rc::downgrade(st);
+        let uw = Rc::downgrade(&ui);
+        ui.volumes_remove_btn.connect_clicked(move |_| {
+            let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+            let name = u.volumes_selected.borrow().clone();
+            if name.is_empty() {
+                return;
+            }
+            volumes_remove(&st, &u, &name);
+        });
+    }
+    {
+        let stw = Rc::downgrade(st);
+        let uw = Rc::downgrade(&ui);
+        ui.networks_remove_btn.connect_clicked(move |_| {
+            let (Some(st), Some(u)) = (stw.upgrade(), uw.upgrade()) else { return };
+            let name = u.networks_selected.borrow().clone();
+            if name.is_empty() {
+                return;
+            }
+            networks_remove(&st, &u, &name);
+        });
+    }
+    update_volumes_actions(&ui);
+    update_networks_actions(&ui);
+
     // ---- 三个分段的**搜索框**（UI 审查 D12）----
     {
         let u = Rc::downgrade(&ui);
@@ -3806,6 +3912,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             if let Some(st) = stw.upgrade() {
                                 refresh_volumes(&st, &u);
                             }
+                        } else {
+                            // ⚠️ **阶段 166**：把删除结果贴回去（刷新那条
+                            //   「共 N 个卷」会把结果冲掉）。
+                            let op = u.volumes_op_msg.borrow().clone();
+                            if !op.is_empty() {
+                                u.set_segment_status(SEG_VOLUMES, &op);
+                                u.volumes_op_msg.borrow_mut().clear();
+                            }
                         }
                     }
                     Msg::Volumes(Err(msg)) => {
@@ -3827,6 +3941,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             u.networks_pending.set(false);
                             if let Some(st) = stw.upgrade() {
                                 refresh_networks(&st, &u);
+                            }
+                        } else {
+                            // ⚠️ **阶段 166**：把删除结果贴回去。
+                            let op = u.networks_op_msg.borrow().clone();
+                            if !op.is_empty() {
+                                u.set_segment_status(SEG_NETWORKS, &op);
+                                u.networks_op_msg.borrow_mut().clear();
                             }
                         }
                     }
@@ -3892,6 +4013,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             // ⚠️ **操作完了重新列一遍**（打标签 / 删除都改了远端）。
                             if let Some(st) = stw.upgrade() {
                                 refresh_images(&st, &u);
+                            }
+                        }
+                    }
+                    // ⚠️ **阶段 166**：卷 / 网络写操作的结果。
+                    Msg::SegOp { seg, msg } => {
+                        u.set_segment_status(seg, &msg);
+                        // ⚠️ **结果先存着** ⇒ 等列表刷新完再贴回去
+                        //   （刷新那条「共 N 个卷」会把结果冲掉）。
+                        match seg {
+                            SEG_VOLUMES => *u.volumes_op_msg.borrow_mut() = msg,
+                            SEG_NETWORKS => *u.networks_op_msg.borrow_mut() = msg,
+                            _ => {}
+                        }
+                        // ⚠️ **操作完了重新列一遍**（远端已经变了）。
+                        if let Some(st) = stw.upgrade() {
+                            match seg {
+                                SEG_VOLUMES => refresh_volumes(&st, &u),
+                                SEG_NETWORKS => refresh_networks(&st, &u),
+                                _ => {}
                             }
                         }
                     }
@@ -8694,6 +8834,9 @@ fn refilter_images(ui: &Rc<DockerUi>) {
     //    清掉的话，用户**根本点不到操作按钮**（按钮会跟着变灰）⇒
     //    重建以后**按名字找回来**。
     let keep = ui.images_selected.borrow().clone();
+    // ⚠️ **重建那一段算「程序性」**（阶段 166）：`store.clear()` 会逐行发
+    //   `cursor-changed` ⇒ 光标处理器会把选中清空 ⇒ 先挡掉。
+    ui.restoring.set(true);
     let q = ui.images_query.borrow().to_ascii_lowercase();
     let all = ui.images_all.borrow().clone();
     ui.images_store.clear();
@@ -8727,6 +8870,15 @@ fn refilter_images(ui: &Rc<DockerUi>) {
     if let Some(it) = found {
         ui.images_view.selection().select_iter(&it);
     }
+    ui.restoring.set(false);
+    // ⚠️ **自己把选中写回去**（阶段 166）：实测 GTK4 **单选模式**下
+    //   `select_iter()` **不发** `cursor-changed` ⇒ 只靠信号的话，选中
+    //   记不回来 ⇒ 按钮还是灰的 ⇒ 用户点不到。
+    *ui.images_selected.borrow_mut() = if found.is_some() {
+        keep
+    } else {
+        String::new()
+    };
     update_images_actions(ui);
     let total = all.len();
     let msg = if shown == total {
@@ -8757,9 +8909,17 @@ fn apply_volumes(ui: &Rc<DockerUi>, v: &[docker::VolumeInfo]) {
 
 /// 重新按搜索词填**卷表**（UI 审查 D12：这三页以前**一点筛选都没有**）。
 fn refilter_volumes(ui: &Rc<DockerUi>) {
+    // ⚠️ **保住选中**（阶段 166）：自动刷新每 7 秒来一次 ⇒ 每次都把选中
+    //    清掉的话，用户**根本点不到删除按钮**（按钮会跟着变灰）⇒
+    //    重建以后**按名字找回来**（跟 `refilter_images` 一个套路）。
+    let keep = ui.volumes_selected.borrow().clone();
+    // ⚠️ **重建那一段算「程序性」**（阶段 166）：`store.clear()` 会逐行发
+    //   `cursor-changed` ⇒ 光标处理器会把选中清空 ⇒ 先挡掉。
+    ui.restoring.set(true);
     let q = ui.volumes_query.borrow().to_ascii_lowercase();
     let all = ui.volumes_all.borrow().clone();
     ui.volumes_store.clear();
+    let mut found: Option<gtk::TreeIter> = None;
     let mut shown = 0usize;
     for x in all.iter() {
         if !q.is_empty() {
@@ -8772,7 +8932,23 @@ fn refilter_volumes(ui: &Rc<DockerUi>) {
         shown += 1;
         let row = ui.volumes_store.append(None);
         ui.volumes_store.set(&row, &[(0u32, &x.name), (1u32, &x.driver)]);
+        if !keep.is_empty() && x.name == keep {
+            found = Some(row);
+        }
     }
+    // ⚠️ **把选中找回来**（重建前记的名字）⇒ 自动刷新不会把用户的选择顶掉。
+    if let Some(it) = found {
+        ui.volumes_view.selection().select_iter(&it);
+    }
+    ui.restoring.set(false);
+    // ⚠️ **自己把选中写回去**（阶段 166）：GTK4 单选模式下 `select_iter()`
+    //   **不发** `cursor-changed` ⇒ 只靠信号的话记不回来 ⇒ 按钮还是灰的。
+    *ui.volumes_selected.borrow_mut() = if found.is_some() {
+        keep
+    } else {
+        String::new()
+    };
+    update_volumes_actions(ui);
     let total = all.len();
     let msg = if shown == total {
         trf!("共 {n} 个卷", n = total)
@@ -8790,9 +8966,16 @@ fn apply_networks(ui: &Rc<DockerUi>, v: &[docker::NetInfo]) {
 
 /// 重新按搜索词填**网络表**（UI 审查 D12）。
 fn refilter_networks(ui: &Rc<DockerUi>) {
+    // ⚠️ **保住选中**（阶段 166）：跟卷页一个套路 ⇒ 自动刷新不会把用户
+    //    选中的网络顶掉（顶掉了删除按钮就变灰）。
+    let keep = ui.networks_selected.borrow().clone();
+    // ⚠️ **重建那一段算「程序性」**（阶段 166）：`store.clear()` 会逐行发
+    //   `cursor-changed` ⇒ 光标处理器会把选中清空 ⇒ 先挡掉。
+    ui.restoring.set(true);
     let q = ui.networks_query.borrow().to_ascii_lowercase();
     let all = ui.networks_all.borrow().clone();
     ui.networks_store.clear();
+    let mut found: Option<gtk::TreeIter> = None;
     let mut shown = 0usize;
     for x in all.iter() {
         if !q.is_empty() {
@@ -8807,7 +8990,22 @@ fn refilter_networks(ui: &Rc<DockerUi>) {
         let row = ui.networks_store.append(None);
         ui.networks_store
             .set(&row, &[(0u32, &x.name), (1u32, &x.driver), (2u32, &x.scope)]);
+        if !keep.is_empty() && x.name == keep {
+            found = Some(row);
+        }
     }
+    // ⚠️ **把选中找回来**（重建前记的名字）。
+    if let Some(it) = found {
+        ui.networks_view.selection().select_iter(&it);
+    }
+    ui.restoring.set(false);
+    // ⚠️ **自己把选中写回去**（阶段 166）：见 `refilter_volumes` 的说明。
+    *ui.networks_selected.borrow_mut() = if found.is_some() {
+        keep
+    } else {
+        String::new()
+    };
+    update_networks_actions(ui);
     let total = all.len();
     let msg = if shown == total {
         trf!("共 {n} 个网络", n = total)
@@ -9386,6 +9584,10 @@ pub fn files_download_for_test(
 /// ⚠️ **为什么自己记**：GTK 的「选中」只是一行 ⇒ 得把它翻译成
 ///    `docker` 认的**镜像名**（`仓库:标签`）⇒ 后面的命令才用得上。
 fn on_images_cursor_changed(ui: &Rc<DockerUi>, view: &gtk::TreeView) {
+    // ⚠️ **重建表格时**那些「假的光标变化」要挡掉（见 `refilter_images`）。
+    if ui.restoring.get() {
+        return;
+    }
     let mut name = String::new();
     if let Some((model, iter)) = view.selection().selected() {
         let repo: String = model.get(&iter, 0);
@@ -9736,6 +9938,280 @@ pub fn images_export_for_test(st: &Rc<PanelState>, dest: &std::path::Path) {
         return;
     }
     run_image_export(st, ui, &image, dest);
+}
+
+/* ---------------- 阶段 166：删卷 / 删网络 ---------------- */
+
+/// **卷表**的**选中变了** ⇒ 记住选中的是哪个卷 ＋ 更新操作条。
+///
+/// ⚠️ **跟镜像页一个套路**（`on_images_cursor_changed`）：GTK 的「选中」只是
+///   一行 ⇒ 得把它翻译成 docker 认的**卷名** ⇒ 后面的命令才用得上。
+fn on_volumes_cursor_changed(ui: &Rc<DockerUi>, view: &gtk::TreeView) {
+    // ⚠️ **重建表格时**那些「假的光标变化」要挡掉（见 `refilter_volumes`）。
+    if ui.restoring.get() {
+        return;
+    }
+    let mut name = String::new();
+    if let Some((model, iter)) = view.selection().selected() {
+        let n: String = model.get(&iter, 0);
+        if !n.is_empty() {
+            name = n;
+        }
+    }
+    *ui.volumes_selected.borrow_mut() = name;
+    update_volumes_actions(ui);
+}
+
+/// 刷新**卷页的操作条**（按钮能不能点 ＋ 提示当前选中了谁）。
+fn update_volumes_actions(ui: &Rc<DockerUi>) {
+    let sel = ui.volumes_selected.borrow().clone();
+    let has = !sel.is_empty();
+    ui.volumes_remove_btn.set_sensitive(has);
+    if has {
+        ui.volumes_hint.set_text(&sel);
+    } else {
+        ui.volumes_hint.set_text(tr("选中一个卷才能删除"));
+    }
+}
+
+/// **网络表**的**选中变了** ⇒ 记住选中的是哪个网络 ＋ 更新操作条。
+fn on_networks_cursor_changed(ui: &Rc<DockerUi>, view: &gtk::TreeView) {
+    // ⚠️ **重建表格时**那些「假的光标变化」要挡掉（见 `refilter_networks`）。
+    if ui.restoring.get() {
+        return;
+    }
+    let mut name = String::new();
+    if let Some((model, iter)) = view.selection().selected() {
+        let n: String = model.get(&iter, 0);
+        if !n.is_empty() {
+            name = n;
+        }
+    }
+    *ui.networks_selected.borrow_mut() = name;
+    update_networks_actions(ui);
+}
+
+/// 刷新**网络页的操作条**。
+///
+/// ⚠️ **默认网络（bridge / host / none）删不掉** ⇒ 按钮**置灰**＋**说清
+///   为什么**（别让用户点一下再吃一个远端报错）。
+fn update_networks_actions(ui: &Rc<DockerUi>) {
+    let sel = ui.networks_selected.borrow().clone();
+    let has = !sel.is_empty();
+    if has && docker::is_default_network(&sel) {
+        ui.networks_remove_btn.set_sensitive(false);
+        ui.networks_hint.set_text(&trf!(
+            "「{name}」是 Docker 默认网络，删不掉",
+            name = sel
+        ));
+        return;
+    }
+    ui.networks_remove_btn.set_sensitive(has);
+    if has {
+        ui.networks_hint.set_text(&sel);
+    } else {
+        ui.networks_hint.set_text(tr("选中一个网络才能删除"));
+    }
+}
+
+/// **删除卷**（**写操作** ⇒ 二次确认）。
+///
+/// ⚠️ **卷里是数据** ⇒ 删了就没了（远端**不会**再问一次）⇒ 必须确认，
+///   而且确认框里要**说清后果**。
+fn volumes_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    let msg = trf!(
+        "确定要删除卷「{name}」吗？（卷里的数据会一起没了，撤不回来）",
+        name = name
+    );
+    let (st2, u2) = (st.clone(), ui.clone());
+    let name = name.to_string();
+    let parent = host_window(ui, st);
+    crate::panel::dialogs::confirm_title(
+        parent.as_ref(),
+        tr("请确认"),
+        &msg,
+        tr("删除"),
+        move |ok| {
+            if !ok {
+                return;
+            }
+            run_volume_remove(&st2, &u2, &name);
+        },
+    );
+}
+
+/// **删除卷**的后台部分（远端跑 `docker volume rm`）。
+fn run_volume_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    ui.set_segment_status(SEG_VOLUMES, &trf!("正在删除卷「{name}」…", name = name));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name = name.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => match docker::remove_volume(&session, &name).await {
+                Ok(()) => trf!("卷「{name}」已删除", name = name),
+                Err(e) => e.0,
+            },
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::SegOp {
+            seg: SEG_VOLUMES,
+            msg,
+        });
+    });
+}
+
+/// **删除网络**（**写操作** ⇒ 二次确认）。
+fn networks_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    let msg = trf!(
+        "确定要删除网络「{name}」吗？（用着它的容器会受影响）",
+        name = name
+    );
+    let (st2, u2) = (st.clone(), ui.clone());
+    let name = name.to_string();
+    let parent = host_window(ui, st);
+    crate::panel::dialogs::confirm_title(
+        parent.as_ref(),
+        tr("请确认"),
+        &msg,
+        tr("删除"),
+        move |ok| {
+            if !ok {
+                return;
+            }
+            run_network_remove(&st2, &u2, &name);
+        },
+    );
+}
+
+/// **删除网络**的后台部分（远端跑 `docker network rm`）。
+fn run_network_remove(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    ui.set_segment_status(
+        SEG_NETWORKS,
+        &trf!("正在删除网络「{name}」…", name = name),
+    );
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name = name.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => match docker::remove_network(&session, &name).await {
+                Ok(()) => trf!("网络「{name}」已删除", name = name),
+                Err(e) => e.0,
+            },
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::SegOp {
+            seg: SEG_NETWORKS,
+            msg,
+        });
+    });
+}
+
+/* ---------------- 阶段 166：删卷 / 删网络的测试钩子 ---------------- */
+
+/// 测试钩子：**卷页的操作条**（按钮文案、能不能点、当前选中的卷、提示文字）。
+pub fn volumes_actions_for_test(st: &Rc<PanelState>) -> (String, bool, String, String) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return (String::new(), false, String::new(), String::new());
+    };
+    (
+        ui.volumes_remove_btn.label().unwrap_or_default().to_string(),
+        ui.volumes_remove_btn.is_sensitive(),
+        ui.volumes_selected.borrow().clone(),
+        ui.volumes_hint.text().to_string(),
+    )
+}
+
+/// 测试钩子：**网络页的操作条**（按钮文案、能不能点、当前选中的网络、提示文字）。
+pub fn networks_actions_for_test(st: &Rc<PanelState>) -> (String, bool, String, String) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else {
+        return (String::new(), false, String::new(), String::new());
+    };
+    (
+        ui.networks_remove_btn.label().unwrap_or_default().to_string(),
+        ui.networks_remove_btn.is_sensitive(),
+        ui.networks_selected.borrow().clone(),
+        ui.networks_hint.text().to_string(),
+    )
+}
+
+/// 测试钩子：**关掉全部详情窗**（概览 / 日志 / 文件）。
+///
+/// ⚠️ **给冒烟用**：详情窗是**独立窗口** ⇒ 不关的话它会**盖在**容器页上面
+///   ⇒ 截图拍到的是它 ⇒ 看不清容器页长什么样。
+pub fn close_detail_windows_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    close_detail_window(ui);
+}
+
+/// 测试钩子：**选中**某个卷行（走真实的 `set_cursor` ⇒ 触发真实的
+/// 「选中 ⇒ 更新操作条」）。
+pub fn select_volume_for_test(st: &Rc<PanelState>, name: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let model = ui.volumes_store.clone();
+    let mut it = model.iter_first();
+    while let Some(mut iter) = it {
+        let n: String = model.get(&iter, 0);
+        if n == name {
+            let path = model.path(&iter);
+            gtk::prelude::TreeViewExt::set_cursor(&ui.volumes_view, &path, None, false);
+            ui.volumes_view.selection().select_path(&path);
+            return true;
+        }
+        if !model.iter_next(&mut iter) {
+            break;
+        }
+        it = Some(iter);
+    }
+    false
+}
+
+/// 测试钩子：**选中**某个网络行（走真实的 `set_cursor`）。
+pub fn select_network_for_test(st: &Rc<PanelState>, name: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let model = ui.networks_store.clone();
+    let mut it = model.iter_first();
+    while let Some(mut iter) = it {
+        let n: String = model.get(&iter, 0);
+        if n == name {
+            let path = model.path(&iter);
+            gtk::prelude::TreeViewExt::set_cursor(&ui.networks_view, &path, None, false);
+            ui.networks_view.selection().select_path(&path);
+            return true;
+        }
+        if !model.iter_next(&mut iter) {
+            break;
+        }
+        it = Some(iter);
+    }
+    false
+}
+
+/// 测试钩子：**删掉**指定的卷（跳过对话框 ⇒ 直接跑）。
+///
+/// ⚠️ **给一个不存在的名字**（`pp-nonexistent-volume-120`）⇒ docker 会
+///   立刻失败 ⇒ 正好验「失败要给中文原因」，又**不会碰到用户的真数据**。
+pub fn volumes_remove_named_for_test(st: &Rc<PanelState>, name: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    run_volume_remove(st, ui, name);
+}
+
+/// 测试钩子：**删掉**指定的网络（跳过对话框 ⇒ 直接跑）。
+pub fn networks_remove_named_for_test(st: &Rc<PanelState>, name: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    run_network_remove(st, ui, name);
 }
 
 /* ---------------- 阶段 115：测试钩子 ---------------- */

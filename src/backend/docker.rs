@@ -830,20 +830,50 @@ pub fn image_save_cmd(image: &str) -> String {
 ///    ⇒ 直接把整段输出塞给用户 ⇒ 一屏乱码。
 /// ⚠️ **按 `\n` 与 `\r` 都切**：推送的进度是用 `\r` 刷的 ⇒ 只按 `\n` 切
 ///    会把整段进度当成一句话。
+/// ⚠️ **阶段 166：跳过「exit status N」那种尾巴**（Docker 29 会**多打一行**
+///    `exit status 1`，实测 docker 29.10.0）：
+///    ```
+///    Error response from daemon: network foo not found
+///    exit status 1
+///    ```
+///    ⇒ 只取最后一行的话，用户看到的是「exit status 1」⇒ **真正的原因被
+///    吃掉了**（用户还得自己再去查）⇒ 要**往前找**那句有信息的话。
 pub fn docker_last_line(out: &str) -> String {
-    out.split(['\n', '\r'])
+    let lines: Vec<&str> = out
+        .split(['\n', '\r'])
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .last()
-        .unwrap_or("")
-        .to_string()
+        .collect();
+    // ⚠️ **从后往前找**第一个「不是退出码尾巴」的行。
+    for l in lines.iter().rev() {
+        if !is_exit_status_line(l) {
+            return (*l).to_string();
+        }
+    }
+    // ⚠️ **全是退出码尾巴**（少见）⇒ 就把最后一行交出去（总比空强）。
+    lines.last().map(|s| s.to_string()).unwrap_or_default()
 }
 
-/// 镜像操作**失败**时的中文提示（纯函数 ⇒ 能单测）。
+/// 那一行是不是「退出码」的水话（`exit status 1` / `exit status 2` …）。
+///
+/// ⚠️ **为什么要单独认**：Docker 29 失败时会在真正的报错**后面**再打一行
+///   `exit status N` ⇒ 只取最后一行就把它当成了「原因」。
+fn is_exit_status_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("exit status ") else {
+        return false;
+    };
+    // ⚠️ **后面得是数字**（`exit status 1` 才是水话；`exit status unknown`
+    //   之类不算 ⇒ 宁可保守一点，别把真原因扔了）。
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 写操作**失败**时的中文提示（纯函数 ⇒ 能单测）。
 ///
 /// ⚠️ **失败要给「为什么」**：只说「推送失败」用户没法处理 ⇒ 把 docker
 ///    说的最后一句带上。
-pub fn image_op_error_msg(what: &str, out: &str) -> String {
+/// ⚠️ **阶段 166 通用化**：原来只给镜像用（`image_op_error_msg`）⇒ 卷 / 网络
+///    的删除也用同一个口径 ⇒ 名字里就不该带「镜像」了。
+pub fn op_error_msg(what: &str, out: &str) -> String {
     let line = docker_last_line(out);
     if line.is_empty() {
         trf!("{what}失败", what = what)
@@ -861,7 +891,7 @@ pub async fn push_image(
     if code == 0 {
         Ok(out)
     } else {
-        Err(BackendError(image_op_error_msg(tr("推送镜像"), &out)))
+        Err(BackendError(op_error_msg(tr("推送镜像"), &out)))
     }
 }
 
@@ -875,7 +905,7 @@ pub async fn tag_image(
     if code == 0 {
         Ok(())
     } else {
-        Err(BackendError(image_op_error_msg(tr("打标签"), &out)))
+        Err(BackendError(op_error_msg(tr("打标签"), &out)))
     }
 }
 
@@ -888,7 +918,7 @@ pub async fn remove_image(
     if code == 0 {
         Ok(())
     } else {
-        Err(BackendError(image_op_error_msg(tr("删除镜像"), &out)))
+        Err(BackendError(op_error_msg(tr("删除镜像"), &out)))
     }
 }
 
@@ -1851,6 +1881,70 @@ pub async fn list_networks(session: &Handle<HostKeyHandler>) -> BackendResult<Ve
         return Err(BackendError(classify_failure(&out)));
     }
     Ok(parse_networks(&out))
+}
+
+/* ---------------- 阶段 166：删卷 / 删网络 ---------------- */
+
+/// **docker 预建的默认网络**（**删不掉**）。
+///
+/// ⚠️ `bridge` / `host` / `none` 是 docker 自带的 ⇒ 远端会拒绝
+///   （"is a pre-defined network and cannot be removed"）
+///   ⇒ 界面上**直接禁掉删除按钮**（比让用户点一下再报错好）。
+pub fn is_default_network(name: &str) -> bool {
+    matches!(name.trim(), "bridge" | "host" | "none")
+}
+
+/// **删卷**的命令（`docker volume rm`）。
+pub fn volume_rm_cmd(name: &str) -> String {
+    format!(
+        "docker volume rm {n}",
+        n = crate::backend::checksum::sh_quote(name)
+    )
+}
+
+/// **删网络**的命令（`docker network rm`）。
+pub fn network_rm_cmd(name: &str) -> String {
+    format!(
+        "docker network rm {n}",
+        n = crate::backend::checksum::sh_quote(name)
+    )
+}
+
+/// **删一个卷**（`docker volume rm`）。
+///
+/// ⚠️ **卷里是数据** ⇒ 删了就没了（远端**不会**再问你一次）⇒ 界面那边
+///   **必须二次确认**。
+pub async fn remove_volume(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+) -> BackendResult<()> {
+    let (code, out) = run_cmd(session, &volume_rm_cmd(name)).await?;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(BackendError(op_error_msg(tr("删除卷"), &out)))
+    }
+}
+
+/// **删一个网络**（`docker network rm`）。
+///
+/// ⚠️ **默认网络直接拒**（`bridge` / `host` / `none`）⇒ 别让用户白等一次
+///   远端报错。
+pub async fn remove_network(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+) -> BackendResult<()> {
+    if is_default_network(name) {
+        return Err(BackendError(
+            tr("这是 Docker 的默认网络，删不掉（bridge / host / none）").to_string(),
+        ));
+    }
+    let (code, out) = run_cmd(session, &network_rm_cmd(name)).await?;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(BackendError(op_error_msg(tr("删除网络"), &out)))
+    }
 }
 
 /* ---------------- 阶段 116：容器内文件浏览 + 上传 + 下载 ---------------- */
@@ -2958,17 +3052,41 @@ mod tests {
         assert_eq!(docker_last_line("   \n  \n"), "");
     }
 
+    /// ⚠️ **阶段 166：Docker 29 会在真正的报错后面多打一行 `exit status 1`**
+    ///   ⇒ 只取最后一行的话，用户看到的是「exit status 1」⇒ 原因被吃掉。
+    #[test]
+    fn docker的退出码尾巴不算原因() {
+        let out = "Error response from daemon: network foo not found\nexit status 1\n";
+        assert_eq!(
+            docker_last_line(out),
+            "Error response from daemon: network foo not found",
+            "要把真正的原因挑出来"
+        );
+        // ⚠️ **没有那行尾巴时**照旧取最后一行。
+        assert_eq!(
+            docker_last_line("Error: no such image: foo\n"),
+            "Error: no such image: foo"
+        );
+        // ⚠️ **全是尾巴**也别交白卷。
+        assert_eq!(docker_last_line("exit status 1\n"), "exit status 1");
+        // ⚠️ **不是数字的**不算尾巴（别把真原因误扔）。
+        assert_eq!(
+            docker_last_line("exit status unknown\nError: boom\n"),
+            "Error: boom"
+        );
+    }
+
     /// 失败要给出**为什么**（不能只说「失败」）。
     #[test]
     fn 镜像操作失败要给原因() {
-        let m = image_op_error_msg(
+        let m = op_error_msg(
             "推送镜像",
             "denied: requested access to the resource is denied",
         );
         assert!(m.contains("推送镜像"), "要说清是哪件事：{m}");
         assert!(m.contains("denied"), "要带上 docker 说的原因：{m}");
         // ⚠️ **没有输出时**也别留个空尾巴。
-        let m2 = image_op_error_msg("删除镜像", "");
+        let m2 = op_error_msg("删除镜像", "");
         assert_eq!(m2, "删除镜像失败");
     }
 
@@ -2997,6 +3115,32 @@ mod tests {
         let c3 = image_tag_cmd("a; rm -rf /", "b; rm -rf /");
         assert!(c3.contains("'a; rm -rf /'"), "源镜像名没被引号包住：{c3}");
         assert!(c3.contains("'b; rm -rf /'"), "目标标签没被引号包住：{c3}");
+    }
+
+    /* ---------------- 阶段 166：删卷 / 删网络 ---------------- */
+
+    /// **默认网络认得出**（bridge / host / none 删不掉）。
+    #[test]
+    fn 默认网络认得出() {
+        assert!(is_default_network("bridge"), "bridge 是默认网络");
+        assert!(is_default_network("host"), "host 是默认网络");
+        assert!(is_default_network("none"), "none 是默认网络");
+        // ⚠️ **普通网络不能被误判**（用户自建的网络是可以删的）。
+        assert!(!is_default_network("my-net"), "自建网络可以删");
+        assert!(!is_default_network("bridge0"), "bridge0 不是默认网络");
+        // ⚠️ **前后空白**也要认（远端表格里可能带空格）。
+        assert!(is_default_network(" bridge "), "带空白的默认网络也要认");
+    }
+
+    /// 删卷 / 删网络的命令：**名字要引号包住**（防注入）。
+    #[test]
+    fn 删卷删网络命令防注入() {
+        let c = volume_rm_cmd("a; rm -rf /");
+        assert!(c.starts_with("docker volume rm "), "应当是 docker volume rm：{c}");
+        assert!(c.contains("'a; rm -rf /'"), "卷名没被引号包住：{c}");
+        let c2 = network_rm_cmd("a; rm -rf /");
+        assert!(c2.starts_with("docker network rm "), "应当是 docker network rm：{c2}");
+        assert!(c2.contains("'a; rm -rf /'"), "网络名没被引号包住：{c2}");
     }
 
     /* ---------------- 阶段 114：监控曲线 ---------------- */
