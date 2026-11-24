@@ -193,6 +193,41 @@ fn find_ok_button(w: &gtk::Widget) -> Option<gtk::Button> {
     None
 }
 
+/// **最后一个顶层窗口里的所有文字**（确认框写了什么 ⇒ 阶段 163 用）。
+fn last_window_text() -> String {
+    use gtk::gio::prelude::ListModelExt;
+    let model = gtk::Window::toplevels();
+    let n = model.n_items();
+    if n == 0 {
+        return String::new();
+    }
+    let Some(w) = model.item(n - 1).and_downcast::<gtk::Window>() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    collect_text(w.upcast_ref::<gtk::Widget>(), &mut out);
+    out
+}
+
+/// 递归收集一棵控件树里的文字（Label / Button 的字）。
+fn collect_text(w: &gtk::Widget, out: &mut String) {
+    if let Some(l) = w.downcast_ref::<gtk::Label>() {
+        out.push_str(&l.text().to_string());
+        out.push('\n');
+    }
+    if let Some(b) = w.downcast_ref::<gtk::Button>() {
+        if let Some(t) = b.label() {
+            out.push_str(&t.to_string());
+            out.push('\n');
+        }
+    }
+    let mut c = w.first_child();
+    while let Some(x) = c {
+        collect_text(&x, out);
+        c = x.next_sibling();
+    }
+}
+
 /// 远端还有没有**某个进程**（判据用）。
 ///
 /// ⚠️ `pgrep -af '[d]ocker logs'` 里的 `[d]` 是老技巧：命令自己不会匹配自己
@@ -1048,16 +1083,17 @@ fn main() {
                 let icons = dockerui::row_action_icons_for_test(&panel.st, "proj");
                 let names: Vec<&str> = icons.iter().map(|(i, _)| i.as_str()).collect();
                 println!("[信息] 项目行的操作图标：{names:?}");
-                // ⚠️ **阶段 162**：项目行**多 up / down 两颗**（用户 2026-11-24：
-                //   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）。
+                // ⚠️ **阶段 163**：项目行**只有一颗「重建」**（用户 2026-11-24：
+                //   「down 了之后容器界面就看不到了 ⇒ 那 up 也没意义 ⇒ 就来
+                //   一个 recreate 吧」）⇒ **没有「销毁」那颗**。
                 check!(
-                    "⑪ 项目行的「操作」列有 5 颗图标（启动 / 停止 / 重启 / up / down）",
-                    icons.len() == 5
+                    "⑪ 项目行的「操作」列有 4 颗图标（启动 / 停止 / 重启 / 重建）",
+                    icons.len() == 4
                         && names.contains(&"pp-play")
                         && names.contains(&"pp-stop")
                         && names.contains(&"view-refresh-symbolic")
                         && names.contains(&"go-up-symbolic")
-                        && names.contains(&"go-down-symbolic"),
+                        && !names.contains(&"go-down-symbolic"),
                     format!("项目行的图标是：{names:?}")
                 );
                 // ⚠️ **项目全在跑 ⇒「启动」是灰的**（没得启动），
@@ -1080,7 +1116,7 @@ fn main() {
                         && pmk.contains(&"stop")
                         && pmk.contains(&"restart")
                         && pmk.contains(&"down")
-                        && pmk.contains(&"up"),
+                        && pmk.contains(&"recreate"),
                     format!("项目行的菜单是：{pm:?}")
                 );
             }
@@ -1168,6 +1204,33 @@ fn main() {
                     puttyplus::windows::dialogs_without_parent()
                 )
             );
+
+            // ---- ⑫ 之二：点「重建」⇒ 确认框里说清**会发生什么** ----
+            //
+            // ⚠️ **阶段 163**：重建 ＝ `docker compose up -d --force-recreate`
+            //   ⇒ 容器**会被换掉**（不是重启）⇒ 确认框得写清楚。
+            let before = toplevel_count();
+            dockerui::dispatch_action_for_test(&panel.st, "proj", "project", "recreate");
+            pump(300);
+            check!(
+                "⑫ 之二 点「重建」弹出确认框",
+                toplevel_count() > before,
+                format!("顶层窗口数 {before} → {}（没弹出确认框）", toplevel_count())
+            );
+            let dlg = last_window_text();
+            println!("[信息] 重建的确认框文字：\n{dlg}");
+            check!(
+                "⑫ 之二 确认框里写了「重建」",
+                dlg.contains("重建"),
+                format!("确认框文字是：\n{dlg}")
+            );
+            check!(
+                "⑫ 之二 确认框里说了「容器会被重新创建」",
+                dlg.contains("重新创建"),
+                format!("确认框文字是：\n{dlg}")
+            );
+            close_last_toplevel();
+            pump(300);
 
             // ---- 真跑一次：对着**不存在的项目**（碰不到任何真东西）----
             //
@@ -1626,6 +1689,47 @@ fn main() {
                 }
                 dockerui::close_row_menu_for_test(&panel2.st);
                 pump(200);
+            }
+
+            // ---- ⑯ 之二：**compose 项目行**的右键菜单 ⇒ 截图看看（阶段 163）----
+            //
+            // ⚠️ **阶段 163**：「重建」＝ `docker compose up -d --force-recreate`；
+            //   「销毁」（`down`）**只在菜单里**（操作列那颗没了）⇒ 菜单是
+            //   **唯一**能拆掉整个项目的地方 ⇒ 得看清它长啥样。
+            //
+            // ⚠️ **菜单只能弹在「已经显示的窗口」上** ⇒ 弹在**没挂到窗口**的
+            //   假面板上 ⇒ GTK 会**段错误**（实测：popover 没有有效的
+            //   surface）⇒ 这里用**真面板**（`panel2`）。
+            {
+                let proj = dockerui::model_rows_for_test(&panel2.st)
+                    .into_iter()
+                    .find(|(_, is_proj, _)| *is_proj)
+                    .map(|(n, _, _)| n);
+                match proj {
+                    Some(pname) => {
+                        let ok = dockerui::show_row_menu_for_test(&panel2.st, &pname);
+                        pump(400);
+                        let items = dockerui::row_menu_items_for_test(&panel2.st);
+                        println!("[信息] 项目行「{pname}」的右键菜单项：{items:?}");
+                        check!("⑯ 之二 项目行的右键菜单弹得出来", ok, "弹不出项目行的菜单");
+                        check!(
+                            "⑯ 之二 菜单里有「重建」和「销毁」",
+                            items.iter().any(|i| i.contains("重建"))
+                                && items.iter().any(|i| i.contains("销毁")),
+                            format!("项目行的菜单项是：{items:?}")
+                        );
+                        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                            shot(&format!("{base}-rowmenu-project.png"));
+                        }
+                        dockerui::close_row_menu_for_test(&panel2.st);
+                        pump(200);
+                    }
+                    None => {
+                        // ⚠️ 远端没有 compose 项目（别的机器可能就是这样）⇒
+                        //   **跳过**，不算失败。
+                        println!("[信息] 远端没有 compose 项目 ⇒ 跳过项目行菜单的截图");
+                    }
+                }
             }
             dockerui::open_terminal_for_test(&panel2.st, &name);
             let mut waited = 0;

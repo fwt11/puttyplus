@@ -9,8 +9,9 @@
 //! 1. 页面**没有下半区**了（详情不在页面里 ⇒ 整页就是一张满高的列表）；
 //! 2. 「CPU」「内存」「详情」三列**退役**了；
 //! 3. 多了一列「操作」；
-//! 4. 容器行 5 颗图标（详情 / 进容器 / 启动 / 停止 / 重启）、
-//!    compose 项目行 6 颗（详情 / 编辑 / 启动 / 停止 / 销毁 / 重建）；
+//! 4. 容器行 3 颗图标（启动 / 停止 / 重启）、
+//!    compose 项目行 4 颗（启动 / 停止 / 重启 / **重建**
+//!    ＝ `docker compose up -d --force-recreate`）；
 //! 5. **图标名在系统主题里真的存在**（写错 ⇒ 界面上是空白方块）；
 //! 6. **可用性看原始状态**：运行中 ⇒「启动」灰、「停止」亮；
 //! 7. 点「详情」⇒ **弹窗**打开（详情不再在页面下半区）；
@@ -216,20 +217,22 @@ fn main() {
     );
     // ⚠️ **阶段 162：compose 项目行还要 up / down**（用户 2026-11-24：
     //   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）。
+    // ⚠️ **阶段 163：换成一颗「重建」**（用户 2026-11-24：「down 了之后
+    //   容器界面就看不到了 ⇒ 那 up 也没意义 ⇒ 就来一个 recreate 吧」）⇒
+    //   **项目行 4 颗**、**没有「销毁」那颗**。
     let p_icons = dockerui::row_action_icons_for_test(&panel.st, "proj");
     let p_names: Vec<&str> = p_icons.iter().map(|(i, _)| i.as_str()).collect();
     println!("[信息] 项目行的操作图标：{p_names:?}");
-    assert_eq!(p_icons.len(), 5, "项目行应当 5 颗图标：{p_names:?}");
+    assert_eq!(p_icons.len(), 4, "项目行应当 4 颗图标：{p_names:?}");
     assert_eq!(
         p_names,
         vec![
             "pp-play",
             "pp-stop",
             "view-refresh-symbolic",
-            "go-up-symbolic",
-            "go-down-symbolic"
+            "go-up-symbolic"
         ],
-        "项目行应当是 启动/停止/重启/up/down：{p_names:?}"
+        "项目行应当是 启动/停止/重启/重建：{p_names:?}"
     );
 
     // ---- ③ 图标名在系统主题里真的存在（写错 ⇒ 空白方块）----
@@ -342,20 +345,14 @@ fn main() {
             Some("stop"),
             "项目行第 2 颗图标应当是「停止」"
         );
-        // ⚠️ **阶段 162：项目行第 4 颗 = up、第 5 颗 = down**
-        //   （用户 2026-11-24：「compose 项目的操作列中应该还有与 up 和
-        //   down 对应的按钮」）。
+        // ⚠️ **阶段 163：项目行第 4 颗 = 重建**（`docker compose up -d
+        //   --force-recreate`）⇒ **没有第 5 颗**（down 会删容器 ⇒ 项目行
+        //   整行消失 ⇒ 是个死路）。
         let (x3, y3) = action_icon_pos(&view, &pp, 3, n_proj).expect("应当算出 proj 行第 4 颗图标");
         assert_eq!(
             dockerui::hit_action_at_for_test(&panel.st, x3, y3).as_deref(),
-            Some("up"),
-            "项目行第 4 颗图标应当是「up」"
-        );
-        let (x4, y4) = action_icon_pos(&view, &pp, 4, n_proj).expect("应当算出 proj 行第 5 颗图标");
-        assert_eq!(
-            dockerui::hit_action_at_for_test(&panel.st, x4, y4).as_deref(),
-            Some("down"),
-            "项目行第 5 颗图标应当是「down」"
+            Some("recreate"),
+            "项目行第 4 颗图标应当是「重建」"
         );
 
         // 容器行（独立容器）：⚠️ **阶段 160** ⇒ 第 1 颗 = 启动、第 2 颗 = 停止
@@ -421,23 +418,19 @@ fn main() {
             "容器行「重启」图标的 tooltip 应当提到重启：{tip2:?}"
         );
 
-        // ⚠️ **阶段 162：项目行第 4 / 5 颗（up / down）** ⇒ tooltip 得写清
-        //   跑的是**哪条命令**（不然 ⌃ / ⌄ 看不出是啥）。
+        // ⚠️ **阶段 163：项目行第 4 颗（重建）** ⇒ tooltip 得写清
+        //   跑的是**哪条命令**（不然 ⬆ 看不出是啥）。
         let (x3, y3) = action_icon_pos(&view, &pp, 3, n_proj).expect("应当算出 proj 行第 4 颗图标");
         let tip3 = dockerui::action_tooltip_at_for_test(&panel.st, x3, y3)
             .expect("项目行第 4 颗图标应当有 tooltip");
-        println!("[信息] 项目行第 4 颗（up）的 tooltip：{tip3:?}");
+        println!("[信息] 项目行第 4 颗（重建）的 tooltip：{tip3:?}");
         assert!(
             tip3.contains("compose up"),
-            "项目行「up」图标的 tooltip 应当写明是 docker compose up：{tip3:?}"
+            "项目行「重建」图标的 tooltip 应当写明是 docker compose up：{tip3:?}"
         );
-        let (x4, y4) = action_icon_pos(&view, &pp, 4, n_proj).expect("应当算出 proj 行第 5 颗图标");
-        let tip4 = dockerui::action_tooltip_at_for_test(&panel.st, x4, y4)
-            .expect("项目行第 5 颗图标应当有 tooltip");
-        println!("[信息] 项目行第 5 颗（down）的 tooltip：{tip4:?}");
         assert!(
-            tip4.contains("compose down"),
-            "项目行「down」图标的 tooltip 应当写明是 docker compose down：{tip4:?}"
+            tip3.contains("--force-recreate"),
+            "项目行「重建」图标的 tooltip 应当写明是强制重建：{tip3:?}"
         );
 
         // ⚠️ **阶段 162：项目行的名字带标记**（加粗 ＋「compose」），

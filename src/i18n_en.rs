@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2147] = [
+pub static EN: [(&str, &str); 2151] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -768,8 +768,10 @@ pub static EN: [(&str, &str); 2147] = [
     ("定位远程文件 {rpath} 失败: {e}", "Failed to seek to the remote file {rpath}: {e}"),
     ("容器", "Containers"),
     ("容器…", "Containers…"),
+    ("容器会被重新创建（卷里的数据保留）", "The containers will be recreated (the data in volumes is kept)"),
     ("容器列表只支持 SSH 会话：当前协议没有可复用的 SSH 连接。", "The container list only supports SSH sessions: the current protocol has no reusable SSH connection."),
     ("容器名不合法", "The container name is not valid"),
+    ("容器和网络会被删除，这个项目也会从列表里消失", "The containers and network will be deleted, and this project will disappear from the list"),
     ("容器正在运行，不用再启动（先「停止」才能启动）", "The container is already running, no need to start it (stop it first)"),
     ("容器没有在运行，不用停（先「启动」才能停）", "The container is not running, no need to stop it (start it first)"),
     ("容器终端已经开着（在另一个窗口里）", "The container terminal is already open (in another window)"),
@@ -1112,6 +1114,7 @@ pub static EN: [(&str, &str); 2147] = [
     ("拿不到进程属性列表的大小", "Could not get the size of the process attribute list"),
     ("挂载", "Mounts"),
     ("按 compose 文件重新创建并启动这个项目", "Recreate and start this project from the compose file"),
+    ("按 compose 文件重新创建并启动这个项目（docker compose up -d --force-recreate）", "Recreate and start this project from its compose file (docker compose up -d --force-recreate)"),
     ("按 compose 文件重新创建并启动这个项目（docker compose up）", "Recreate and start this project from its compose file (docker compose up)"),
     ("按列类型转义生成条件，填进 WHERE 框（填完可以接着改，按回车查库）", "Build the condition with type-aware quoting and insert it into the WHERE box (edit it further, then press Enter to query)"),
     ("按哪一列排序（不选就不排序）", "Which column to sort by (nothing selected means no sorting)"),
@@ -1605,6 +1608,7 @@ pub static EN: [(&str, &str); 2147] = [
     ("确定", "OK"),
     ("确定删除选中的 {n} 项？\n{v0}", "Delete the {n} selected items?\n{v0}"),
     ("确定要{act} compose 项目「{name}」吗？", "Do you really want to {act} the compose project \"{name}\"?"),
+    ("确定要{act} compose 项目「{name}」吗？（{hint}）", "Do you really want to {act} the compose project \"{name}\"? ({hint})"),
     ("确定要{act} compose 项目「{name}」吗？（容器和网络会被删除）", "Do you really want to {act} the compose project \"{name}\"? (the containers and networks will be deleted)"),
     ("确定要{act}容器「{name}」吗？", "Do you really want to {act} the container \"{name}\"?"),
     ("确定要删除镜像「{img}」吗？（删了就没了）", "Delete the image \"{img}\"? (it cannot be undone)"),

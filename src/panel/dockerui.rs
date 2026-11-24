@@ -144,10 +144,17 @@ pub enum ActionKind {
     Stop,
     /// 重启。
     Restart,
-    /// 销毁 compose 项目。
+    /// 销毁 compose 项目（`docker compose down`）。
+    ///
+    /// ⚠️ **阶段 163：只在右键菜单里**（操作列没有「销毁」按钮）——
+    ///   用户 2026-11-24：「down 了之后容器界面就看不到了 ⇒ 那 up 也没意义」
+    ///   ⇒ down 会**删掉容器** ⇒ **项目行整行消失** ⇒ 没法再「拉回来」。
     Down,
-    /// 重建 compose 项目。
-    Up,
+    /// 重建 compose 项目（`docker compose up -d --force-recreate`）。
+    ///
+    /// ⚠️ **阶段 163：操作列里 compose 项目行只留这一颗**（替掉了原来的
+    ///   up / down 两颗）⇒ 按 compose 文件**一律重建**。
+    Recreate,
     /// 复制容器 ID（复制到剪贴板）。
     CopyId,
 }
@@ -194,30 +201,32 @@ const ICON_START: &str = "pp-play";
 const ICON_STOP: &str = "pp-stop";
 /// 图标名：**重启**。
 const ICON_RESTART: &str = "view-refresh-symbolic";
-/// 图标名：**compose up**（**操作列**里用的，阶段 162）。
+/// 图标名：**重建**（**操作列**里 compose 项目行的第 4 颗，阶段 163）。
 ///
-/// ⚠️ **为什么用「上下箭头」这一对**（用户 2026-11-24：「compose 项目的
-///   操作列中应该还有与 up 和 down 对应的按钮」）：
-///   - `go-up-symbolic` / `go-down-symbolic` 是 **docker compose 那两个
-///     命令的字面意思**（up / down）⇒ 一眼能对上；
-///   - ⚠️ **不用 `edit-copy-symbolic`（重建）**：那个图标是「复制」⇒ 放在
-///     一排 ▶ ■ ⟳ 里会读成「复制一份」⇒ 不是「按 compose 文件重新创建」；
-///   - ⚠️ **不用 `user-trash-symbolic`（销毁）**：那个是「删掉」⇒ 但 **down
-///     会删容器与网络** ⇒ 放在操作列里太吓人（其实有二次确认）⇒ down 用
-///     箭头（跟 up 成对），**「会删东西」这件事交给 tooltip 与确认框**。
-const ICON_COMPOSE_UP: &str = "go-up-symbolic";
-/// 图标名：**compose down**（**操作列**里用的；理由同 [`ICON_COMPOSE_UP`]）。
-const ICON_COMPOSE_DOWN: &str = "go-down-symbolic";
+/// ⚠️ **为什么是向上的箭头**（用户 2026-11-24：「那就不要 up 和 down 了，
+///   就来一个 recreate 吧，就是 docker compose up -d --force-recreate」）：
+///   - `go-up-symbolic` 是 **docker compose `up` 的字面意思**⇒ 一眼能对上；
+///   - ⚠️ **不用 `edit-copy-symbolic`**：那个图标是「复制」⇒ 放在一排
+///     ▶ ■ ⟳ 里会读成「复制一份」⇒ 不是「按 compose 文件重新创建」
+///     （**右键菜单**里的「重建」用那个，见 [`ICON_MENU_RECREATE`]，那里有文字兜底）；
+///   - ⚠️ **不用 `user-trash-symbolic`**：销毁会**删容器与网络**⇒ 放在
+///     操作列里太吓人 ⇒ 销毁只在**右键菜单**里（标红 ＋ 二次确认）。
+const ICON_RECREATE: &str = "go-up-symbolic";
 /// 图标名：**编辑**。
 const ICON_EDIT: &str = "document-edit-symbolic";
 /// 图标名：**销毁**（垃圾桶）。
+///
+/// ⚠️ **只在右键菜单里用**（阶段 163）—— 操作列不放「销毁」：
+///   `docker compose down` 会**删掉容器** ⇒ **项目行整行消失** ⇒ 用户
+///   再也点不到那一行的任何按钮（用户 2026-11-24 的原话：「down 了之后
+///   容器界面就看不到了」）⇒ 那种按钮不该放在「一眼就点得到」的位置。
 const ICON_DOWN: &str = "user-trash-symbolic";
-/// 图标名：**重建**。
+/// 图标名：**重建**（**右键菜单**里用的；跟操作列的 [`ICON_RECREATE`] 同一件事）。
 ///
 /// ⚠️ **不是 `system-reboot-symbolic`**（阶段 157）：那个画的是 **⏻ 电源**
 ///   ⇒ 看着像「关机」！⇒ 换成 **📋 两张纸**（`edit-copy-symbolic`）
 ///   ⇒ 「照着 compose 文件再造一份」这层意思对上了。
-const ICON_UP: &str = "edit-copy-symbolic";
+const ICON_MENU_RECREATE: &str = "edit-copy-symbolic";
 /// 图标名：**文件**（容器里的文件）。
 const ICON_FILES: &str = "folder-symbolic";
 /// 图标名：**日志**。
@@ -235,7 +244,7 @@ pub fn action_key(k: ActionKind) -> &'static str {
         ActionKind::Stop => "stop",
         ActionKind::Restart => "restart",
         ActionKind::Down => "down",
-        ActionKind::Up => "up",
+        ActionKind::Recreate => "recreate",
         ActionKind::CopyId => "copyid",
     }
 }
@@ -263,10 +272,19 @@ fn project_name_markup(name: &str) -> String {
 ///
 /// ⚠️ **阶段 162：compose 项目行还要 up / down**（用户 2026-11-24：
 ///   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）
-///   ⇒ **项目行 5 颗**（启动 / 停止 / 重启 ＋ `docker compose up` ＋
-///   `docker compose down`）⇒ **两种行一眼就分得出来**。
-///   ⚠️ `up` / `down` **跟右键菜单里的「重建 / 销毁」是同一个动作**
-///   （`ComposeAction::Up` / `Down`）⇒ 同一件事，图标不同（菜单里有文字）。
+///   ⇒ 当时是**项目行 5 颗**（启动 / 停止 / 重启 ＋ `docker compose up` ＋
+///   `docker compose down`）。
+/// ⚠️ **阶段 163：up / down 两颗换成一颗「重建」**（用户 2026-11-24：
+///   「docker compose down 了之后，是不是容器界面就看不到了？那 up 也没
+///   意义了」⇒「那就不要 up 和 down 了，就来一个 recreate 吧，就是
+///   docker compose up -d --force-recreate」）：
+/// - **为什么不能留 down**：`down` 会**删掉容器** ⇒ compose 项目行是
+///   **从容器推导出来的** ⇒ 容器没了**那一行整行消失** ⇒ 用户再也点不到
+///   那一行的任何按钮（包括「拉回来」的那个）⇒ 是个**死路**；
+/// - **为什么 up 也要一起换掉**：光 `up` **只补缺的**（配置没变的容器
+///   不重建）⇒ 用户要的「按新文件重建一遍」达不到 ⇒ 一律
+///   `up -d --force-recreate`；
+/// ⇒ **项目行 4 颗**（启动 / 停止 / 重启 / 重建）⇒ **容器行 3 颗**。
 ///
 /// ⚠️ **能不能点看的是 `raw_state`**（docker 的**原始**状态），不是界面上的
 ///   中文标签 ⇒ 切到英文界面也不会判错。
@@ -294,20 +312,15 @@ pub fn row_actions(kind: &str, raw_state: &str) -> Vec<RowAction> {
             enabled: some_running,
         },
     ];
-    // ⚠️ **阶段 162：只有 compose 项目行才有 up / down**
-    //   （容器没有「项目」这层 ⇒ 这两个命令对它没意义）。
+    // ⚠️ **阶段 163：只有 compose 项目行才有「重建」**
+    //   （容器没有「项目」这层 ⇒ 这条命令对它没意义）。
     if kind == KIND_PROJECT {
-        // ⚠️ **两个都一直能点**：`up` 是「按 compose 文件对齐一次」
-        //   （改了 compose 文件就想按这个）；`down` 是「拆掉整个项目」
-        //   （项目停着的时候也能拆）⇒ 灰掉反而挡路。
+        // ⚠️ **一直能点**：项目停了（exited）也能重建（`up` 会把它拉起来）；
+        //   项目在跑也能重建（`--force-recreate` 换一批新容器）⇒
+        //   灰掉反而挡路。
         acts.push(RowAction {
-            kind: ActionKind::Up,
-            icon: ICON_COMPOSE_UP.into(),
-            enabled: true,
-        });
-        acts.push(RowAction {
-            kind: ActionKind::Down,
-            icon: ICON_COMPOSE_DOWN.into(),
+            kind: ActionKind::Recreate,
+            icon: ICON_RECREATE.into(),
             enabled: true,
         });
     }
@@ -320,6 +333,14 @@ pub fn row_actions(kind: &str, raw_state: &str) -> Vec<RowAction> {
 ///   菜单**按行类型**给不同的项：
 /// - **容器行**：进容器 / 文件 / 日志 / 属性 ＋ 启停 ＋ 复制容器 ID；
 /// - **compose 项目行**：编辑 compose 文件 / 属性 ＋ 启停 ＋ 销毁 / 重建。
+///
+/// ⚠️ **阶段 163**：
+/// - **「重建」＝ `docker compose up -d --force-recreate`**（跟操作列那颗
+///   按钮是**同一件事** ⇒ 一律按 compose 文件重建）；
+/// - **「销毁」留着**（`docker compose down`）⇒ 它是**唯一能拆掉整个项目**
+///   的入口（改完卷 / 换目录之后要清场）⇒ 但确认框会明说「**这个项目也会
+///   从列表里消失**」（用户 2026-11-24：「down 了之后容器界面就看不到了」）
+///   ⇒ 不再是「按下去才发现」。
 ///
 /// ⚠️ **分三段**（用分隔线隔开）：「看」→「启停」→「危险动作」。
 pub fn menu_actions(kind: &str, raw_state: &str) -> Vec<MenuAction> {
@@ -377,8 +398,8 @@ pub fn menu_actions(kind: &str, raw_state: &str) -> Vec<MenuAction> {
                 enabled: true,
             },
             MenuAction {
-                kind: ActionKind::Up,
-                icon: ICON_UP.into(),
+                kind: ActionKind::Recreate,
+                icon: ICON_MENU_RECREATE.into(),
                 label: tr("重建"),
                 group: 2,
                 enabled: true,
@@ -515,10 +536,12 @@ pub fn action_tooltip(a: &RowAction, is_project: bool, raw_state: &str) -> &'sta
             }
         }
         ActionKind::Restart => tr("重启这个容器"),
-        // ⚠️ **阶段 162**：up / down 在「操作」列里**只有图标没有字** ⇒
-        //   tooltip 得**写清楚跑的是哪条命令**（不然 ⌃/⌄ 看不出是啥）。
+        // ⚠️ **阶段 163**：重建在「操作」列里**只有图标没有字** ⇒
+        //   tooltip 得**写清楚跑的是哪条命令**（不然 ⬆ 看不出是啥）。
         ActionKind::Down => tr("停掉并删除这个 compose 项目的容器与网络（docker compose down）"),
-        ActionKind::Up => tr("按 compose 文件重新创建并启动这个项目（docker compose up）"),
+        ActionKind::Recreate => {
+            tr("按 compose 文件重新创建并启动这个项目（docker compose up -d --force-recreate）")
+        }
     }
 }
 
@@ -5339,20 +5362,23 @@ fn confirm_compose_action(
     // ⚠️ `do_compose_action` 从这里取项目名 ⇒ 先记上。
     *ui.selected_project.borrow_mut() = name.to_string();
     // ⚠️ **二次确认**：在用户服务器上动 compose 项目是**不可逆**的
-    //   副作用（销毁还会删掉容器与网络）⇒ 先问一句（默认焦点在
-    //   「取消」上 ⇒ 手快按回车不会误操作）。
-    let msg = if action.is_dangerous() {
-        trf!(
-            "确定要{act} compose 项目「{name}」吗？（容器和网络会被删除）",
+    //   副作用（重建会**换掉容器**、销毁会**删掉容器与网络**）⇒ 先问一句
+    //   （默认焦点在「取消」上 ⇒ 手快按回车不会误操作）。
+    // ⚠️ **阶段 163：每种动作补一句「会发生什么」**（`confirm_hint`）——
+    //   尤其销毁：**这个项目会从列表里消失**（项目行是从容器推导出来的）
+    //   ⇒ 用户 2026-11-24 担心的正是这个 ⇒ 现在**按下之前**就说清楚。
+    let msg = match action.confirm_hint() {
+        Some(hint) => trf!(
+            "确定要{act} compose 项目「{name}」吗？（{hint}）",
             act = action.label(),
-            name = name
-        )
-    } else {
-        trf!(
+            name = name,
+            hint = hint
+        ),
+        None => trf!(
             "确定要{act} compose 项目「{name}」吗？",
             act = action.label(),
             name = name
-        )
+        ),
     };
     let (st2, u2) = (st.clone(), ui.clone());
     let parent = host_window(ui, st);
@@ -5607,11 +5633,11 @@ fn dispatch_row_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, hit: &ActionHit) 
             let id = ui.selected_container_id();
             copy_to_clipboard(&id);
         }
-        ActionKind::Down | ActionKind::Up => {
+        ActionKind::Down | ActionKind::Recreate => {
             let action = if hit.action.kind == ActionKind::Down {
                 ComposeAction::Down
             } else {
-                ComposeAction::Up
+                ComposeAction::Recreate
             };
             confirm_compose_action(st, ui, &name, action);
         }
@@ -8236,6 +8262,9 @@ mod tests {
     /// ⚠️ **阶段 162：compose 项目行多 up / down 两颗**（用户 2026-11-24：
     ///   「compose 项目的操作列中应该还有与 up 和 down 对应的按钮」）
     ///   ⇒ 项目行 5 颗、容器行 3 颗 ⇒ **两种行一眼就分得开**。
+    /// ⚠️ **阶段 163：up / down 换成一颗「重建」**（用户 2026-11-24：
+    ///   「down 了之后容器界面就看不到了 ⇒ 那 up 也没意义 ⇒ 就来一个
+    ///   recreate 吧」）⇒ **项目行 4 颗**。
     #[test]
     fn 操作列只有启动停止重启三颗() {
         let a = row_actions(KIND_CONTAINER, "running");
@@ -8250,7 +8279,7 @@ mod tests {
             ],
             "容器行的操作列应当只有 启动/停止/重启"
         );
-        // 项目行：前 3 颗一样，后面多 up / down。
+        // 项目行：前 3 颗一样，后面多一颗「重建」。
         let p = row_actions(KIND_PROJECT, "running");
         let pk: Vec<ActionKind> = p.iter().map(|x| x.kind).collect();
         assert_eq!(
@@ -8259,12 +8288,11 @@ mod tests {
                 ActionKind::Start,
                 ActionKind::Stop,
                 ActionKind::Restart,
-                ActionKind::Up,
-                ActionKind::Down
+                ActionKind::Recreate
             ],
-            "项目行的操作列应当是 启动/停止/重启/up/down"
+            "项目行的操作列应当是 启动/停止/重启/重建"
         );
-        assert_eq!(action_col_icons_max(), 5);
+        assert_eq!(action_col_icons_max(), 4);
     }
 
     /// ⚠️ **阶段 160：其它动作都进右键菜单了** ⇒ 操作列里**不该**再有它们。
@@ -8281,7 +8309,7 @@ mod tests {
                         | ActionKind::Files
                         | ActionKind::Logs
                         | ActionKind::Down
-                        | ActionKind::Up
+                        | ActionKind::Recreate
                         | ActionKind::CopyId
                 ),
                 "这些动作应当只出现在右键菜单里：{:?}",
@@ -8318,7 +8346,7 @@ mod tests {
         let pk: Vec<ActionKind> = p.iter().map(|x| x.kind).collect();
         assert!(pk.contains(&ActionKind::Edit), "项目行的菜单里要有「编辑 compose」：{pk:?}");
         assert!(pk.contains(&ActionKind::Down), "项目行的菜单里要有「销毁」：{pk:?}");
-        assert!(pk.contains(&ActionKind::Up), "项目行的菜单里要有「重建」：{pk:?}");
+        assert!(pk.contains(&ActionKind::Recreate), "项目行的菜单里要有「重建」：{pk:?}");
         assert!(!pk.contains(&ActionKind::Files), "项目行不该有「文件」：{pk:?}");
         assert!(!pk.contains(&ActionKind::Logs), "项目行不该有「日志」：{pk:?}");
         // 两种行都有启停三项。
@@ -8408,39 +8436,61 @@ mod tests {
         assert_eq!(en(ActionKind::Stop), Some(false));
     }
 
-    /// **阶段 162：compose 项目行比容器行多 up / down 两颗**（用户
-    /// 2026-11-24：「compose 项目的操作列中应该还有与 up 和 down 对应的
-    /// 按钮」）。
+    /// **阶段 163：compose 项目行比容器行多一颗「重建」**（用户
+    /// 2026-11-24：「down 了之后容器界面就看不到了 ⇒ 那 up 也没意义 ⇒
+    /// 就来一个 recreate 吧，就是 docker compose up -d --force-recreate」）。
     ///
-    /// ⚠️ **容器行不能有**（容器没有「项目」这层 ⇒ 那两个命令对它没意义）。
+    /// ⚠️ **容器行不能有**（容器没有「项目」这层 ⇒ 这条命令对它没意义）。
+    /// ⚠️ **项目行也不能有「销毁」**：down 会**删掉容器** ⇒ 项目行整行消失
+    ///   ⇒ 用户再也点不到那一行的任何按钮 ⇒ 是个死路（销毁只在右键菜单里）。
     #[test]
-    fn 项目行多出上下两颗按钮() {
+    fn 项目行多出重建一颗按钮() {
         let c = row_actions(KIND_CONTAINER, "running");
         assert_eq!(c.len(), 3, "容器行应当只有 启动/停止/重启：{c:?}");
         assert!(
-            !c.iter().any(|a| a.kind == ActionKind::Up || a.kind == ActionKind::Down),
-            "容器行不该有 up/down：{c:?}"
+            !c.iter()
+                .any(|a| a.kind == ActionKind::Recreate || a.kind == ActionKind::Down),
+            "容器行不该有 重建/销毁：{c:?}"
         );
-        // 项目行：启动 / 停止 / 重启 ＋ up ＋ down。
+        // 项目行：启动 / 停止 / 重启 ＋ 重建。
         let p = row_actions(KIND_PROJECT, "running");
-        assert_eq!(p.len(), 5, "项目行应当 5 颗：{p:?}");
+        assert_eq!(p.len(), 4, "项目行应当 4 颗：{p:?}");
         let kinds: Vec<ActionKind> = p.iter().map(|a| a.kind).collect();
         assert_eq!(kinds[0], ActionKind::Start);
         assert_eq!(kinds[1], ActionKind::Stop);
         assert_eq!(kinds[2], ActionKind::Restart);
-        assert_eq!(kinds[3], ActionKind::Up, "第 4 颗是 up");
-        assert_eq!(kinds[4], ActionKind::Down, "第 5 颗是 down");
-        // ⚠️ **up / down 一直能点**（项目停着也能 down；改了 compose 文件
-        //   也能 up ⇒ 灰掉反而挡路）。
+        assert_eq!(kinds[3], ActionKind::Recreate, "第 4 颗是重建");
+        // ⚠️ **操作列里不该有「销毁」**（down 会让整行消失 ⇒ 死路）。
+        assert!(
+            !p.iter().any(|a| a.kind == ActionKind::Down),
+            "项目行的操作列不该有「销毁」：{p:?}"
+        );
+        // ⚠️ **重建一直能点**（项目停着也能重建；改了 compose 文件也能
+        //   重建 ⇒ 灰掉反而挡路）。
         let en = |k: ActionKind| p.iter().find(|x| x.kind == k).map(|x| x.enabled);
-        assert_eq!(en(ActionKind::Up), Some(true));
-        assert_eq!(en(ActionKind::Down), Some(true));
+        assert_eq!(en(ActionKind::Recreate), Some(true));
         let stopped = row_actions(KIND_PROJECT, "exited");
         let en = |k: ActionKind| stopped.iter().find(|x| x.kind == k).map(|x| x.enabled);
-        assert_eq!(en(ActionKind::Up), Some(true));
-        assert_eq!(en(ActionKind::Down), Some(true));
-        // ⚠️ **列宽按最多的那种行算** ⇒ 5 颗放得下。
-        assert_eq!(action_col_icons_max(), 5);
+        assert_eq!(en(ActionKind::Recreate), Some(true));
+        // ⚠️ **列宽按最多的那种行算** ⇒ 4 颗放得下。
+        assert_eq!(action_col_icons_max(), 4);
+    }
+
+    /// **阶段 163：重建的 tooltip 得写明跑的是哪条命令**（图标没字 ⇒
+    ///   「⬆」看不出是「重建」还是「启停」）。
+    #[test]
+    fn 重建的tooltip写明强制重建() {
+        let p = row_actions(KIND_PROJECT, "running");
+        let a = p
+            .iter()
+            .find(|x| x.kind == ActionKind::Recreate)
+            .expect("项目行有重建");
+        let tip = action_tooltip(a, true, "running");
+        assert!(tip.contains("compose up"), "tooltip 得写明是 compose up：{tip}");
+        assert!(
+            tip.contains("--force-recreate"),
+            "tooltip 得写明是强制重建：{tip}"
+        );
     }
 
     /// **阶段 162：compose 项目行的名字要一眼认出来**（粗体 ＋ 小字
@@ -8580,7 +8630,7 @@ mod tests {
             ActionKind::Stop,
             ActionKind::Restart,
             ActionKind::Down,
-            ActionKind::Up,
+            ActionKind::Recreate,
         ];
         let mut names: Vec<&str> = all.iter().map(|k| action_key(*k)).collect();
         names.sort_unstable();

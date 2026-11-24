@@ -15,6 +15,34 @@
 > ⚠️ **下面的第二节及以后是 2026-10-27 那轮的历史记录**（阶段 19/20 的收尾），
 > 留着是为了别把当时的坑忘了；**当前状态看第一节**。
 
+## 〇之二之一五十、最新进展（2026-11-24：compose 项目只留一颗「重建」，阶段 163）
+
+- **用户这轮两句**：
+  1. 「docker compose **down** 了之后，是不是容器界面就看不到了？那 **up** 也没意义了」；
+  2. 「如果是这样，那就**不要 up 和 down 了，就来一个 recreate 吧**，就是
+     `docker compose up -d --force-recreate`」。
+- **① 为什么 down 是死路**（**实测**）：compose 项目行是**从容器推导出来的**
+  （`com.docker.compose.project` 标签分组 ＋ `docker ps -a`）⇒ `down` 删掉
+  容器 ⇒ **项目行整行消失** ⇒ 用户**再也点不到那一行的任何按钮**
+  （连「拉回来」的那个也点不到）⇒ 只能留在右键菜单里（标红 ＋ 二次确认）。
+- **② 为什么 up 也要换掉**：光 `up` **只补缺的** ⇒ **实测**容器已在跑时
+  `up -d` 只打印 `Container … Running`（**容器 ID 不变**）⇒ 「按新文件重建
+  一遍」达不到 ⇒ 一律 `up -d --force-recreate`（实测 ID 从 `eeb596439a4c`
+  变成 `62a265b1d9c7`）。
+- **③ 落地**：
+  - 后端 `ComposeAction::Up` ⇒ **`Recreate`**（`subcmd()` 还是 `up`，命令串
+    多 `--force-recreate`）；新增 `confirm_hint()`（确认框里说清后果）；
+  - 界面 `ActionKind::Up` ⇒ **`Recreate`**（短名 `recreate`）；「操作」列
+    compose 项目行 **4 颗**（启动 / 停止 / 重启 / **重建**），容器行 3 颗；
+    ⬆ 图标（`go-up-symbolic`），tooltip 写明
+    「…（docker compose up -d --force-recreate）」；
+  - 二次确认：销毁 ⇒「容器和网络会被删除，**这个项目也会从列表里消失**」；
+    重建 ⇒「容器会被重新创建（卷里的数据保留）」。
+- **验证**：lib **983 条**全绿（+2：重建 tooltip / `confirm_hint`）＋ i18n
+  **2151** 条（+4）＋ `cargo check --examples` 全过 ＋ 契约 PASS=73 FAIL=0
+  ＋ 三个容器冒烟全绿（`docker_actioncol_smoke` / `docker_ui_smoke` /
+  `docker_files_nav_smoke`）。
+
 ## 〇之二之一四十九、最新进展（2026-11-24：compose 项目一眼认得出 ＋ 端口写清主/容器 ＋ 文件页加「..」，阶段 162）
 
 - **用户这轮提了三条**（都做完了）：

@@ -472,9 +472,21 @@ pub enum ComposeAction {
     ///   项目行也得有「重启」⇒ 这里补上（`docker compose restart`）。
     Restart,
     /// 销毁（`docker compose down`）：停掉并**删除**容器与网络。
+    ///
+    /// ⚠️ **阶段 163：界面上没有直接的「销毁」按钮**（用户 2026-11-24：
+    ///   「down 了之后容器界面就看不到了 ⇒ 那 up 也没意义」）⇒
+    ///   只在**右键菜单**里留着（唯一能拆掉整个项目的入口）。
     Down,
-    /// 重建（`docker compose up`）：按 compose 文件**重新创建并启动**。
-    Up,
+    /// 重建（`docker compose up -d --force-recreate`）：按 compose 文件
+    /// **强制重新创建**容器并启动。
+    ///
+    /// ⚠️ **为什么是 `--force-recreate`**（阶段 163）：
+    /// - `docker compose up` **只补缺的**：配置没变的容器**不重建** ⇒
+    ///   「按新文件重建一遍」这个预期达不到；
+    /// - `--force-recreate` **一律重建** ⇒ 改完 compose 文件点一下就生效。
+    ///
+    /// ⚠️ **`-d` 必须带**：`up` 默认占着前台（不返回）。
+    Recreate,
 }
 
 impl ComposeAction {
@@ -485,7 +497,7 @@ impl ComposeAction {
             ComposeAction::Stop => "stop",
             ComposeAction::Restart => "restart",
             ComposeAction::Down => "down",
-            ComposeAction::Up => "up",
+            ComposeAction::Recreate => "up",
         }
     }
 
@@ -496,7 +508,7 @@ impl ComposeAction {
             ComposeAction::Stop => tr("停止"),
             ComposeAction::Restart => tr("重启"),
             ComposeAction::Down => tr("销毁"),
-            ComposeAction::Up => tr("重建"),
+            ComposeAction::Recreate => tr("重建"),
         }
     }
 
@@ -507,13 +519,28 @@ impl ComposeAction {
             ComposeAction::Stop => tr("已停止"),
             ComposeAction::Restart => tr("已重启"),
             ComposeAction::Down => tr("已销毁"),
-            ComposeAction::Up => tr("已重建"),
+            ComposeAction::Recreate => tr("已重建"),
         }
     }
 
-    /// 是不是**危险**动作（销毁会删掉容器与网络 ⇒ 确认框要说清楚）。
-    pub fn is_dangerous(&self) -> bool {
-        matches!(self, ComposeAction::Down)
+    /// 二次确认框里**要补的那句话**（没有就返回 `None`）。
+    ///
+    /// ⚠️ **为什么每种动作要单独说一句**（阶段 163）：
+    /// - 「销毁」⇒ 容器和网络**会被删掉**，而且**这个项目会从列表里消失**
+    ///   （项目行是**从容器推导出来的** ⇒ 容器没了，那一行就没了）⇒
+    ///   正是用户 2026-11-24 说的「down 了之后容器界面就看不到了」；
+    /// - 「重建」⇒ 容器**会被重新创建**（**卷里的数据保留**）⇒ 说清楚
+    ///   免得用户以为只是「重启一下」。
+    ///
+    /// ⚠️ **以前这里有个 `is_dangerous()`**（只有 `Down` 为真）⇒ 阶段 163
+    ///   确认框改成「**每种动作补一句后果**」⇒ 那个「是不是危险」的开关
+    ///   就没人用了 ⇒ 删掉（别留没人调用的公开接口）。
+    pub fn confirm_hint(&self) -> Option<&'static str> {
+        match self {
+            ComposeAction::Down => Some(tr("容器和网络会被删除，这个项目也会从列表里消失")),
+            ComposeAction::Recreate => Some(tr("容器会被重新创建（卷里的数据保留）")),
+            _ => None,
+        }
     }
 }
 
@@ -548,8 +575,12 @@ pub fn compose_cmd(project: &str, files: &str, dir: &str, action: ComposeAction)
     cmd.push(' ');
     cmd.push_str(action.subcmd());
     // ⚠️ `up` 默认**占着前台**（不返回）⇒ 必须加 `-d`（后台）。
-    if matches!(action, ComposeAction::Up) {
-        cmd.push_str(" -d");
+    // ⚠️ **阶段 163：重建一律 `--force-recreate`**（用户 2026-11-24：
+    //   「就来一个 recreate 吧，就是 docker compose up -d --force-recreate」）
+    //   ⇒ 只写 `up` 的话，**配置没变的容器不会重建** ⇒「按新文件重建一遍」
+    //   这个预期达不到。
+    if matches!(action, ComposeAction::Recreate) {
+        cmd.push_str(" -d --force-recreate");
     }
     cmd.push_str(" 2>&1");
     cmd
@@ -2452,9 +2483,40 @@ mod tests {
     }
 
     #[test]
-    fn compose重建要后台跑() {
-        let cmd = compose_cmd("proj", "/a/compose.yml", "/a", ComposeAction::Up);
+    fn compose重建要后台跑而且强制重建() {
+        let cmd = compose_cmd("proj", "/a/compose.yml", "/a", ComposeAction::Recreate);
         assert!(cmd.contains(" up -d"), "up 必须加 -d（否则占着前台）：{cmd}");
+        // ⚠️ **阶段 163**：光 `up -d` 不够 ⇒ **配置没变的容器不会重建**
+        //   ⇒ 用户要的「按新文件重建一遍」达不到。
+        assert!(
+            cmd.contains(" --force-recreate"),
+            "重建必须带 --force-recreate：{cmd}"
+        );
+    }
+
+    #[test]
+    fn compose的确认提示说清后果() {
+        // ⚠️ **销毁**：项目会**从列表里消失**（用户 2026-11-24 提的坑：
+        //   「down 了之后容器界面就看不到了」）⇒ 确认框里必须说。
+        let h = ComposeAction::Down
+            .confirm_hint()
+            .expect("销毁要有额外提示");
+        assert!(
+            h.contains("从列表里消失"),
+            "销毁的提示得说清项目会从列表里消失：{h}"
+        );
+        // ⚠️ **重建**：容器会被**重新创建**（卷里的数据保留）。
+        let h = ComposeAction::Recreate
+            .confirm_hint()
+            .expect("重建要有额外提示");
+        assert!(
+            h.contains("重新创建"),
+            "重建的提示得说清容器会重新创建：{h}"
+        );
+        // 启停没有额外提示（没那么吓人）。
+        assert!(ComposeAction::Start.confirm_hint().is_none());
+        assert!(ComposeAction::Stop.confirm_hint().is_none());
+        assert!(ComposeAction::Restart.confirm_hint().is_none());
     }
 
     #[test]

@@ -6097,6 +6097,51 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
   （按 UTF-8 字节序重排）。
 - lib **897 全绿**；`cargo check --examples` 全过（146 个）。
 
+## 四之五十、2026-11-24：阶段 163 —— compose 项目只留一颗「重建」（`up -d --force-recreate`）
+
+### 用户原话
+
+- 「docker compose **down** 了之后，是不是容器界面就看不到了？那 **up** 也没意义了」；
+- 「如果是这样，那就**不要 up 和 down 了，就来一个 recreate 吧**，就是
+  `docker compose up -d --force-recreate`」。
+
+### ① 为什么 down 是死路（实测）
+
+- compose 项目行是**从容器推导出来的**（按 `com.docker.compose.project`
+  标签分组，容器来自 `docker ps -a`）⇒ `down` 删掉容器 ⇒ **项目行整行消失**
+  ⇒ 用户**再也点不到那一行的任何按钮**（连「拉回来」的那个也点不到）；
+- 实测：`docker compose down` ⇒ 容器 `Removed`、网络删除、`docker ps -a`
+  与 `docker compose ls` 都查不到；而 `docker compose stop` ⇒ 容器还在
+  `ps -a` 里（`Exited`）⇒ **`up` 只在「停着但没删」时有用**。
+
+### ② 为什么 up 也要换掉（实测）
+
+- 光 `up` **只补缺的**（配置没变的容器**不重建**）⇒ 实测：容器已在跑时
+  `up -d` 只打印 `Container … Running`（**容器 ID 不变**）⇒ 用户要的
+  「按新文件重建一遍」达不到；
+- ⇒ 一律 `up -d --force-recreate`（实测：ID 从 `eeb596439a4c` 变成
+  `62a265b1d9c7` ⇒ 真的换了一批容器）。
+
+### ③ 落地
+
+- 后端：`ComposeAction::Up` ⇒ **`Recreate`**（`subcmd()` 仍是 `up`，命令串
+  追加 `-d --force-recreate`）；新增 `confirm_hint()`（确认框里说清后果）；
+- 界面：`ActionKind::Up` ⇒ **`Recreate`**（短名 `recreate`）；「操作」列
+  compose 项目行 **4 颗**（启动 / 停止 / 重启 / **重建**），容器行 3 颗 ⇒
+  列宽按 `action_col_icons_max()`（= 4）算；
+- 图标：⬆（`go-up-symbolic`）＝ `docker compose up` 的字面意思；tooltip
+  写明「…（docker compose up -d --force-recreate）」；
+- 「**销毁**」只在**右键菜单**里（标红 ＋ 二次确认）⇒ 它是唯一能拆掉整个
+  项目的入口 ⇒ 不放在「一眼就点得到」的操作列里；
+- 二次确认：销毁 ⇒「容器和网络会被删除，**这个项目也会从列表里消失**」；
+  重建 ⇒「容器会被重新创建（卷里的数据保留）」。
+
+### 验证
+
+- lib **983 全绿**（+2：重建 tooltip 写明强制重建 / `confirm_hint` 说清后果）；
+- i18n **2151 条**（+4）；`cargo check --examples` 全过；
+- 契约 **PASS=73 FAIL=0**；三个容器冒烟全绿。
+
 ## 四之四十九、2026-11-24：阶段 162 —— compose 项目一眼认得出 ＋ 端口写清主/容器 ＋ 文件页加「..」
 
 ### 用户原话
@@ -6112,6 +6157,8 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
   存 markup（`COL_NAME` 仍是纯名字 ⇒ 按名字找行 / 排序 / 拼路径都不受影响）；
 - 「操作」列**多 ⌃ / ⌄ 两颗**（`docker compose up` / `down`）⇒ **项目行 5 颗、
   容器行 3 颗** ⇒ 列宽按 `action_col_icons_max()`（= 5）算；
+  ⚠ **阶段 163 把这两颗换成一颗「重建」**（`down` 会把项目删到找不回来 ⇒
+  死路）⇒ **项目行现在 4 颗**（见上面「四之五十」）；
 - ⚠ **up / down 一直能点**（改了 compose 文件想按 up；项目停着也能 down）；
 - ⚠ **tooltip 写明是哪条命令**（图标没字 ⇒ 「⌃」看不出是啥）。
 
