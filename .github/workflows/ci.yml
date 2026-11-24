@@ -280,9 +280,24 @@ jobs:
           #   - `newmenu_smoke`：「新建」入口的统一性（审计 P1-2 / P1-6）＋
           #     **阶段 141 的「容器…」**：菜单里有、没会话时置灰、点了真的
           #     挂出容器页签（**走真按钮**，不是复制逻辑）。
+          # ⚠ **阶段 154 的两个也在名单里**（都不连真服务器 ⇒ 快）：
+          #   - `localdir_smoke`：**每条连接各自的本地目录**（用户
+          #     2026-11-23 提的）⇒ 两条连接各记各的、再开时各回各家；
+          #   - `ssh_fail_hint_smoke`：**ssh 连不上时界面要提示**（用户
+          #     2026-11-23 提的）⇒ spawn ＋ inproc **两条路各来一遍**
+          #     ⇒ 都要弹框 ＋ 说清原因 ＋ 有「重试」。⚠️ 它连的是
+          #     **127.0.0.1:1**（没人监听）⇒ 立刻「连接被拒绝」；
+          #     spawn 那条路要外部 ssh ⇒ CI 装了 openssh-client ✔。
+          #   - `docker_actioncol_smoke`：**阶段 155 的容器页**（用户
+          #     2026-11-23：「整个页面都改成列表」「去掉详情 / CPU / 内存列」
+          #     「放个操作列，用图标按钮」）⇒ 列退役、「操作」列的图标集合
+          #     ＋ 图标名在主题里真的存在 ＋ 按原始状态决定启停能不能点 ＋
+          #     点「详情」开弹窗 ＋ 点「停止」有二次确认。⚠️ **不连远端**
+          #     （只往模型里灌假容器）⇒ CI 上跑得动。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
-                     docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke; do
+                     docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke \
+                     localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then

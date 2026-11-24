@@ -32,6 +32,7 @@ pub mod settingsui;
 pub mod shortcuts;
 pub mod shortcutsui;
 pub mod sidebar;
+pub mod sshfail;
 pub mod tabs;
 pub mod term;
 pub mod termview;

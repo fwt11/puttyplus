@@ -524,7 +524,9 @@ impl TermInner {
     ///
     /// ⇒ 收尾的活儿（停自动应答、记退出码、摆「会话已结束」条、报
     ///   上层存活数）只有**一份** ⇒ 两边行为必然一致。
-    fn on_session_ended(&self, status: i32) {
+    /// ⚠️ 用 `self: &Rc<Self>`：要给「重试」按钮留一个能重新建连的句柄
+    ///    （`reconnect_term` 收的是 `&Rc<Self>`）。
+    fn on_session_ended(self: &Rc<Self>, status: i32) {
         self.autofeed_on.set(false);
         self.child_alive.set(false);
         // ⚠️ **阶段 125**：会话断了（网络断了 / 远端关机 / ssh 退出）⇒
@@ -539,10 +541,26 @@ impl TermInner {
         if let Some(r) = self.rec.borrow_mut().as_mut() {
             r.rec.exit(status as i64);
         }
-        self.term.feed(
-            tr("\r\n\x1b[1;33m== 会话已结束（状态码见上）。点上方「重新连接」可重建会话 ==\x1b[0m\r\n")
-                .as_bytes(),
-        );
+        // ⚠️ **外部 ssh 那条路**：ssh **连不上**时它自己会把原因打进终端
+        //    （`ssh: connect to host x port 22: Connection timed out`），
+        //    然后以 255 退出 ⇒ 光留一句「会话已结束」用户还是不知道
+        //    到底哪儿出了问题 ⇒ 这里补一句人话 ＋ 一颗「重试」。
+        self.report_spawn_failure(status);
+        // ⚠️ **退出码要摆出来**（阶段 154）：以前写的是「状态码见上」，
+        //   可**码压根没显示** ⇒ 用户看到一句没有信息量的提示。
+        // ⚠️ **码是 0 时别摆**：VTE 在「子进程秒退」时给的是 0（不是真的
+        //   退出码）⇒ 摆出来等于撒谎 ⇒ 那种情况下只说「会话已结束」。
+        let code = crate::sshfail::exit_code(status);
+        let text = if code == 0 {
+            tr("会话已结束。点上方「重新连接」可重建会话").to_string()
+        } else {
+            trf!(
+                "会话已结束（退出码 {code}）。点上方「重新连接」可重建会话",
+                code = code
+            )
+        };
+        let line = format!("\r\n\x1b[1;33m== {} ==\x1b[0m\r\n", text);
+        self.term.feed(line.as_bytes());
         // 阶段 25：会话一断就把「重新连接」摆出来。
         // 光在终端里打一行字，多数用户看不出"还能救"。
         self.banner_re.set_visible(true);
@@ -556,6 +574,34 @@ impl TermInner {
             if let Some(h) = self.alive_hook.borrow().as_ref() {
                 h(false);
             }
+        }
+    }
+
+    /// **外部 ssh 连不上** ⇒ 给用户一句人话（阶段 154）。
+    ///
+    /// ⚠ **判据是「ssh 自己打的报错」**，不是退出码（实测：VTE 的
+    ///    `child-exited` 给的是 waitpid 的原始状态，而且**子进程秒退**时
+    ///    那个信号要么不来、要么给 0 ⇒ 「连不上」这种最快的失败恰恰是
+    ///    退出码最靠不住的时候 ⇒ 只能看 ssh 自己打的那行报错）。
+    ///
+    /// ⚠ 退出码 255（OpenSSH 的约定）仍作**兜底**：慢速失败（登录超时）
+    ///    时退出码是准的 ⇒ 就算屏幕上的字认不出来，也告诉用户
+    ///    「是 ssh 自己报错了」。
+    ///
+    /// ⚠ ssh 的报错**已经在终端里了** ⇒ 这里只弹框，不再往终端里重复
+    ///    写一遍（避免两行说同一件事）。
+    fn report_spawn_failure(self: &Rc<Self>, status: i32) {
+        let screen = self.term.visible_text().unwrap_or_default();
+        // ① ssh 自己打的报错（最可靠）
+        if let Some((kind, line)) = crate::sshfail::find_ssh_error_line(&screen, 6) {
+            ssh_failure_dialog(self, kind, &line);
+            return;
+        }
+        // ② 退出码 255 ⇒ 是 ssh 自己报的错（屏幕上的字认不出来）
+        if crate::sshfail::is_ssh_error_exit(status) {
+            let code = crate::sshfail::exit_code(status);
+            let raw = trf!("ssh 客户端退出码 {code}", code = code);
+            ssh_failure_dialog(self, crate::sshfail::Kind::Unknown, &raw);
         }
     }
 }
@@ -2898,10 +2944,13 @@ fn spawn_term_inproc_ex(
                     );
                     return;
                 }
-                let parent = toplevel(&inner_cb.term);
-                alert::<gtk::Window>(
-                    parent.as_ref(),
-                    &trf!("SSH 连接失败：{msg}", msg = msg),
+                // ⚠️ **说清楚为什么**（阶段 154）：光说「连接失败」用户没法
+                //    办事 ⇒ 按原因给一句人话（超时？认证？网络？）＋ 给一颗
+                //    「重试」⇒ 错误恢复闭环。
+                report_ssh_failure(
+                    &inner_cb,
+                    crate::sshfail::classify(&msg),
+                    &msg,
                 );
             }
             Err(_) => {}
@@ -3128,6 +3177,48 @@ fn spawn_term(inner: &Rc<TermInner>) {
                     &trf!("启动 SSH 客户端失败：{e}\n\n可点终端上方的「重新连接」，或安装 openssh-client / putty。", e = e),
                 );
             }
+        },
+    );
+}
+
+/// SSH 连不上 ⇒ **说清楚为什么** ＋ 给一颗「重试」（阶段 154）。
+///
+/// ⚠️ **两处都要提示**：
+/// - **弹框**：用户第一眼看到的就是它（还能当场重试）；
+/// - **终端里那行**：弹框可能被忽略（终端在后台标签页里），而终端那一行
+///   是用户唯一能回头翻到的地方（进程内 SSH 连不上时终端**一个字都没有**）。
+///
+/// ⚠️ **ANSI 转义留在代码里，别进 `tr()`**：译表的生成脚本不认识 `\x1b`
+///    ⇒ 译文里的转义会被弄坏（译表里那些 `x1b[1;33m` 就是这么来的）。
+fn report_ssh_failure(
+    inner: &Rc<TermInner>,
+    kind: crate::sshfail::Kind,
+    raw: &str,
+) {
+    let hint = crate::sshfail::hint(kind);
+    let line = format!("\r\n\x1b[1;31m== {} ==\x1b[0m\r\n", hint);
+    inner.term.feed(line.as_bytes());
+    ssh_failure_dialog(inner, kind, raw);
+}
+
+/// 「SSH 连接失败」的弹框：**一句人话** ＋ **原始错误** ＋ 一颗「重试」。
+///
+/// ⚠️ 「重试」是当场重连这条终端（`reconnect_term`）⇒ 用户不用去菜单里翻。
+fn ssh_failure_dialog(
+    inner: &Rc<TermInner>,
+    kind: crate::sshfail::Kind,
+    raw: &str,
+) {
+    let msg = crate::sshfail::message(kind, raw);
+    let parent = toplevel(&inner.term);
+    let inner2 = Rc::clone(inner);
+    crate::panel::dialogs::show_error_with_retry(
+        parent.as_ref(),
+        tr("SSH 连接失败"),
+        &msg,
+        tr("重试"),
+        move || {
+            inner2.reconnect_term();
         },
     );
 }

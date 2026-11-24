@@ -11,6 +11,8 @@ pub mod dbconn;
 pub mod dbgrid;
 pub mod dbimport;
 pub mod dbtransfer;
+/// **「操作」列的图标按钮**（阶段 155）——容器表每行一排图标。
+pub mod actioncell;
 pub mod erview;
 pub mod dbtree;
 pub mod dbui;
@@ -460,16 +462,11 @@ impl SftpPanel {
             opts: opts.clone(),
         });
 
-        // 本地起始目录：PUTTYPLUS_LOCALDIR → 上次关闭时的目录
-        //              → ~/Downloads → ~
+        // 本地起始目录：PUTTYPLUS_LOCALDIR → 这条连接自己记住的目录
+        //              → 全局上次目录 → ~/Downloads → ~
         let mut local = std::env::var("PUTTYPLUS_LOCALDIR").unwrap_or_default();
         if local.is_empty() {
-            local = crate::settings::last_local_dir()
-                // ⚠️ 旧版本记下的是 Windows 的逐字路径（`\\?\C:\Users\fwt`）
-                //    ⇒ 恢复时先去掉前缀（界面上不能出现那个前缀）。
-                .map(|p| localpath::pretty(&p))
-                .filter(|p| usable_local_dir(p))
-                .unwrap_or_else(default_local_dir);
+            local = start_local_dir(&opts);
         }
         *st.local_cwd.borrow_mut() = localpath::pretty(&local);
 
@@ -785,12 +782,47 @@ fn default_local_dir() -> String {
     }
 }
 
+/// 面板的**本地起始目录**（阶段 154）：
+/// 这条连接自己记住的目录 → 全局上次目录 → 默认（~/Downloads → ~）。
+///
+/// ⚠ **为什么这条连接自己记的排第一**：用户要的是「**每条连接**各自的
+///    本地目录」（在 A 服务器下载到 `/data`，下次连 A 还在 `/data`，
+///    连 B 不受影响）⇒ 全局那份只当**兜底**（还没给这条连接记过目录时用）。
+///
+/// ⚠️ 旧版本记下的是 Windows 的逐字路径（`\\?\C:\Users\fwt`）
+///    ⇒ 恢复时先去掉前缀（界面上不能出现那个前缀）。
+fn start_local_dir(opts: &crate::args::ConnOptions) -> String {
+    let pretty = |p: String| localpath::pretty(&p);
+    crate::settings::conn_local_dir(&opts.session_key())
+        .map(pretty)
+        .filter(|p| usable_local_dir(p))
+        .or_else(|| {
+            crate::settings::last_local_dir()
+                .map(pretty)
+                .filter(|p| usable_local_dir(p))
+        })
+        .unwrap_or_else(default_local_dir)
+}
+
 /// 记住本地目录（相对路径先转绝对，避免从桌面启动时 cwd 不同导致跑偏）。
+///
+/// ⚠ 这是**全局**那份（关窗时用；没有具体连接时用）。
 pub fn remember_local_dir(path: &str) {
     if path.is_empty() {
         return;
     }
-    crate::settings::set_last_local_dir(&local_dir_to_remember(path));
+    crate::settings::set_local_dirs(None, &local_dir_to_remember(path));
+}
+
+/// 记住**这条连接**的本地目录（阶段 154）：这条连接一份 ＋ 全局一份。
+fn remember_local_dir_for(st: &Rc<PanelState>, path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    crate::settings::set_local_dirs(
+        Some(&st.opts.session_key()),
+        &local_dir_to_remember(path),
+    );
 }
 
 /// 记进设置的那个本地目录：**绝对化** + 去掉 Windows 逐字前缀。
@@ -810,7 +842,8 @@ fn set_local_cwd(st: &Rc<PanelState>, path: &str) {
     // ⚠️ 统一去掉 Windows 的逐字前缀（`\\?\`）⇒ 界面显示的路径与
     //    实际读写的路径长得一样，用户也能照着敲。
     *st.local_cwd.borrow_mut() = localpath::pretty(path);
-    remember_local_dir(path);
+    // ⚠️ **记到这条连接名下**（阶段 154）⇒ 下次连它还在这个目录。
+    remember_local_dir_for(st, path);
 }
 
 /// 终端 ssh 启动时刻（秒），目录跟随轮询用。

@@ -77,24 +77,389 @@ pub const SEG_VOLUMES: &str = "volumes";
 pub const SEG_NETWORKS: &str = "networks";
 
 /// 表格的列（**顺序 = `TreeStore` 的列顺序**）。
+///
+/// ⚠️ **阶段 155**：用户说「去掉**详情**列，没啥用」＋「去掉 **CPU 和内存**列」
+///    ⇒ 这三列**退役**（连同它们的模型列号一起收掉），
+///    换来一列**「操作」**（每行一排图标按钮，见 [`crate::panel::actioncell`]）。
+///
+/// ⚠️ **模型列号 ≠ 视图列下标**了 ⇒ 建列时**必须按模型列号绑属性**
+///    （`col.add_attribute(&r, "text", model_col)`），
+///    别再拿循环下标当模型列号（以前两者恰好相等 ⇒ 删列就错位）。
 const COL_NAME: usize = 0;
 const COL_ID: usize = 1;
 const COL_IMAGE: usize = 2;
 const COL_PORTS: usize = 3;
-const COL_CPU: usize = 4;
-const COL_MEM: usize = 5;
-const COL_STATE: usize = 6;
-const COL_DETAIL: usize = 7;
+const COL_STATE: usize = 4;
+/// **这一行是什么**（`"container"` / `"project"`）。
+///
+/// 干什么用：**「操作」列要给不同类型的行不同的按钮**
+///   （容器：详情/进容器/启停；compose 项目：编辑/启停/销毁/重建）
+///   ⇒ 行类型得能从模型里读到。
+const COL_KIND: usize = 5;
+/// **docker 的原始状态**（`running` / `exited` / …；项目行是空串）。
+///
+/// 干什么用：「操作」列里「启动 / 停止」哪个能点 ⇒ 得知道**原始状态**
+///   （界面上的状态是中文标签，英文界面下文字变了 ⇒ 不能拿它判断）。
+const COL_RAW_STATE: usize = 6;
 /// **状态列的 markup**（带色点的那一份；**界面上已不再显示**）。
 ///
 /// 历史包袱：UI 审查 D8 时代状态列靠 Pango markup 画「绿点 + 文字」，
 /// 文字（`COL_STATE`）与 markup（`COL_STATE_MK`）分成两列。美化·地基 2/5
 /// 之后状态列改用**药丸渲染器**（颜色由 `pill_state_of` 现取，跟主题走）
 /// ⇒ 这一列**没人读了**，但 TreeStore 的列结构是按位置取值的
-/// （`model.get(iter, 8)`）⇒ 摘掉这一列要挪 N_COLS 后面所有列号，
-/// 没那份必要 ⇒ 先留着，注释说明它已退役。
-const COL_STATE_MK: usize = 8;
-const N_COLS: usize = 9;
+/// ⇒ 摘掉这一列要挪 N_COLS 后面所有列号，没那份必要 ⇒ 先留着，
+/// 注释说明它已退役。
+const COL_STATE_MK: usize = 7;
+const N_COLS: usize = 8;
+
+/// 行类型：**容器**（`COL_KIND` 的值）。
+const KIND_CONTAINER: &str = "container";
+/// 行类型：**compose 项目**（父行）。
+const KIND_PROJECT: &str = "project";
+
+/* ---------------- 阶段 155：「操作」列 ---------------- */
+
+/// 「操作」列里一颗图标 = **干什么**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionKind {
+    /// 看详情（弹窗；页签停在**概览**）。
+    Detail,
+    /// 看容器里的文件（文件页）。
+    Files,
+    /// 看容器日志（日志页）。
+    Logs,
+    /// 进容器（开容器内终端）。
+    Enter,
+    /// 编辑 compose 文件。
+    Edit,
+    /// 启动。
+    Start,
+    /// 停止。
+    Stop,
+    /// 重启。
+    Restart,
+    /// 销毁 compose 项目。
+    Down,
+    /// 重建 compose 项目。
+    Up,
+    /// 复制容器 ID（复制到剪贴板）。
+    CopyId,
+}
+
+/// 一颗操作图标（**干什么** ＋ **画哪个图** ＋ **能不能点**）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowAction {
+    /// 干什么（派发时按它分派）。
+    pub kind: ActionKind,
+    /// 图标名（**Adwaita 真有的** ⇒ 写错就显示成空白方块）。
+    pub icon: String,
+    /// 能不能点（不能 ⇒ 画暗的，tooltip 说为什么）。
+    pub enabled: bool,
+}
+
+/// 图标名：**详情**。
+///
+/// ⚠️ **不是 `dialog-information-symbolic`**（阶段 157）：Adwaita 把它画成
+///   一个**灯泡** ⇒ 看着像「提示 / 灵感」，不像「看详情」。
+///   ⇒ 换成 **ⓘ**（`help-about-symbolic`）⇒ 一眼就是「信息 / 详情」。
+const ICON_DETAIL: &str = "help-about-symbolic";
+/// 图标名：**进容器**（终端）。
+const ICON_TERMINAL: &str = "utilities-terminal-symbolic";
+/// 图标名：**启动**（**右键菜单**里用的）。
+///
+/// ⚠️ **菜单不能用 `pp-play`**：那是**表格自绘**的图标（`panel::actioncell`
+///   自己画出来的）⇒ **图标主题里根本没有这个名字** ⇒ 菜单里会显示成
+///   **缺图占位符**（实测截图：菜单里「启动 / 停止」是两块灰糊）。
+/// ⇒ 菜单用 Adwaita **真有的** `media-playback-start-symbolic`
+///   （实心 ▶ 在**图标＋文字**的菜单行里不扎眼 ⇒ 可以用）。
+const ICON_MENU_START: &str = "media-playback-start-symbolic";
+/// 图标名：**停止**（**右键菜单**里用的；理由同 [`ICON_MENU_START`]）。
+const ICON_MENU_STOP: &str = "media-playback-stop-symbolic";
+/// 图标名：**启动**。
+///
+/// ⚠️ **不是 `media-playback-start-symbolic`**（阶段 157）：Adwaita 那个是
+///   **实心**三角 ⇒ 混在一排线性图标里**特别扎眼**。
+///   ⇒ 改成**自绘的描边三角**（`pp-play` ⇒ 见 `panel::actioncell`）。
+const ICON_START: &str = "pp-play";
+/// 图标名：**停止**。
+///
+/// ⚠️ 同上：Adwaita 的 `media-playback-stop-symbolic` 是**实心**方块
+///   ⇒ 改成自绘的**描边方块**（`pp-stop`）。
+const ICON_STOP: &str = "pp-stop";
+/// 图标名：**重启**。
+const ICON_RESTART: &str = "view-refresh-symbolic";
+/// 图标名：**编辑**。
+const ICON_EDIT: &str = "document-edit-symbolic";
+/// 图标名：**销毁**（垃圾桶）。
+const ICON_DOWN: &str = "user-trash-symbolic";
+/// 图标名：**重建**。
+///
+/// ⚠️ **不是 `system-reboot-symbolic`**（阶段 157）：那个画的是 **⏻ 电源**
+///   ⇒ 看着像「关机」！⇒ 换成 **📋 两张纸**（`edit-copy-symbolic`）
+///   ⇒ 「照着 compose 文件再造一份」这层意思对上了。
+const ICON_UP: &str = "edit-copy-symbolic";
+/// 图标名：**文件**（容器里的文件）。
+const ICON_FILES: &str = "folder-symbolic";
+/// 图标名：**日志**。
+const ICON_LOGS: &str = "text-x-generic-symbolic";
+
+/// **动作的短名字**（测试钩子用；跟界面上没关系）。
+pub fn action_key(k: ActionKind) -> &'static str {
+    match k {
+        ActionKind::Detail => "detail",
+        ActionKind::Files => "files",
+        ActionKind::Logs => "logs",
+        ActionKind::Enter => "enter",
+        ActionKind::Edit => "edit",
+        ActionKind::Start => "start",
+        ActionKind::Stop => "stop",
+        ActionKind::Restart => "restart",
+        ActionKind::Down => "down",
+        ActionKind::Up => "up",
+        ActionKind::CopyId => "copyid",
+    }
+}
+
+/// **这一行的操作按钮**（**纯函数** ⇒ 单测能验，不用开 GTK）。
+///
+/// ⚠️ **阶段 160：操作列只留「启动 / 停止 / 重启」**（用户 2026-11-24：
+///   「操作列只保留启动、停止、重启，把其他的都移到右键菜单里」）
+///   ⇒ 两种行**都是 3 颗**⇒ 列宽统一、图标不多不少。
+///
+/// ⚠️ **能不能点看的是 `raw_state`**（docker 的**原始**状态），不是界面上的
+///   中文标签 ⇒ 切到英文界面也不会判错。
+pub fn row_actions(kind: &str, raw_state: &str) -> Vec<RowAction> {
+    // ⚠️ **项目行有三种状态**（阶段 155）：`running`（全在跑）/ `exited`
+    //   （全停了）/ `mixed`（一半在跑）⇒ 「启动 / 停止」哪个能点得看这个。
+    let all_running = raw_state == "running";
+    let none_running = raw_state == "exited";
+    // ⚠️ **「重启」只在「有东西在跑」时能点**（全停着的项目重启它也没用）。
+    let some_running = !none_running;
+    let _ = kind;
+    vec![
+        RowAction {
+            kind: ActionKind::Start,
+            icon: ICON_START.into(),
+            enabled: !all_running,
+        },
+        RowAction {
+            kind: ActionKind::Stop,
+            icon: ICON_STOP.into(),
+            enabled: !none_running,
+        },
+        RowAction {
+            kind: ActionKind::Restart,
+            icon: ICON_RESTART.into(),
+            enabled: some_running,
+        },
+    ]
+}
+
+/// **右键菜单里有哪些项**（**纯函数** ⇒ 单测能验）。
+///
+/// ⚠️ **阶段 160**：操作列瘦身后，其余动作全搬到右键菜单 ⇒
+///   菜单**按行类型**给不同的项：
+/// - **容器行**：进容器 / 文件 / 日志 / 属性 ＋ 启停 ＋ 复制容器 ID；
+/// - **compose 项目行**：编辑 compose 文件 / 属性 ＋ 启停 ＋ 销毁 / 重建。
+///
+/// ⚠️ **分三段**（用分隔线隔开）：「看」→「启停」→「危险动作」。
+pub fn menu_actions(kind: &str, raw_state: &str) -> Vec<MenuAction> {
+    // ⚠️ **启停的可点性看原始状态**（跟「操作」列**同一套算术** ⇒ 菜单与列一致；
+    //   否则运行中的容器在菜单里还能点「启动」⇒ 点了只是空转）。
+    let op_enabled = |k: ActionKind| -> bool {
+        row_actions(kind, raw_state)
+            .into_iter()
+            .find(|a| a.kind == k)
+            .map(|a| a.enabled)
+            .unwrap_or(true)
+    };
+    if kind == KIND_PROJECT {
+        vec![
+            MenuAction {
+                kind: ActionKind::Edit,
+                icon: ICON_EDIT.into(),
+                label: tr("编辑 compose 文件"),
+                group: 0,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Detail,
+                icon: ICON_DETAIL.into(),
+                label: tr("属性"),
+                group: 0,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Start,
+                icon: ICON_MENU_START.into(),
+                label: tr("启动"),
+                group: 1,
+                enabled: op_enabled(ActionKind::Start),
+            },
+            MenuAction {
+                kind: ActionKind::Stop,
+                icon: ICON_MENU_STOP.into(),
+                label: tr("停止"),
+                group: 1,
+                enabled: op_enabled(ActionKind::Stop),
+            },
+            MenuAction {
+                kind: ActionKind::Restart,
+                icon: ICON_RESTART.into(),
+                label: tr("重启"),
+                group: 1,
+                enabled: op_enabled(ActionKind::Restart),
+            },
+            MenuAction {
+                kind: ActionKind::Down,
+                icon: ICON_DOWN.into(),
+                label: tr("销毁"),
+                group: 2,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Up,
+                icon: ICON_UP.into(),
+                label: tr("重建"),
+                group: 2,
+                enabled: true,
+            },
+        ]
+    } else {
+        vec![
+            MenuAction {
+                kind: ActionKind::Enter,
+                icon: ICON_TERMINAL.into(),
+                label: tr("进入容器"),
+                group: 0,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Files,
+                icon: ICON_FILES.into(),
+                label: tr("文件"),
+                group: 0,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Logs,
+                icon: ICON_LOGS.into(),
+                label: tr("日志"),
+                group: 0,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Detail,
+                icon: ICON_DETAIL.into(),
+                label: tr("属性"),
+                group: 0,
+                enabled: true,
+            },
+            MenuAction {
+                kind: ActionKind::Start,
+                icon: ICON_MENU_START.into(),
+                label: tr("启动"),
+                group: 1,
+                enabled: op_enabled(ActionKind::Start),
+            },
+            MenuAction {
+                kind: ActionKind::Stop,
+                icon: ICON_MENU_STOP.into(),
+                label: tr("停止"),
+                group: 1,
+                enabled: op_enabled(ActionKind::Stop),
+            },
+            MenuAction {
+                kind: ActionKind::Restart,
+                icon: ICON_RESTART.into(),
+                label: tr("重启"),
+                group: 1,
+                enabled: op_enabled(ActionKind::Restart),
+            },
+            MenuAction {
+                kind: ActionKind::CopyId,
+                icon: "edit-copy-symbolic".into(),
+                label: tr("复制容器 ID"),
+                group: 2,
+                enabled: true,
+            },
+        ]
+    }
+}
+
+/// 右键菜单里的一项（**干什么** ＋ **画哪个图** ＋ **写什么字** ＋ **第几段**）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MenuAction {
+    /// 干什么（派发时按它分派）。
+    pub kind: ActionKind,
+    /// 图标名（**Adwaita 真有的**）。
+    pub icon: String,
+    /// 菜单上的文字。
+    pub label: &'static str,
+    /// 第几段（**同段之间不插分隔线** ⇒ 分隔线只在段号变化时插）。
+    pub group: u8,
+    /// 能不能点（**启停看原始状态** ⇒ 菜单与「操作」列一致）。
+    pub enabled: bool,
+}
+
+/// **操作列最多几颗图标**（列宽按它算 ⇒ 两种行都放得下）。
+pub fn action_col_icons_max() -> usize {
+    row_actions(KIND_PROJECT, "running")
+        .len()
+        .max(row_actions(KIND_CONTAINER, "running").len())
+}
+
+/// 一颗操作图标的 **tooltip**（禁用时说明「为什么不能点」）。
+///
+/// ⚠️ **灰图标要说明为什么**（UI 审查 D15 的老规矩）：以前是灰按钮配一句
+///   说明 ⇒ 现在灰的是图标 ⇒ 说明也得跟过来。
+pub fn action_tooltip(a: &RowAction, is_project: bool, raw_state: &str) -> &'static str {
+    let all_running = raw_state == "running";
+    let none_running = raw_state == "exited";
+    match a.kind {
+        ActionKind::Detail => {
+            if is_project {
+                tr("看这个 compose 项目的详情")
+            } else {
+                tr("看这个容器的详情（概览 / 日志 / 监控 / 文件）")
+            }
+        }
+        ActionKind::Files => tr("看容器里的文件"),
+        ActionKind::Logs => tr("看容器的日志"),
+        ActionKind::CopyId => tr("复制这个容器的 ID"),
+        ActionKind::Enter => tr("在这个容器里开一个 shell"),
+        ActionKind::Edit => tr("编辑这个 compose 项目的 compose 文件"),
+        ActionKind::Start => {
+            if all_running {
+                if is_project {
+                    tr("项目正在运行，不用再启动（先「停止」才能启动）")
+                } else {
+                    tr("容器正在运行，不用再启动（先「停止」才能启动）")
+                }
+            } else if is_project {
+                tr("启动这个 compose 项目的容器")
+            } else {
+                tr("启动这个容器")
+            }
+        }
+        ActionKind::Stop => {
+            if none_running {
+                if is_project {
+                    tr("项目没有在运行，不用停（先「启动」才能停）")
+                } else {
+                    tr("容器没有在运行，不用停（先「启动」才能停）")
+                }
+            } else if is_project {
+                tr("停止这个 compose 项目的容器")
+            } else {
+                tr("停止这个容器")
+            }
+        }
+        ActionKind::Restart => tr("重启这个容器"),
+        ActionKind::Down => tr("销毁这个 compose 项目（容器和网络会被删除）"),
+        ActionKind::Up => tr("按 compose 文件重新创建并启动这个项目"),
+    }
+}
 
 /* ---------------- 文件表的列（阶段 140） ---------------- */
 
@@ -272,12 +637,38 @@ pub struct DockerUi {
     name_renderer: Option<gtk::CellRendererText>,
     /// **详情区**（阶段 110：选中容器才显示）。
     detail: DetailUi,
-    /// **「进入容器」按钮**（**工具条上**；阶段 117）。
+    /// **上一次点「操作」列里的图标**是什么时刻（微秒，单调钟）。
     ///
-    /// ⚠️ **为什么放工具条**：原来唯一的入口在**详情区**的标题行 ⇒ 得**先
-    ///   选中容器、还得把下半区拖出来**才看得到 ⇒ 用户（2026-11-16）反馈
-    ///   「界面里没看到在哪里打开容器shell」⇒ 入口必须**一眼可见**。
-    btn_enter: gtk::Button,
+    /// ⚠️ **干什么用**：双击图标时，表格自己的「激活」（进 shell）也会触发
+    ///   ⇒ 一次点击干两件事 ⇒ 记下时刻 ⇒ **激活时看一眼**（太近就当是
+    ///   这一次图标点击的延续 ⇒ 跳过）。
+    last_action_click: Cell<Option<i64>>,
+    /// **「操作」列**（阶段 155）。
+    ///
+    /// ⚠️ **为什么留着句柄**：命中判定要认出「点的是不是这一列」
+    ///   （`path_at_pos` 会把列一起返回 ⇒ 拿它跟这一列比）。
+    action_col: gtk::TreeViewColumn,
+    /// **详情区的内容盒**（容器详情 ＋ compose 项目详情）。
+    ///
+    /// ⚠️ **阶段 155**：它住在**弹窗**里（不是页面下半区）⇒ 建弹窗时要把它
+    ///   装进去。
+    detail_box: gtk::Box,
+    /// **详情弹窗**（阶段 155：详情区从「页面下半区」搬到了**弹窗**里）。
+    ///
+    /// ⚠️ **为什么是弹窗**：用户说「不要下面那部分了，整个页面都改成列表」
+    ///   ⇒ 页面只剩一张满高的列表 ⇒ 详情（概览 / 日志 / 监控 / 文件 ＋
+    ///   compose 项目）只能**另开一扇窗**。
+    /// ⚠️ **建一次、复用**：关掉只是**隐藏**（不销毁）⇒ 控件状态不丢
+    ///   （日志页的搜索词、监控页的曲线、文件页的目录都不用重来）。
+    detail_window: RefCell<Option<gtk::Window>>,
+    /// 详情弹窗里的**「关闭」按钮**（阶段 156：容器详情 / 项目详情各一个）。
+    ///
+    /// ⚠️ **为什么内容里必须有它**（用户 2026-11-23 报的「弹出对话框没法
+    ///   关闭」）：详情弹窗是**普通 `gtk::Window`** ⇒ GTK4 **不替它画标题栏**
+    ///   ⇒ 窗口管理器给不给装饰都不确定 ⇒ **用户可能一个关闭入口都看不到**
+    ///   ⇒ 就在内容里放一个，**永远看得见**。
+    /// ⚠️ **一个 widget 只能有一个 parent** ⇒ 两块详情各要一个。
+    detail_close_btns: RefCell<Vec<gtk::Button>>,
     /// **日志页**（阶段 112）。
     log: LogUi,
     /// 详情区里的 **Stack**（概览 / 日志两页）。
@@ -441,12 +832,39 @@ pub struct DockerUi {
     images_busy: Cell<bool>,
     volumes_busy: Cell<bool>,
     networks_busy: Cell<bool>,
+    /// **「待会儿再刷一次」**的标志（阶段 161）。
+    ///
+    /// ⚠️ **为什么需要**：刷新有「不叠加」的守卫（正在飞就直接返回）
+    ///   ⇒ 但**写操作之后的那次刷新**（打标签 / 删除镜像 / 启停容器）
+    ///   **正好撞上正在飞的那次** ⇒ 那次刷新被**丢掉** ⇒
+    ///   状态行说「已删除」而**表里那行还在**（像程序坏了）；
+    ///   镜像段更糟：**自动刷新默认关着** ⇒ 一直不更新（实测踩过）。
+    /// ⇒ 撞上了就**记一笔** ⇒ 这次回来后**立刻再刷一次**。
+    busy_pending: Cell<bool>,
+    images_pending: Cell<bool>,
+    volumes_pending: Cell<bool>,
+    networks_pending: Cell<bool>,
     /// **「文件」页**（阶段 116）。
     files: FilesUi,
     /// 文件页**正在列的是哪个容器**（空 = 没选容器）。
     files_name: RefCell<String>,
     /// 文件页**当前目录**（远程 POSIX 路径）。
+    ///
+    /// ⚠️ **只认「成功列出来过」的目录**（阶段 159）：它是
+    ///   - 双击目录时**拼路径的基准**（[`files_remote_path`]）
+    ///   - 表格里**正在显示**的那个目录
+    ///   - 上传时的落点
+    /// ⇒ **列失败时绝不能推进它**（推进了 ⇒ 下一次双击在失败路径上再拼一层
+    ///   ⇒ 地址栏越拼越长；用户 2026-11-24 报的正是这个）。
     files_path: RefCell<String>,
+    /// 文件页**正在请求的目录**（远程 POSIX 路径）。
+    ///
+    /// ⚠️ **跟 [`Self::files_path`] 分开**（阶段 159）：
+    /// - `files_path` = **已经成功列出来**的目录（界面显示的就是它）；
+    /// - `files_req` = **这次正在请求**的目录（用来认「这个回包是不是我要的」）。
+    /// ⇒ 请求失败时**只动 `files_req`**，`files_path` 原地不动 ⇒
+    ///   路径栏 / 表格 / 拼接基准三者始终**指同一个目录**。
+    files_req: RefCell<String>,
     /// 文件页**正在传**（上传 / 下载 ⇒ 不许再开一个）。
     files_xfer: Cell<bool>,
     /// 文件页**已经完成了几次传输**（上传 / 下载各算一次）。
@@ -582,25 +1000,15 @@ struct DetailUi {
     net: gtk::Grid,
     mount: gtk::Grid,
     env: gtk::Grid,
-    /// 「启动」「停止」「重启」三个按钮（**写操作 ⇒ 点了要二次确认**）。
-    btn_start: gtk::Button,
-    btn_stop: gtk::Button,
-    btn_restart: gtk::Button,
-    /// **「终端」按钮**（阶段 113：开容器内终端）。
-    btn_term: gtk::Button,
     /// **compose 项目详情**那块（阶段 111：选中项目行时显示，与容器详情互斥）。
     proj_root: gtk::Box,
     /// 项目标题（「compose 项目：postgres」）。
     proj_title: gtk::Label,
     /// 项目正文（配置文件 / 工作目录 / 容器清单）。
     proj_info: gtk::Label,
-    /// 「编辑 compose 文件」。
-    btn_edit: gtk::Button,
-    /// 「启动」「停止」「销毁」「重建」（**写操作 ⇒ 点了要二次确认**）。
-    btn_cstart: gtk::Button,
-    btn_cstop: gtk::Button,
-    btn_cdown: gtk::Button,
-    btn_cup: gtk::Button,
+    // ⚠️ **阶段 155**：原来这里还有九个按钮（容器的启动 / 停止 / 重启 /
+    //   进入容器 ＋ 项目的编辑 / 启动 / 停止 / 销毁 / 重建）⇒ 全部搬进
+    //   **「操作」列**（每行一排图标按钮）⇒ 详情区**只管看**。
 }
 
 /// 监控页的控件（**阶段 114**）。
@@ -967,26 +1375,65 @@ fn ports_multiline(raw: &str) -> String {
     raw.replace(", ", "\n")
 }
 
-
-/// 字节数 ⇒ **docker 同款**的大小写法（`59.3MiB` / `62.6GiB`）。
+/// 端口串 ⇒ **给人看的样子**（阶段 157）。
 ///
-/// ⚠️ **为什么不用 `util::human_size`**（UI 审查 D21）：那个函数除以 1024
-///   却写 `KB/MB/GB`（十进制名字配二进制数字），跟子行里 docker 自己的
-///   `MiB/GiB` **对不上** ⇒ 同一列里父行「59.3 MB」、子行「59.3MiB」
-///   ⇒ 同一个量两种单位 ⇒ 用户以为差了一截 ⇒ 这里统一成 docker 的写法。
-fn human_size_bin(n: f64) -> String {
-    const UNIT: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut v = n;
-    let mut u: i32 = -1;
-    while v >= 1024.0 && u < 4 {
-        v /= 1024.0;
-        u += 1;
+/// ⚠️ **为什么要收拾**（用户 2026-11-23：「很不美」）：docker 的原始串把
+///   **同一个端口写了两遍**（IPv4 一条、IPv6 一条：
+///   `0.0.0.0:5432->5432/tcp` ＋ `[::]:5432->5432/tcp`）⇒ 一半的行在
+///   重复同一件事 ⇒ 端口列被撑得很宽、上下扫读很累。
+/// ⇒ 现在：**去重** ＋ **压缩**：
+///   - `0.0.0.0:5432->5432/tcp` ⇒ `5432/tcp`（通配地址丢掉）；
+///   - `127.0.0.1:9001->9001/tcp` ⇒ `127.0.0.1:9001/tcp`（**保留**：
+///     "只绑本机"是有用信息，不能丢）；
+///   - `9000->9001/tcp` ⇒ `9000→9001/tcp`（端口不同 ⇒ 映射关系要留）。
+///
+/// ⚠️ **完整端口串在详情弹窗里看得到**（这里只是给人扫一眼的摘要）。
+fn ports_pretty(raw: &str) -> String {
+    /// 通配地址（IPv4 全 0 / IPv6 全 0）⇒ 不占地方。
+    fn is_wildcard(host: &str) -> bool {
+        matches!(host, "0.0.0.0" | "::" | "[::]" | "*")
     }
-    if u < 0 {
-        return format!("{n:.0} B");
+    let mut out: Vec<String> = Vec::new();
+    // ⚠️ **模型里存的是「一行一个」的串**（`ports_multiline` 把 `, ` 换成
+    //   换行）⇒ 这里**逗号和换行都当分隔符**。
+    for item in raw.split([',', '\n']) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let pretty = match item.split_once("->") {
+            Some((left, right)) => {
+                // 左边 = `host:port` 或 `port`；右边 = `port/proto`。
+                let (host, lport) = match left.rsplit_once(':') {
+                    Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+                        (Some(h), p)
+                    }
+                    _ => (None, left),
+                };
+                let (rport, proto) = match right.split_once('/') {
+                    Some((p, pr)) => (p, Some(pr)),
+                    None => (right, None),
+                };
+                let host_txt = match host {
+                    Some(h) if !h.is_empty() && !is_wildcard(h) => format!("{h}:"),
+                    _ => String::new(),
+                };
+                let proto_txt = proto.map(|p| format!("/{p}")).unwrap_or_default();
+                if lport == rport {
+                    format!("{host_txt}{rport}{proto_txt}")
+                } else {
+                    format!("{host_txt}{lport}→{rport}{proto_txt}")
+                }
+            }
+            None => item.to_string(),
+        };
+        if !out.contains(&pretty) {
+            out.push(pretty);
+        }
     }
-    format!("{v:.1}{}", UNIT[u as usize])
+    out.join("\n")
 }
+
 
 /// 后端给的中文错误 ⇒ **分类**（决定空态的标题）。
 ///
@@ -1156,65 +1603,6 @@ fn fill_kv(grid: &gtk::Grid, kv: &Kv) {
     }
 }
 
-/// 一列的**排序方式**（UI 审查 D4）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SortKind {
-    /// 纯文字（按字典序）。
-    Text,
-    /// 百分比（`"1.0%"` ⇒ 1.0）。
-    Percent,
-    /// 字节（`"52.84MiB / 63.00GiB"` ⇒ 已用的字节数）。
-    Bytes,
-}
-
-/// 数值列的**排序键**。
-///
-/// ⚠️ **为什么不能按字符串排**（UI 审查 D4）：`"9.5%"` 按字典序排在
-///   `"50.8%"` **前面** ⇒ 「找最占资源的容器」全看错 ⇒ CPU / 内存
-///   **必须按数值**排。
-fn sort_key(s: &str, kind: SortKind) -> f64 {
-    match kind {
-        SortKind::Text => 0.0,
-        SortKind::Percent => {
-            let t = s.trim().trim_end_matches('%').trim();
-            t.parse::<f64>().unwrap_or(0.0)
-        }
-        SortKind::Bytes => parse_size_bytes(s),
-    }
-}
-
-/// `"52.84MiB / 63.00GiB"` ⇒ **已用**的字节数（第一个数）。
-fn parse_size_bytes(s: &str) -> f64 {
-    let first = s.split('/').next().unwrap_or("").trim();
-    let mut num = String::new();
-    let mut unit = String::new();
-    for ch in first.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            num.push(ch);
-        } else if ch.is_ascii_alphabetic() {
-            unit.push(ch);
-        }
-        if !num.is_empty() && !unit.is_empty() {
-            break;
-        }
-    }
-    let v: f64 = num.parse().unwrap_or(0.0);
-    // ⚠️ docker 用的是 `MiB` / `GiB`（1024 进制），但也有人写 `MB` ⇒
-    //   两种都认（`MiB` 与 `MB` 在 docker 里是同一个意思）。
-    let u = unit.to_ascii_uppercase();
-    let u = u.strip_suffix('B').unwrap_or(&u).to_string();
-    let u = u.strip_suffix('I').unwrap_or(&u).to_string();
-    let mul = match u.as_str() {
-        "" => 1.0,
-        "K" => 1024.0,
-        "M" => 1024.0 * 1024.0,
-        "G" => 1024.0f64.powi(3),
-        "T" => 1024.0f64.powi(4),
-        "P" => 1024.0f64.powi(5),
-        _ => 1.0,
-    };
-    v * mul
-}
 
 /// docker 状态原文 ⇒ **药丸档位**（**纯函数**，便于单测）。
 ///
@@ -1509,16 +1897,9 @@ impl DockerUi {
 
     /// 写一个容器行。
     fn set_container_row(&self, it: &gtk::TreeIter, c: &ContainerInfo) {
-        let state = c.state_label().to_string();
+        // ⚠️ **阶段 158：状态列的文案带上了时长**（「运行 2 小时」）。
+        let state = state_pill_text(&c.state, c.state_label(), c.duration);
         let mk = state_markup(&c.state);
-        // ⚠️ **详情列翻成中文**（UI 审查 D14）：项目规矩是用户可见文案
-        //   全中文 ⇒ 不能把 docker 的原文（`Up 13 hours (healthy)`）摆出来。
-        let detail = docker::status_detail_zh(&c.status);
-        // ⚠️ **内存列只给绝对值**（用户 2026-11-23）：以前这里带百分比
-        //   （`8.4% · 52.84MiB / 63.00GiB`）⇒ 一列里塞两个单位，扫起来
-        //   费劲；而**父行的合计本来就没有百分比** ⇒ 父子两行还不一致
-        //   ⇒ 现在容器行也只给绝对值（`52.84MiB / 63.00GiB`）。
-        let mem = c.mem.clone();
         // ⚠️ **端口一个一行**（用户 2026-11-23）：docker 的端口串是逗号
         //   分隔的长串 ⇒ 单行会被省略号截掉 ⇒ 换成换行符。
         let ports = ports_multiline(&c.ports);
@@ -1529,10 +1910,12 @@ impl DockerUi {
                 (COL_ID as u32, &c.id),
                 (COL_IMAGE as u32, &c.image),
                 (COL_PORTS as u32, &ports),
-                (COL_CPU as u32, &c.cpu),
-                (COL_MEM as u32, &mem),
                 (COL_STATE as u32, &state),
-                (COL_DETAIL as u32, &detail),
+                (COL_KIND as u32, &KIND_CONTAINER),
+                // ⚠️ **原始状态**（阶段 155）：「操作」列里「启动 / 停止」哪个
+                //   能点 ⇒ 得知道 docker 说的原始状态（界面上的中文标签在
+                //   英文界面下会变 ⇒ 不能拿它判断）。
+                (COL_RAW_STATE as u32, &c.state),
                 (COL_STATE_MK as u32, &mk),
             ],
         );
@@ -1542,7 +1925,8 @@ impl DockerUi {
     ///
     /// ⚠️ **父行不是一行空格**（UI 审查 D16）：以前 ID / 镜像 / 端口 /
     ///   CPU / 内存 全空 ⇒ 一行里 5 个空格 + 2 个词 ⇒ 扫起来很跳 ⇒
-    ///   现在给一份**摘要**（镜像个数 / CPU 合计 / 内存合计 / 几个在跑）。
+    ///   现在给一份**摘要**（镜像个数 / 几个在跑）。
+    /// ⚠️ **阶段 155**：CPU / 内存列退役 ⇒ 父行也不再有合计。
     fn set_project_row(&self, it: &gtk::TreeIter, name: &str, items: &[ContainerInfo]) {
         let n = items.len();
         let running = items.iter().filter(|c| c.state == "running").count();
@@ -1560,29 +1944,7 @@ impl DockerUi {
         } else {
             trf!("{n} 个镜像", n = imgs.len())
         };
-        // CPU：合计（各容器的百分比加起来）。
-        let cpu_sum: f64 = items
-            .iter()
-            .map(|c| sort_key(&c.cpu, SortKind::Percent))
-            .sum();
-        let cpu_text = if n == 0 {
-            String::new()
-        } else {
-            // ⚠️ **格式化要自己拼**：`trf!` 不认 `{v:.1}` ⇒ 用 `format!`。
-            // ⚠️ **小数位跟子行一样**（`docker stats` 给的是两位）：同一列里
-            //   父行「0.00%」、子行「0.0%」会让人以为是两个不同的量。
-            format!("{cpu_sum:.2}%")
-        };
-        // 内存：合计（按字节加）。
-        let mem_sum: f64 = items.iter().map(|c| parse_size_bytes(&c.mem)).sum();
-        let mem_text = if n == 0 {
-            String::new()
-        } else {
-            // ⚠️ **同子行的单位写法**（`MiB`/`GiB`）⇒ 父行子行能直接比。
-            human_size_bin(mem_sum)
-        };
         let cnt = trf!("{r}/{n} 运行中", r = running, n = n);
-        let kind = tr("compose 项目").to_string();
         // ⚠️ **父行没有自己的状态** ⇒ 色点用「灰」（不假装它在跑）。
         let mk = format!(
             "<span foreground=\"{c}\">●</span> {t}",
@@ -1596,10 +1958,20 @@ impl DockerUi {
                 (COL_ID as u32, &String::new()),
                 (COL_IMAGE as u32, &img_text),
                 (COL_PORTS as u32, &String::new()),
-                (COL_CPU as u32, &cpu_text),
-                (COL_MEM as u32, &mem_text),
                 (COL_STATE as u32, &cnt),
-                (COL_DETAIL as u32, &kind),
+                (COL_KIND as u32, &KIND_PROJECT),
+                // ⚠️ **原始状态**（阶段 155）：项目行没有自己的状态 ⇒ 用
+                //   「容器们跑得怎么样」⇒ 三种：`running`（全在跑）/
+                //   `exited`（全停了）/ `mixed`（一半在跑）。
+                //   ⇒ 「启动 / 停止」哪个能点就看得出来了。
+                (
+                    COL_RAW_STATE as u32,
+                    &match (running, n) {
+                        (0, _) => "exited".to_string(),
+                        (r, t) if r == t => "running".to_string(),
+                        _ => "mixed".to_string(),
+                    },
+                ),
                 (COL_STATE_MK as u32, &mk),
             ],
         );
@@ -1965,6 +2337,12 @@ impl DockerUi {
         None
     }
 
+    /// 找到某一行（**容器名 / 项目名**）的迭代器。
+    fn find_iter(&self, name: &str) -> Option<gtk::TreeIter> {
+        let path = self.find_path(name)?;
+        self.model.iter(&path)
+    }
+
     /// 详情取回来了 ⇒ 填四张卡片。
     fn apply_detail(&self, d: &ContainerDetail) {
         // ⚠️ **顺手记下选中的容器**（阶段 112 修的 bug）：消息循环拿它比对
@@ -1990,24 +2368,9 @@ impl DockerUi {
         fill_kv(&self.detail.net, &detail_net_kv(d));
         fill_kv(&self.detail.mount, &detail_mount_kv(d));
         fill_kv(&self.detail.env, &detail_env_kv(d));
-        // 按钮：运行中只能停/重启；停了才能启动。
-        self.detail.btn_start.set_sensitive(!d.is_running());
-        self.detail.btn_stop.set_sensitive(d.is_running());
-        self.detail.btn_restart.set_sensitive(true);
-        // ⚠️ **灰按钮要说明「为什么不能点」**（UI 审查 D15）：以前运行中的
-        //   容器「启动」是灰的 ⇒ 用户只能猜 ⇒ 现在 tooltip 说清楚。
-        if d.is_running() {
-            self.detail.btn_start.set_tooltip_text(Some(tr(
-                "容器正在运行，不用再启动（先「停止」才能启动）",
-            )));
-            self.detail.btn_stop.set_tooltip_text(Some(tr("停止这个容器")));
-        } else {
-            self.detail.btn_start.set_tooltip_text(Some(tr("启动这个容器")));
-            self.detail.btn_stop.set_tooltip_text(Some(tr(
-                "容器没有在运行，不用停（先「启动」才能停）",
-            )));
-        }
-        self.detail.btn_restart.set_tooltip_text(Some(tr("重启这个容器")));
+        // ⚠️ **阶段 155**：原来这里会按状态设按钮的可用性（运行中不能启动…）
+        //   ⇒ 现在按钮在**「操作」列**里 ⇒ 可用性由那一列自己算
+        //   （`row_actions` 看 `COL_RAW_STATE`）⇒ 这里只管**看**。
         self.detail.root.set_visible(true);
     }
 
@@ -2028,8 +2391,6 @@ impl DockerUi {
     fn clear_detail(&self) {
         *self.selected.borrow_mut() = String::new();
         *self.selected_project.borrow_mut() = String::new();
-        // ⚠️ **阶段 117**：没有选中 ⇒ 「进入容器」不可点。
-        self.btn_enter.set_sensitive(false);
         self.detail.root.set_visible(false);
         self.detail.proj_root.set_visible(false);
     }
@@ -2081,14 +2442,9 @@ impl DockerUi {
             .proj_title
             .set_text(&trf!("compose 项目：{n}", n = sum.name));
         self.detail.proj_info.set_text(&project_info_text(&sum));
-        // 「编辑」要 compose 文件 ⇒ 没有文件就禁用（别给用户一个点不动的按钮）。
-        self.detail.btn_edit.set_sensitive(!sum.files.is_empty());
-        // ⚠️ **灰按钮要说明「为什么不能点」**（UI 审查 D15）。
-        self.detail.btn_edit.set_tooltip_text(Some(if sum.files.is_empty() {
-            tr("这个项目没有记录 compose 配置文件路径 ⇒ 没法编辑")
-        } else {
-            tr("编辑这个项目的 compose 文件")
-        }));
+        // ⚠️ **阶段 155**：原来这里会把「编辑 compose 文件」按钮按有没有
+        //   配置文件设成灰的 ⇒ 现在那个入口在**「操作」列**里 ⇒ 点它的时候
+        //   再判断（见 `dispatch_row_action` 的 `ActionKind::Edit`）。
         self.detail.proj_root.set_visible(true);
         self.detail.root.set_visible(false);
     }
@@ -2396,12 +2752,62 @@ fn project_info_text(s: &ProjectSummary) -> String {
     v.join("\n")
 }
 
+/// 一段时长 ⇒ **给人看的样子**（"2 小时" / "不到 1 秒"）。
+///
+/// ⚠️ **单位走 `tr()`**（界面有中英两版 ⇒ 单位也得翻）。
+/// ⚠️ **数字与单位之间留一个空格**（中文排版的习惯，也跟英文对齐）。
+fn duration_text(d: docker::DockerDuration) -> String {
+    use docker::{DockerDuration, DurUnit};
+    match d {
+        DockerDuration::LessThanSecond => tr("不到 1 秒").to_string(),
+        DockerDuration::Num(n, u) => {
+            let unit = match u {
+                DurUnit::Second => tr("秒"),
+                DurUnit::Minute => tr("分钟"),
+                DurUnit::Hour => tr("小时"),
+                DurUnit::Day => tr("天"),
+                DurUnit::Week => tr("周"),
+                DurUnit::Month => tr("个月"),
+                DurUnit::Year => tr("年"),
+            };
+            format!("{n} {unit}")
+        }
+    }
+}
+
+/// 状态列的**药丸文字**（阶段 158）。
+///
+/// ⚠️ **用户 2026-11-24 提的**：「状态列要显示已经运行了多久，如果只是已经
+///   创建，就显示已经创建了多久，如果是正在运行，就显示已经运行了多久，
+///   **尽量简洁**」。
+/// ⇒ 在跑 ⇒ 「运行 2 小时」；只创建 ⇒ 「创建 3 分钟」；已停止 ⇒「停止 9 天」；
+///   **拿不到时长就退回原来的状态标签**（"运行中" / "已创建" / "已停止"）。
+///
+/// ⚠️ **药丸底色不变**（绿 / 黄 / 灰 / 红）⇒ 状态一眼能分，时长是补充。
+fn state_pill_text(state: &str, label: &str, duration: Option<docker::DockerDuration>) -> String {
+    let Some(d) = duration else {
+        return label.to_string();
+    };
+    let dur = duration_text(d);
+    match state {
+        "running" => trf!("运行 {d}", d = dur),
+        "created" => trf!("创建 {d}", d = dur),
+        "exited" => trf!("停止 {d}", d = dur),
+        _ => label.to_string(),
+    }
+}
+
 /// 建界面（**只建一次**；挂在 [`PanelState::docker_ui`] 上）。
 fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ---- 工具条 ----
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some(tr("搜索容器")));
-    search.set_hexpand(true);
+    // ⚠️ **阶段 157：搜索框不扩展，但给一个像样的宽度**（18~28 字符）。
+    //   GTK4 里 `max_width_chars` **限不住分配宽度**（Box 会照旧把富余
+    //   塞给它）⇒ 真要限宽，得让它**不扩展**，再由旁边的弹性空隙吸收。
+    search.set_hexpand(false);
+    search.set_width_chars(18);
+    search.set_max_width_chars(28);
 
     // 过滤：三个切换按钮（互斥）
     let f_all = gtk::ToggleButton::with_label(tr("全部"));
@@ -2452,18 +2858,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     spin.set_valign(gtk::Align::Center);
     spin.set_visible(false);
 
-    // ⚠️ **阶段 117**：「进入容器」按钮（**列表正上方** ⇒ 一眼可见）。
-    //
-    // ⚠️ **为什么要有它**：原来唯一的入口在**详情区**的标题行 ⇒ 必须先
-    //   选中容器、还得把下半区拖出来才看得到 ⇒ 用户反馈「界面里没看到
-    //   在哪里打开容器 shell」⇒ 现在**列表上方**就有一个。
-    let btn_enter = gtk::Button::with_label(tr("进入容器"));
-    btn_enter.add_css_class("flat");
-    // ⚠️ **没选容器时是灰的**（点了也不知道进哪个）。
-    btn_enter.set_sensitive(false);
-    btn_enter.set_tooltip_text(Some(tr(
-        "在容器里打开一个交互式 shell（等价于 docker exec -it）",
-    )));
+    // ⚠️ **阶段 155**：工具条上原来那个「进入容器」按钮**撤了** ⇒ 它搬进
+    //   **「操作」列**（每行一颗终端图标）⇒ 不用先选中容器就能直接进那一个。
+    //   （以前「选中容器 + 工具条按钮」是两步 ⇒ 现在一步。）
 
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bar.set_margin_start(6);
@@ -2475,7 +2872,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     //   ⇒ 左组「筛选」可伸缩、右组「操作」保持自然宽度 ⇒ 窄窗口时
     //   被压扁的是**搜索框**，操作按钮永远看得见。
     let filter_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    filter_group.set_hexpand(true);
+    // ⚠️ **阶段 157：这一组**不**吸富余宽度**。
+    //   GTK4 的 Box 会把富余宽度**全给扩展子控件** ⇒ 以前搜索框一个人
+    //   吃掉了整条工具条的富余 ⇒ 「全部 / 运行中 / 已停止」被顶到最右边，
+    //   跟「自动刷新」挤成一团 ⇒ 整条栏看着是歪的。
+    //   ⇒ 富余改由**后面的弹性空隙**吸收（见下面 `spacer`）。
+    filter_group.set_hexpand(false);
     filter_group.append(&search);
     // 筛选组收进**分段控件**（美化·二批 7）：三颗互斥 ToggleButton 本来就
     //   是"分段"的语义 ⇒ 套上 `.pp-segmented`（圆角胶囊容器 + 段内 dim、
@@ -2494,10 +2896,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     action_group.append(&auto);
     // ⚠️ loading 动画的小转圈（用户 2026-11-16）。
     action_group.append(&spin);
-    // ⚠️ **阶段 117**：「进入容器」是主操作之一 ⇒ 放在操作组。
-    action_group.append(&btn_enter);
 
     bar.append(&filter_group);
+    // ⚠️ **阶段 157：弹性空隙** ⇒ 左边（搜索 + 筛选）聚在一起，
+    //   右边（自动刷新）靠右 ⇒ 工具条的两头各归各位。
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bar.append(&spacer);
     // ⚠️ **分组之间画一根竖线**（一眼看得出哪里是筛选、哪里是操作）。
     let sep = gtk::Separator::new(gtk::Orientation::Vertical);
     sep.set_valign(gtk::Align::Center);
@@ -2514,22 +2919,41 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let model = gtk::TreeStore::new(&types);
     let view = gtk::TreeView::new();
     view.set_model(Some(&model));
+    // ⚠️ **阶段 157：必须显式开 `has-tooltip`**！
+    //
+    // GTK4 的树视图**默认不查 tooltip** ⇒ 不开的话 `query-tooltip`
+    // **永远不会来** ⇒ 「操作」列那套自绘 tooltip **一次都没显示过**
+    // （用户 2026-11-23：「按钮增加 tooltip」）。
+    view.set_has_tooltip(true);
+    // ⚠️ **阶段 157：挂 `.view` 类** ⇒ 主题里那整套「表格节奏」规则
+    //   （`treeview.view cell { padding: 4px 7px }` ⇒ 行高有呼吸感、
+    //   `treeview.view:selected` ⇒ 选中行是**淡 accent** 而不是 GTK 默认的
+    //   **实心蓝**、表头降半调加粗）**才生效**。
+    //
+    // ⚠️ **GTK4 的 `GtkTreeView` 不自带 `.view` 类**（那是 `GtkListView` 的）
+    //   ⇒ 全项目以前都**没挂** ⇒ 这些规则**从来没生效过**（用户
+    //   2026-11-23：「整个界面很不美」）。
+    view.add_css_class("view");
     // 树形表格 ⇒ 画树线（父行与子行的连线），一眼看得出谁是谁的。
     view.set_enable_tree_lines(true);
     // 名称列的渲染器（**冒烟用它验「字真的画出来了」**）。
     let mut name_renderer: Option<gtk::CellRendererText> = None;
+    // ⚠️ **阶段 155**：「操作」列的渲染器（每行一排图标按钮）。
+    let action_renderer = crate::panel::actioncell::ActionCellRenderer::new();
+    // ⚠️ **操作列的句柄要留在外面**（命中判定要认出「点的是不是这一列」）。
+    let action_col = gtk::TreeViewColumn::new();
     {
-        let titles = [
-            tr("名称"),
-            tr("ID"),
-            tr("镜像"),
-            tr("端口"),
-            tr("CPU"),
-            tr("内存"),
-            tr("状态"),
-            tr("详情"),
+        // ⚠️ **模型列号 ≠ 视图列下标**（阶段 155）：CPU / 内存 / 详情三列
+        //    退役了 ⇒ 视图下标跟模型列号**不再相等** ⇒ 这里**必须带模型列号**
+        //    走，别再拿循环下标当模型列号（以前两者恰好相等 ⇒ 删列就错位）。
+        let cols: [(usize, &str); 5] = [
+            (COL_NAME, tr("名称")),
+            (COL_ID, tr("ID")),
+            (COL_IMAGE, tr("镜像")),
+            (COL_PORTS, tr("端口")),
+            (COL_STATE, tr("状态")),
         ];
-        for (i, t) in titles.iter().enumerate() {
+        for (model_col, t) in cols {
             let col = gtk::TreeViewColumn::new();
             col.set_title(t);
             col.set_resizable(true);
@@ -2540,29 +2964,39 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             //    **不会**自己把这一列的文本喂给它 ⇒ 不绑就是一片空白（列头
             //    还在，看着像「查出来是空的」）。项目里 `panel/dbgrid.rs`
             //    踩过同一个坑。药丸走 `cell_data_func`，文字走 `add_attribute`。
-            if i == COL_STATE {
+            if model_col == COL_STATE {
                 let pr = crate::panel::pillcell::PillCellRenderer::new();
                 col.pack_start(&pr, false);
                 col.set_cell_data_func(&pr, move |_col, cell, model, iter| {
-                    let raw: String = model.get(iter, COL_STATE as i32);
+                    // ⚠️ **文字用显示列**（阶段 158 起，这列已经是**成好的**
+                    //   药丸文案：「运行 2 小时」/「2/2 运行中」……），
+                    //   **颜色档位用原始状态列**（docker 的 `running` 等）。
+                    let text: String = model.get(iter, COL_STATE as i32);
+                    let raw: String = model.get(iter, COL_RAW_STATE as i32);
+                    let kind: String = model.get(iter, COL_KIND as i32);
                     let p = cell
                         .downcast_ref::<crate::panel::pillcell::PillCellRenderer>()
                         .expect("状态列的渲染器必须是 PillCellRenderer");
-                    p.set_text(pill_text_of(&raw));
-                    p.set_state(pill_state_of(&raw));
+                    p.set_text(text);
+                    // ⚠️ **阶段 157（修 bug）**：以前这里拿**中文标签**
+                    //   （`COL_STATE` = "运行中"）去判档位 ⇒ `pill_state_of`
+                    //   认不出来 ⇒ **永远是「灰」** ⇒ 整个状态列一片死灰
+                    //   （用户 2026-11-23：「很不美」）。
+                    //   ⇒ 档位必须看 **原始状态**（`COL_RAW_STATE`）。
+                    // ⚠️ **项目行仍然是灰的**：项目本身没有「运行 / 停止」，
+                    //   灰点不假装它在跑（跟 `state_markup` 的口径一致）。
+                    p.set_state(if kind == KIND_PROJECT {
+                        crate::panel::pillcell::PillState::Dim
+                    } else {
+                        pill_state_of(&raw)
+                    });
                 });
             } else {
                 let r = gtk::CellRendererText::new();
                 r.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                // ⚠️ **数字列右对齐 + 技术值等宽**（美化·地基 3/5）：
-                //    CPU/内存右对齐 ⇒ 数量级一眼对齐（左对齐时 9.5% 和
-                //    50.8% 的"50"对不齐，扫起来费劲）；ID/端口等宽 ⇒
+                // ⚠️ **技术值等宽**（美化·地基 3/5）：ID/端口等宽 ⇒
                 //    `200f9d6b` 这种十六进制值在比例字体里数错位。
-                match i {
-                    COL_CPU | COL_MEM => {
-                        gtk::prelude::CellRendererExt::set_alignment(&r, 1.0, 0.5);
-                        col.set_alignment(1.0);
-                    }
+                match model_col {
                     COL_ID => {
                         r.set_family(Some("monospace"));
                     }
@@ -2576,84 +3010,131 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     _ => {}
                 }
                 col.pack_start(&r, false);
-                col.add_attribute(&r, "text", i as i32);
-                if i == COL_NAME {
+                // ⚠️ **阶段 157：ID / 端口两列改走 `cell_data_func`**
+                //   （要「收拾一下再显示」：ID 只留前 8 位、端口去重压缩）。
+                match model_col {
+                    COL_ID => {
+                        col.set_cell_data_func(&r, move |_col, cell, model, iter| {
+                            let full: String = model.get(iter, COL_ID as i32);
+                            let r = cell
+                                .downcast_ref::<gtk::CellRendererText>()
+                                .expect("ID 列的渲染器必须是 CellRendererText");
+                            // ⚠️ **12 位 hex 占 130px 太奢侈**（用户 2026-11-23：
+                            //   「很不美」）⇒ 只显示**前 8 位**（够认容器了）
+                            //   ⇒ 完整 ID 在详情弹窗里看得到。
+                            let short: String = full.chars().take(8).collect();
+                            r.set_property("text", &short);
+                        });
+                    }
+                    COL_PORTS => {
+                        col.set_cell_data_func(&r, move |_col, cell, model, iter| {
+                            let raw: String = model.get(iter, COL_PORTS as i32);
+                            let r = cell
+                                .downcast_ref::<gtk::CellRendererText>()
+                                .expect("端口列的渲染器必须是 CellRendererText");
+                            r.set_property("text", &ports_pretty(&raw));
+                        });
+                    }
+                    _ => {
+                        col.add_attribute(&r, "text", model_col as i32);
+                    }
+                }
+                if model_col == COL_NAME {
                     name_renderer = Some(r.clone());
                 }
             }
-            // ⚠️ **列宽**（UI 审查 D18）：以前 ID 80px ⇒ 12 位 ID 被截成
-            //   `200f9d6b…`；端口 100px ⇒ `127.0.0.1:54…`；内存固定 80px ⇒
-            //   `50.76MiB /…`；而半句英文的「详情」列却占 170px+ 且 expand。
-            //   ⇒ 现在：ID 给足（12 位）、端口给足、内存给足（带百分比）、
-            //   **详情列不再 expand**（内容已经是中文的短句 ⇒ 固定宽度就够）。
-            match i {
+            // ⚠️ **列宽**（阶段 158，用户 2026-11-24：「容器名称列还是太宽了，
+            //   看看怎么给每列设置宽度合理些，既要尽量显示全所有的信息，又要
+            //   各列之间有合理的比例」）。
+            //
+            // ⚠️ **以前名称列 `expand(true)`** ⇒ 它一个人吃掉整条表格的富余
+            //   宽度（截图里 1420px 的窗口它占了 820px ⇒ 名字只占一小条，
+            //   别的列全挤在一起）⇒ **改成不展开**（按内容给宽度）。
+            // ⚠️ **展开的是「镜像」列**（跟本文件其它表一个套路：`flat_table`
+            //   里「展开**最容易被截断的那列**」）⇒ `emqx/emqx-enterprise:…`
+            //   这种长镜像名**完整显示** ✓。
+            // ⚠️ **阶段 160：每列的宽度按「内容该有多宽」给**（用户 2026-11-24：
+            //   「容器名称列还是太宽了……既要尽量显示全所有的信息，又要各列之间
+            //   有合理的比例」）⇒ **都不展开** ⇒ 富余宽度全给**最后一列**
+            //   （操作列，图标右对齐）⇒ **中间的列之间不会隔出空洞**。
+            match model_col {
                 COL_NAME => {
-                    // ⚠️ **名称列不再抢空间**（用户 2026-11-23）：容器名不会
-                    //   很长 ⇒ 以前 expand(true) 让它吃掉全部余量 ⇒ 详情列
-                    //   被挤到放不下（`已退出（读出码 0）· 6 天` 被截断）。
-                    //   ⇒ 名称固定宽度，**余量让给详情列**。
-                    col.set_min_width(140);
+                    // ⚠️ **不展开**（用户明说「太宽了」）⇒ 200（够放 20 来个字符）。
+                    col.set_min_width(200);
                     col.set_expand(false);
                 }
-                COL_ID => col.set_min_width(110),
-                COL_IMAGE => col.set_min_width(160),
-                COL_PORTS => col.set_min_width(165),
-                COL_CPU => col.set_min_width(70),
-                COL_MEM => col.set_min_width(130),
-                COL_STATE => col.set_min_width(110),
-                COL_DETAIL => {
-                    col.set_min_width(160);
-                    col.set_expand(true);
+                // ⚠️ **ID 只显示前 8 位**（阶段 158）⇒ 96 足够。
+                COL_ID => col.set_min_width(96),
+                COL_IMAGE => {
+                    // ⚠️ **镜像名最长**（`emqx/emqx-enterprise:latest` 约 28 字）
+                    //   ⇒ 280（阶段 157 时只有 230 ⇒ 会被省略号截掉）。
+                    col.set_min_width(280);
+                    col.set_expand(false);
                 }
+                // ⚠️ **端口可能有两个**（`3306/tcp, 33060/tcp`）⇒ 190。
+                COL_PORTS => col.set_min_width(190),
+                // ⚠️ **阶段 158**：药丸文字变成「运行 2 小时」⇒ 比「运行中」宽。
+                COL_STATE => col.set_min_width(130),
                 _ => {}
             }
             // ⚠️ **每一列都能排序**（UI 审查 D4）：给列头一个排序 id ⇒
             //   用户点列头就能排序（GTK 会自己画排序箭头）。
             //   ⚠️ **默认不排**（不调 `set_sort_column_id`）⇒ 保持
             //   `docker ps` 原来的顺序，不擅自改用户的视图。
-            col.set_sort_column_id(i as i32);
+            col.set_sort_column_id(model_col as i32);
             view.append_column(&col);
         }
+        // ---- **「操作」列**（阶段 155）----
+        //
+        // ⚠️ **这一列没有模型列** ⇒ 图标是**现算**的（按行类型 + 原始状态）
+        //    ⇒ 走 `cell_data_func`，不走 `add_attribute`。
+        // ⚠️ **这一列不排序**（图标没法比大小）⇒ 不给 `set_sort_column_id`。
+        action_col.set_title(tr("操作"));
+        action_col.set_resizable(false);
+        // ⚠️ **阶段 158：这一列吸收表格的富余宽度** ⇒ 图标组**右对齐**
+        //   （贴着窗口右缘）⇒ 中间的列之间不会隔出一大片空白。
+        action_col.set_expand(true);
+        // ⚠️ **表头也跟着右对齐**（否则标题在左、图标在右 ⇒ 对不上）。
+        action_col.set_alignment(1.0);
+        // ⚠️ **宽度按最多的那种行算**（compose 项目 6 颗）⇒ 容器行（5 颗）
+        //   右边空一格，没关系（不能反过来把项目行的最后一颗挤掉）。
+        action_col.set_min_width(
+            (crate::panel::actioncell::SLOT_W * action_col_icons_max() as i32) + 8,
+        );
+        action_col.pack_start(&action_renderer, false);
+        action_col.set_cell_data_func(&action_renderer, move |_col, cell, model, iter| {
+            let kind: String = model.get(iter, COL_KIND as i32);
+            let raw: String = model.get(iter, COL_RAW_STATE as i32);
+            let r = cell
+                .downcast_ref::<crate::panel::actioncell::ActionCellRenderer>()
+                .expect("操作列的渲染器必须是 ActionCellRenderer");
+            r.set_icons(
+                row_actions(&kind, &raw)
+                    .into_iter()
+                    .map(|a| crate::panel::actioncell::Icon::new(&a.icon, a.enabled))
+                    .collect(),
+            );
+        });
+        view.append_column(&action_col);
     }
     // ---- 排序函数（UI 审查 D4）----
     //
     // ⚠️ **每个列都要注册**：GTK 不知道没注册的列该怎么排 ⇒ 点了没反应。
-    // ⚠️ **CPU / 内存按数值排**（不是字符串）：`"9.5%"` 按字典序排在
-    //   `"50.8%"` **前面** ⇒ 「找最占资源的容器」会看错。
+    // ⚠️ **阶段 155**：CPU / 内存列退役 ⇒ 只剩文字列 ⇒ 全部按字典序排。
     {
-        for (col, kind) in [
-            (COL_NAME, SortKind::Text),
-            (COL_ID, SortKind::Text),
-            (COL_IMAGE, SortKind::Text),
-            (COL_PORTS, SortKind::Text),
-            (COL_CPU, SortKind::Percent),
-            (COL_MEM, SortKind::Bytes),
-            (COL_STATE, SortKind::Text),
-            (COL_DETAIL, SortKind::Text),
-        ] {
+        for col in [COL_NAME, COL_ID, COL_IMAGE, COL_PORTS, COL_STATE] {
             model.set_sort_func(
                 gtk::SortColumn::Index(col as u32),
                 move |m, a, b| {
                     let sa: String = m.get(a, col as i32);
                     let sb: String = m.get(b, col as i32);
-                    match kind {
-                        // ⚠️ **端口列现在是多行**（带 `\n`）⇒ 直接按原字符串
-                        //   比，`\n`（0x0A）会排在所有字符前面 ⇒ 多端口的
-                        //   容器全挤到最前面 ⇒ 比较前**摊平成一行**再比。
-                        SortKind::Text => match sa.replace('\n', " ").cmp(&sb.replace('\n', " ")) {
-                            std::cmp::Ordering::Less => gtk::Ordering::Smaller,
-                            std::cmp::Ordering::Greater => gtk::Ordering::Larger,
-                            std::cmp::Ordering::Equal => gtk::Ordering::Equal,
-                        },
-                        _ => {
-                            let ka = sort_key(&sa, kind);
-                            let kb = sort_key(&sb, kind);
-                            match ka.partial_cmp(&kb) {
-                                Some(std::cmp::Ordering::Less) => gtk::Ordering::Smaller,
-                                Some(std::cmp::Ordering::Greater) => gtk::Ordering::Larger,
-                                _ => gtk::Ordering::Equal,
-                            }
-                        }
+                    // ⚠️ **端口列现在是多行**（带 `\n`）⇒ 直接按原字符串
+                    //   比，`\n`（0x0A）会排在所有字符前面 ⇒ 多端口的
+                    //   容器全挤到最前面 ⇒ 比较前**摊平成一行**再比。
+                    match sa.replace('\n', " ").cmp(&sb.replace('\n', " ")) {
+                        std::cmp::Ordering::Less => gtk::Ordering::Smaller,
+                        std::cmp::Ordering::Greater => gtk::Ordering::Larger,
+                        std::cmp::Ordering::Equal => gtk::Ordering::Equal,
                     }
                 },
             );
@@ -2807,29 +3288,19 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     empty.root.set_visible(false);
     table_overlay.add_overlay(&empty.root);
 
-    // ---- 详情区（阶段 110：选中容器才显示）----
+    // ---- 详情区（阶段 155：**搬进弹窗**了）----
     //
-    // 布局：标题行（容器名 + 状态 + 三个动作按钮）＋ 四张卡片（2×2 网格）。
+    // 布局：标题行（容器名 + 状态药丸）＋ 四张卡片（2×2 网格）。
+    //
+    // ⚠️ **阶段 155**：这块以前在页面**下半区**（Paned 的下半格）⇒ 用户说
+    //   「不要下面那部分了，整个页面都改成列表」⇒ 现在它**装在弹窗里**
+    //   （见 `ensure_detail_window`）⇒ 页面只剩**一张满高的列表**。
+    // ⚠️ **标题行里的四个按钮也没了**（启动 / 停止 / 重启 / 进入容器）
+    //   ⇒ 全部搬进**「操作」列**（每行一排图标按钮）⇒ 这里只管**看**。
     let d_title = gtk::Label::new(Some(""));
     d_title.set_xalign(0.0);
     d_title.set_hexpand(true);
     d_title.add_css_class("heading");
-
-    // ⚠️ **动作按钮是写操作** ⇒ 点了必须**二次确认**（见下面的事件接线）。
-    let mk_btn = |label: &str| {
-        let b = gtk::Button::with_label(label);
-        b.add_css_class("flat");
-        b
-    };
-    let d_start = mk_btn(tr("启动"));
-    let d_stop = mk_btn(tr("停止"));
-    let d_restart = mk_btn(tr("重启"));
-    // 「终端」⇒ 开**容器内终端**（阶段 113）。
-    //
-    // ⚠️ **不是写操作**（只是进容器里跑个 shell）⇒ 不用二次确认。
-    // ⚠️ **阶段 117 改名**：原来叫「终端」⇒ 用户以为说的是 PuTTY
-    //   终端（页签上就有个「终端」）⇒ 找不到这个入口 ⇒ 改成「进入容器」。
-    let d_term = mk_btn(tr("进入容器"));
 
     let d_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     d_row.set_margin_start(8);
@@ -2842,10 +3313,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     d_pill.set_valign(gtk::Align::Center);
     d_row.append(&d_title);
     d_row.append(&d_pill);
-    d_row.append(&d_start);
-    d_row.append(&d_stop);
-    d_row.append(&d_restart);
-    d_row.append(&d_term);
+    // ⚠️ **阶段 156**：末尾放一个**「关闭」** ⇒ 弹窗里永远有一个看得见的
+    //   关闭入口（普通 `GtkWindow` 没有自带标题栏 ⇒ 外面那个 X 不一定在）。
+    let d_close = detail_close_button();
+    d_row.append(&d_close);
 
     // 一张卡片 = 标题 + **键值表**（UI 审查 D9：不是一坨自动换行的文本）。
     let (c_config, card_config) = mk_kv_card(tr("运行配置"));
@@ -3201,35 +3672,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ⚠️ **没选容器时不显示**（Paned 里隐藏的子控件不占地方 ⇒ 列表拿满）。
     d_root.set_visible(false);
 
-    // ---- compose 项目详情（阶段 111：选中项目行时显示）----
+    // ---- compose 项目详情（阶段 155：**也搬进弹窗**了）----
     //
-    // ⚠️ 与**容器详情互斥**：两块都在 Paned 的下半区，谁显示谁。
+    // ⚠️ 与**容器详情互斥**：两块在同一个弹窗里，谁显示谁。
     let p_title = gtk::Label::new(Some(""));
     p_title.set_xalign(0.0);
     p_title.set_hexpand(true);
     p_title.add_css_class("heading");
 
-    // 「编辑 compose 文件」+「启动」「停止」「销毁」「重建」。
-    //
-    // ⚠️ **图标按钮统一走 `a11y::icon_button`**（AGENTS.md 的 lint）——
-    //    这里用的是**带文字的按钮**（不是图标）⇒ 不受那条约束。
-    let p_edit = gtk::Button::with_label(tr("编辑 compose 文件"));
-    p_edit.add_css_class("flat");
-    let p_start = mk_btn(tr("启动"));
-    let p_stop = mk_btn(tr("停止"));
-    let p_down = mk_btn(tr("销毁"));
-    let p_up = mk_btn(tr("重建"));
-
+    // ⚠️ **阶段 155**：原来这行有五个按钮（编辑 / 启动 / 停止 / 销毁 /
+    //   重建）⇒ 全部搬进**「操作」列**（项目行那几颗图标）⇒ 这里只留标题。
     let p_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     p_row.set_margin_start(8);
     p_row.set_margin_end(8);
     p_row.set_margin_top(4);
     p_row.append(&p_title);
-    p_row.append(&p_edit);
-    p_row.append(&p_start);
-    p_row.append(&p_stop);
-    p_row.append(&p_down);
-    p_row.append(&p_up);
+    // ⚠️ **阶段 156**：项目详情也得有**「关闭」**（一个 widget 只能有一个
+    //   parent ⇒ 不能跟容器详情那个共用同一个按钮）。
+    let p_close = detail_close_button();
+    p_row.append(&p_close);
 
     let p_info = gtk::Label::new(Some(""));
     p_info.set_xalign(0.0);
@@ -3249,7 +3710,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     p_root.append(&p_scroll);
     p_root.set_visible(false);
 
-    // 两块详情**装在同一个盒子里**（Paned 的下半区只有一块）。
+    // 两块详情**装在同一个盒子里**（**阶段 155**：这个盒子进了**弹窗**）。
+    //
+    // ⚠️ **为什么还是两个盒子**（不合成一个）：容器详情与 compose 项目详情
+    //   **互斥**（看容器时不该露出别的项目的信息）⇒ 两块各自 `set_visible`。
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     detail_box.append(&d_root);
     detail_box.append(&p_root);
@@ -3281,32 +3745,38 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     hint.add_css_class("dim-label");
     hint.set_valign(gtk::Align::Center);
 
+    // ⚠️ **阶段 157：「上次刷新」和「双击提示」之间加一个「·」**。
+    //   以前两段 dim 文字**紧挨着** ⇒ 读起来像一句病句
+    //   （「还没刷新 双击容器行可进入 shell」）⇒ 一个分隔点就分开了。
+    let status_dot = gtk::Label::new(Some("·"));
+    status_dot.add_css_class("dim-label");
+    status_dot.set_valign(gtk::Align::Center);
+
     let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     status_bar.append(&status);
     status_bar.append(&last);
+    status_bar.append(&status_dot);
     status_bar.append(&hint);
 
-    // ---- 页面：上（工具条 + 表格）｜下（详情区）----
+    // ---- 页面：**满高的列表**（阶段 155）----
     //
-    // ⚠️ 用 **Paned**（可拖）：详情区矮了就把它拖矮，别把列表挤没。
+    // ⚠️ **阶段 155**：以前这里是「上（工具条 + 表格）｜下（详情区）」的
+    //   **竖向 Paned** ⇒ 用户说「不要下面那部分了，整个页面都改成列表」
+    //   ⇒ **Paned 撤掉** ⇒ 页面只剩工具条 + 满高的表格。
+    //   详情（概览 / 日志 / 监控 / 文件 ＋ compose 项目）**搬进弹窗**
+    //   （见 `ensure_detail_window`）⇒ 点「操作」列里的 💡 打开。
     let top = gtk::Box::new(gtk::Orientation::Vertical, 0);
     top.append(&bar);
     // ⚠️ **用 Overlay 包一层**：大转圈要**在列表正中间**（loading 动画）。
     top.append(&table_overlay);
 
-    let paned = gtk::Paned::new(gtk::Orientation::Vertical);
-    paned.set_vexpand(true);
-    paned.set_start_child(Some(&top));
-    paned.set_end_child(Some(&detail_box));
-    paned.set_position(360);
-
     // ---- 阶段 115：顶层四页（容器 / 镜像 / 卷 / 网络）----
     //
-    // ⚠️ **容器那一整套**（工具条 + 表格 + 详情区）整体变成「容器」子页。
+    // ⚠️ **容器那一整套**（工具条 + 表格）整体变成「容器」子页。
     let seg_stack = gtk::Stack::new();
     seg_stack.set_vexpand(true);
     seg_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    let _ = seg_stack.add_named(&paned, Some(SEG_CONTAINERS));
+    let _ = seg_stack.add_named(&top, Some(SEG_CONTAINERS));
     let _ = seg_stack.add_named(&images_root, Some(SEG_IMAGES));
     let _ = seg_stack.add_named(&volumes_root, Some(SEG_VOLUMES));
     let _ = seg_stack.add_named(&networks_root, Some(SEG_NETWORKS));
@@ -3371,7 +3841,11 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         containers: RefCell::new(Vec::new()),
         version: RefCell::new(String::new()),
         name_renderer,
-        btn_enter: btn_enter.clone(),
+        last_action_click: Cell::new(None),
+        action_col: action_col.clone(),
+        detail_box: detail_box.clone(),
+        detail_window: RefCell::new(None),
+        detail_close_btns: RefCell::new(vec![d_close.clone(), p_close.clone()]),
         detail: DetailUi {
             root: d_root,
             title: d_title,
@@ -3380,18 +3854,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             net: card_net,
             mount: card_mount,
             env: card_env,
-            btn_start: d_start.clone(),
-            btn_stop: d_stop.clone(),
-            btn_restart: d_restart.clone(),
-            btn_term: d_term.clone(),
             proj_root: p_root,
             proj_title: p_title,
             proj_info: p_info,
-            btn_edit: p_edit.clone(),
-            btn_cstart: p_start.clone(),
-            btn_cstop: p_stop.clone(),
-            btn_cdown: p_down.clone(),
-            btn_cup: p_up.clone(),
         },
         log: LogUi {
             root: log_root,
@@ -3454,6 +3919,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         networks_store: networks_store.clone(),
         networks_view: networks_view.clone(),
         images_busy: Cell::new(false),
+        busy_pending: Cell::new(false),
+        images_pending: Cell::new(false),
+        volumes_pending: Cell::new(false),
+        networks_pending: Cell::new(false),
         files: FilesUi {
             root: f_root,
             path: f_path,
@@ -3472,6 +3941,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         },
         files_name: RefCell::new(String::new()),
         files_path: RefCell::new(String::new()),
+        files_req: RefCell::new(String::new()),
         files_xfer: Cell::new(false),
         files_seq: Cell::new(0),
         files_xfer_done: Cell::new(0),
@@ -3599,7 +4069,17 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             while let Ok(r) = rx.recv().await {
                 let Some(u) = u.upgrade() else { break };
                 match r {
-                    Msg::List(Ok(info)) => u.apply(&info),
+                    Msg::List(Ok(info)) => {
+                        u.apply(&info);
+                        // ⚠️ **阶段 161**：撞上了「待会儿再刷」⇒ 立刻再刷一次
+                        //   （不然写操作之后的那次刷新被丢掉 ⇒ 表里还是旧状态）。
+                        if u.busy_pending.get() {
+                            u.busy_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh(&st, &u);
+                            }
+                        }
+                    }
                     Msg::List(Err(msg)) => {
                         // ⚠️ **没权限 ⇒ 弹一次对话框**（阶段 135）。
                         u.containers_failed(stw.upgrade().as_ref(), &msg);
@@ -3612,15 +4092,33 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         apply_images(&u, &v);
                         // ⚠️ **取到数据了 ⇒ 错态收起来**（阶段 135）。
                         u.hide_seg_error(SEG_IMAGES);
-                        // ⚠️ **把操作结果贴回去**（刷新那条消息会冲掉它）。
-                        let op = u.images_op_msg.borrow().clone();
-                        if !op.is_empty() {
-                            u.set_segment_status(SEG_IMAGES, &op);
-                            u.images_op_msg.borrow_mut().clear();
+                        // ⚠️ **阶段 161：撞上了「待会儿再刷」⇒ 立刻再刷一次**
+                        //   （不然打标签/删除之后的那次刷新被丢掉 ⇒ 表里还是旧数据）。
+                        if u.images_pending.get() {
+                            u.images_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh_images(&st, &u);
+                            }
+                            // ⚠️ **操作结果先留着** ⇒ 等**最后一次**刷完再贴
+                            //   （不然会被「正在读取…」冲掉）。
+                        } else {
+                            // ⚠️ **把操作结果贴回去**（刷新那条消息会冲掉它）。
+                            let op = u.images_op_msg.borrow().clone();
+                            if !op.is_empty() {
+                                u.set_segment_status(SEG_IMAGES, &op);
+                                u.images_op_msg.borrow_mut().clear();
+                            }
                         }
                     }
                     Msg::Images(Err(msg)) => {
                         u.images_busy.set(false);
+                        // ⚠️ **阶段 161**：同样要把「待会儿再刷」兑现掉。
+                        if u.images_pending.get() {
+                            u.images_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh_images(&st, &u);
+                            }
+                        }
                         // ⚠️ **大号错态**（阶段 135）：不能只剩底部那行小字。
                         u.seg_failed(stw.upgrade().as_ref(), SEG_IMAGES, &msg);
                     }
@@ -3628,18 +4126,44 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         u.volumes_busy.set(false);
                         apply_volumes(&u, &v);
                         u.hide_seg_error(SEG_VOLUMES);
+                        // ⚠️ **阶段 161**：同上 ⇒ 撞上了就再刷一次。
+                        if u.volumes_pending.get() {
+                            u.volumes_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh_volumes(&st, &u);
+                            }
+                        }
                     }
                     Msg::Volumes(Err(msg)) => {
                         u.volumes_busy.set(false);
+                        if u.volumes_pending.get() {
+                            u.volumes_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh_volumes(&st, &u);
+                            }
+                        }
                         u.seg_failed(stw.upgrade().as_ref(), SEG_VOLUMES, &msg);
                     }
                     Msg::Networks(Ok(v)) => {
                         u.networks_busy.set(false);
                         apply_networks(&u, &v);
                         u.hide_seg_error(SEG_NETWORKS);
+                        // ⚠️ **阶段 161**：同上 ⇒ 撞上了就再刷一次。
+                        if u.networks_pending.get() {
+                            u.networks_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh_networks(&st, &u);
+                            }
+                        }
                     }
                     Msg::Networks(Err(msg)) => {
                         u.networks_busy.set(false);
+                        if u.networks_pending.get() {
+                            u.networks_pending.set(false);
+                            if let Some(st) = stw.upgrade() {
+                                refresh_networks(&st, &u);
+                            }
+                        }
                         u.seg_failed(stw.upgrade().as_ref(), SEG_NETWORKS, &msg);
                     }
                     // ⚠️ **阶段 116**：文件列表 / 传输 / 查看。
@@ -3652,17 +4176,36 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         // ⚠️ **只认「现在这个容器的这个目录」**：换了容器或
                         //   换了目录以后，旧结果必须丢掉（不然界面上是上一个
                         //   目录的内容）。
+                        // ⚠️ **阶段 159：比的是「正在请求的目录」**
+                        //   （`files_req`）⇒ 当前目录（`files_path`）**只在成功
+                        //   之后才推进** ⇒ 失败时它还是上一个成功的目录。
                         if u.files_name.borrow().as_str() != name
-                            || u.files_path.borrow().as_str() != path
+                            || u.files_req.borrow().as_str() != path
                         {
                             continue;
                         }
                         match r {
-                            Ok(v) => apply_files(&u, &v),
+                            Ok(v) => {
+                                // ⚠️ **成功才推进「当前目录」**（阶段 159）：
+                                //   路径栏显示的内容、表格里的行、双击时拼路径的
+                                //   基准 —— 三者必须**指同一个目录**。
+                                *u.files_path.borrow_mut() = path.clone();
+                                u.files.path.set_text(&path);
+                                apply_files(&u, &v);
+                            }
                             // ⚠️ **说人话**（阶段 140）：容器里没有 `ls` 时
                             //   docker 的原话是「OCI runtime exec failed …」
                             //   ⇒ 用户看不懂「这个容器列不了目录」。
-                            Err(msg) => u.files.status.set_text(&files_err_zh(&msg)),
+                            Err(msg) => {
+                                // ⚠️ **阶段 159：失败 ⇒ 路径栏回到上一个成功的目录**
+                                //   （表格也还是那个目录的行）⇒ 用户不会拿着
+                                //   「旧表格 + 新路径」继续点 ⇒ 路径不再累积。
+                                let cur = u.files_path.borrow().clone();
+                                if !cur.is_empty() {
+                                    u.files.path.set_text(&cur);
+                                }
+                                u.files.status.set_text(&files_err_zh(&msg));
+                            }
                         }
                     }
                     // ⚠️ **阶段 120**：镜像操作的结果（进度 / 成功 / 失败）。
@@ -3852,8 +4395,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     //     道理）。
                     *u.selected_project.borrow_mut() = String::new();
                     u.detail.proj_root.set_visible(false);
-                    // ⚠️ **阶段 117**：有选中 ⇒ 「进入容器」可点。
-                    u.btn_enter.set_sensitive(true);
                     // ⚠️ **先记下选中的容器**（阶段 112 修的 bug）。
                     //
                     // ⚠️ **为什么必须在这儿记**：详情消息回来时要拿它比对
@@ -3895,127 +4436,62 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             }
         });
     }
-    // ---- **「进入容器」按钮**（阶段 117）----
+    // ================= 阶段 155：「操作」列的点击 =================
     //
-    // ⚠️ **为什么在工具条上也放一个**：详情区那个按钮在**下半区** ⇒ 用户
-    //   常常看不到 ⇒ 工具条这个是**列表正上方** ⇒ 一眼能找到。
+    // ⚠️ **为什么自己画图标按钮**（而不是每行放真按钮）：GTK4 **没有**
+    //   `GtkCellRendererWidget` ⇒ 单元格里放不下真 widget ⇒「操作」列是
+    //   一个**自绘的 CellRenderer**（见 `panel::actioncell`）⇒ 命中判定
+    //   也得自己做（`path_at_pos` 给格内坐标 ⇒ 算命中第几颗图标）。
+    //
+    // ⚠️ **GTK4 没有 `button-press-event` 信号** ⇒ 用 `GestureClick`。
     {
         let stw = Rc::downgrade(st);
         let u = Rc::downgrade(&ui);
-        btn_enter.connect_clicked(move |_| {
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        // ⚠️ **捕获阶段** ⇒ 我们的手势先于表格自己的点击手势跑 ⇒ 命中图标
+        //   时可以**独占**这次点击（表格不会跟着选中 / 激活那一行）。
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.connect_pressed(move |g, n_press, x, y| {
             let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
                 return;
             };
-            let name = u.selected.borrow().clone();
-            if name.is_empty() {
-                u.set_segment_status(SEG_CONTAINERS, tr("先在列表里选中一个容器"));
+            // ⚠️ **双击只算第一次**（否则一次双击派发两遍动作）。
+            if n_press > 1 {
                 return;
             }
-            open_container_terminal(&st, &u, &name);
+            let Some(hit) = hit_action_column(&u, x as i32, y as i32) else {
+                return;
+            };
+            // 命中了 ⇒ 独占这次点击（表格不再选中 / 激活那一行）。
+            //
+            // ⚠️ GTK4 的 `GtkGestureSingle::claim()` **gtk4-rs 没暴露**
+            //   ⇒ 用 `set_state(Claimed)`（同一个意思）。
+            g.set_state(gtk::EventSequenceState::Claimed);
+            // ⚠️ **记住点过图标** ⇒ 双击图标时表格的「激活」（进 shell）要
+            //   拦下来（否则点一下图标、双击一下就跑进容器了）。
+            u.last_action_click.set(Some(glib::monotonic_time()));
+            dispatch_row_action(&st, &u, &hit);
         });
+        view.add_controller(click);
     }
-    // **启停 / 重启**（**写操作 ⇒ 二次确认**）
-    {
-        for (btn, action) in [
-            (d_start.clone(), Action::Start),
-            (d_stop.clone(), Action::Stop),
-            (d_restart.clone(), Action::Restart),
-        ] {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            btn.connect_clicked(move |_| {
-                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                    return;
-                };
-                let name = u.selected.borrow().clone();
-                if name.is_empty() {
-                    return;
-                }
-                // ⚠️ **二次确认**：停掉用户服务器上的容器是**不可逆**的副作用 ⇒
-                //    先问一句（默认焦点落在「取消」上 ⇒ 手快按回车不会误停）。
-                confirm_container_action(&st, &u, &name, action);
-            });
-        }
-    }
-    // **容器内终端**（阶段 113）
+    // ---- **「操作」列的 tooltip**（阶段 155）----
     //
-    // ⚠️ **不是写操作**（只是进容器里跑个 shell）⇒ 不用二次确认。
+    // ⚠️ **为什么自己写**：图标是画上去的 ⇒ GTK 不知道每颗图标叫什么 ⇒
+    //   悬停说明也得自己给（禁用时说明「为什么不能点」）。
     {
-        let stw = Rc::downgrade(st);
         let u = Rc::downgrade(&ui);
-        d_term.connect_clicked(move |_| {
-            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                return;
+        view.connect_query_tooltip(move |view, x, y, _kbd, tooltip| {
+            let Some(u) = u.upgrade() else { return false };
+            let Some(hit) = hit_action_column(&u, x, y) else {
+                return false;
             };
-            let name = u.selected.borrow().clone();
-            if name.is_empty() {
-                return;
-            }
-            open_container_terminal(&st, &u, &name);
+            // GTK4 的树视图 tooltip 要自己指定行（默认处理器被我们接管了）。
+            view.set_tooltip_row(tooltip, &hit.ctx.path);
+            let is_project = hit.ctx.kind == KIND_PROJECT;
+            tooltip.set_text(Some(action_tooltip(&hit.action, is_project, &hit.ctx.raw)));
+            true
         });
-    }
-    // **compose 项目的 5 个操作**（阶段 111）
-    {
-        // 「编辑 compose 文件」⇒ **打开远程文件**（不是写操作 ⇒ 不必确认）。
-        {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            p_edit.connect_clicked(move |_| {
-                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                    return;
-                };
-                open_compose_file(&st, &u);
-            });
-        }
-        // 启动 / 停止 / 销毁 / 重建（**写操作 ⇒ 二次确认**）。
-        for (btn, action) in [
-            (p_start.clone(), ComposeAction::Start),
-            (p_stop.clone(), ComposeAction::Stop),
-            (p_down.clone(), ComposeAction::Down),
-            (p_up.clone(), ComposeAction::Up),
-        ] {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            btn.connect_clicked(move |_| {
-                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                    return;
-                };
-                let name = u.selected_project.borrow().clone();
-                if name.is_empty() {
-                    return;
-                }
-                // ⚠️ **二次确认**：在用户服务器上动 compose 项目是**不可逆**的
-                //    副作用（销毁还会删掉容器与网络）⇒ 先问一句（默认焦点在
-                //    「取消」上 ⇒ 手快按回车不会误操作）。
-                let msg = if action.is_dangerous() {
-                    trf!(
-                        "确定要{act} compose 项目「{name}」吗？（容器和网络会被删除）",
-                        act = action.label(),
-                        name = name
-                    )
-                } else {
-                    trf!(
-                        "确定要{act} compose 项目「{name}」吗？",
-                        act = action.label(),
-                        name = name
-                    )
-                };
-                let (st2, u2) = (st.clone(), u.clone());
-                let parent = host_window(&u, &st);
-                crate::panel::dialogs::confirm_title(
-                    parent.as_ref(),
-                    tr("请确认"),
-                    &msg,
-                    action.label(),
-                    move |ok| {
-                        if !ok {
-                            return;
-                        }
-                        do_compose_action(&st2, &u2, action);
-                    },
-                );
-            });
-        }
     }
     // ================= 阶段 112：日志页 =================
     // **切到「日志」页 ⇒ 起流；切走 ⇒ 停流**（监控页同理，**阶段 114**）。
@@ -4087,7 +4563,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         {
             let view = f_view_cb.clone();
             view.connect_query_tooltip(|view, x, y, _kbd, tooltip| {
-                let Some((Some(path), _col, _cx, _cy)) = view.path_at_pos(x, y) else {
+                // ⚠️ **坐标换算**（阶段 156）：tooltip 给的是 widget 坐标，
+                //   `path_at_pos` 要 bin window 坐标 ⇒ 不换算会显示**下一行**。
+                let (bx, by) = view.convert_widget_to_bin_window_coords(x, y);
+                let Some((Some(path), _col, _cx, _cy)) = view.path_at_pos(bx, by) else {
                     return false;
                 };
                 // GTK4 的树视图 tooltip 要自己指定行（默认处理器被我们接管了）
@@ -4516,6 +4995,16 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         let stw = Rc::downgrade(st);
         view.connect_row_activated(move |v, path, _col| {
             let Some(u) = u.upgrade() else { return };
+            // ⚠️ **阶段 155**：刚点过「操作」列的图标 ⇒ 这次「激活」是那次
+            //   点击的延续（双击图标）⇒ 跳过（不然点图标会顺带进 shell）。
+            if let Some(t) = u.last_action_click.get() {
+                let now = glib::monotonic_time();
+                if now - t < 700_000 {
+                    u.last_action_click.set(None);
+                    return;
+                }
+                u.last_action_click.set(None);
+            }
             // 只有**有子行的行**（项目行）才响应。
             let Some(it) = u.model.iter(path) else {
                 return;
@@ -4542,105 +5031,41 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     }
     // ================= UI 审查 D5：右键菜单 ＋ 键盘 =================
     {
-        // ---- **右键菜单**（进 shell / 日志 / 启停 / 重启 / 复制 ID）----
+        // ---- **右键菜单**（按行类型给不同的项）----
         //
         // ⚠️ **为什么要有**：写操作（启停 / 重启 / 进 shell）以前**只能**
         //   「选中行 → 看下半区详情 → 点按钮」⇒ 在 20 个容器里停掉一个要
         //   滚动、选中、够到下半区、再点 ⇒ 右键直接就在手边。
         //
+        // ⚠️ **阶段 160：操作列瘦身后（只留启动 / 停止 / 重启）**，
+        //   「进容器 / 文件 / 日志 / 属性 / 编辑 compose / 销毁 / 重建」
+        //   全搬到这儿 ⇒ 菜单**按行类型**给不同的项（容器行 vs 项目行）
+        //   ⇒ **每次弹出前按这一行重建**（见 `build_row_menu`）。
+        //
         // ⚠️ **GTK4 没有 `connect_button_press_event`**（那是 GTK3 的写法）
         //   ⇒ 右键要用 `GestureClick`（`set_button(3)`）。
         let pop = crate::menu::popover(&view);
-        let body = crate::menu::body();
-        let b_shell = crate::menu::item("utilities-terminal-symbolic", tr("进入容器"), None);
-        let b_logs = crate::menu::item("text-x-generic-symbolic", tr("查看日志"), None);
-        let b_start = crate::menu::item("media-playback-start-symbolic", tr("启动"), None);
-        let b_stop = crate::menu::item("media-playback-stop-symbolic", tr("停止"), None);
-        let b_restart = crate::menu::item("view-refresh-symbolic", tr("重启"), None);
-        let b_copy = crate::menu::item("edit-copy-symbolic", tr("复制容器 ID"), None);
-        body.append(&b_shell);
-        body.append(&b_logs);
-        body.append(&crate::menu::sep());
-        body.append(&b_start);
-        body.append(&b_stop);
-        body.append(&b_restart);
-        body.append(&crate::menu::sep());
-        body.append(&b_copy);
-        pop.set_child(Some(&body));
-
-        // 右键 ⇒ 先把光标挪到那一行（这样菜单里的操作针对的是右键的那一行）。
+        // 右键 ⇒ 挪光标 ＋ 按这一行的类型重建菜单 ＋ 弹出来。
         {
             let view2 = view.clone();
-            let click = gtk::GestureClick::new();
-            click.set_button(3);
-            click.connect_pressed(move |_g, _n, x, y| {
-                if let Some((Some(path), _c, _cx, _cy)) = view2.path_at_pos(x as i32, y as i32) {
-                    gtk::prelude::TreeViewExt::set_cursor(&view2, &path, None, false);
-                }
-            });
-            view.add_controller(click);
-        }
-        // 菜单里的五个动作。
-        {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            b_shell.connect_clicked(move |_| {
-                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                    return;
-                };
-                let Some(name) = u.selected_container_name() else { return };
-                open_container_terminal(&st, &u, &name);
-                u.close_row_menu();
-            });
-        }
-        {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            b_logs.connect_clicked(move |_| {
-                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                    return;
-                };
-                let Some(name) = u.selected_container_name() else { return };
-                // ⚠️ **切到日志页** ⇒ 那一页自己会起流（见 stack 的
-                //   `visible-child-name` 回调）。
-                u.stack.set_visible_child_name(PAGE_LOGS);
-                let _ = st;
-                u.close_row_menu();
-            });
-        }
-        for (btn, action) in [
-            (b_start, Action::Start),
-            (b_stop, Action::Stop),
-            (b_restart, Action::Restart),
-        ] {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            btn.connect_clicked(move |_| {
-                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
-                    return;
-                };
-                let Some(name) = u.selected_container_name() else { return };
-                u.close_row_menu();
-                confirm_container_action(&st, &u, &name, action);
-            });
-        }
-        {
-            let u = Rc::downgrade(&ui);
-            b_copy.connect_clicked(move |_| {
-                let Some(u) = u.upgrade() else { return };
-                let Some(name) = u.selected_container_name() else { return };
-                let id = u.selected_container_id();
-                u.close_row_menu();
-                let _ = name;
-                copy_to_clipboard(&id);
-            });
-        }
-        // 菜单挂在表格上 ⇒ 右键哪一行就在哪儿弹。
-        {
             let pop2 = pop.clone();
+            let stw = Rc::downgrade(st);
+            let u = Rc::downgrade(&ui);
             let click = gtk::GestureClick::new();
             click.set_button(3);
             click.connect_pressed(move |_g, _n, x, y| {
+                let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                    return;
+                };
+                // ⚠️ **坐标换算**（阶段 156）：手势是 widget 坐标，
+                //   `path_at_pos` 要 bin window 坐标 ⇒ 不换算会选中**下一行**。
+                let (bx, by) = view2.convert_widget_to_bin_window_coords(x as i32, y as i32);
+                let mut ctx: Option<RowCtx> = None;
+                if let Some((Some(path), _c, _cx, _cy)) = view2.path_at_pos(bx, by) {
+                    gtk::prelude::TreeViewExt::set_cursor(&view2, &path, None, false);
+                    ctx = row_ctx_at(&u, &path);
+                }
+                build_row_menu(&st, &u, &pop2, ctx.as_ref());
                 pop2.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                     x as i32,
                     y as i32,
@@ -4771,6 +5196,432 @@ fn confirm_container_action(
             do_action(&st2, &u2, action, &name2);
         },
     );
+}
+
+/// compose 项目写操作的**二次确认**（启动 / 停止 / 重启 / 销毁 / 重建）。
+///
+/// ⚠️ **阶段 160**：操作列瘦身后，项目的启停也走这里 ⇒ 项目行点「启动」
+///   跑的是 `docker compose start`（不是 `docker start <项目名>`）。
+fn confirm_compose_action(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    name: &str,
+    action: ComposeAction,
+) {
+    // ⚠️ `do_compose_action` 从这里取项目名 ⇒ 先记上。
+    *ui.selected_project.borrow_mut() = name.to_string();
+    // ⚠️ **二次确认**：在用户服务器上动 compose 项目是**不可逆**的
+    //   副作用（销毁还会删掉容器与网络）⇒ 先问一句（默认焦点在
+    //   「取消」上 ⇒ 手快按回车不会误操作）。
+    let msg = if action.is_dangerous() {
+        trf!(
+            "确定要{act} compose 项目「{name}」吗？（容器和网络会被删除）",
+            act = action.label(),
+            name = name
+        )
+    } else {
+        trf!(
+            "确定要{act} compose 项目「{name}」吗？",
+            act = action.label(),
+            name = name
+        )
+    };
+    let (st2, u2) = (st.clone(), ui.clone());
+    let parent = host_window(ui, st);
+    crate::panel::dialogs::confirm_title(
+        parent.as_ref(),
+        tr("请确认"),
+        &msg,
+        action.label(),
+        move |ok| {
+            if !ok {
+                return;
+            }
+            do_compose_action(&st2, &u2, action);
+        },
+    );
+}
+
+/* ---------------- 阶段 155：「操作」列 ---------------- */
+
+/// **一行容器表的基本信息**（右键菜单、命中判定都要它）。
+///
+/// ⚠️ **阶段 160**：从 [`ActionHit`] 里拆出来 ⇒ 右键菜单不必伪造一个
+///   「命中的图标」就能拿到「是哪一行」。
+#[derive(Clone, Debug)]
+struct RowCtx {
+    /// 那一行的路径（tooltip / 挪光标要用它定位）。
+    path: gtk::TreePath,
+    /// 行名（容器名 / compose 项目名）。
+    name: String,
+    /// 行类型（`COL_KIND`）。
+    kind: String,
+    /// 原始状态（`COL_RAW_STATE`）。
+    raw: String,
+}
+
+/// **命中结果**（点中了哪一行、哪颗图标）。
+#[derive(Clone, Debug)]
+struct ActionHit {
+    /// 命中的那一行。
+    ctx: RowCtx,
+    /// 命中的那颗图标。
+    action: RowAction,
+}
+
+/// 某一行在模型里的**基本信息**（**纯查表** ⇒ 菜单与命中判定共用）。
+fn row_ctx_at(ui: &Rc<DockerUi>, path: &gtk::TreePath) -> Option<RowCtx> {
+    let it = ui.model.iter(path)?;
+    let name: String = ui.model.get(&it, COL_NAME as i32);
+    let kind: String = ui.model.get(&it, COL_KIND as i32);
+    let raw: String = ui.model.get(&it, COL_RAW_STATE as i32);
+    Some(RowCtx {
+        path: path.clone(),
+        name,
+        kind,
+        raw,
+    })
+}
+
+/// **按这一行的类型重建右键菜单**（阶段 160）。
+///
+/// ⚠️ **为什么每次弹出都重建**：菜单项**按行类型**不同（容器行有「文件 /
+///   日志 / 复制 ID」，项目行有「编辑 compose / 销毁 / 重建」）
+///   ⇒ 一次建好没法两用 ⇒ 弹出前按行重建（菜单很少弹 ⇒ 重建不心疼）。
+///
+/// ⚠️ **每一项都把「哪一行」记在闭包里** ⇒ 点它的时候动的是**右键的那一行**
+///   （不是「当前选中那一行」）⇒ 免得「右键 A 实际动到 B」。
+fn build_row_menu(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    pop: &gtk::Popover,
+    ctx: Option<&RowCtx>,
+) {
+    // ⚠️ **旧内容扔掉**（换行类型 ⇒ 换内容）。
+    pop.set_child(None::<&gtk::Widget>);
+    let body = crate::menu::body();
+    let Some(ctx) = ctx else {
+        pop.set_child(Some(&body));
+        return;
+    };
+    let acts = menu_actions(&ctx.kind, &ctx.raw);
+    let mut last_group = u8::MAX;
+    for a in acts {
+        // ⚠️ **段号变了才插分隔线**（同一段里不插）。
+        if a.group != last_group {
+            if last_group != u8::MAX {
+                body.append(&crate::menu::sep());
+            }
+            last_group = a.group;
+        }
+        let b = crate::menu::item(&a.icon, a.label, None);
+        // ⚠️ **危险动作标红**（销毁项目会删掉容器与网络）。
+        if a.kind == ActionKind::Down {
+            crate::menu::danger(&b);
+        }
+        // ⚠️ **不能点的项要真的点不了**（跟「操作」列同一套算术）——
+        //   运行中的容器在菜单里点「启动」只是空转 ⇒ 直接灰掉。
+        if !a.enabled {
+            b.set_sensitive(false);
+        }
+        let st2 = st.clone();
+        let u2 = ui.clone();
+        let ctx2 = ctx.clone();
+        let kind = a.kind;
+        let icon = a.icon.clone();
+        b.connect_clicked(move |_| {
+            u2.close_row_menu();
+            dispatch_row_action(
+                &st2,
+                &u2,
+                &ActionHit {
+                    ctx: ctx2.clone(),
+                    action: RowAction {
+                        kind,
+                        icon: icon.clone(),
+                        enabled: true,
+                    },
+                },
+            );
+        });
+        body.append(&b);
+    }
+    pop.set_child(Some(&body));
+}
+
+/// **点中了「操作」列里的第几颗图标**（没点中就 `None`）。
+///
+/// ⚠️ **`cell_x` 是格内坐标**（相对列的左边缘）⇒ 除以槽宽就是第几颗。
+///   （实测确认：GTK4 的 `path_at_pos` 给的 `cell_x` 就是格内坐标。）
+fn hit_action_column(ui: &Rc<DockerUi>, x: i32, y: i32) -> Option<ActionHit> {
+    // ⚠️ **坐标必须换算**（阶段 156）：手势给的是 **widget 坐标**（含列头），
+    //   而 `path_at_pos` 收的是 **bin window 坐标**（不含列头）⇒ 不换算就
+    //   **整体下移一行** ⇒ 点 compose 项目行的「编辑」会命中它**下面那个
+    //   容器行**的「进容器」⇒ 弹出 term 窗口（用户 2026-11-23 报的）。
+    //   ⚠️ 老坑见 `src/panel/pane.rs:1881`（「右键 A 实际选中/上传 B」）。
+    let (bx, by) = ui.view.convert_widget_to_bin_window_coords(x, y);
+    let (path, col, cell_x, _cell_y) = ui.view.path_at_pos(bx, by)?;
+    let path = path?;
+    let col = col?;
+    // ⚠️ **不是「操作」列** ⇒ 不算命中（点别的列就是普通点击）。
+    if col != ui.action_col {
+        return None;
+    }
+    let ctx = row_ctx_at(ui, &path)?;
+    let acts = row_actions(&ctx.kind, &ctx.raw);
+    // ⚠️ **阶段 158：图标组右对齐** ⇒ 第几颗要减去它在格内的左边缘。
+    //   ⇒ **问渲染器**（`hit_index`）⇒ **画和判是同一套算术**
+    //   （以前两边各写一份 ⇒ 迟早漂移）。
+    let cell_w = ui.view.cell_area(Some(&path), Some(&ui.action_col)).width();
+    // ⚠️ **`n` 用「这一行」的图标数**（不是渲染器里存着的那个 ——
+    //   那是**最后绘制的那一行**的 ⇒ 拿它算会错位）。
+    let idx = crate::panel::actioncell::hit_index_at(cell_x, cell_w, acts.len())?;
+    let action = acts.get(idx)?.clone();
+    Some(ActionHit { ctx, action })
+}
+
+/// **派发一次操作**（点中了「操作」列里的某颗图标）。
+///
+/// ⚠️ **写操作仍然二次确认**（跟以前那些按钮一个待遇）⇒ 启停 / 销毁 /
+///   重建都走 `confirm_*`。
+fn dispatch_row_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, hit: &ActionHit) {
+    let is_project = hit.ctx.kind == KIND_PROJECT;
+    let name = hit.ctx.name.clone();
+    match hit.action.kind {
+        ActionKind::Detail => {
+            // ⚠️ **先把光标挪到那一行**（用户看得见自己点的是谁）。
+            //   `restoring` 是「程序性恢复选中」⇒ 顺带**跳过**表格自己的
+            //   选中回调（不然详情会被取两次）。
+            ui.restoring.set(true);
+            if let Some(path) = ui.find_path(&name) {
+                gtk::prelude::TreeViewExt::set_cursor(&ui.view, &path, None, false);
+            }
+            ui.restoring.set(false);
+            if is_project {
+                ui.show_project(&name);
+            } else {
+                *ui.selected.borrow_mut() = name.clone();
+                *ui.selected_project.borrow_mut() = String::new();
+                ui.detail.proj_root.set_visible(false);
+                load_detail(st, ui, &name);
+            }
+            // 弹窗**从概览页**打开（其余页签在弹窗的页签条上）。
+            ui.stack.set_visible_child_name(PAGE_OVERVIEW);
+            let title = if is_project {
+                trf!("compose 项目：{n}", n = name)
+            } else {
+                trf!("容器：{n}", n = name)
+            };
+            open_detail_window(st, ui, &title);
+        }
+        ActionKind::Enter => {
+            // ⚠️ **不是写操作**（只是进容器里跑个 shell）⇒ 不用二次确认。
+            open_container_terminal(st, ui, &name);
+        }
+        ActionKind::Edit => {
+            // 「编辑 compose 文件」⇒ **打开远程文件**（不是写操作 ⇒ 不必确认）。
+            *ui.selected_project.borrow_mut() = name.clone();
+            let has_file = ui
+                .project_summary(&name)
+                .map(|s| !s.files.is_empty())
+                .unwrap_or(false);
+            if !has_file {
+                ui.set_segment_status(
+                    SEG_CONTAINERS,
+                    tr("这个项目没有记录 compose 配置文件路径 ⇒ 没法编辑"),
+                );
+                return;
+            }
+            open_compose_file(st, ui);
+        }
+        ActionKind::Start | ActionKind::Stop | ActionKind::Restart => {
+            // ⚠️ **阶段 160：项目行要走 compose**（以前一律走容器路径
+            //   ⇒ `docker start <项目名>` ⇒ 报「no such container」⇒
+            //   **项目行的启动/停止其实是坏的**）。
+            if is_project {
+                let action = match hit.action.kind {
+                    ActionKind::Start => ComposeAction::Start,
+                    ActionKind::Stop => ComposeAction::Stop,
+                    _ => ComposeAction::Restart,
+                };
+                confirm_compose_action(st, ui, &name, action);
+            } else {
+                let action = match hit.action.kind {
+                    ActionKind::Start => Action::Start,
+                    ActionKind::Stop => Action::Stop,
+                    _ => Action::Restart,
+                };
+                // ⚠️ **二次确认**：停掉用户服务器上的容器是**不可逆**的副作用 ⇒
+                //   先问一句（默认焦点落在「取消」上 ⇒ 手快按回车不会误停）。
+                confirm_container_action(st, ui, &name, action);
+            }
+        }
+        ActionKind::Files => {
+            // ⚠️ **文件页看的是「选中容器的目录」** ⇒ 得先把这个容器设成选中。
+            *ui.selected.borrow_mut() = name.clone();
+            *ui.selected_project.borrow_mut() = String::new();
+            ui.detail.proj_root.set_visible(false);
+            ui.stack.set_visible_child_name(PAGE_FILES);
+            // ⚠️ **阶段 155**：详情在**弹窗**里 ⇒ 「文件」得把弹窗一起打开
+            //   （不然切了页签，用户什么也没看见）。
+            open_detail_window(st, ui, &trf!("容器：{n}", n = name));
+        }
+        ActionKind::Logs => {
+            // ⚠️ **切到日志页** ⇒ 那一页自己会起流（见 stack 的
+            //   `visible-child-name` 回调）。
+            *ui.selected.borrow_mut() = name.clone();
+            *ui.selected_project.borrow_mut() = String::new();
+            ui.detail.proj_root.set_visible(false);
+            ui.stack.set_visible_child_name(PAGE_LOGS);
+            open_detail_window(st, ui, &trf!("容器：{n}", n = name));
+        }
+        ActionKind::CopyId => {
+            let id = ui.selected_container_id();
+            copy_to_clipboard(&id);
+        }
+        ActionKind::Down | ActionKind::Up => {
+            let action = if hit.action.kind == ActionKind::Down {
+                ComposeAction::Down
+            } else {
+                ComposeAction::Up
+            };
+            confirm_compose_action(st, ui, &name, action);
+        }
+    }
+}
+
+/// **详情弹窗里的「关闭」按钮**（阶段 156）。
+///
+/// ⚠️ **为什么非有不可**（用户 2026-11-23 报的「弹出对话框没法关闭」）：
+///   详情弹窗是**普通 `gtk::Window`** ⇒ GTK4 **不替它画标题栏**（项目自己的
+///   主窗口 / 编辑器窗口都是**显式** `set_titlebar(HeaderBar)` 才有的，
+///   见 `src/main.rs:189`、`src/panel/fileedit.rs:1126`）⇒ 外面那个 X
+///   **不一定存在** ⇒ **用户可能一个关闭入口都看不到**。
+///   ⇒ 就在内容里放一个，**永远看得见**。
+///
+/// ⚠️ **只藏，不销毁**：弹窗里装着**共享的**详情控件（`detail_box`）
+///   ⇒ 销毁了就再也开不出来（控件全成悬空句柄）。
+fn detail_close_button() -> gtk::Button {
+    let b = gtk::Button::with_label(tr("关闭"));
+    b.add_css_class("flat");
+    b.set_valign(gtk::Align::Center);
+    // ⚠️ **阶段 157：图标按钮/动作按钮都要有 tooltip**（用户 2026-11-23：
+    //   「按钮增加 tooltip」）⇒ 这里是纯文字按钮 ⇒ 补一句说明它做什么。
+    b.set_tooltip_text(Some(tr("关掉这个详情窗口（内容留着，下次打开还在）")));
+    b.connect_clicked(|b| {
+        // ⚠️ 往上找那扇窗（按钮是弹窗内容的一部分）⇒ **藏起来**，不销毁。
+        if let Some(w) = b
+            .ancestor(gtk::Window::static_type())
+            .and_downcast::<gtk::Window>()
+        {
+            w.set_visible(false);
+        }
+    });
+    b
+}
+
+/// **详情弹窗**（第一次用时建；以后**复用**）。
+///
+/// ⚠️ **建一次、复用**：关掉只是**隐藏**（不销毁）⇒ 控件状态不丢
+///   （日志页的搜索词、监控页的曲线、文件页的目录都不用重来）。
+/// ⚠️ **必须挂到宿主窗口下面**（transient parent）⇒ 不然弹窗可能落在
+///   主窗**后面**（UI 审查 D19 的老坑）。
+fn ensure_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
+    if let Some(w) = ui.detail_window.borrow().as_ref() {
+        return w.clone();
+    }
+    let win = gtk::Window::new();
+    win.set_title(Some(tr("容器详情")));
+    // ⚠️ **阶段 156**：**记住尺寸**（AGENTS.md：工具窗要记尺寸）⇒ 下次按它开。
+    let (mut dw, mut dh) = (880, 620);
+    if let Some((w, h)) = crate::settings::window_size("docker_detail") {
+        if w >= 240 && h >= 180 {
+            dw = w;
+            dh = h;
+        }
+    }
+    win.set_default_size(dw, dh);
+    if let Some(parent) = host_window(ui, st) {
+        win.set_transient_for(Some(&parent));
+    }
+    win.set_child(Some(&ui.detail_box));
+    // ⚠️ **关掉 ⇒ 回到概览页** ⇒ 日志 / 监控两条流自动停掉
+    //   （不然远端一直挂着 `docker logs -f` / `docker stats`）。
+    //
+    // ⚠️ **阶段 156：这里必须 `hide` + `Stop`，不能 `Proceed`**：
+    //   `Proceed` = 继续走 GTK 的默认处理 ⇒ 它会把窗口**销毁**
+    //   （见 `src/panel/dbui.rs:5616-5618` 的老坑）⇒ 而弹窗里装的是
+    //   **共享的 `detail_box`** ⇒ 一关整块详情内容就没了 ⇒ 下次打开是坏的
+    //   （`ensure_detail_window` 还会返回已销毁的句柄 ⇒ `present()` 无效）。
+    {
+        win.connect_close_request(move |w| {
+            crate::settings::save_window_size("docker_detail", w);
+            w.set_visible(false);
+            glib::Propagation::Stop
+        });
+    }
+    // ⚠️ **一藏就回概览页** ⇒ 所有关法（按钮 / X / Esc）统一走这一条路。
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_hide(move |_| {
+            if let Some(u) = u.upgrade() {
+                u.stack.set_visible_child_name(PAGE_OVERVIEW);
+            }
+        });
+    }
+    // ⚠️ **万一还是被销毁了**（将来谁又引入了 destroy）⇒ 把句柄摘掉
+    //   ⇒ 下次**重建**，而不是拿一个野句柄去 `present()`。
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_destroy(move |_| {
+            if let Some(u) = u.upgrade() {
+                *u.detail_window.borrow_mut() = None;
+            }
+        });
+    }
+    // ⚠️ **Esc 关闭**（普通 `GtkWindow` 不像 `GtkDialog` 那样 Esc 自动关）。
+    {
+        let w = win.clone();
+        let key = gtk::EventControllerKey::new();
+        key.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Escape {
+                // ⚠️ **光标在输入框里时不抢 Esc**（日志页的搜索框要靠 Esc
+                //   清空）⇒ 只在焦点**不在可编辑控件**上时才关窗。
+                if let Some(f) = gtk::prelude::GtkWindowExt::focus(&w) {
+                    if f.is::<gtk::Entry>() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+                w.set_visible(false);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        win.add_controller(key);
+    }
+    *ui.detail_window.borrow_mut() = Some(win.clone());
+    win
+}
+
+/// **关掉详情弹窗**（页签关掉时走的就是它）。
+///
+/// ⚠️ **只隐藏，不销毁**：弹窗里装着详情区的控件（概览 / 日志 / 监控 /
+///   文件）⇒ 销毁了 ⇒ 下次打开就是一片空白 ⇒ 只隐藏（控件留着）。
+fn close_detail_window(ui: &Rc<DockerUi>) {
+    if let Some(w) = ui.detail_window.borrow().as_ref() {
+        w.set_visible(false);
+    }
+    // 回概览页 ⇒ 日志 / 监控两条流自动停掉（不白占远端进程）。
+    // （弹窗藏起来时 `hide` 钩子也会做这件事 ⇒ 这里再兜一层。）
+    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
+}
+
+/// **打开详情弹窗**（标题带上是谁）。
+fn open_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, title: &str) {
+    let win = ensure_detail_window(st, ui);
+    win.set_title(Some(&format!("{} · {}", tr("容器详情"), title)));
+    win.present();
 }
 
 /// 容器页的**宿主窗口**（弹窗的 transient parent）。
@@ -5740,8 +6591,13 @@ pub fn open_compose_path(st: &Rc<PanelState>, path: &str, work_dir: &str) {
 /// 结果回来再回主线程更新界面。
 fn refresh(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     if ui.busy.get() {
+        // ⚠️ **阶段 161：记一笔「待会儿再刷」**——上一次还没回来时，
+        //   **写操作之后的那次刷新会被丢掉** ⇒ 表里还是旧数据
+        //   （用户看着像「删了没删」）。
+        ui.busy_pending.set(true);
         return; // 上一次还没回来 ⇒ 不叠加
     }
+    ui.busy_pending.set(false);
     ui.busy.set(true);
     // ⚠️ **loading 动画**（用户 2026-11-16）：开始取了 ⇒ 转起来。
     ui.set_loading(true);
@@ -5803,6 +6659,8 @@ pub fn mount(st: &Rc<PanelState>) {
                 stop_stats(&u);
                 // ⚠️ **容器内终端也得停**（否则容器里留着孤儿 shell）。
                 stop_terminal(&u);
+                // ⚠️ **详情弹窗也得关**（否则关掉页签后屏幕上还留着一扇窗）。
+                close_detail_window(&u);
             }
         });
     }
@@ -5842,6 +6700,19 @@ pub fn name_renderer_for_test(st: &Rc<PanelState>) -> Option<gtk::CellRendererTe
         .borrow()
         .as_ref()
         .and_then(|u| u.name_renderer.clone())
+}
+
+/// 测试钩子：表格的**列标题**（阶段 155：用来验「CPU / 内存 / 详情」退役了）。
+pub fn column_titles_for_test(st: &Rc<PanelState>) -> Vec<String> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    for i in 0..ui.view.n_columns() {
+        if let Some(c) = ui.view.column(i as i32) {
+            out.push(c.title().to_string());
+        }
+    }
+    out
 }
 
 /// 测试钩子：最近一次取到的容器。
@@ -5983,12 +6854,34 @@ pub fn set_detail_for_test(st: &Rc<PanelState>, d: ContainerDetail) {
     ui.apply_detail(&d);
 }
 
-/// 测试钩子：详情区是不是显示着（**没选容器时应当是收起的**）。
+/// 测试钩子：详情**弹窗**是不是开着（阶段 155：详情搬进弹窗了）。
+///
+/// ⚠️ **看的是「弹窗在不在屏幕上」**（`is_visible`）⇒ 不是「控件在不在」
+///   ⇒ 控件一直都在（弹窗是复用的）⇒ 拿控件判断等于什么都没断言。
 pub fn detail_visible_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .and_then(|u| u.detail_window.borrow().as_ref().cloned())
+        .map(|w| w.is_visible())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：**详情弹窗**的标题（阶段 155）。
+pub fn detail_window_title_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .and_then(|u| u.detail_window.borrow().as_ref().cloned())
+        .and_then(|w| w.title())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// 测试钩子：容器详情的**内容块**是不是显示着（项目行时应当是收起的）。
+pub fn detail_body_visible_for_test(st: &Rc<PanelState>) -> bool {
     st.docker_ui
         .borrow()
         .as_ref()
-        .map(|u| u.detail.root.is_visible())
+        .map(|u| u.detail.root.property::<bool>("visible"))
         .unwrap_or(false)
 }
 
@@ -5999,6 +6892,99 @@ pub fn detail_title_for_test(st: &Rc<PanelState>) -> String {
         .as_ref()
         .map(|u| u.detail.title.text().to_string())
         .unwrap_or_default()
+}
+
+/// 测试钩子：**按 widget 坐标**命中「操作」列 ⇒ 命中的动作短名（阶段 156）。
+///
+/// ⚠️ **为什么要有它**（阶段 156）：`dispatch_action_for_test` /
+///   `click_row_action_for_test` 都**直接构造命中结果** ⇒ **完全绕开坐标**
+///   ⇒ 「点项目行的『编辑』却弹出 term 窗口」（命中**差一行**）这种 bug
+///   **测不出来**。
+///   ⇒ 这个钩子走的是**真·命中判定那条路**（含 widget → bin window 换算）。
+///
+/// ⚠️ 坐标是 **widget 坐标**（跟手势给的一样）。
+pub fn hit_action_at_for_test(st: &Rc<PanelState>, x: i32, y: i32) -> Option<String> {
+    let slot = st.docker_ui.borrow();
+    let ui = slot.as_ref()?;
+    let hit = hit_action_column(ui, x, y)?;
+    Some(action_key(hit.action.kind).to_string())
+}
+
+/// 测试钩子：悬停「操作」列 ⇒ **tooltip 文案**（阶段 157）。
+///
+/// ⚠️ **用户 2026-11-23 提的**：「按钮增加 tooltip」。
+///   ⇒ 这里走的是**跟真·tooltip 处理器同一条路**（`hit_action_column` ＋
+///   `action_tooltip`）⇒ 「命中差一行」/「文案对不上」都能测出来。
+///
+/// ⚠️ 坐标是 **widget 坐标**（跟手势给的一样）。
+pub fn action_tooltip_at_for_test(st: &Rc<PanelState>, x: i32, y: i32) -> Option<String> {
+    let slot = st.docker_ui.borrow();
+    let ui = slot.as_ref()?;
+    let hit = hit_action_column(ui, x, y)?;
+    Some(
+        action_tooltip(
+            &hit.action,
+            hit.ctx.kind == KIND_PROJECT,
+            &hit.ctx.raw,
+        )
+        .to_string(),
+    )
+}
+
+/// 测试钩子：详情弹窗里**「关闭」按钮**的个数（阶段 156：容器 / 项目各一个）。
+pub fn detail_close_button_count_for_test(st: &Rc<PanelState>) -> usize {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.detail_close_btns.borrow().len())
+        .unwrap_or(0)
+}
+
+/// 测试钩子：**点一下**详情弹窗里的「关闭」按钮（阶段 156）。
+///
+/// ⚠️ 走的是**按钮自己的点击处理**（不是直接藏窗口）⇒ 跟用户真点一下是
+///   同一条路。
+pub fn close_detail_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    let btns = ui.detail_close_btns.borrow();
+    if let Some(b) = btns.first() {
+        b.emit_clicked();
+    }
+}
+
+/// 测试钩子：详情弹窗**还活着**吗（没被销毁）（阶段 156）。
+///
+/// ⚠️ 验的是「句柄还在」⇒ 抓「关一次就把共享内容销毁了」那种回归。
+pub fn detail_window_alive_for_test(st: &Rc<PanelState>) -> bool {
+    st.docker_ui
+        .borrow()
+        .as_ref()
+        .map(|u| u.detail_window.borrow().is_some())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：详情**内容**还挂在弹窗里吗（阶段 156）。
+///
+/// ⚠️ **这是「内容有没有被销毁」最直接的判据**：GTK4 销毁窗口时会把子控件
+///   **解除父子关系**（`parent()` 变 `None`）⇒ 内容还挂在窗上 ⇒ 没被销毁。
+pub fn detail_content_attached_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(u) = slot.as_ref() else { return false };
+    let win = u.detail_window.borrow();
+    match win.as_ref() {
+        Some(w) => u.detail_box.is_ancestor(w),
+        None => false,
+    }
+}
+
+/// 测试钩子：**模拟点窗口的 X**（走 `close-request` 那条路）（阶段 156）。
+pub fn request_close_detail_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    if let Some(w) = ui.detail_window.borrow().as_ref() {
+        w.close();
+    }
 }
 
 /// 测试钩子：详情头的**状态药丸**（文字 + 档位类）。
@@ -6052,34 +7038,233 @@ pub fn selected_for_test(st: &Rc<PanelState>) -> String {
         .unwrap_or_default()
 }
 
-/// 测试钩子：动作按钮**能不能点**（`start` / `stop` / `restart`）。
-pub fn action_sensitive_for_test(st: &Rc<PanelState>, which: &str) -> bool {
-    st.docker_ui
-        .borrow()
-        .as_ref()
-        .map(|u| match which {
-            "start" => u.detail.btn_start.is_sensitive(),
-            "stop" => u.detail.btn_stop.is_sensitive(),
-            "restart" => u.detail.btn_restart.is_sensitive(),
-            _ => false,
-        })
+/// 测试钩子：**某一行某个操作能不能点**（阶段 155：按钮搬进「操作」列了）。
+///
+/// `name` = 行名（容器名 / compose 项目名）；`action` = `detail` / `enter` /
+/// `edit` / `start` / `stop` / `restart` / `down` / `up`。
+pub fn row_action_enabled_for_test(st: &Rc<PanelState>, name: &str, action: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let Some(it) = ui.find_iter(name) else {
+        return false;
+    };
+    let kind: String = ui.model.get(&it, COL_KIND as i32);
+    let raw: String = ui.model.get(&it, COL_RAW_STATE as i32);
+    row_actions(&kind, &raw)
+        .into_iter()
+        .find(|a| action_key(a.kind) == action)
+        .map(|a| a.enabled)
         .unwrap_or(false)
 }
 
-/// 测试钩子：**点一下动作按钮**（冒烟要验「二次确认拦在前面」）。
+/// 测试钩子：某一行「操作」列的**图标**（图标名 + 能不能点）。
+///
+/// ⚠️ **为什么要有**：图标是**自绘**的 ⇒ 冒烟能验「图标名对不对、几个、
+///   禁用态对不对」⇒ 免得图标名写错 ⇒ 界面上是空白方块。
+pub fn row_action_icons_for_test(st: &Rc<PanelState>, name: &str) -> Vec<(String, bool)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let Some(it) = ui.find_iter(name) else {
+        return Vec::new();
+    };
+    let kind: String = ui.model.get(&it, COL_KIND as i32);
+    let raw: String = ui.model.get(&it, COL_RAW_STATE as i32);
+    row_actions(&kind, &raw)
+        .into_iter()
+        .map(|a| (a.icon, a.enabled))
+        .collect()
+}
+
+/// 测试钩子：**在某一行上弹出右键菜单**（阶段 160）。
+///
+/// ⚠️ **菜单是「按行类型」现建的** ⇒ 要先给它一行 ⇒ 冒烟才能截图 / 断言。
+pub fn show_row_menu_for_test(st: &Rc<PanelState>, name: &str) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let pop = ui.row_menu.borrow().clone();
+    let Some(pop) = pop else { return false };
+    let Some(it) = ui.find_iter(name) else { return false };
+    let path = ui.model.path(&it);
+    let Some(ctx) = row_ctx_at(ui, &path) else { return false };
+    build_row_menu(st, ui, &pop, Some(&ctx));
+    // ⚠️ **要像真右键一样定位在那一行旁边**（阶段 160 补）——
+    //   不定位的话弹层会落在表格左下角 ⇒ 截图里根本看不到菜单。
+    let y = row_widget_y(ui, &path);
+    pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(24, y, 1, 1)));
+    pop.popup();
+    true
+}
+
+/// 这一行在**表格 widget 坐标**里的 y（找不到就 0）。
+///
+/// ⚠️ **`path_at_pos` 收的是 bin window 坐标**（不含列头）⇒ 得先换算。
+fn row_widget_y(ui: &Rc<DockerUi>, path: &gtk::TreePath) -> i32 {
+    let view = &ui.view;
+    let mut y = 0;
+    while y < 800 {
+        let (bx, by) = view.convert_widget_to_bin_window_coords(0, y);
+        if let Some((Some(p), _, _, _)) = view.path_at_pos(bx, by) {
+            if &p == path {
+                return y;
+            }
+        }
+        y += 6;
+    }
+    0
+}
+
+/// 测试钩子：**收起右键菜单**（阶段 160；冒烟截图后要收起来）。
+pub fn close_row_menu_for_test(st: &Rc<PanelState>) {
+    let slot = st.docker_ui.borrow();
+    if let Some(ui) = slot.as_ref() {
+        ui.close_row_menu();
+    }
+}
+
+/// 测试钩子：**右键菜单里每一项的文字**（阶段 160）。
+pub fn row_menu_items_for_test(st: &Rc<PanelState>) -> Vec<String> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let pop = ui.row_menu.borrow();
+    let Some(pop) = pop.as_ref() else { return Vec::new() };
+    let Some(child) = pop.child() else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut cur = child.first_child();
+    while let Some(c) = cur {
+        if let Some(b) = c.downcast_ref::<gtk::Button>() {
+            if let Some(t) = crate::menu::item_label(b) {
+                out.push(t);
+            }
+        }
+        cur = c.next_sibling();
+    }
+    out
+}
+
+/// 测试钩子：**右键菜单里每一项能不能点**（**键是菜单文字**）。
+///
+/// ⚠️ **为什么要有**：菜单里的「启动 / 停止」要跟「操作」列**一样**看状态
+///   ⇒ 冒烟得能验「运行中的容器，菜单里的『启动』是灰的」。
+pub fn row_menu_item_sensitive_for_test(st: &Rc<PanelState>, label: &str) -> Option<bool> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return None };
+    let pop = ui.row_menu.borrow();
+    let Some(pop) = pop.as_ref() else { return None };
+    let Some(child) = pop.child() else { return None };
+    let mut cur = child.first_child();
+    while let Some(c) = cur {
+        if let Some(b) = c.downcast_ref::<gtk::Button>() {
+            if crate::menu::item_label(b).as_deref() == Some(label) {
+                return Some(b.is_sensitive());
+            }
+        }
+        cur = c.next_sibling();
+    }
+    None
+}
+
+/// 测试钩子：**右键菜单里有哪些项**（阶段 160）。
+///
+/// 返回 `(动作短名, 菜单文字)` ⇒ 冒烟能验「文件 / 日志 / 属性」都在菜单里
+/// （用户 2026-11-24 提的）。
+pub fn menu_actions_for_test(kind: &str, raw_state: &str) -> Vec<(String, String)> {
+    menu_actions(kind, raw_state)
+        .into_iter()
+        .map(|m| (action_key(m.kind).to_string(), m.label.to_string()))
+        .collect()
+}
+
+/// 测试钩子：**右键菜单里每一项的图标名**（阶段 160 补）。
+///
+/// ⚠️ **为什么要有**：菜单图标名写错 ⇒ 界面上是**缺图占位符**（用户一眼就看见）
+///   ⇒ 冒烟要能验「菜单里的图标名**系统主题里真有**」。
+pub fn menu_action_icons_for_test(kind: &str, raw_state: &str) -> Vec<String> {
+    menu_actions(kind, raw_state).into_iter().map(|m| m.icon).collect()
+}
+
+/// 测试钩子：**右键菜单里每一项**能不能点（**键是菜单文字**）。
+///
+/// ⚠️ **为什么要有**：菜单里的「启动 / 停止」要跟「操作」列**一样**
+///   看容器状态 ⇒ 冒烟得能验「运行中的容器，菜单里的『启动』是灰的」。
+pub fn menu_action_enabled_for_test(kind: &str, raw_state: &str, label: &str) -> Option<bool> {
+    menu_actions(kind, raw_state)
+        .into_iter()
+        .find(|m| m.label == label)
+        .map(|m| m.enabled)
+}
+
+/// 测试钩子：**直接派发一次操作**（**不查模型** ⇒ 不受后台刷新影响）。
+///
+/// ⚠️ **为什么要有这个**：界面组（不连服务器）会往模型里灌**假数据**
+///   ⇒ 但后台的**真实刷新**可能刚好落下来 ⇒ 把假数据换掉 ⇒ 按名字查行
+///   就查不到了 ⇒ 断言变成「偶发红」（实测踩过：截图多花 1 秒就红了）。
+///   ⇒ 这个钩子**直接派发** ⇒ 与模型里现在是什么无关。
+///
+/// ⚠️ **但它绕过了「按行找」那一段** ⇒ 「行 ⇒ 类型/原始状态 ⇒ 动作」
+///   这条链路由**单测**（`row_actions`）与**界面组**（在真数据上点
+///   「进容器」图标）一起守着。
+pub fn dispatch_action_for_test(st: &Rc<PanelState>, name: &str, kind: &str, action: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    // ⚠️ **阶段 160**：动作可能在「操作」列里，也可能在**右键菜单**里
+    //   （详情 / 文件 / 日志 / 编辑…）⇒ 两处都找。
+    let Some(a) = row_actions(kind, "running")
+        .into_iter()
+        .chain(menu_actions(kind, "running").into_iter().map(|m| RowAction {
+            kind: m.kind,
+            icon: m.icon,
+            enabled: true,
+        }))
+        .find(|a| action_key(a.kind) == action)
+    else {
+        return;
+    };
+    let hit = ActionHit {
+        ctx: RowCtx {
+            path: gtk::TreePath::new_first(),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            raw: "running".to_string(),
+        },
+        action: a,
+    };
+    dispatch_row_action(st, ui, &hit);
+}
+
+/// 测试钩子：**点一下某一行某个操作**（走的是「操作」列的同一条派发链路）。
 ///
 /// ⚠️ 冒烟里点的是**不存在的容器名** ⇒ 就算确认逻辑坏了，命令也只会被
 ///    docker 拒绝 ⇒ **碰不到用户机器上的真容器**。
-pub fn click_action_for_test(st: &Rc<PanelState>, which: &str) {
+pub fn click_row_action_for_test(st: &Rc<PanelState>, name: &str, action: &str) {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
-    let btn = match which {
-        "start" => ui.detail.btn_start.clone(),
-        "stop" => ui.detail.btn_stop.clone(),
-        "restart" => ui.detail.btn_restart.clone(),
-        _ => return,
+    let Some(it) = ui.find_iter(name) else { return };
+    let kind: String = ui.model.get(&it, COL_KIND as i32);
+    let raw: String = ui.model.get(&it, COL_RAW_STATE as i32);
+    // ⚠️ **阶段 160**：动作可能在「操作」列里，也可能在**右键菜单**里
+    //   （进容器 / 详情 / 文件…）⇒ 两处都找。
+    let Some(a) = row_actions(&kind, &raw)
+        .into_iter()
+        .chain(menu_actions(&kind, &raw).into_iter().map(|m| RowAction {
+            kind: m.kind,
+            icon: m.icon,
+            enabled: true,
+        }))
+        .find(|a| action_key(a.kind) == action)
+    else {
+        return;
     };
-    btn.emit_clicked();
+    let path = ui.model.path(&it);
+    let hit = ActionHit {
+        ctx: RowCtx {
+            path,
+            name: name.to_string(),
+            kind,
+            raw,
+        },
+        action: a,
+    };
+    dispatch_row_action(st, ui, &hit);
 }
 
 /// 测试钩子：**选中**某个 compose 项目行（冒烟要验「项目详情 + 5 个操作」）。
@@ -6103,10 +7288,14 @@ pub fn selected_project_for_test(st: &Rc<PanelState>) -> String {
 }
 
 /// 测试钩子：**项目详情**是不是显示着（没选项目行时应当是隐藏的）。
+///
+/// ⚠️ **用 `visible()` 而不是 `is_visible()`**：阶段 155 之后详情住在
+///   **弹窗**里 ⇒ 弹窗没开时整棵子树的 `is_visible()` **恒为 false**
+///   ⇒ 那样就分不清「没有项目详情」和「弹窗没开」了。
 pub fn project_detail_visible_for_test(st: &Rc<PanelState>) -> bool {
     let slot = st.docker_ui.borrow();
     slot.as_ref()
-        .map(|u| u.detail.proj_root.is_visible())
+        .map(|u| u.detail.proj_root.property::<bool>("visible"))
         .unwrap_or(false)
 }
 
@@ -6126,38 +7315,10 @@ pub fn project_info_for_test(st: &Rc<PanelState>) -> String {
         .unwrap_or_default()
 }
 
-/// 测试钩子：某个项目操作按钮**能不能点**（`edit`/`start`/`stop`/`down`/`up`）。
-pub fn project_action_sensitive_for_test(st: &Rc<PanelState>, which: &str) -> bool {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return false };
-    let btn = match which {
-        "edit" => &ui.detail.btn_edit,
-        "start" => &ui.detail.btn_cstart,
-        "stop" => &ui.detail.btn_cstop,
-        "down" => &ui.detail.btn_cdown,
-        "up" => &ui.detail.btn_cup,
-        _ => return false,
-    };
-    btn.is_sensitive()
-}
-
-/// 测试钩子：**点一下**某个项目操作按钮。
-///
-/// ⚠️ 冒烟里点的是**不存在的项目名** ⇒ 就算确认逻辑坏了，命令也只会被
-///    docker 拒绝 ⇒ **碰不到用户机器上的真项目**。
-pub fn click_project_action_for_test(st: &Rc<PanelState>, which: &str) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    let btn = match which {
-        "edit" => ui.detail.btn_edit.clone(),
-        "start" => ui.detail.btn_cstart.clone(),
-        "stop" => ui.detail.btn_cstop.clone(),
-        "down" => ui.detail.btn_cdown.clone(),
-        "up" => ui.detail.btn_cup.clone(),
-        _ => return,
-    };
-    btn.emit_clicked();
-}
+// ⚠️ **阶段 155**：原来这里有 `project_action_sensitive_for_test` /
+//   `click_project_action_for_test`（项目那五个按钮）⇒ 那些按钮搬进
+//   **「操作」列**了 ⇒ 跟容器行**共用**上面那两个钩子
+//   （`row_action_enabled_for_test` / `click_row_action_for_test`）。
 
 /// 测试钩子：**展开**某个 compose 项目（冒烟要验证「点开才显示」）。
 pub fn expand_project_for_test(st: &Rc<PanelState>, name: &str) -> bool {
@@ -6208,30 +7369,10 @@ pub fn term_send_for_test(st: &Rc<PanelState>, bytes: &[u8]) {
     }
 }
 
-/// 测试钩子：工具条上「进入容器」按钮的**文案 ＋ 可不可点**（阶段 117）。
-///
-/// ⚠️ **返回 (文案, 可点)**：入口**存在**与**能用**是两回事 ⇒ 分开看。
-pub fn enter_button_for_test(st: &Rc<PanelState>) -> (String, bool) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else {
-        return (String::new(), false);
-    };
-    (
-        ui.btn_enter.label().unwrap_or_default().to_string(),
-        ui.btn_enter.is_sensitive(),
-    )
-}
-
-/// 测试钩子：**点**工具条上那个「进入容器」按钮（阶段 117）。
-///
-/// ⚠️ **为什么要有**：光断言「按钮在不在、文案对不对」**抓不住**「点了没
-///   反应」⇒ 反向验证时退掉回调，断言还是绿的（实测踩过）⇒ 必须真的
-///   **点一下**，看它到底进不进得去。
-pub fn enter_click_for_test(st: &Rc<PanelState>) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    ui.btn_enter.emit_clicked();
-}
+// ⚠️ **阶段 155**：原来这里有 `enter_button_for_test` / `enter_click_for_test`
+//   （工具条上的「进入容器」按钮）⇒ 那个按钮**撤了** ⇒ 入口搬进
+//   **「操作」列**（每行一颗终端图标）⇒ 冒烟改用
+//   `click_row_action_for_test(st, 容器名, "enter")`。
 
 /// 测试钩子：**双击**某个容器行（阶段 117 ⇒ 顶层容器行双击 ⇒ 进 shell）。
 pub fn double_click_container_for_test(st: &Rc<PanelState>, name: &str) {
@@ -6263,13 +7404,8 @@ pub fn stop_terminal_for_test(st: &Rc<PanelState>) {
     stop_terminal(ui);
 }
 
-/// 测试钩子：容器详情区的**「终端」按钮**能不能点。
-pub fn term_button_sensitive_for_test(st: &Rc<PanelState>) -> bool {
-    let slot = st.docker_ui.borrow();
-    slot.as_ref()
-        .map(|u| u.detail.btn_term.is_sensitive())
-        .unwrap_or(false)
-}
+// ⚠️ **阶段 155**：原来这里有 `term_button_sensitive_for_test`（详情区的
+//   「终端」按钮）⇒ 那个按钮**撤了** ⇒ 入口在**「操作」列**里。
 
 /// 测试钩子：**容器内终端的窗口还开着吗**（阶段 125）。
 ///
@@ -6830,6 +7966,61 @@ mod tests {
         assert_eq!(pill_text_of(""), "");
     }
 
+    /// **阶段 158：状态列的文案带上时长**（用户 2026-11-24 提的）。
+    #[test]
+    fn 状态列带时长() {
+        use crate::backend::docker::{DockerDuration, DurUnit};
+        let h2 = DockerDuration::Num(2, DurUnit::Hour);
+        let m3 = DockerDuration::Num(3, DurUnit::Minute);
+        let d9 = DockerDuration::Num(9, DurUnit::Day);
+        // 在跑 ⇒ 「运行 2 小时」
+        assert_eq!(
+            state_pill_text("running", tr("运行中"), Some(h2)),
+            trf!("运行 {d}", d = "2 小时")
+        );
+        // 只创建 ⇒ 「创建 3 分钟」
+        assert_eq!(
+            state_pill_text("created", tr("已创建"), Some(m3)),
+            trf!("创建 {d}", d = "3 分钟")
+        );
+        // 已停止 ⇒ 「停止 9 天」
+        assert_eq!(
+            state_pill_text("exited", tr("已停止"), Some(d9)),
+            trf!("停止 {d}", d = "9 天")
+        );
+        // ⚠️ **拿不到时长 ⇒ 退回原来的状态标签**（不能显示成空）。
+        assert_eq!(state_pill_text("running", tr("运行中"), None), tr("运行中"));
+        assert_eq!(state_pill_text("exited", tr("已停止"), None), tr("已停止"));
+        // ⚠️ **暂停 / 重启中不给时长**（那两小时是「暂停了多久」）。
+        assert_eq!(state_pill_text("paused", tr("已暂停"), Some(h2)), tr("已暂停"));
+    }
+
+    /// **阶段 158：时长 ⇒ 给人看的样子**。
+    #[test]
+    fn 时长文案() {
+        use crate::backend::docker::{DockerDuration, DurUnit};
+        assert_eq!(
+            duration_text(DockerDuration::Num(45, DurUnit::Second)),
+            format!("45 {}", tr("秒"))
+        );
+        assert_eq!(
+            duration_text(DockerDuration::Num(3, DurUnit::Minute)),
+            format!("3 {}", tr("分钟"))
+        );
+        assert_eq!(
+            duration_text(DockerDuration::Num(2, DurUnit::Hour)),
+            format!("2 {}", tr("小时"))
+        );
+        assert_eq!(
+            duration_text(DockerDuration::Num(9, DurUnit::Day)),
+            format!("9 {}", tr("天"))
+        );
+        assert_eq!(
+            duration_text(DockerDuration::LessThanSecond),
+            tr("不到 1 秒")
+        );
+    }
+
     fn c(name: &str, compose: &str) -> ContainerInfo {
         ContainerInfo {
             id: format!("{name}-id"),
@@ -6851,6 +8042,10 @@ mod tests {
             },
             cpu: "1.0%".to_string(),
             mem: "10MiB".to_string(),
+            duration: Some(crate::backend::docker::DockerDuration::Num(
+                1,
+                crate::backend::docker::DurUnit::Hour,
+            )),
         }
     }
 
@@ -6905,30 +8100,293 @@ mod tests {
         }
     }
 
-    /* ---------------- UI 审查 2026-11-18 的纯函数 ---------------- */
+    /* ---------------- 阶段 155：「操作」列的纯函数 ---------------- */
 
-    /// ⚠️ **CPU 必须按数值排**（UI 审查 D4）：`"9.5%"` 按字典序排在
-    ///   `"50.8%"` **前面** ⇒ 「找最占资源的容器」会看错。
+    /// ⚠️ **阶段 160：操作列只留 3 颗**（启动 / 停止 / 重启）——
+    ///   容器行与项目行**一样**（用户 2026-11-24：「操作列只保留启动、停止、
+    ///   重启，把其他的都移到右键菜单里」）。
     #[test]
-    fn cpu按数值排而不是按字符串() {
-        let a = sort_key("9.5%", SortKind::Percent);
-        let b = sort_key("50.8%", SortKind::Percent);
-        assert!(a < b, "9.5% 应当排在 50.8% 前面（数值排序）：{a} vs {b}");
-        // ⚠️ **字符串排序正好相反** ⇒ 这条断言真的抓得住退化。
+    fn 操作列只有启动停止重启三颗() {
+        for kind in [KIND_CONTAINER, KIND_PROJECT] {
+            let a = row_actions(kind, "running");
+            assert_eq!(a.len(), 3, "{kind} 行的操作列应当只有 3 颗");
+            let kinds: Vec<ActionKind> = a.iter().map(|x| x.kind).collect();
+            assert_eq!(
+                kinds,
+                vec![
+                    ActionKind::Start,
+                    ActionKind::Stop,
+                    ActionKind::Restart
+                ],
+                "{kind} 行的操作列应当只有 启动/停止/重启"
+            );
+        }
+        assert_eq!(action_col_icons_max(), 3);
+    }
+
+    /// ⚠️ **阶段 160：其它动作都进右键菜单了** ⇒ 操作列里**不该**再有它们。
+    #[test]
+    fn 操作列里不该有详情和编辑() {
+        let a = row_actions(KIND_CONTAINER, "running");
+        for x in &a {
+            assert!(
+                !matches!(
+                    x.kind,
+                    ActionKind::Detail
+                        | ActionKind::Enter
+                        | ActionKind::Edit
+                        | ActionKind::Files
+                        | ActionKind::Logs
+                        | ActionKind::Down
+                        | ActionKind::Up
+                        | ActionKind::CopyId
+                ),
+                "这些动作应当只出现在右键菜单里：{:?}",
+                x.kind
+            );
+        }
+    }
+
+    /// ⚠️ **阶段 160：右键菜单按行类型给不同的项**（用户：新增文件 / 日志 /
+    ///   属性）。
+    #[test]
+    fn 右键菜单按行类型给项() {
+        let c = menu_actions(KIND_CONTAINER, "running");
+        let ck: Vec<ActionKind> = c.iter().map(|x| x.kind).collect();
         assert!(
-            "9.5%".cmp("50.8%") == std::cmp::Ordering::Greater,
-            "字符串排序的对照组失效了（这条断言就抓不住退化了）"
+            ck.contains(&ActionKind::Files),
+            "容器行的菜单里要有「文件」：{ck:?}"
+        );
+        assert!(
+            ck.contains(&ActionKind::Logs),
+            "容器行的菜单里要有「日志」：{ck:?}"
+        );
+        assert!(
+            ck.contains(&ActionKind::Detail),
+            "容器行的菜单里要有「属性」：{ck:?}"
+        );
+        assert!(
+            ck.contains(&ActionKind::Enter),
+            "容器行的菜单里要有「进入容器」：{ck:?}"
+        );
+        // 项目行：编辑 compose / 销毁 / 重建 ⇒ **不该**有「文件 / 日志」
+        // （那是容器级的东西）。
+        let p = menu_actions(KIND_PROJECT, "running");
+        let pk: Vec<ActionKind> = p.iter().map(|x| x.kind).collect();
+        assert!(pk.contains(&ActionKind::Edit), "项目行的菜单里要有「编辑 compose」：{pk:?}");
+        assert!(pk.contains(&ActionKind::Down), "项目行的菜单里要有「销毁」：{pk:?}");
+        assert!(pk.contains(&ActionKind::Up), "项目行的菜单里要有「重建」：{pk:?}");
+        assert!(!pk.contains(&ActionKind::Files), "项目行不该有「文件」：{pk:?}");
+        assert!(!pk.contains(&ActionKind::Logs), "项目行不该有「日志」：{pk:?}");
+        // 两种行都有启停三项。
+        for k in [ActionKind::Start, ActionKind::Stop, ActionKind::Restart] {
+            assert!(ck.contains(&k), "容器行菜单缺 {k:?}");
+            assert!(pk.contains(&k), "项目行菜单缺 {k:?}");
+        }
+    }
+
+    /// **阶段 160 补：菜单里的启停项也要看状态**（跟「操作」列同一套算术）。
+    ///
+    /// ⚠️ **为什么要有**：运行中的容器，菜单里点「启动」只是空转
+    ///   ⇒ 那一项得**真的点不了**（灰的）⇒ 免得用户以为程序坏了。
+    #[test]
+    fn 菜单里的启停看状态() {
+        let en = |acts: &[MenuAction], k: ActionKind| -> bool {
+            acts.iter()
+                .find(|a| a.kind == k)
+                .map(|a| a.enabled)
+                .unwrap_or(false)
+        };
+        // 运行中 ⇒ 启动点不了、停止能点、重启能点。
+        let run = menu_actions(KIND_CONTAINER, "running");
+        assert!(!en(&run, ActionKind::Start), "运行中不该能点「启动」");
+        assert!(en(&run, ActionKind::Stop), "运行中应当能点「停止」");
+        assert!(en(&run, ActionKind::Restart), "运行中应当能点「重启」");
+        // 已停止 ⇒ 反过来。
+        let stop = menu_actions(KIND_CONTAINER, "exited");
+        assert!(en(&stop, ActionKind::Start), "已停止应当能点「启动」");
+        assert!(!en(&stop, ActionKind::Stop), "已停止不该能点「停止」");
+        assert!(!en(&stop, ActionKind::Restart), "全停着不该能点「重启」");
+        // 项目行同理（状态是 running / exited / mixed）。
+        let prun = menu_actions(KIND_PROJECT, "running");
+        assert!(!en(&prun, ActionKind::Start), "运行中的项目不该能点「启动」");
+        assert!(en(&prun, ActionKind::Stop), "运行中的项目应当能点「停止」");
+        // ⚠️ **跟「操作」列完全一致**（同一套算术 ⇒ 不会漂）。
+        for raw in ["running", "exited", "mixed"] {
+            let row = row_actions(KIND_PROJECT, raw);
+            let menu = menu_actions(KIND_PROJECT, raw);
+            for k in [ActionKind::Start, ActionKind::Stop, ActionKind::Restart] {
+                let r = row.iter().find(|a| a.kind == k).unwrap();
+                assert_eq!(
+                    en(&menu, k),
+                    r.enabled,
+                    "菜单与操作列的 {k:?} 不一致（状态 {raw}）"
+                );
+            }
+        }
+    }
+
+    /// **第几颗图标 ⇒ 哪个动作**（阶段 156）。
+    ///
+    /// ⚠️ **为什么要单测这一层**：图标**画出来**的顺序（`row_actions`）和
+    ///   **点中**的顺序（`cell_x ÷ 槽宽`）必须**一模一样** ⇒ 错位一格就是
+    ///   「点 compose 项目行的『编辑』却弹出了 term 窗口」（用户
+    ///   2026-11-23 报的）⇒ 把这条对应关系钉死。
+    ///
+    /// ⚠️ **阶段 160**：操作列只剩 3 颗 ⇒ 第 2 颗是**停止**。
+    #[test]
+    fn 第几颗图标对应哪个动作() {
+        use crate::panel::actioncell::SLOT_W;
+        let p = row_actions(KIND_PROJECT, "running");
+        assert_eq!(p[1].kind, ActionKind::Stop);
+        assert_eq!(action_key(p[1].kind), "stop");
+        let c = row_actions(KIND_CONTAINER, "running");
+        assert_eq!(c[1].kind, ActionKind::Stop);
+        assert_eq!(action_key(c[1].kind), "stop");
+        // 第 3 颗 = 重启（两种行都一样）。
+        assert_eq!(c[2].kind, ActionKind::Restart);
+        // 槽宽 ⇒ 第 2 颗的**格内**坐标落在 [SLOT_W, 2*SLOT_W) ⇒ 索引 = 1。
+        for x in [SLOT_W, SLOT_W + 8, 2 * SLOT_W - 1] {
+            assert_eq!(x / SLOT_W, 1, "第 2 颗图标的格内坐标 {x} 应当落在索引 1");
+        }
+    }
+
+    /// **运行中 ⇒ 启动点不了、停止能点**（跟以前那两个按钮一个待遇）。
+    #[test]
+    fn 运行中启动点不了停止能点() {
+        let a = row_actions(KIND_CONTAINER, "running");
+        let en = |k: ActionKind| a.iter().find(|x| x.kind == k).map(|x| x.enabled);
+        assert_eq!(en(ActionKind::Start), Some(false));
+        assert_eq!(en(ActionKind::Stop), Some(true));
+        // ⚠️ **停了反过来**（这条抓得住「判反了」的退化）。
+        let b = row_actions(KIND_CONTAINER, "exited");
+        let en = |k: ActionKind| b.iter().find(|x| x.kind == k).map(|x| x.enabled);
+        assert_eq!(en(ActionKind::Start), Some(true));
+        assert_eq!(en(ActionKind::Stop), Some(false));
+    }
+
+    /// **项目三种状态**（全跑 / 全停 / 一半跑）⇒ 启停的可用性跟着变。
+    #[test]
+    fn 项目三态决定启停能不能点() {
+        let en = |raw: &str, k: ActionKind| {
+            row_actions(KIND_PROJECT, raw)
+                .iter()
+                .find(|x| x.kind == k)
+                .map(|x| x.enabled)
+        };
+        // 全在跑 ⇒ 启动没得启（灰），停止能点。
+        assert_eq!(en("running", ActionKind::Start), Some(false));
+        assert_eq!(en("running", ActionKind::Stop), Some(true));
+        // 全停了 ⇒ 启动能点，停止没得停（灰）。
+        assert_eq!(en("exited", ActionKind::Start), Some(true));
+        assert_eq!(en("exited", ActionKind::Stop), Some(false));
+        // 一半在跑 ⇒ 两个都能点（停掉跑着的、把停着的起起来）。
+        assert_eq!(en("mixed", ActionKind::Start), Some(true));
+        assert_eq!(en("mixed", ActionKind::Stop), Some(true));
+    }
+
+    /// **图标名必须是 Adwaita 真有的**（写错 ⇒ 界面上是空白方块）。
+    ///
+    /// ⚠️ **这条只是「长得像」**：真正的判据是问图标主题（冒烟里问）
+    ///   ⇒ 这里防的是「拼错 / 用了不存在的名字」这种低级错。
+    ///
+    /// ⚠️ **阶段 157：自绘图标（`pp-` 开头）不在主题里** ⇒ 单独放行
+    ///   （Adwaita 只有**实心**的 ▶ / ■ ⇒ 混在一排线性图标里太扎眼
+    ///   ⇒ 自己画描边版，见 `panel::actioncell::custom_node`）。
+    #[test]
+    fn 图标名都是已知的Adwaita符号() {
+        for raw in ["running", "exited", "mixed"] {
+            for a in row_actions(KIND_CONTAINER, raw)
+                .into_iter()
+                .chain(row_actions(KIND_PROJECT, raw))
+            {
+                assert!(!a.icon.is_empty());
+                if a.icon.starts_with("pp-") {
+                    continue;
+                }
+                assert!(
+                    a.icon.ends_with("-symbolic"),
+                    "图标名应当是 symbolic 的：{}",
+                    a.icon
+                );
+            }
+        }
+    }
+
+    /// **自绘图标只有两个**，且**必须真的自绘**（阶段 157）。
+    ///
+    /// ⚠️ 为什么要单独钉住：自绘图标**不在图标主题里** ⇒ 冒烟里那条
+    ///   「图标名在主题里真的存在」只能跳过它们 ⇒ 万一有人把 `pp-play`
+    ///   写成了 `media-playback-start-symbolic`（主题里**有** ⇒ 冒烟绿了）
+    ///   ⇒ 视觉上又变回那个扎眼的实心三角 ⇒ 没人会发现。
+    #[test]
+    fn 自绘图标只有播放和停止两个() {
+        let mut custom: Vec<String> = Vec::new();
+        for raw in ["running", "exited", "mixed"] {
+            for a in row_actions(KIND_CONTAINER, raw)
+                .into_iter()
+                .chain(row_actions(KIND_PROJECT, raw))
+            {
+                if a.icon.starts_with("pp-") {
+                    custom.push(a.icon.clone());
+                }
+            }
+        }
+        custom.sort_unstable();
+        custom.dedup();
+        assert_eq!(
+            custom,
+            vec!["pp-play".to_string(), "pp-stop".to_string()],
+            "自绘图标多了或少了：{custom:?}"
         );
     }
 
-    /// 内存列按**字节**排（不是按字符串）。
+    /// **同一行里的短名字不能重样**（测试钩子靠它派发 ⇒ 重了就派错）。
     #[test]
-    fn 内存按字节排() {
-        let a = sort_key("1.0MiB / 4.0GiB", SortKind::Bytes);
-        let b = sort_key("900.0MiB / 4.0GiB", SortKind::Bytes);
-        assert!(a < b, "1MiB 应当排在 900MiB 前面：{a} vs {b}");
-        assert!((a - 1024.0 * 1024.0).abs() < 1.0, "1MiB 应当是 1048576 字节：{a}");
+    fn 同一行里动作短名不重样() {
+        for raw in ["running", "exited", "mixed"] {
+            for kind in [KIND_CONTAINER, KIND_PROJECT] {
+                let mut seen: Vec<&str> = Vec::new();
+                for a in row_actions(kind, raw) {
+                    let k = action_key(a.kind);
+                    assert!(!seen.contains(&k), "{kind} 这一行里短名重了：{k}");
+                    seen.push(k);
+                }
+            }
+        }
+        // ⚠️ **八种动作各有一个短名**（详情在两种行里都有 ⇒ 按行判重）。
+        let all = [
+            ActionKind::Detail,
+            ActionKind::Enter,
+            ActionKind::Edit,
+            ActionKind::Start,
+            ActionKind::Stop,
+            ActionKind::Restart,
+            ActionKind::Down,
+            ActionKind::Up,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|k| action_key(*k)).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 8, "八种动作各有一个短名");
     }
+
+    /// **禁用时要说明「为什么不能点」**（UI 审查 D15 的老规矩）。
+    #[test]
+    fn 禁用时有话说清楚为什么() {
+        let running = row_actions(KIND_CONTAINER, "running");
+        let start = running
+            .iter()
+            .find(|x| x.kind == ActionKind::Start)
+            .expect("有启动");
+        assert!(!start.enabled);
+        let tip = action_tooltip(start, false, "running");
+        assert!(tip.contains("运行"), "tooltip 得说清为什么不能点：{tip}");
+        // ⚠️ **英文界面也得有话说**（不能是空串 / 不能是中文）。
+        assert!(!tip.is_empty());
+    }
+
+    /* ---------------- UI 审查 2026-11-18 的纯函数 ---------------- */
 
     /// 端口列：**一个端口一行**（用户 2026-11-23）。
     ///
@@ -6952,45 +8410,6 @@ mod tests {
 
     /// 内存列**不带百分比**（用户 2026-11-23）。
     ///
-    /// ⚠️ **为什么**：一列里塞两个单位（`8.4% · 52.84MiB / 63.00GiB`）
-    ///   扫起来费劲；而且**父行的合计本来就没有百分比** ⇒ 父子两行
-    ///   不一致 ⇒ 现在容器行也只给绝对值。
-    #[test]
-    fn 内存列不带百分比() {
-        let raw = "52.84MiB / 63.00GiB";
-        // 表格这一列**原样**给绝对值 ⇒ 不含 `%`
-        assert!(!raw.contains('%'), "内存列不该带百分比：{raw}");
-        assert!(raw.contains("52.84MiB"), "内存列应当保留绝对值：{raw}");
-    }
-
-    /// ⚠️ **凡是给界面看的格式化字符串，都不许露出没替换的占位符**。
-    ///
-    /// ⚠️ **为什么要有这条**：`trf!` 宏只替换 `{名字}` ⇒ 写成
-    ///   `trf!("{v:.1}%", v = x)` ⇒ **格式说明被忽略** ⇒ 界面上直接
-    ///   显示「{v:.1}%」（真实踩过：CPU 合计列与内存百分比列）。
-    #[test]
-    fn 格式化字符串不留占位符() {
-        // 项目父行的 CPU 合计（走 `set_project_row` 的那条路径）。
-        let cpu_sum: f64 = 12.34;
-        let cpu_text = format!("{cpu_sum:.2}%");
-        assert_eq!(cpu_text, "12.34%");
-        assert!(!cpu_text.contains('{'));
-        // ⚠️ **父行跟子行的小数位一样**（子行是 docker stats 的「0.00%」）。
-        assert_eq!(cpu_text.chars().filter(|c| *c == '.').count(), 1);
-    }
-
-    /// 父行的内存合计 ⇒ **docker 同款单位**（UI 审查 D21）。
-    #[test]
-    fn 父行内存合计跟子行同单位() {
-        // 59.3MiB ⇒ 父行写「59.3MiB」，**不是**「59.3 MB」。
-        assert_eq!(human_size_bin(59.3 * 1024.0 * 1024.0), "59.3MiB");
-        assert_eq!(human_size_bin(62.6 * 1024.0f64.powi(3)), "62.6GiB");
-        assert_eq!(human_size_bin(512.0), "512 B");
-        // ⚠️ **不能再出现十进制名字**（MB/GB 跟 MiB/GiB 混着写没法比）。
-        let s = human_size_bin(59.3 * 1024.0 * 1024.0);
-        assert!(!s.ends_with("MB"), "不该用十进制名字：{s}");
-    }
-
     /// 权限列 ⇒ **通用写法，不翻成中文**（阶段 140）。
     ///
     /// ⚠️ **为什么改**（用户 2026-11-19：「权限好像一般没有说还要翻译成汉语
@@ -7274,8 +8693,11 @@ fn refresh_segment(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
 /// 刷新**镜像**（阶段 115）。
 fn refresh_images(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     if ui.images_busy.get() {
+        // ⚠️ **阶段 161**：同上 ⇒ 记一笔，待会儿再刷一次。
+        ui.images_pending.set(true);
         return; // 上一次还没回来 ⇒ 不叠加
     }
+    ui.images_pending.set(false);
     ui.images_busy.set(true);
     ui.set_segment_status(SEG_IMAGES, tr("正在读取远程镜像…"));
     let opts = st.opts.clone();
@@ -7291,8 +8713,11 @@ fn refresh_images(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
 /// 刷新**卷**（阶段 115）。
 fn refresh_volumes(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     if ui.volumes_busy.get() {
+        // ⚠️ **阶段 161**：同上 ⇒ 记一笔，待会儿再刷一次。
+        ui.volumes_pending.set(true);
         return;
     }
+    ui.volumes_pending.set(false);
     ui.volumes_busy.set(true);
     ui.set_segment_status(SEG_VOLUMES, tr("正在读取远程卷…"));
     let opts = st.opts.clone();
@@ -7308,8 +8733,11 @@ fn refresh_volumes(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
 /// 刷新**网络**（阶段 115）。
 fn refresh_networks(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
     if ui.networks_busy.get() {
+        // ⚠️ **阶段 161**：同上 ⇒ 记一笔，待会儿再刷一次。
+        ui.networks_pending.set(true);
         return;
     }
+    ui.networks_pending.set(false);
     ui.networks_busy.set(true);
     ui.set_segment_status(SEG_NETWORKS, tr("正在读取远程网络…"));
     let opts = st.opts.clone();
@@ -7553,12 +8981,17 @@ fn files_selected(ui: &Rc<DockerUi>) -> Option<(String, String)> {
 }
 
 /// 选中条目的**远程绝对路径**。
+///
+/// ⚠️ **基准是「当前目录」**（[`DockerUi::files_path`]）⇒ 那个目录
+///   **成功列出来过**才算数（阶段 159）⇒ 拼出来的路径一定指得过去。
 fn files_remote_path(ui: &Rc<DockerUi>, name: &str) -> String {
     let dir = ui.files_path.borrow().clone();
     if dir.is_empty() {
         return format!("/{name}");
     }
-    format!("{}/{name}", dir.trim_end_matches('/'))
+    // ⚠️ **用 path_join**（远端是 POSIX 路径）：它自己处理结尾的 '/' ⇒
+    //   "/" ＋ "media" = "/media"，"/media" ＋ "proc" = "/media/proc"。
+    crate::util::path_join(&dir, name)
 }
 
 /// **文件页是不是正开着**。
@@ -7580,10 +9013,17 @@ fn files_ensure(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str) {
 }
 
 /// 去某个目录（**改路径栏 ＋ 重新列**）。
+///
+/// ⚠️ **阶段 159：这里**只记「正在请求的目录」**（`files_req`）**，
+///   **不动**当前目录（`files_path`）**和路径栏**：
+/// - 目录**列不出来**（不存在 / 没权限 / 容器没跑）⇒ 回包是失败 ⇒
+///   路径栏与表格**都留在上一个成功的目录**（见 `Msg::Files` 的处理）；
+/// - 以前这里**乐观地**先把路径栏改了 ⇒ 失败后路径栏停在那个进不去的目录，
+///   而表格还是旧目录的行 ⇒ 用户以为「没进去」⇒ 又在旧表格里点一行
+///   ⇒ **地址栏越拼越长**（用户 2026-11-24 报的
+///   `/media/proc/root/sbin/srv/tmp/srv/sbin`）。
 fn files_goto(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, path: &str) {
     *ui.files_name.borrow_mut() = container.to_string();
-    *ui.files_path.borrow_mut() = path.to_string();
-    ui.files.path.set_text(path);
     files_list(st, ui, container, path);
 }
 
@@ -7597,6 +9037,9 @@ fn files_list(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, path: &st
     // ⚠️ **请求序号**：只认最新一次（旧的晚到 ⇒ 盖掉新的 ⇒ 看着像刷新坏了）。
     let seq = ui.files_seq.get() + 1;
     ui.files_seq.set(seq);
+    // ⚠️ **阶段 159：登记「正在请求的目录」**（回包靠它认「是不是我要的那个」）
+    //   ⇒ **每次发请求都要登记**（不只 `files_goto`：传完之后的重列也走这儿）。
+    *ui.files_req.borrow_mut() = path.to_string();
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let container = container.to_string();
@@ -7890,6 +9333,18 @@ pub fn files_path_for_test(st: &Rc<PanelState>) -> String {
     let slot = st.docker_ui.borrow();
     slot.as_ref()
         .map(|u| u.files_path.borrow().clone())
+        .unwrap_or_default()
+}
+
+/// 测试钩子：文件页**路径栏上显示的文字**（阶段 159）。
+///
+/// ⚠️ **跟 [`files_path_for_test`] 分开**：那个是「内部认定的当前目录」，
+///   这个是**用户眼前看到的那个输入框**⇒ 用户报的现象（「路径名会在地址栏
+///   累积」）就发生在这个输入框里 ⇒ 冒烟要盯的是它。
+pub fn files_entry_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.files.path.text().to_string())
         .unwrap_or_default()
 }
 

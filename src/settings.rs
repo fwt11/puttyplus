@@ -979,17 +979,49 @@ pub fn set_last_db_connection(key: &str, name: &str) {
 const NAV_GROUP: &str = "navigation";
 const NAV_LOCAL_DIR: &str = "local_dir";
 
+/// **每条连接**各自记的本地目录（阶段 154）。
+///
+/// ⚠ 键 = 会话键（`ConnOptions::session_key()`：连接名优先，否则 `host:port`）
+///    ⇒ 同一个服务器用不同名字连（或者不同用户连）⇒ 各记各的。
+const CONN_LOCAL_GROUP: &str = "conn_local_dirs";
+
 /// 上次浏览/关闭时的本地目录；没记过或记的是空串 → None。
 pub fn last_local_dir() -> Option<String> {
     get_str_opt(NAV_GROUP, NAV_LOCAL_DIR).filter(|s| !s.is_empty())
 }
 
-/// 记录本地目录。调用方负责只在目录可用时写（这里不做存在性判断，
-/// 避免导航路径短暂不可读时把旧值弄丢）。
+/// 这条连接（按会话键）自己记住的本地目录；没记过 → None。
+pub fn conn_local_dir(key: &str) -> Option<String> {
+    get_str_opt(CONN_LOCAL_GROUP, &safe_key(key)).filter(|s| !s.is_empty())
+}
+
+/// 记录本地目录（**只有全局那份**）。调用方负责只在目录可用时写
+/// （这里不做存在性判断，避免导航路径短暂不可读时把旧值弄丢）。
 pub fn set_last_local_dir(path: &str) {
-    if !path.is_empty() {
-        set_str(NAV_GROUP, NAV_LOCAL_DIR, path);
+    set_local_dirs(None, path);
+}
+
+/// 记本地目录：**全局一份 ＋ 这条连接一份**（**一次落盘**）。
+///
+/// ⚠ 为什么全局那份也要写：它是「还没给这条连接单独记过目录」时的
+///    **兜底起点**（老行为：软件记住上次用过的目录）⇒ 别把老行为弄丢。
+/// ⚠ 为什么连接那份也要写：**每条连接各自的目录**（阶段 154）——用户
+///    在 A 服务器下载到 `/data`，下次连 A 还在 `/data`，连 B 不受影响。
+pub fn set_local_dirs(conn_key: Option<&str>, dir: &str) {
+    if dir.is_empty() {
+        return;
     }
+    let p = path();
+    let kf = glib::KeyFile::new();
+    let _ = kf.load_from_file(&p, glib::KeyFileFlags::NONE);
+    kf.set_string(NAV_GROUP, NAV_LOCAL_DIR, dir);
+    if let Some(k) = conn_key {
+        kf.set_string(CONN_LOCAL_GROUP, &safe_key(k), dir);
+    }
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&p, kf.to_data().as_bytes());
 }
 
 /* ---------------- 目录镜像（6.2） ---------------- */

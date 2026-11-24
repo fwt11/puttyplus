@@ -98,6 +98,18 @@ fn fake_containers() -> Vec<puttyplus::backend::docker::ContainerInfo> {
         },
         cpu: "1.0%".to_string(),
         mem: "10MiB".to_string(),
+        // ⚠️ **阶段 158**：状态列要显示时长 ⇒ 假数据也得带时长。
+        duration: Some(if running {
+            puttyplus::backend::docker::DockerDuration::Num(
+                2,
+                puttyplus::backend::docker::DurUnit::Hour,
+            )
+        } else {
+            puttyplus::backend::docker::DockerDuration::Num(
+                1,
+                puttyplus::backend::docker::DurUnit::Hour,
+            )
+        }),
     };
     vec![
         mk("solo-a", "", true),   // 独立容器（顶层行）
@@ -556,7 +568,7 @@ fn main() {
         //    表格得真的挂到窗口上、真的画出来，才能问 GTK「哪一行在哪儿」。
         let win = gtk::Window::new();
         win.set_title(Some("docker ui smoke"));
-        win.set_default_size(900, 500);
+        win.set_default_size(1420, 560);
         let view = dockerui::view_for_test(&panel.st).expect("应当有表格");
         // ⚠️ 挂**整页**（不是表格本身）：表格已经在滚动容器里了 ⇒
         //    再 `set_child` 到窗口上 GTK 会报「已有父控件」。
@@ -646,50 +658,35 @@ fn main() {
             format!("刷新后 web/db 消失了：{shown2:?}")
         );
 
-        // ================= UI 审查 2026-11-18：排序（D4） =================
+        // ================= 阶段 155：CPU / 内存 / 详情 三列退役 =================
         //
-        // ⚠️ **为什么这条要紧**：CPU / 内存两列明晃晃摆在那儿 ⇒ 用户
-        //   唯一能做的就是用眼睛扫 ⇒ **按数值**排序是「找最占资源的容器」
-        //   的唯一途径。
-        //
-        // ⚠️ **判据用「顺序」而不是「调了几次函数」** ⇒ 与实现无关。
+        // ⚠️ 用户 2026-11-23：「去掉详情列，没啥用。去掉 CPU 和内存列。」
+        //   ⇒ 这三列**必须真的没了**（不是挪了个位置）。
         {
-            // 灌一批 CPU 差别很大的容器（字符串排序会看错的那种）。
-            //
-            // ⚠️ **都做成独立容器**（compose 字段清空）⇒ 四个都是**顶层行**
-            //   ⇒ 排序结果直接能比（compose 的容器是**子行**，排在父行下面）。
-            let mut r1: Vec<puttyplus::backend::docker::ContainerInfo> = fake_containers()
-                .into_iter()
-                .map(|mut c| {
-                    c.compose = String::new();
-                    c.compose_files = String::new();
-                    c.compose_dir = String::new();
-                    c
-                })
-                .collect();
-            r1[0].cpu = "9.5%".into(); // solo-a
-            r1[1].cpu = "50.8%".into(); // web
-            r1[2].cpu = "1.2%".into(); // solo-b
-            r1[3].cpu = "30.0%".into(); // db
-            dockerui::set_rows_for_test(&panel.st, r1);
-            pump(200);
-            // 按 CPU **降序**排。
-            let sorted = dockerui::sort_by_for_test(&panel.st, 4, false);
-            println!("[信息] 按 CPU 降序后的顶层行：{sorted:?}");
+            let titles = dockerui::column_titles_for_test(&panel.st);
+            println!("[信息] 现在的列：{titles:?}");
             check!(
-                "⑨ CPU 列能排序，且是**按数值**排（不是按字符串）",
-                sorted.len() == 4
-                    && sorted[0] == "web" // 50.8%
-                    && sorted[1] == "db" // 30.0%
-                    && sorted[2] == "solo-a" // 9.5%
-                    && sorted[3] == "solo-b", // 1.2%
-                format!("按 CPU 降序是：{sorted:?}（web=50.8% / db=30.0% / solo-a=9.5% / solo-b=1.2%）")
+                "⑨ 「CPU」「内存」「详情」三列退役了",
+                !titles.iter().any(|t| t == "CPU")
+                    && !titles.iter().any(|t| t == "内存")
+                    && !titles.iter().any(|t| t == "详情"),
+                format!("现在的列是：{titles:?}")
             );
-            // ⚠️ **字符串排序正好相反** ⇒ 这条断言真抓得住退化。
             check!(
-                "⑨ 对照组：字符串排序会把 9.5% 排在 50.8% 前面（所以不能按字符串排）",
-                "9.5%".cmp("50.8%") == std::cmp::Ordering::Greater,
-                "对照组失效了"
+                "⑨ 多了一列「操作」",
+                titles.iter().any(|t| t == "操作"),
+                format!("现在的列是：{titles:?}")
+            );
+            // ⚠️ **剩下的列还是能排序的**（退役的是数值列，不是排序功能）。
+            let sorted = dockerui::sort_by_for_test(&panel.st, 0, false);
+            println!("[信息] 按名称降序后的顶层行：{sorted:?}");
+            check!(
+                "⑨ 名称列还能排序（降序）",
+                sorted.len() == 3
+                    && sorted[0] == "solo-b"
+                    && sorted[1] == "solo-a"
+                    && sorted[2] == "proj",
+                format!("按名称降序是：{sorted:?}")
             );
         }
 
@@ -818,9 +815,9 @@ fn main() {
         pump(200);
 
         check!(
-            "⑨ 详情区显示出来了",
-            dockerui::detail_visible_for_test(&panel.st),
-            "详情区还是收着的（选中了容器就该显示）"
+            "⑨ 详情内容显示出来了",
+            dockerui::detail_body_visible_for_test(&panel.st),
+            "详情内容还是收着的（选中了容器就该显示）"
         );
         let title = dockerui::detail_title_for_test(&panel.st);
         check!(
@@ -861,12 +858,66 @@ fn main() {
             env.contains("PATH") && env.contains("/usr/bin"),
             format!("环境变量卡片是：\n{env}")
         );
+        // ⚠️ **阶段 155**：按钮搬进「操作」列了 ⇒ 可用性看**那一行的图标**。
         check!(
             "⑨ 运行中 ⇒ 「启动」点不了、「停止」能点",
-            !dockerui::action_sensitive_for_test(&panel.st, "start")
-                && dockerui::action_sensitive_for_test(&panel.st, "stop"),
-            "按钮可用性跟状态对不上"
+            !dockerui::row_action_enabled_for_test(&panel.st, "web", "start")
+                && dockerui::row_action_enabled_for_test(&panel.st, "web", "stop"),
+            "操作列的可用性跟状态对不上"
         );
+        // ⚠️ **「操作」列的图标得是 Adwaita 真有的**（写错 ⇒ 空白方块）。
+        {
+            let icons = dockerui::row_action_icons_for_test(&panel.st, "web");
+            let names: Vec<&str> = icons.iter().map(|(i, _)| i.as_str()).collect();
+            println!("[信息] 容器行的操作图标：{names:?}");
+            // ⚠️ **阶段 160**：操作列只剩 3 颗（启动 / 停止 / 重启）
+            //   ⇒ 详情 / 进容器等**搬进右键菜单**了。
+            check!(
+                "⑨ 容器行的「操作」列只有 3 颗图标（启动 / 停止 / 重启）",
+                icons.len() == 3
+                    && names.contains(&"pp-play")
+                    && names.contains(&"pp-stop")
+                    && names.contains(&"view-refresh-symbolic"),
+                format!("容器行的图标是：{names:?}")
+            );
+            let theme = gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display"));
+            // ⚠️ **`pp-` 开头的是自绘图标**（阶段 157）⇒ 不在主题里，跳过。
+            let missing: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|n| !n.starts_with("pp-") && !theme.has_icon(*n))
+                .collect();
+            check!(
+                "⑨ 「操作」列的图标名在系统主题里都真的有（不是空白方块）",
+                missing.is_empty(),
+                format!("主题里没有这些图标：{missing:?}")
+            );
+        }
+        // ⚠️ **阶段 155**：详情搬进**弹窗**了 ⇒ 点「详情」图标才打开。
+        check!(
+            "⑨ 详情弹窗**还没开**（要点「详情」图标才开）",
+            !dockerui::detail_visible_for_test(&panel.st),
+            "弹窗自己开了（那就不是弹窗的用法了）"
+        );
+        // ⚠️ **用不依赖模型的派发钩子**（后台真实刷新可能把灌进去的假数据
+        //   换掉 ⇒ 按名字查行会查不到 ⇒ 断言偶发红）。
+        dockerui::dispatch_action_for_test(&panel.st, "web", "container", "detail");
+        pump(300);
+        check!(
+            "⑨ 点「详情」图标 ⇒ 详情弹窗打开了",
+            dockerui::detail_visible_for_test(&panel.st),
+            "点了「详情」图标，弹窗没开"
+        );
+        let wtitle = dockerui::detail_window_title_for_test(&panel.st);
+        check!(
+            "⑨ 弹窗标题里有容器名",
+            wtitle.contains("web"),
+            format!("弹窗标题是 {wtitle:?}")
+        );
+        // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张详情弹窗。
+        if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+            shot(&format!("{base}-detail-popup.png"));
+        }
 
         // ⚠️ **刷新不能把选中顶掉**（自动刷新每 7 秒来一次 ⇒ 用户刚选中的
         //    容器要是被「刷新」清掉，详情也就跟着没了）。
@@ -881,9 +932,9 @@ fn main() {
             )
         );
         check!(
-            "⑨ 刷新后详情区还开着",
-            dockerui::detail_visible_for_test(&panel.st),
-            "刷新后详情区收起来了"
+            "⑨ 刷新后详情内容还开着",
+            dockerui::detail_body_visible_for_test(&panel.st),
+            "刷新后详情内容收起来了"
         );
 
         // ⚠️ **二次确认**：写操作（停容器）**必须先问一句**。
@@ -894,7 +945,7 @@ fn main() {
         // ⚠️ 判据用「**最近一次写操作**」，**不用状态行**：状态行会被后台
         //    刷新改掉 ⇒ 拿它判断会误判（刷新先到就当成动作跑了）。
         let action_before = dockerui::last_action_for_test(&panel.st);
-        dockerui::click_action_for_test(&panel.st, "stop");
+        dockerui::dispatch_action_for_test(&panel.st, "web", "container", "stop");
         pump(300);
         let after = toplevel_count();
         check!(
@@ -969,7 +1020,7 @@ fn main() {
             );
             check!(
                 "⑪ 容器详情**藏起来**了（两种详情互斥）",
-                !dockerui::detail_visible_for_test(&panel.st),
+                !dockerui::detail_body_visible_for_test(&panel.st),
                 "容器详情还开着"
             );
             let ptitle = dockerui::project_title_for_test(&panel.st);
@@ -989,12 +1040,42 @@ fn main() {
                 pinfo.contains("web") && pinfo.contains("db"),
                 format!("项目详情是：\n{pinfo}")
             );
-            // ---- 5 个操作按钮 ----
-            for which in ["edit", "start", "stop", "down", "up"] {
+            // ---- 「操作」列的 6 颗图标（阶段 155）----
+            {
+                let icons = dockerui::row_action_icons_for_test(&panel.st, "proj");
+                let names: Vec<&str> = icons.iter().map(|(i, _)| i.as_str()).collect();
+                println!("[信息] 项目行的操作图标：{names:?}");
+                // ⚠️ **阶段 160**：项目行也只剩 3 颗（编辑 / 销毁 / 重建进了右键菜单）。
                 check!(
-                    format!("⑪ 项目操作按钮「{which}」能点"),
-                    dockerui::project_action_sensitive_for_test(&panel.st, which),
-                    format!("按钮 {which} 是灰的")
+                    "⑪ 项目行的「操作」列只有 3 颗图标（启动 / 停止 / 重启）",
+                    icons.len() == 3
+                        && names.contains(&"pp-play")
+                        && names.contains(&"pp-stop")
+                        && names.contains(&"view-refresh-symbolic"),
+                    format!("项目行的图标是：{names:?}")
+                );
+                // ⚠️ **项目全在跑 ⇒「启动」是灰的**（没得启动），
+                //   「停止」能点。
+                check!(
+                    "⑪ 项目全在跑 ⇒「启动」点不了、「停止」能点",
+                    !dockerui::row_action_enabled_for_test(&panel.st, "proj", "start")
+                        && dockerui::row_action_enabled_for_test(&panel.st, "proj", "stop"),
+                    "项目行的可用性跟状态对不上"
+                );
+                // ⚠️ **阶段 160**：详情 / 编辑 / 销毁 / 重建**搬进右键菜单**了
+                //   ⇒ 「操作」列里没有它们 ⇒ 改验「菜单里有」。
+                let pm = dockerui::menu_actions_for_test("project", "running");
+                let pmk: Vec<&str> = pm.iter().map(|(k, _)| k.as_str()).collect();
+                check!(
+                    "⑪ 项目行的右键菜单里有 编辑/属性/启停/销毁/重建",
+                    pmk.contains(&"edit")
+                        && pmk.contains(&"detail")
+                        && pmk.contains(&"start")
+                        && pmk.contains(&"stop")
+                        && pmk.contains(&"restart")
+                        && pmk.contains(&"down")
+                        && pmk.contains(&"up"),
+                    format!("项目行的菜单是：{pm:?}")
                 );
             }
 
@@ -1026,7 +1107,7 @@ fn main() {
             );
             check!(
                 "⑪b 选中容器 ⇒ 容器详情显示着",
-                dockerui::detail_visible_for_test(&panel.st),
+                dockerui::detail_body_visible_for_test(&panel.st),
                 "容器详情没显示"
             );
             // ---- 反过来：再点回项目行 ⇒ compose 内容回来、容器详情藏起来 ----
@@ -1043,7 +1124,7 @@ fn main() {
             );
             check!(
                 "⑪b 点回项目行 ⇒ 容器详情**藏起来**了（两种详情互斥）",
-                !dockerui::detail_visible_for_test(&panel.st),
+                !dockerui::detail_body_visible_for_test(&panel.st),
                 "容器详情还开着"
             );
 
@@ -1052,7 +1133,7 @@ fn main() {
             // ⚠️ **安全**：这里**不点确定** ⇒ 命令不会跑 ⇒ 碰不到远端任何项目。
             let before = toplevel_count();
             let action_before = dockerui::last_action_for_test(&panel.st);
-            dockerui::click_project_action_for_test(&panel.st, "down");
+            dockerui::dispatch_action_for_test(&panel.st, "proj", "project", "down");
             pump(300);
             check!(
                 "⑫ 点「销毁」弹出确认框（写操作有二次确认）",
@@ -1087,7 +1168,32 @@ fn main() {
             // ⚠️ 目的是验「确认之后**真的**把命令发到远端了」⇒ 判据是
             //    **执行结果**（失败也算执行了）+ 失败原因来自远端。
             let mut rows = fake_containers();
+            // ⚠️ **阶段 160**：几条贴近真实的独立容器（长镜像名 / 多端口 /
+            //   各种状态与时长）⇒ 截图能看出「列宽合不合理」。
+        for (nm, idv, imgv, stv, raw, prt, dur) in [
+            ("eng_tut", "b6ddf7f1a2b3", "emqx/emqx-enterprise:latest", "running", "Up 4 days", "0.0.0.0:1883->1883/tcp", (4u64, puttyplus::backend::docker::DurUnit::Day)),
+            ("some-postgres", "c1007e60d4e5", "postgres:17", "running", "Up 11 minutes (healthy)", "0.0.0.0:5432->5432/tcp", (11, puttyplus::backend::docker::DurUnit::Minute)),
+            ("some-mysql", "c439166f7a8b", "mysql:8", "running", "Up 11 minutes (healthy)", "0.0.0.0:3306->3306/tcp, 0.0.0.0:33060->33060/tcp", (11, puttyplus::backend::docker::DurUnit::Minute)),
+            ("emqx-enterprise", "b6ddf7f1c9d0", "emqx/emqx-enterprise:latest", "exited", "Exited (0) 9 days ago", "", (9, puttyplus::backend::docker::DurUnit::Day)),
+            ("only-created", "deadbeef1234", "nginx:alpine", "created", "Created", "", (3, puttyplus::backend::docker::DurUnit::Minute)),
+            ("paused-one", "feedface5678", "redis:7", "paused", "Up 2 hours (Paused)", "6379/tcp", (2, puttyplus::backend::docker::DurUnit::Hour)),
+        ] {
             rows.push(puttyplus::backend::docker::ContainerInfo {
+                id: idv.into(),
+                name: nm.into(),
+                image: imgv.into(),
+                status: raw.into(),
+                state: stv.into(),
+                ports: prt.into(),
+                compose: String::new(),
+                compose_files: String::new(),
+                compose_dir: String::new(),
+                cpu: "1.0%".into(),
+                mem: "10MiB".into(),
+                duration: Some(puttyplus::backend::docker::DockerDuration::Num(dur.0, dur.1)),
+            });
+        }
+        rows.push(puttyplus::backend::docker::ContainerInfo {
                 id: "ghost-id".into(),
                 name: "ghost".into(),
                 image: "img:1".into(),
@@ -1099,6 +1205,10 @@ fn main() {
                 compose_dir: "/srv/app".into(),
                 cpu: "1.0%".into(),
                 mem: "10MiB".into(),
+                duration: Some(puttyplus::backend::docker::DockerDuration::Num(
+                    1,
+                    puttyplus::backend::docker::DurUnit::Hour,
+                )),
             });
             dockerui::set_rows_for_test(&panel.st, rows);
             pump(200);
@@ -1108,7 +1218,12 @@ fn main() {
                 "选不中那个项目行"
             );
             pump(200);
-            dockerui::click_project_action_for_test(&panel.st, "start");
+            dockerui::dispatch_action_for_test(
+                &panel.st,
+                "pp-smoke-nonexistent",
+                "project",
+                "start",
+            );
             pump(400);
             // ⚠️ 确认框 ⇒ **点确定**（这才是「真跑一次」）。
             confirm_last_dialog();
@@ -1334,7 +1449,7 @@ fn main() {
             //    只有测试钩子会写 ⇒ 真实流程里详情消息被当成「过时的」
             //    丢掉 ⇒ **详情区永远不显示**（冒烟当时没抓住）。
             let mut waited2 = 0;
-            while waited2 < 40 && !dockerui::detail_visible_for_test(&panel2.st) {
+            while waited2 < 40 && !dockerui::detail_body_visible_for_test(&panel2.st) {
                 pump(200);
                 waited2 += 1;
             }
@@ -1346,7 +1461,7 @@ fn main() {
             );
             check!(
                 "⑮ 选中容器后详情真的显示出来了",
-                dockerui::detail_visible_for_test(&panel2.st),
+                dockerui::detail_body_visible_for_test(&panel2.st),
                 format!("等了 {waited2} 次还是没详情")
             );
             // 切到日志页 ⇒ 起流 ⇒ 等日志真的进来。
@@ -1434,11 +1549,78 @@ fn main() {
             }
 
             // ---- 前端：开容器内终端 ----
+            //
+            // ⚠️ **阶段 155**：详情区的「终端」按钮**撤了** ⇒ 入口在
+            //   **「操作」列**里 ⇒ 断言改成「那行有颗能点的终端图标」。
+            // ⚠️ **阶段 160**：「进容器」搬进**右键菜单**了（操作列只剩启停）。
+            let cm0 = dockerui::menu_actions_for_test("container", "running");
+            let cmk: Vec<&str> = cm0.iter().map(|(k, _)| k.as_str()).collect();
             check!(
-                "⑯ 详情区的「终端」按钮能点",
-                dockerui::term_button_sensitive_for_test(&panel2.st),
-                "按钮是灰的"
+                "⑯ 右键菜单里有「进入容器 / 文件 / 日志 / 属性」",
+                cmk.contains(&"enter")
+                    && cmk.contains(&"files")
+                    && cmk.contains(&"logs")
+                    && cmk.contains(&"detail"),
+                format!("容器行的菜单是：{cm0:?}")
             );
+            // ---- 菜单的图标名**系统主题里真得存在**（写错 ⇒ 缺图占位符）----
+            //
+            // ⚠️ **阶段 160 踩过**：菜单里用了表格自绘的 `pp-play` / `pp-stop`
+            //   ⇒ 主题里没这两个名字 ⇒ 界面上是两块**灰糊**（截图才发现）。
+            {
+                let theme = gtk::IconTheme::for_display(
+                    &gtk::gdk::Display::default().expect("display"),
+                );
+                let mut bad: Vec<String> = Vec::new();
+                for kind in ["container", "project"] {
+                    for n in dockerui::menu_action_icons_for_test(kind, "running") {
+                        if !theme.has_icon(&n) {
+                            bad.push(format!("{kind}:{n}"));
+                        }
+                    }
+                }
+                check!(
+                    "⑯ 右键菜单的图标名系统主题里都有",
+                    bad.is_empty(),
+                    format!("主题里没有这些图标：{bad:?}")
+                );
+            }
+            // ---- 右键菜单**真的弹出来**（项也对）⇒ 截图看看 ----
+            {
+                let ok = dockerui::show_row_menu_for_test(&panel2.st, &name);
+                pump(400);
+                let items = dockerui::row_menu_items_for_test(&panel2.st);
+                println!("[信息] 右键菜单项：{items:?}");
+                check!("⑯ 右键菜单弹得出来", ok, "弹不出右键菜单");
+                check!(
+                    "⑯ 右键菜单里有 进入容器/文件/日志/属性/启动/停止/重启",
+                    items.iter().any(|t| t.contains("进入容器"))
+                        && items.iter().any(|t| t.contains("文件"))
+                        && items.iter().any(|t| t.contains("日志"))
+                        && items.iter().any(|t| t.contains("属性"))
+                        && items.iter().any(|t| t == "启动")
+                        && items.iter().any(|t| t == "停止")
+                        && items.iter().any(|t| t == "重启"),
+                    format!("菜单项是：{items:?}")
+                );
+                // ---- 菜单里的启停**看状态**（跟「操作」列一致）----
+                //
+                // ⚠️ 这一行是**运行中**的容器 ⇒ 「启动」应当灰掉、「停止」能点。
+                let start_sensitive =
+                    dockerui::row_menu_item_sensitive_for_test(&panel2.st, "启动");
+                let stop_sensitive =
+                    dockerui::row_menu_item_sensitive_for_test(&panel2.st, "停止");
+                check!(
+                    "⑯ 运行中的容器：菜单里「启动」是灰的、「停止」能点",
+                    start_sensitive == Some(false) && stop_sensitive == Some(true),
+                    format!("启动 sensitive={start_sensitive:?} 停止 sensitive={stop_sensitive:?}")
+                );
+                if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                    shot(&format!("{base}-rowmenu.png"));
+                }
+                dockerui::close_row_menu_for_test(&panel2.st);
+                pump(200);
+            }
             dockerui::open_terminal_for_test(&panel2.st, &name);
             let mut waited = 0;
             while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
@@ -2238,26 +2420,42 @@ fn main() {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
     }
-    // ================= N 组：阶段 117 —— 入口好找 ＋ 交互像 docker exec -it =================
+    // ================= N 组：阶段 117/155 —— 入口好找 ＋ 交互像 docker exec -it =================
     //
     // ⚠️ 用户 2026-11-16：「界面里没看到在哪里打开容器shell」⇒ 这组专测
-    //   **入口能不能被找到**（工具条按钮 ＋ 双击容器行）。
+    //   **入口能不能被找到**。
+    //
+    // ⚠️ **阶段 155**：工具条上那个「进入容器」按钮**撤了** ⇒ 入口搬进
+    //   **「操作」列**（每行一颗终端图标）⇒ **不用先选中容器**就能直接进
+    //   那一行 ⇒ 断言也跟着改成「操作」列的形态。
     {
-        // ---- 工具条上有个「进入容器」按钮，选中容器后可点 ----
-        let (label, sensitive) = dockerui::enter_button_for_test(&panel2.st);
-        check!(
-            "㉒ 工具条上有「进入容器」按钮",
-            label == "进入容器",
-            format!("按钮文案={label:?}")
-        );
-        check!(
-            "㉒ 选中容器后「进入容器」可点",
-            sensitive,
-            "按钮是灰的（选中的容器不在？）"
-        );
-        // ---- **点工具条那个「进入容器」按钮 ⇒ 进 shell** ----
+        // ---- 「操作」列里有颗终端图标（进容器）----
+        {
+            let cs0 = dockerui::containers_for_test(&panel2.st);
+            let c0 = cs0
+                .iter()
+                .find(|c| c.state == "running")
+                .or_else(|| cs0.first())
+                .cloned();
+            if let Some(c0) = c0 {
+                // ⚠️ **阶段 160**：终端图标**搬进右键菜单**了 ⇒ 验菜单。
+                let cm = dockerui::menu_actions_for_test("container", "running");
+                let cmk: Vec<&str> = cm.iter().map(|(k, _)| k.as_str()).collect();
+                check!(
+                    "㉒ 容器行的右键菜单里有「进入容器」",
+                    cmk.contains(&"enter"),
+                    format!("容器 {} 的菜单是：{cm:?}", c0.name)
+                );
+                check!(
+                    "㉒ 容器行的右键菜单里有「文件 / 日志 / 属性」",
+                    cmk.contains(&"files") && cmk.contains(&"logs") && cmk.contains(&"detail"),
+                    format!("容器 {} 的菜单是：{cm:?}", c0.name)
+                );
+            }
+        }
+        // ---- **点那颗终端图标 ⇒ 进 shell** ----
         //
-        // ⚠️ **这条是补上一个漏洞**：光断言「按钮在不在」抓不住「点了没
+        // ⚠️ **这条是补上一个漏洞**：光断言「图标在不在」抓不住「点了没
         //   反应」（反向验证时退掉回调，断言照样绿）⇒ 必须真的点一下。
         {
             let cs0 = dockerui::containers_for_test(&panel2.st);
@@ -2269,17 +2467,17 @@ fn main() {
             if let Some(c0) = c0 {
                 dockerui::stop_terminal_for_test(&panel2.st);
                 pump(300);
-                // ⚠️ **先选中那一行**（按钮要「有选中」才可用）。
-                dockerui::select_container_for_test(&panel2.st, &c0.name);
-                pump(300);
-                dockerui::enter_click_for_test(&panel2.st);
+                // ⚠️ **不用先选中容器**（这正是搬进「操作」列的好处）。
+                // ⚠️ **阶段 160**：「进容器」在右键菜单里 ⇒ 走**同一个派发**
+                //   （`dispatch_action_for_test` 现在也找菜单里的动作）。
+                dockerui::dispatch_action_for_test(&panel2.st, &c0.name, "container", "enter");
                 let mut waited = 0;
                 while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
                     pump(200);
                     waited += 1;
                 }
                 check!(
-                    "㉒ 点「进入容器」按钮能进容器 shell",
+                    "㉒ 点「进容器」能进容器 shell",
                     dockerui::term_running_for_test(&panel2.st),
                     format!("等了 {waited} 次还没起来")
                 );
@@ -2400,12 +2598,10 @@ fn main() {
                 "[信息] 容器 {name} 里能用的 shell={have_shell:?}、不能用的={missing_shell:?}"
             );
 
-            // ---- 进容器（走工具条上的「进入容器」按钮 ⇒ 顺带验阶段 117 的入口）----
+            // ---- 进容器（走「操作」列里的终端图标 ⇒ 顺带验阶段 155 的入口）----
             dockerui::stop_terminal_for_test(&panel2.st);
             pump(300);
-            dockerui::select_container_for_test(&panel2.st, &name);
-            pump(200);
-            dockerui::enter_click_for_test(&panel2.st);
+            dockerui::click_row_action_for_test(&panel2.st, &name, "enter");
             let mut waited = 0;
             while waited < 40 && !dockerui::term_running_for_test(&panel2.st) {
                 pump(200);
@@ -2647,6 +2843,30 @@ fn main() {
             !imgs.is_empty(),
             format!("共 {} 行", imgs.len())
         );
+
+        // ---- **先清掉上一轮遗留的测试标签**（自愈）----
+        //
+        // ⚠️ **为什么要有**：上一次跑挂了（断言红）⇒ 标签留在远端 ⇒
+        //   这一轮镜像表第一行就是它 ⇒ 「界面第一行跟远端原文对得上」
+        //   这类断言**莫名红** ⇒ 一次失败会**毒掉后面所有轮**（实测踩过）。
+        // ⇒ 开跑前先把同名标签删掉。
+        {
+            let rows = dockerui::images_rows_for_test(&panel2.st);
+            if let Some(i) = rows.iter().position(|r| r.0 == "pp-test-tag-120") {
+                dockerui::images_select_for_test(&panel2.st, i as u32);
+                dockerui::images_remove_for_test(&panel2.st);
+                let mut w0 = 0;
+                while w0 < 40
+                    && dockerui::images_rows_for_test(&panel2.st)
+                        .iter()
+                        .any(|r| r.0 == "pp-test-tag-120")
+                {
+                    pump(200);
+                    w0 += 1;
+                }
+                println!("[信息] 清掉了上一轮遗留的 pp-test-tag-120");
+            }
+        }
 
         // ---- **操作条在**（四个按钮）----
         let (labels, sensitive, sel0) = dockerui::images_actions_for_test(&panel2.st);

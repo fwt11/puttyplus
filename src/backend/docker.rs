@@ -41,10 +41,131 @@ pub const SEP: char = '|';
 /// ⚠️ `{{.Label "com.docker.compose.project"}}` 要 **Docker 17.06+**；
 /// 老版本会报「template parsing error」⇒ 有个**降级模板**（见
 /// [`list_cmd_simple`]）。
-const PS_FIELDS: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Label \"com.docker.compose.project\"}}|{{.Label \"com.docker.compose.project.config_files\"}}|{{.Label \"com.docker.compose.project.working_dir\"}}";
+///
+/// ⚠️ **`{{.RunningFor}}` 放在最后**（阶段 158）⇒ 老字段的下标**不变**
+///   （解析是按位置取的 ⇒ 中间插字段会把所有列都错位）。
+const PS_FIELDS: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Label \"com.docker.compose.project\"}}|{{.Label \"com.docker.compose.project.config_files\"}}|{{.Label \"com.docker.compose.project.working_dir\"}}|{{.RunningFor}}";
 
 /// 容器列表的字段模板（**降级版**：不依赖 `.Label`，老 Docker 也能用）。
-const PS_FIELDS_SIMPLE: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}";
+const PS_FIELDS_SIMPLE: &str = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.RunningFor}}";
+
+/// 一段时长（**docker 的人话** ⇒ 结构化）。
+///
+/// ⚠️ docker 输出的时长是**英文**（`2 hours` / `Less than a second` /
+///   `3 minutes ago`）⇒ 这里解析成结构体，**界面层再翻成中文**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockerDuration {
+    /// 「不到 1 秒」（docker 原话 `Less than a second`）。
+    LessThanSecond,
+    /// 「N 个某单位」。
+    Num(u64, DurUnit),
+}
+
+/// 时长的单位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+/// 解析 docker 的人话时长（`Up 2 hours` / `Exited (0) 9 days ago` /
+///
+/// `Less than a second` / `3 minutes ago`）。
+///
+/// ⚠️ **找的是「数字 ＋ 单位」那一段**，不是去认整句话 ⇒
+///   `Exited (0) 9 days ago` 里 `(0)` 不是时长（括号里不是纯数字）⇒ 跳过。
+///
+/// ⚠️ **docker 的输出是英文**（CLI 不做本地化）⇒ 单位名只认英文。
+pub fn parse_docker_duration(s: &str) -> Option<DockerDuration> {
+    if s.contains("Less than a second") {
+        return Some(DockerDuration::LessThanSecond);
+    }
+    // ⚠️ **「About a minute / About an hour / About a day …」**
+    //   （docker 的 `humanizeDuration`：不到两个单位时用「大约」）⇒
+    //   当成「1 个单位」处理（跟 docker 自己的精度一致）。
+    if let Some(u) = about_a_unit(s) {
+        return Some(DockerDuration::Num(1, u));
+    }
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        let n = tokens[i];
+        let unit = tokens[i + 1];
+        // ⚠️ **必须是纯数字**（`(0)`、`2)` 这种不算）。
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            if let Some(u) = dur_unit_of(unit) {
+                return Some(DockerDuration::Num(n.parse::<u64>().ok()?, u));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 「About a minute / About an hour / About a day …」⇒ 单位。
+///
+/// ⚠️ **不能只认「整句开头就是 About」**（2026-11-24 实测踩过）：
+///   docker 的 `Status` **前面还有 `Up `** ⇒ `Up About an hour (healthy)`
+///   ——这正是**跑了一小时上下**的容器最常见的样子 ⇒ 按前缀匹配会漏掉
+///   ⇒ 状态列只显示「运行中」而没有时长。
+/// ⇒ 改成**按词扫**：`About` + (`a`/`an`) + 单位词，**在句中哪都行**。
+fn about_a_unit(s: &str) -> Option<DurUnit> {
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    for i in 0..tokens.len() {
+        if tokens[i] != "About" {
+            continue;
+        }
+        let Some(art) = tokens.get(i + 1) else { continue };
+        if *art != "a" && *art != "an" {
+            continue;
+        }
+        let Some(word) = tokens.get(i + 2) else { continue };
+        // ⚠️ **去掉可能粘着的标点**（`hour,` / `hour)`）。
+        let word = word.trim_matches(|c: char| !c.is_ascii_alphabetic());
+        if let Some(u) = dur_unit_of(word) {
+            return Some(u);
+        }
+    }
+    None
+}
+
+/// docker 的单位词 ⇒ 单位（单复数都认）。
+fn dur_unit_of(word: &str) -> Option<DurUnit> {
+    match word {
+        "second" | "seconds" => Some(DurUnit::Second),
+        "minute" | "minutes" => Some(DurUnit::Minute),
+        "hour" | "hours" => Some(DurUnit::Hour),
+        "day" | "days" => Some(DurUnit::Day),
+        "week" | "weeks" => Some(DurUnit::Week),
+        "month" | "months" => Some(DurUnit::Month),
+        "year" | "years" => Some(DurUnit::Year),
+        _ => None,
+    }
+}
+
+/// 按状态挑出**值得显示的那段时长**（阶段 158）。
+///
+/// ⚠️ **三种情况**（用户 2026-11-24：「状态列要显示已经运行了多久，如果只是
+///   已经创建，就显示已经创建了多久，如果是正在运行，就显示已经运行了多久」）：
+/// - **在跑** ⇒ **跑了多久**（`Up 2 hours` ⇒ 2 小时）；
+/// - **只创建、没启动过** ⇒ **创建了多久**（docker 的 `.RunningFor`
+///   ——⚠️ 它给的其实是「**创建至今**」，不是运行时长，实测确认）；
+/// - **已停止** ⇒ **停了多久**（`Exited (0) 9 days ago` ⇒ 9 天）。
+///
+/// ⚠️ **暂停 / 重启中不给时长**（`Up 2 hours (Paused)` 里的两小时是「暂停
+///   了多久」不是「跑了多久」）⇒ 只显示状态标签。
+pub fn duration_of(state: &str, status: &str, created_for: &str) -> Option<DockerDuration> {
+    match state {
+        "running" | "exited" => parse_docker_duration(status),
+        "created" => parse_docker_duration(created_for),
+        _ => None,
+    }
+}
 
 /// 一个容器。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,6 +194,16 @@ pub struct ContainerInfo {
     pub cpu: String,
     /// 内存占用（`51MiB / 63GiB`；没采到就是空）。
     pub mem: String,
+    /// **值得显示的那段时长**（阶段 158）。
+    ///
+    /// ⚠️ **按状态挑**（见 [`duration_of`]）：
+    /// - 在跑 ⇒ **跑了多久**（`Up 2 hours` ⇒ 2 小时）；
+    /// - 只创建没启动 ⇒ **创建了多久**（`.RunningFor` ⇒ 3 分钟）；
+    /// - 已停止 ⇒ **停了多久**（`Exited (0) 9 days ago` ⇒ 9 天）。
+    ///
+    /// ⚠️ **算的都是远端守护进程的时间**（`Up 2 hours` / `.RunningFor`
+    ///   都是 docker 那边算的）⇒ **不受两台机器的时钟偏差影响** ✓。
+    pub duration: Option<DockerDuration>,
 }
 
 impl ContainerInfo {
@@ -335,6 +466,11 @@ pub enum ComposeAction {
     Start,
     /// 停止（`docker compose stop`）：停掉容器，**容器还留着**。
     Stop,
+    /// 重启（`docker compose restart`）：**原地**重启容器（不重建）。
+    ///
+    /// ⚠️ **阶段 160**：操作列瘦身后只剩「启动 / 停止 / 重启」⇒
+    ///   项目行也得有「重启」⇒ 这里补上（`docker compose restart`）。
+    Restart,
     /// 销毁（`docker compose down`）：停掉并**删除**容器与网络。
     Down,
     /// 重建（`docker compose up`）：按 compose 文件**重新创建并启动**。
@@ -347,6 +483,7 @@ impl ComposeAction {
         match self {
             ComposeAction::Start => "start",
             ComposeAction::Stop => "stop",
+            ComposeAction::Restart => "restart",
             ComposeAction::Down => "down",
             ComposeAction::Up => "up",
         }
@@ -357,6 +494,7 @@ impl ComposeAction {
         match self {
             ComposeAction::Start => tr("启动"),
             ComposeAction::Stop => tr("停止"),
+            ComposeAction::Restart => tr("重启"),
             ComposeAction::Down => tr("销毁"),
             ComposeAction::Up => tr("重建"),
         }
@@ -367,6 +505,7 @@ impl ComposeAction {
         match self {
             ComposeAction::Start => tr("已启动"),
             ComposeAction::Stop => tr("已停止"),
+            ComposeAction::Restart => tr("已重启"),
             ComposeAction::Down => tr("已销毁"),
             ComposeAction::Up => tr("已重建"),
         }
@@ -1061,18 +1200,27 @@ pub fn parse_ps(out: &str) -> Vec<ContainerInfo> {
         let image = f.next().unwrap_or("").trim().to_string();
         let status = f.next().unwrap_or("").trim().to_string();
         let state = state_of(&status).to_string();
+        // ⚠️ **老字段先读**（下标不能动 ⇒ 新字段一律**追加**在最后）。
+        let ports = f.next().unwrap_or("").trim().to_string();
+        let compose = f.next().unwrap_or("").trim().to_string();
+        let compose_files = f.next().unwrap_or("").trim().to_string();
+        let compose_dir = f.next().unwrap_or("").trim().to_string();
+        // ⚠️ **阶段 158**：`.RunningFor`（docker 给的是「**创建至今**」）。
+        let created_for = f.next().unwrap_or("").trim().to_string();
+        let duration = duration_of(&state, &status, &created_for);
         v.push(ContainerInfo {
             id,
             name,
             image,
             status,
             state,
-            ports: f.next().unwrap_or("").trim().to_string(),
-            compose: f.next().unwrap_or("").trim().to_string(),
-            compose_files: f.next().unwrap_or("").trim().to_string(),
-            compose_dir: f.next().unwrap_or("").trim().to_string(),
+            ports,
+            compose,
+            compose_files,
+            compose_dir,
             cpu: String::new(),
             mem: String::new(),
+            duration,
         });
     }
     v
@@ -1837,6 +1985,11 @@ pub fn parse_ls(out: &str) -> Vec<ContainerFile> {
             None => name_all,
         };
         let name = name.trim_matches('"').to_string();
+        // ⚠️ **只留最后一段**（basename，阶段 159）：`ls` 给的**未必是文件名**
+        //   （有的实现给的是**完整路径**）⇒ 名称列会出现 "/media/proc" 这种
+        //   东西 ⇒ 双击时它又被拼到当前目录后面 ⇒ **路径越拼越长**
+        //   （用户 2026-11-24 报的）⇒ 名字列只放文件名。
+        let name = crate::util::path_basename(&name).to_string();
         if name.is_empty() || name == "." || name == ".." {
             continue;
         }
@@ -1848,6 +2001,63 @@ pub fn parse_ls(out: &str) -> Vec<ContainerFile> {
         });
     }
     v
+}
+
+/// `ls` 失败 ⇒ **说清楚是「目录」的问题**（不是 docker 没装）。
+///
+/// ⚠️ **为什么不能直接用 [`classify_failure`]**（阶段 159）：它把
+///   「no such file or directory」一律翻成「远程没有找到 docker」
+///   ⇒ 用户明明有 docker、只是**目录不存在**，却被告知「服务器上没装
+///   Docker」（容器文件页里天天撞得上）。
+pub fn classify_ls_failure(raw: &str) -> String {
+    let s = raw.to_ascii_lowercase();
+    // ⚠️ **先看 docker 层面的错**（容器没跑 / 容器没了 / 没权限 / 没装）。
+    if s.contains("cannot connect to the docker daemon")
+        || s.contains("is the docker daemon running")
+        || s.contains("error during connect")
+        || s.contains("no such container")
+        || s.contains("cannot connect to the unix socket")
+        || s.contains("docker.sock")
+        || s.contains("oci runtime exec failed")
+    {
+        return classify_failure(raw);
+    }
+    // ⇒ 到这里就是 `ls` 自己的错 ⇒ 说目录的事。
+    if s.contains("no such file or directory") || s.contains("not found") {
+        tr("这个目录不存在（可能已经被删掉了）").to_string()
+    } else if s.contains("permission denied") {
+        tr("没有权限读这个目录").to_string()
+    } else if s.contains("not a directory") {
+        tr("这不是一个目录").to_string()
+    } else if s.contains("command not found") {
+        tr("容器里没有 ls 命令（换个镜像试试）").to_string()
+    } else {
+        // 认不出来 ⇒ 把原文给用户（别吞掉信息）
+        let t = raw.trim();
+        if t.is_empty() {
+            tr("读不出这个目录").to_string()
+        } else {
+            t.to_string()
+        }
+    }
+}
+
+/// `ls -lA` 的输出 ⇒ 文件列表（**空目录不是错误**）。
+///
+/// ⚠️ **为什么单独拎出来**（阶段 159，用户 2026-11-24 报的「双击文件夹 ⇒
+///   路径名在地址栏累积、进不去文件夹」）：
+/// - `ls -lA` 在**空目录**里只输出一行 `total 0` ⇒ **解析出 0 行**；
+/// - 以前这里把「0 行」当成**失败** ⇒ 于是：
+///   ① 表格**停在旧目录**（用户以为没进去 ⇒ 又在旧表格里点一行）
+///   ② 而路径栏**照样前进**（乐观更新）⇒ 下一次双击就在失败路径上**再拼一层**
+///   ⇒ 地址栏变成 `/media/proc/root/sbin/srv/tmp/srv/sbin` 这种鬼样子。
+/// ⇒ 现在**只有命令真的失败**（退出码 ≠ 0：目录不存在 / 没权限 / 容器没跑）
+///   才算错；**空目录是成功**（0 个条目）。
+pub fn ls_files(code: i32, out: &str) -> BackendResult<Vec<ContainerFile>> {
+    if code != 0 {
+        return Err(BackendError(classify_ls_failure(out)));
+    }
+    Ok(parse_ls(out))
 }
 
 /// 列容器里的一个目录（阶段 116）。
@@ -1863,13 +2073,7 @@ pub async fn list_dir(
         return Err(BackendError(tr("容器名不合法").to_string()));
     }
     let (code, out) = run_cmd(session, &list_dir_cmd(container, path)).await?;
-    let files = parse_ls(&out);
-    if code != 0 || files.is_empty() {
-        // ⚠️ **一行都没解析出来** ⇒ 多半是错误信息（容器没跑 / 没权限 /
-        //   容器里没有 ls……）⇒ 翻成中文。
-        return Err(BackendError(classify_failure(&out)));
-    }
-    Ok(files)
+    ls_files(code, &out)
 }
 
 /// 读容器里的一个文件（阶段 116）。
@@ -2163,12 +2367,30 @@ mod tests {
     }
 
     #[test]
-    fn 降级模板只有五个字段也认() {
+    fn 降级模板字段少也认() {
+        // ⚠️ **阶段 158**：降级模板也有 `{{.RunningFor}}`（6 个字段），
+        //   但**老 docker 连它都不认** ⇒ 解析时字段可能更少 ⇒ 后面缺的
+        //   一律当空串（不是错误）。
         let out = "abc123def456|web|nginx:latest|Up 2 hours|0.0.0.0:80->80/tcp\n";
         let v = parse_ps(out);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].ports, "0.0.0.0:80->80/tcp");
         assert_eq!(v[0].compose, "");
+        // ⚠️ **在跑 ⇒ 时长来自 `Status`**（`Up 2 hours`）⇒ 没有
+        //   `.RunningFor` 也照样有「运行了多久」✓。
+        assert_eq!(v[0].duration, Some(DockerDuration::Num(2, DurUnit::Hour)));
+        // ⚠️ **只创建 ⇒ 时长只能来自 `.RunningFor`** ⇒ 没有它就没时长。
+        let out3 = "abc123def456|web|nginx:latest|Created|0.0.0.0:80->80/tcp\n";
+        let v3 = parse_ps(out3);
+        assert_eq!(v3[0].duration, None, "没有 .RunningFor 时不该有创建时长");
+        // 有 `.RunningFor`（完整模板的最后一个字段）⇒ 时长认得出来。
+        let out2 = "abc123def456|web|nginx:latest|Up 2 hours|0.0.0.0:80->80/tcp||||3 days ago\n";
+        let v2 = parse_ps(out2);
+        assert_eq!(
+            v2[0].duration,
+            Some(DockerDuration::Num(2, DurUnit::Hour)),
+            "完整模板的时长没解析出来"
+        );
     }
 
     /// 容器已经被删掉时，错误要说清楚（别把英文原文甩给用户）。
@@ -2286,6 +2508,93 @@ mod tests {
         assert_eq!(state_of("Restarting (1) 5 seconds ago"), "restarting");
         assert_eq!(state_of("Dead"), "dead");
         assert_eq!(state_of("说不清"), "unknown");
+    }
+
+    /// **阶段 158：docker 的人话时长 ⇒ 结构化**。
+    ///
+    /// ⚠️ 这些是 docker `humanizeDuration` 的**全部措辞** ⇒ 少认一种，
+    ///   界面上就少显示一段时长。
+    #[test]
+    fn 人话时长能解析() {
+        use DockerDuration::{LessThanSecond, Num};
+        assert_eq!(parse_docker_duration("Up Less than a second"), Some(LessThanSecond));
+        assert_eq!(parse_docker_duration("Up 1 second"), Some(Num(1, DurUnit::Second)));
+        assert_eq!(parse_docker_duration("Up 45 seconds"), Some(Num(45, DurUnit::Second)));
+        assert_eq!(parse_docker_duration("About a minute"), Some(Num(1, DurUnit::Minute)));
+        assert_eq!(parse_docker_duration("Up 3 minutes"), Some(Num(3, DurUnit::Minute)));
+        assert_eq!(parse_docker_duration("About an hour"), Some(Num(1, DurUnit::Hour)));
+        assert_eq!(parse_docker_duration("Up 2 hours"), Some(Num(2, DurUnit::Hour)));
+        assert_eq!(parse_docker_duration("About a day"), Some(Num(1, DurUnit::Day)));
+        assert_eq!(parse_docker_duration("Up 9 days"), Some(Num(9, DurUnit::Day)));
+        assert_eq!(parse_docker_duration("About a week"), Some(Num(1, DurUnit::Week)));
+        assert_eq!(parse_docker_duration("Up 3 weeks"), Some(Num(3, DurUnit::Week)));
+        assert_eq!(parse_docker_duration("About a month"), Some(Num(1, DurUnit::Month)));
+        assert_eq!(parse_docker_duration("Up 2 months"), Some(Num(2, DurUnit::Month)));
+        assert_eq!(parse_docker_duration("About a year"), Some(Num(1, DurUnit::Year)));
+        assert_eq!(parse_docker_duration("Up 3 years"), Some(Num(3, DurUnit::Year)));
+        // ⚠️ **状态里夹着的数字不算时长**（`Exited (0) 9 days ago` 的 `(0)`
+        //   是退出码，不是时长）。
+        assert_eq!(
+            parse_docker_duration("Exited (0) 9 days ago"),
+            Some(Num(9, DurUnit::Day))
+        );
+        // 没有时长 ⇒ None（界面退回状态标签）。
+        assert_eq!(parse_docker_duration("Created"), None);
+        assert_eq!(parse_docker_duration("Paused"), None);
+        assert_eq!(parse_docker_duration(""), None);
+    }
+
+    /// **阶段 158 补：docker 的「大约」措辞前面还有 `Up `**（2026-11-24 实测）。
+    ///
+    /// ⚠️ `Up About an hour (healthy)` 是**跑了一小时上下**的容器最常见的样子
+    ///   ⇒ 漏掉它 ⇒ 状态列只有「运行中」没有时长（真机上就是这样）。
+    #[test]
+    fn 大约措辞在句中也认() {
+        use DockerDuration::Num;
+        assert_eq!(
+            parse_docker_duration("Up About an hour (healthy)"),
+            Some(Num(1, DurUnit::Hour))
+        );
+        assert_eq!(
+            parse_docker_duration("Up About a minute (unhealthy)"),
+            Some(Num(1, DurUnit::Minute))
+        );
+        assert_eq!(
+            parse_docker_duration("Exited (0) About an hour ago"),
+            Some(Num(1, DurUnit::Hour))
+        );
+        // ⚠️ **`About` 后面不是量词就别当时长**（别把别的句子误读）。
+        assert_eq!(parse_docker_duration("Up About 5 containers"), None);
+    }
+
+    /// **阶段 158：按状态挑出「该显示哪段时长」**。
+    #[test]
+    fn 时长按状态挑() {
+        use DockerDuration::{LessThanSecond, Num};
+        // 在跑 ⇒ **跑了多久**（从 `Up …` 里取）。
+        assert_eq!(
+            duration_of("running", "Up 2 hours (healthy)", "13 days ago"),
+            Some(Num(2, DurUnit::Hour))
+        );
+        // 只创建、没启动过 ⇒ **创建了多久**（docker 的 `.RunningFor`）。
+        assert_eq!(
+            duration_of("created", "Created", "3 minutes ago"),
+            Some(Num(3, DurUnit::Minute))
+        );
+        // 已停止 ⇒ **停了多久**。
+        assert_eq!(
+            duration_of("exited", "Exited (0) 9 days ago", "10 days ago"),
+            Some(Num(9, DurUnit::Day))
+        );
+        // 暂停 / 重启中 ⇒ 不给时长（`Up 2 hours (Paused)` 的两小时是
+        // 「暂停了多久」，说成「运行 2 小时」是错的）。
+        assert_eq!(duration_of("paused", "Up 2 hours (Paused)", "2 days ago"), None);
+        assert_eq!(duration_of("restarting", "Restarting (1) 5 seconds ago", "1 day ago"), None);
+        // 「不到 1 秒」也要认。
+        assert_eq!(
+            duration_of("running", "Up Less than a second", "Less than a second ago"),
+            Some(LessThanSecond)
+        );
     }
 
     #[test]
@@ -2901,6 +3210,41 @@ drwxr-xr-x 2 root root  4096 Nov 15 19:30 conf.d\n";
         assert!(v.is_empty(), "错误信息不该被当成文件：{v:?}");
         let v2 = super::parse_ls("total 0\n");
         assert!(v2.is_empty(), "表头不该被当成文件：{v2:?}");
+    }
+
+    /// ⚠️ **阶段 159：空目录是成功，不是失败**。
+    ///
+    /// 这是用户 2026-11-24 报的「双击文件夹 ⇒ 路径名在地址栏累积、进不去
+    /// 文件夹」的**根因**：`ls -lA` 在空目录里只输出 `total 0` ⇒ 解析出 0 行
+    /// ⇒ 以前判成失败 ⇒ 表格停在父目录、路径栏却前进 ⇒ 用户在旧表格上
+    /// 再点一行 ⇒ 又拼一层。
+    #[test]
+    fn 空目录是成功不是失败() {
+        let r = super::ls_files(0, "total 0\n");
+        assert!(r.is_ok(), "空目录不该判成失败：{r:?}");
+        assert!(r.unwrap().is_empty(), "空目录就该是 0 个条目");
+    }
+
+    #[test]
+    fn 命令失败才算失败() {
+        // 目录不存在 ⇒ `ls` 退出码非 0 ⇒ 报错（这是**真的**失败）。
+        let r = super::ls_files(2, "ls: cannot access '/nope': No such file or directory\n");
+        assert!(r.is_err(), "进不去的目录该报错");
+        // 容器没跑 ⇒ docker exec 退出码非 0 ⇒ 报错。
+        let r2 = super::ls_files(1, "Error response from daemon: container is not running\n");
+        assert!(r2.is_err(), "容器没跑该报错");
+    }
+
+    /// ⚠️ **阶段 159：名字只取最后一段**（basename）。
+    ///
+    /// 有的 `ls` 实现给的是**完整路径** ⇒ 名称列会出现 "/media/proc" 这种
+    /// 东西 ⇒ 双击时它又被拼到当前目录后面 ⇒ **路径越拼越长**。
+    #[test]
+    fn 名字只取最后一段() {
+        let out = "drwxr-xr-x 2 root root 4096 Nov 15 19:30 /media/proc\n";
+        let v = super::parse_ls(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "proc", "名字列只该放文件名");
     }
 
     #[test]
