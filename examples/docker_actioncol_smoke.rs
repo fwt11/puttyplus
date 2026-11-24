@@ -230,7 +230,7 @@ fn main() {
             "pp-play",
             "pp-stop",
             "view-refresh-symbolic",
-            "go-up-symbolic"
+            "edit-copy-symbolic"
         ],
         "项目行应当是 启动/停止/重启/重建：{p_names:?}"
     );

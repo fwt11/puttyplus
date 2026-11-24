@@ -47,29 +47,10 @@ use crate::i18n::tr;
 use crate::panel::PanelState;
 use crate::trf;
 
-/// 概览页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
-const PAGE_OVERVIEW: &str = "overview";
-/// 日志页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
-const PAGE_LOGS: &str = "logs";
-/// 监控页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
-const PAGE_MONITOR: &str = "monitor";
-/// 文件页在 `Stack` 里的名字（**内部标识**，不是界面文案）。
-const PAGE_FILES: &str = "files";
-/// **容器终端页**在 `Stack` 里的名字（UI 审查 D19：终端搬进容器页了）。
-
-/// 采样间隔（秒）：**阶段 114**。
-///
-/// ⚠️ `docker stats` 的持续模式**每 500ms 刷一次** ⇒ 直接用会得到一堆
-///   挤在一起的点 ⇒ 我们**每 2 秒出一个点**。
-const STATS_INTERVAL: f64 = 2.0;
-
-/// 曲线上保留多少个点（2 秒一个 ⇒ 60 个 = **2 分钟**的窗口）。
-pub const STATS_POINTS: usize = 60;
-
 /// **顶层分段**（阶段 115）：容器 / 镜像 / 卷 / 网络。
 ///
-/// ⚠️ **跟详情区的三个子页不是一回事**：详情区那三个（概览 / 日志 /
-///   监控）是**选中某个容器之后**才有的；这四个是**顶层**（先选看什么，
+/// ⚠️ **跟详情区的三个窗口不是一回事**：详情区那三个（概览 / 日志 / 文件）
+///   是**选中某个容器之后**才有的；这四个是**顶层**（先选看什么，
 ///   再看细节）。
 pub const SEG_CONTAINERS: &str = "containers";
 pub const SEG_IMAGES: &str = "images";
@@ -116,7 +97,13 @@ const COL_STATE_MK: usize = 7;
 ///   拼路径都靠它）⇒ **不能**往里塞 `<b>` 之类标签 ⇒ 另开一列放**要画的
 ///   那份**（容器行 = 空 ⇒ 画纯名字；项目行 = 粗体 ＋「compose」小字）。
 const COL_NAME_MK: usize = 8;
-const N_COLS: usize = 9;
+/// **资源列**（阶段 164：CPU 百分比 ＋ 内存占用）。
+///
+/// ⚠️ **为什么单独一列**（用户 2026-11-24：「如果地方确实大的话，我们可以
+///   考虑把 cpu 占用、内存占用加回来，**只用 1 列**，cpu 写百分比，内存只写
+///   占了多少内存，不用百分比」）⇒ **一列两样**，不拆成两列。
+const COL_RES: usize = 9;
+const N_COLS: usize = 10;
 
 /// 行类型：**容器**（`COL_KIND` 的值）。
 const KIND_CONTAINER: &str = "container";
@@ -201,17 +188,20 @@ const ICON_START: &str = "pp-play";
 const ICON_STOP: &str = "pp-stop";
 /// 图标名：**重启**。
 const ICON_RESTART: &str = "view-refresh-symbolic";
-/// 图标名：**重建**（**操作列**里 compose 项目行的第 4 颗，阶段 163）。
+/// 图标名：**重建**（**操作列**里 compose 项目行的第 4 颗，阶段 164）。
 ///
-/// ⚠️ **为什么是向上的箭头**（用户 2026-11-24：「那就不要 up 和 down 了，
-///   就来一个 recreate 吧，就是 docker compose up -d --force-recreate」）：
-///   - `go-up-symbolic` 是 **docker compose `up` 的字面意思**⇒ 一眼能对上；
-///   - ⚠️ **不用 `edit-copy-symbolic`**：那个图标是「复制」⇒ 放在一排
-///     ▶ ■ ⟳ 里会读成「复制一份」⇒ 不是「按 compose 文件重新创建」
-///     （**右键菜单**里的「重建」用那个，见 [`ICON_MENU_RECREATE`]，那里有文字兜底）；
-///   - ⚠️ **不用 `user-trash-symbolic`**：销毁会**删容器与网络**⇒ 放在
-///     操作列里太吓人 ⇒ 销毁只在**右键菜单**里（标红 ＋ 二次确认）。
-const ICON_RECREATE: &str = "go-up-symbolic";
+/// ⚠️ **为什么是「两个叠起来的方框」**（用户 2026-11-24：「这几个图标实在
+///   不够精致，尤其是 recreate 图标，**看不出来是什么意思**」）：
+/// - 阶段 162 用的是 `go-up-symbolic`（一个向上的箭头）⇒ **看不出是啥**
+///   （「向上」跟「重建」没关系，跟「上一级目录」倒是撞了）；
+/// - 试过一堆自绘方案（圆弧绕着容器方框 / 容器方框＋向下的箭头 / 方形循环
+///   箭头 / 两个叠方框…）⇒ **自己画的都不如主题的清楚**（16px 下自己画的
+///   圆弧**看不出箭头**、叠方框**糊成一团**）⇒ 16px 的图标必须**用主题里
+///   按 16px 设计过的**那一个；
+/// - ⇒ `edit-copy-symbolic`（两个叠起来的方块 =「多一个 / 再来一份」）
+///   ⇒ 意思对得上「按 compose 文件**再造一批**容器」；
+/// - ⇒ **跟右键菜单里的「重建」用同一个图标**（同一个动作 ⇒ 同一个图标）。
+const ICON_RECREATE: &str = "edit-copy-symbolic";
 /// 图标名：**编辑**。
 const ICON_EDIT: &str = "document-edit-symbolic";
 /// 图标名：**销毁**（垃圾桶）。
@@ -221,12 +211,6 @@ const ICON_EDIT: &str = "document-edit-symbolic";
 ///   再也点不到那一行的任何按钮（用户 2026-11-24 的原话：「down 了之后
 ///   容器界面就看不到了」）⇒ 那种按钮不该放在「一眼就点得到」的位置。
 const ICON_DOWN: &str = "user-trash-symbolic";
-/// 图标名：**重建**（**右键菜单**里用的；跟操作列的 [`ICON_RECREATE`] 同一件事）。
-///
-/// ⚠️ **不是 `system-reboot-symbolic`**（阶段 157）：那个画的是 **⏻ 电源**
-///   ⇒ 看着像「关机」！⇒ 换成 **📋 两张纸**（`edit-copy-symbolic`）
-///   ⇒ 「照着 compose 文件再造一份」这层意思对上了。
-const ICON_MENU_RECREATE: &str = "edit-copy-symbolic";
 /// 图标名：**文件**（容器里的文件）。
 const ICON_FILES: &str = "folder-symbolic";
 /// 图标名：**日志**。
@@ -399,7 +383,7 @@ pub fn menu_actions(kind: &str, raw_state: &str) -> Vec<MenuAction> {
             },
             MenuAction {
                 kind: ActionKind::Recreate,
-                icon: ICON_MENU_RECREATE.into(),
+                icon: ICON_RECREATE.into(),
                 label: tr("重建"),
                 group: 2,
                 enabled: true,
@@ -737,14 +721,25 @@ pub struct DockerUi {
     /// ⚠️ **阶段 155**：它住在**弹窗**里（不是页面下半区）⇒ 建弹窗时要把它
     ///   装进去。
     detail_box: gtk::Box,
-    /// **详情弹窗**（阶段 155：详情区从「页面下半区」搬到了**弹窗**里）。
+    /// **日志窗的内容盒**（标题行 ＋ 日志正文；阶段 165）。
+    logs_box: gtk::Box,
+    /// **文件窗的内容盒**（标题行 ＋ 文件区；阶段 165）。
+    files_box: gtk::Box,
+    /// **详情弹窗**（阶段 165：**概览**单独一扇窗）。
     ///
     /// ⚠️ **为什么是弹窗**：用户说「不要下面那部分了，整个页面都改成列表」
-    ///   ⇒ 页面只剩一张满高的列表 ⇒ 详情（概览 / 日志 / 监控 / 文件 ＋
+    ///   ⇒ 页面只剩一张满高的列表 ⇒ 详情（概览 / 日志 / 文件 ＋
     ///   compose 项目）只能**另开一扇窗**。
-    /// ⚠️ **建一次、复用**：关掉只是**隐藏**（不销毁）⇒ 控件状态不丢
-    ///   （日志页的搜索词、监控页的曲线、文件页的目录都不用重来）。
+    /// ⚠️ **建一次、复用**：关掉只是**隐藏**（不销毁）⇒ 控件状态不丢。
     detail_window: RefCell<Option<gtk::Window>>,
+    /// **日志弹窗**（阶段 165：日志**独立一扇窗**）。
+    ///
+    /// ⚠️ **用户 2026-11-24**：「其他这几个 tab 都单独出来吧，每次点鼠标
+    ///   右键就只出来一个窗口就行了」⇒ 概览 / 日志 / 文件**各一扇窗**，
+    ///   同一时刻只显示一扇。
+    logs_window: RefCell<Option<gtk::Window>>,
+    /// **文件弹窗**（阶段 165：文件**独立一扇窗**）。
+    files_window: RefCell<Option<gtk::Window>>,
     /// 详情弹窗里的**「关闭」按钮**（阶段 156：容器详情 / 项目详情各一个）。
     ///
     /// ⚠️ **为什么内容里必须有它**（用户 2026-11-23 报的「弹出对话框没法
@@ -755,8 +750,6 @@ pub struct DockerUi {
     detail_close_btns: RefCell<Vec<gtk::Button>>,
     /// **日志页**（阶段 112）。
     log: LogUi,
-    /// 详情区里的 **Stack**（概览 / 日志两页）。
-    stack: gtk::Stack,
     /// 正在看**哪个容器**的日志（空 = 没在看）。
     ///
     /// ⚠️ **用来认「这条数据是不是现在这条流的」**：换了容器以后，旧流
@@ -847,19 +840,6 @@ pub struct DockerUi {
     ///   序号（每次点「重连」都加）⇒ 用来认出「这个请求已经过期了」
     ///   （用户连点两次 ⇒ 后一个说了算，前一个的通道要关掉）。
     term_req: Cell<u64>,
-    /// **监控页**（阶段 114）。
-    monitor: MonitorUi,
-    /// 监控曲线的数据（**共享**给四张图 ⇒ 外面套 `Rc<RefCell<…>>`）。
-    monitor_data: Rc<RefCell<MonitorData>>,
-    /// 正在看**哪个容器**的监控（空 = 没在看）。
-    ///
-    /// ⚠️ **用来认「这条数据是不是现在这条流的」**：换了容器以后，旧流
-    ///   还在往通道里写 ⇒ 它的数据必须丢掉（不然两个容器的曲线混一块）。
-    stat_name: RefCell<String>,
-    /// 停监控流的**信号**（`oneshot` ⇒ 发了就停）。
-    stat_stop: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
-    /// 监控流**是不是在跑**。
-    stat_running: Cell<bool>,
     /// **顶层分段**（阶段 115）：容器 / 镜像 / 卷 / 网络 四页。
     seg: gtk::Stack,
     /// 四个**分段按钮**（点谁切谁）。
@@ -962,12 +942,6 @@ pub struct DockerUi {
     ///   回来谁先上屏 ⇒ **旧结果会盖掉新结果**（看着像「刷新了但内容不对」）
     ///   ⇒ 每次请求发一个递增序号 ⇒ 只认**序号最大**的那次。
     files_seq: Cell<u64>,
-    /// **最后一个采样点的原始行**（**带 ANSI** ⇒ 原样）。
-    ///
-    /// ⚠️ **为什么留原始行**：冒烟要能验证「**剥 ANSI 之后**解析出来的
-    ///   值跟远端那一行对得上」⇒ 光看指标卡不够（卡上只有数字）⇒ 得
-    ///   留着**原文**才能做对照。
-    stat_last_raw: RefCell<Option<String>>,
     /// 当前选中的**容器名**（空 = 没选容器）。
     ///
     /// ⚠️ **刷新要保住它**：自动刷新每 7 秒重建一次表格 ⇒ 不记住选中行的话，
@@ -1009,28 +983,6 @@ enum Msg {
     },
     /// 日志流**开不起来**（连不上 / 没权限 / 容器没了）。
     LogError {
-        name: String,
-        msg: String,
-    },
-    /// **监控采样**的一个点（阶段 114）。
-    ///
-    /// ⚠️ 带上容器名 ⇒ 换了容器以后，旧流的数据能认出来、丢掉。
-    StatPoint {
-        name: String,
-        pt: docker::StatPoint,
-        /// **原始行**（**带 ANSI** ⇒ 原样，不剥）。
-        ///
-        /// ⚠️ 带上它是为了**测试能对照**：冒烟拿它跟指标卡比 ⇒ 能抓到
-        ///   「忘了剥 ANSI ⇒ 解析出来的全是 0」这类退化。
-        raw: String,
-    },
-    /// 监控流**结束了**（远端命令退出；`code` 是退出码）。
-    StatEnd {
-        name: String,
-        code: i32,
-    },
-    /// 监控流**开不起来**（连不上 / 没权限 / 容器没了）。
-    StatError {
         name: String,
         msg: String,
     },
@@ -1095,31 +1047,11 @@ struct DetailUi {
     //   **「操作」列**（每行一排图标按钮）⇒ 详情区**只管看**。
 }
 
-/// 监控页的控件（**阶段 114**）。
-struct MonitorUi {
-    /// 整块（**只在监控页里显示**）。
-    root: gtk::Box,
-    /// 四个指标卡的**当前值**（CPU / 内存 / 网络 / 磁盘）。
-    val_cpu: gtk::Label,
-    val_mem: gtk::Label,
-    val_net: gtk::Label,
-    val_blk: gtk::Label,
-    /// 四张折线图（cairo 自绘）。
-    chart_cpu: gtk::DrawingArea,
-    chart_mem: gtk::DrawingArea,
-    chart_net: gtk::DrawingArea,
-    chart_blk: gtk::DrawingArea,
-    /// 状态行（「正在采样…」「已结束」「出错原因」）。
-    status: gtk::Label,
-}
-
 /// 「文件」页的控件（**阶段 116**）。
 ///
 /// ⚠️ **容器里没有 SFTP** ⇒ 浏览 / 上传 / 下载全靠 `docker exec`
 ///   （命令与解析见 [`crate::backend::docker`]）。
 struct FilesUi {
-    /// 整块（**只在文件页里显示**）。
-    root: gtk::Box,
     /// **路径栏**（当前远程目录；回车 ⇒ 去这个目录）。
     path: gtk::Entry,
     /// 文件表（**平表**：图标 / 名字 / 大小 / 权限 ＋ 两个隐藏列）。
@@ -1139,314 +1071,6 @@ struct FilesUi {
     ///   目录）⇒ 挤在一行 ⇒ 传输刚报完「上传完成」就被「N 个条目」冲掉
     ///   ⇒ 用户（和冒烟）根本看不到传完了没有。
     xfer_status: gtk::Label,
-}
-
-/// 监控曲线的数据（**共享**给四张图 ⇒ 外面套 `Rc<RefCell<…>>`）。
-///   拿到最新的点 ⇒ 得和界面共享同一份数据（`Rc<RefCell<…>>`）。
-///
-/// ⚠️ **为什么 `Vec<(f64, f64)>`**：`(x, y)`；`x` 是**点的序号**（等间隔
-///   ⇒ 画的时候归一化成横坐标）。
-#[derive(Default)]
-struct MonitorData {
-    /// CPU（%）。
-    cpu: Vec<(f64, f64)>,
-    /// 内存（%）。
-    mem: Vec<(f64, f64)>,
-    /// 网络接收（字节/秒）。
-    net_rx: Vec<(f64, f64)>,
-    /// 网络发送（字节/秒）。
-    net_tx: Vec<(f64, f64)>,
-    /// 磁盘读（字节/秒）。
-    blk_read: Vec<(f64, f64)>,
-    /// 磁盘写（字节/秒）。
-    blk_write: Vec<(f64, f64)>,
-}
-
-impl MonitorData {
-    /// 清空（换容器 / 重新起流时）。
-    fn clear(&mut self) {
-        self.cpu.clear();
-        self.mem.clear();
-        self.net_rx.clear();
-        self.net_tx.clear();
-        self.blk_read.clear();
-        self.blk_write.clear();
-    }
-
-    /// 追加一个点（**只保留最近 `STATS_POINTS` 个**）。
-    fn push(&mut self, pt: docker::StatPoint) {
-        Self::push_one(&mut self.cpu, pt.cpu);
-        Self::push_one(&mut self.mem, pt.mem);
-        Self::push_one(&mut self.net_rx, pt.net_rx);
-        Self::push_one(&mut self.net_tx, pt.net_tx);
-        Self::push_one(&mut self.blk_read, pt.blk_read);
-        Self::push_one(&mut self.blk_write, pt.blk_write);
-    }
-
-    /// 追加一条线的点（**满了就丢最旧的**）。
-    fn push_one(series: &mut Vec<(f64, f64)>, v: f64) {
-        let x = series.len() as f64;
-        series.push((x, v));
-        if series.len() > STATS_POINTS {
-            let drop = series.len() - STATS_POINTS;
-            series.drain(..drop);
-        }
-    }
-}
-
-/// 一张图要用的**颜色**（**全部从主题取**，不写死 RGB）。
-///
-/// ⚠️ **为什么单独一个结构**（UI 审查 2026-11-18 D1）：cairo 自绘的东西
-///   **不过 CSS** ⇒ `theme.rs` 那套主题对它**完全无效** ⇒ 以前写死的
-///   `set_source_rgb(1.0, 1.0, 1.0)`（白底）在暗色主题下就是四个白盒子。
-///   ⇒ 颜色得**自己从主题令牌里取**。
-///
-/// ⚠️ **每次重画都重新取** ⇒ 切主题后曲线**跟着变**（不用重开界面）。
-#[derive(Clone, Copy)]
-struct ChartPalette {
-    /// 底色（面板底色）。
-    bg: (f64, f64, f64),
-    /// 边框色。
-    border: (f64, f64, f64),
-    /// 网格线色。
-    grid: (f64, f64, f64),
-    /// 坐标轴文字色。
-    text: (f64, f64, f64),
-    /// 四条曲线的颜色（按顺序取）。
-    series: [(f64, f64, f64); 4],
-}
-
-impl ChartPalette {
-    /// **从当前主题取一套颜色**。
-    fn current() -> Self {
-        let hexes = crate::theme::chart_series_hexes();
-        let mut series = [(0.0, 0.0, 0.0); 4];
-        for (i, h) in hexes.iter().enumerate() {
-            series[i] = hex_rgb(h);
-        }
-        let grid = crate::theme::chart_grid_hex();
-        Self {
-            bg: hex_rgb(&crate::theme::panel_hex()),
-            border: hex_rgb(&grid),
-            grid: hex_rgb(&grid),
-            text: hex_rgb(&crate::theme::chart_axis_hex()),
-            series,
-        }
-    }
-}
-
-/// `#rrggbb` ⇒ cairo 用的 RGB（0..1）。
-fn hex_rgb(hex: &str) -> (f64, f64, f64) {
-    match gtk::gdk::RGBA::parse(hex) {
-        Ok(c) => (
-            f64::from(c.red()),
-            f64::from(c.green()),
-            f64::from(c.blue()),
-        ),
-        Err(_) => (0.0, 0.0, 0.0),
-    }
-}
-
-/// 纵轴的**量程**（UI 审查 D3：曲线冲顶是 5% 还是 50%？得看刻度）。
-///
-/// - `fixed`：百分比类的图**固定量程**（CPU / 内存固定 0..100 ⇒ 曲线高度
-///   就是百分比，不用猜）；
-/// - 网络 / 磁盘是**自动量程** ⇒ 取观测最大值，再**向上取整**到一个好看的
-///   数（`nice_max`）⇒ 刻度上的数字才读得懂（`20M` 而不是 `20971520`）。
-fn chart_max(series: &[(&[(f64, f64)], (f64, f64, f64))], fixed: Option<f64>) -> f64 {
-    let mut observed = 0.0f64;
-    for (pts, _) in series {
-        for (_, v) in pts.iter() {
-            if v.is_finite() && *v > observed {
-                observed = *v;
-            }
-        }
-    }
-    match fixed {
-        Some(f) => f.max(observed).max(1.0),
-        None => nice_max(observed),
-    }
-}
-
-/// 把一个数**向上取整**到一个好看的刻度（1 / 2 / 5 × 10ⁿ）。
-fn nice_max(v: f64) -> f64 {
-    if !(v > 0.0) || !v.is_finite() {
-        return 1.0;
-    }
-    let exp = v.log10().floor();
-    let base = 10f64.powf(exp);
-    let m = v / base;
-    let step = if m <= 1.0 {
-        1.0
-    } else if m <= 2.0 {
-        2.0
-    } else if m <= 5.0 {
-        5.0
-    } else {
-        10.0
-    };
-    // ⚠️ **至少 1**：刻度上的数字是整数（`fmt_axis`）⇒ 量程小于 1 的话
-    //   顶端那个刻度会显示成「0」⇒ 用户以为图是空的。
-    (step * base).max(1.0)
-}
-
-/// 纵轴刻度的**文字**（**短**：轴上只放得下几个字符）。
-fn fmt_axis(v: f64) -> String {
-    if !v.is_finite() {
-        return "0".to_string();
-    }
-    let a = v.abs();
-    if a >= 1e9 {
-        format!("{:.1}G", v / 1e9)
-    } else if a >= 1e6 {
-        format!("{:.1}M", v / 1e6)
-    } else if a >= 1e3 {
-        format!("{:.0}K", v / 1e3)
-    } else {
-        format!("{v:.0}")
-    }
-}
-
-/// 画一张折线图（**纯绘图**：cairo + 点集 ⇒ 好测好读**）。
-///
-/// ⚠️ `series`：每条 = (点集, 颜色 RGB)。
-/// ⚠️ **纵轴自动量程**（或固定量程）：见 [`chart_max`]。
-/// ⚠️ **纵轴有刻度**（UI 审查 D3）：顶端标**最大值**、底端标 **0** ⇒
-///   用户不用猜「这条线冲顶是多少」。
-///
-/// 美化·地基 4/5：图自己画成**一张圆角卡**；曲线下加**渐变面积填充**
-/// （冲高的那段一眼可辨）；网格**虚线化**再淡一档；曲线 2px **圆角线帽**
-/// （以前 1.6px 的细硬线看着像示波器，现在是仪表盘）。
-fn draw_chart(
-    cr: &gtk::cairo::Context,
-    w: i32,
-    h: i32,
-    series: &[(&[(f64, f64)], (f64, f64, f64))],
-    fixed: Option<f64>,
-    pal: &ChartPalette,
-) {
-    let (ww, hh) = (f64::from(w), f64::from(h));
-    if ww < 20.0 || hh < 20.0 {
-        return;
-    }
-    // ⚠️ **左边留出刻度的位置**（不然「100」会压在曲线上）。
-    let pad_l = 32.0;
-    let pad_r = 8.0;
-    let pad_t = 6.0;
-    let pad_b = 12.0;
-    let plot_w = (ww - pad_l - pad_r).max(1.0);
-    let plot_h = (hh - pad_t - pad_b).max(1.0);
-
-    // 卡片底 + 边框（圆角矩形；**主题色**，不再是写死的白底）
-    rounded_rect_path(cr, 0.5, 0.5, ww - 1.0, hh - 1.0, 8.0);
-    cr.set_source_rgb(pal.bg.0, pal.bg.1, pal.bg.2);
-    let _ = cr.fill_preserve();
-    cr.set_source_rgb(pal.border.0, pal.border.1, pal.border.2);
-    let _ = cr.set_line_width(1.0);
-    let _ = cr.stroke();
-
-    // 纵轴量程
-    let max_y = chart_max(series, fixed);
-
-    // 各条曲线的**像素点集**（面积填充与折线共用，算一遍就好）
-    let pixel_series: Vec<Vec<(f64, f64)>> = series
-        .iter()
-        .map(|(pts, _)| {
-            let mut xy: Vec<(f64, f64)> = Vec::with_capacity(pts.len());
-            let n = pts.len() as f64;
-            for (i, (_, v)) in pts.iter().enumerate() {
-                let x = pad_l + plot_w * (i as f64) / (n - 1.0).max(1.0);
-                let vv = if v.is_finite() { *v } else { 0.0 };
-                let y = pad_t + plot_h * (1.0 - (vv / max_y).clamp(0.0, 1.0));
-                xy.push((x, y));
-            }
-            xy
-        })
-        .collect();
-
-    // 面积填充（先画 ⇒ 曲线压在填充上面）。渐变：曲线色
-    // alpha 0.18（顶部）→ 0.02（底部）⇒ 冲高那段有"重量"，低平段不糊底。
-    for (xy, (_pts, color)) in pixel_series.iter().zip(series) {
-        if xy.len() < 2 {
-            continue;
-        }
-        let grad = gtk::cairo::LinearGradient::new(pad_l, pad_t, pad_l, pad_t + plot_h);
-        grad.add_color_stop_rgba(0.0, color.0, color.1, color.2, 0.18);
-        grad.add_color_stop_rgba(1.0, color.0, color.1, color.2, 0.02);
-        let _ = cr.set_source(&grad);
-        let last = xy.last().copied().unwrap_or((pad_l, pad_t + plot_h));
-        let first = xy.first().copied().unwrap_or(last);
-        let mut started = false;
-        for &(x, y) in xy.iter() {
-            if started {
-                let _ = cr.line_to(x, y);
-            } else {
-                let _ = cr.move_to(x, y);
-                started = true;
-            }
-        }
-        // 沿底边闭合
-        let _ = cr.line_to(last.0, pad_t + plot_h);
-        let _ = cr.line_to(first.0, pad_t + plot_h);
-        let _ = cr.close_path();
-        let _ = cr.fill();
-    }
-
-    // 网格（三条横线，**虚线** + 更淡 ⇒ 让位给数据）
-    cr.set_source_rgba(pal.grid.0, pal.grid.1, pal.grid.2, 0.35);
-    let _ = cr.set_dash(&[2.0, 3.0], 0.0);
-    for i in 1..=3 {
-        let y = pad_t + plot_h * (i as f64) / 4.0;
-        let _ = cr.move_to(pad_l, y);
-        let _ = cr.line_to(pad_l + plot_w, y);
-    }
-    let _ = cr.stroke();
-    let _ = cr.set_dash(&[], 0.0);
-
-    // 曲线：2px 圆角线帽
-    for (xy, (_pts, color)) in pixel_series.iter().zip(series) {
-        if xy.len() < 2 {
-            continue;
-        }
-        cr.set_source_rgb(color.0, color.1, color.2);
-        let _ = cr.set_line_width(2.0);
-        let _ = cr.set_line_cap(gtk::cairo::LineCap::Round);
-        let _ = cr.set_line_join(gtk::cairo::LineJoin::Round);
-        let mut started = false;
-        for &(x, y) in xy.iter() {
-            if started {
-                let _ = cr.line_to(x, y);
-            } else {
-                let _ = cr.move_to(x, y);
-                started = true;
-            }
-        }
-        let _ = cr.stroke();
-    }
-
-    // 纵轴刻度（**ASCII** ⇒ cairo 的玩具文字接口能用）：
-    // 顶端 = 最大值、底端 = 0。
-    cr.set_source_rgb(pal.text.0, pal.text.1, pal.text.2);
-    let _ = cr.set_font_size(9.0);
-    let _ = cr.move_to(3.0, pad_t + 8.0);
-    let _ = cr.show_text(&fmt_axis(max_y));
-    let _ = cr.move_to(3.0, hh - 3.0);
-    let _ = cr.show_text("0");
-}
-
-/// cairo 的**圆角矩形路径**（cairo 没有现成接口 ⇒ 四段 90° 弧手拼）。
-///
-/// 美化·地基 4/5：图表底板要圆角 ⇒ 每个角一段 `arc`（圆心在角内缩 r 处）。
-fn rounded_rect_path(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
-    let r = r.min(w / 2.0).min(h / 2.0);
-    let _ = cr.new_path();
-    // 右上 → 右下 → 左下 → 左上，最后 close_path 收口
-    let _ = cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
-    let _ = cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
-    let _ = cr.arc(x + r, y + h - r, r, FRAC_PI_2, std::f64::consts::PI);
-    let _ = cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * FRAC_PI_2);
-    let _ = cr.close_path();
 }
 
 /// 端口列：docker 给的是**逗号分隔的一长串** ⇒ 单行放不下就被省略号
@@ -1517,6 +1141,111 @@ fn ports_pretty(raw: &str) -> String {
         }
     }
     out.join("\n")
+}
+
+/* ---------------- 阶段 164：资源列（CPU / 内存） ---------------- */
+
+/// **内存：只写「占了多少」**（用户 2026-11-24：「内存只写占了多少内存，
+/// 不用百分比」）。
+///
+/// ⚠️ **docker stats 给的是「用了 / 上限」**（`52.84MiB / 63.00GiB`）⇒
+///   这里**只取前面那段**（上限对「这个容器占了多少」没用 ⇒ 反而占地方）。
+fn mem_used(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    s.split('/').next().unwrap_or(s).trim().to_string()
+}
+
+/// **CPU 百分比**（`"2.30%"` ⇒ `2.30`；认不出来就是 `0.0`）。
+fn cpu_pct(raw: &str) -> f64 {
+    let s = raw.trim().trim_end_matches('%').trim();
+    s.parse::<f64>().unwrap_or(0.0)
+}
+
+/// **二进制单位**（跟 docker 的 `MiB` / `GiB` 同款 ⇒ 父子两行能直接比）。
+///
+/// ⚠️ **两位小数**（docker 的 `52.84MiB` / `63.00GiB` 就是两位）⇒ 同一列里
+///   父行「1.00GiB」、子行「52.84MiB」不会看着像两个不同的量。
+fn human_size_bin(n: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let v = n as f64;
+    if v < KIB {
+        return format!("{n} B");
+    }
+    // ⚠️ **阈值与除数别错**（连踩两次：阈值错一档 ⇒ 10MiB 变成 0.01GiB；
+    //   除数也错 ⇒ 10MiB 变成 10240.00MiB）⇒ 下面有专门的断言。
+    if v < KIB * KIB * KIB {
+        return format!("{:.2}MiB", v / (KIB * KIB));
+    }
+    if v < KIB * KIB * KIB * KIB {
+        return format!("{:.2}GiB", v / (KIB * KIB * KIB));
+    }
+    format!("{:.2}TiB", v / (KIB * KIB * KIB * KIB))
+}
+
+/// **资源列的文案**（一行：`CPU 2.30% · 内存 52.84MiB`）。
+///
+/// ⚠️ **两个指标写在一列里**（用户 2026-11-24：「只用 1 列，cpu 写百分比，
+///   内存只写占了多少内存」）⇒ 一眼能看，不用在两列之间来回扫。
+/// ⚠️ **没采到就是「—」**（`docker stats` **只报运行中的容器** ⇒ 已停止的
+///   容器没有这一行 ⇒ 不能显示成 0%）。
+fn res_text(cpu: &str, mem: &str) -> String {
+    let c = cpu.trim();
+    let m = mem_used(mem);
+    // ⚠️ **两个都没有 ⇒ 就一个「—」**（已停止的容器：`docker stats` 不报它）
+    //   ⇒ 写成「CPU — · 内存 —」是废话。
+    if c.is_empty() && m.is_empty() {
+        return tr("—").to_string();
+    }
+    let c_txt = if c.is_empty() {
+        tr("—").to_string()
+    } else {
+        // ⚠️ **阶段 165：小数位也要统一**（跟内存同一个道理）。
+        //   docker 原样给 `1.0%`（一位小数）⇒ 而项目行是**合计** ⇒ 走
+        //   `format!("{:.2}%")` ⇒ **两位小数** ⇒ 父子两行一个模子。
+        format!("{:.2}%", cpu_pct(c))
+    };
+    // ⚠️ **阶段 165：内存的单位要跟「项目行的合计」一致**。
+    //   docker 原样给的是 `67.9MiB`（**一位小数**）⇒ 而项目行是合计值
+    //   ⇒ 用 `human_size_bin` 统一成**两位小数**（`67.90MiB`）
+    //   ⇒ 同一列里父子两行**一个模子**（不然看着像两个不同的量）。
+    //   ⚠️ 解析不了 ⇒ 保留原样（别把真信息弄丢）。
+    let m_owned = match crate::backend::docker::parse_size_bytes(&m) {
+        Some(b) => human_size_bin(b),
+        None => m.clone(),
+    };
+    let m_txt = if m_owned.is_empty() { tr("—") } else { m_owned.as_str() };
+    trf!("CPU {c} · 内存 {m}", c = c_txt, m = m_txt)
+}
+/// **项目行的资源**（CPU 百分比合计 ＋ 内存合计）。
+///
+/// ⚠️ **合计**（不是平均）⇒ 父行显示的是「这个项目一共占了多少」。
+fn project_res_text(items: &[crate::backend::docker::ContainerInfo]) -> String {
+    let cpu_sum: f64 = items.iter().map(|c| cpu_pct(&c.cpu)).sum();
+    let mem_sum: u64 = items
+        .iter()
+        .filter_map(|c| crate::backend::docker::parse_size_bytes(&mem_used(&c.mem)))
+        .sum();
+    // ⚠️ **`trf!` 不支持格式说明**（它只做「把 `{名字}` 换成值」）⇒
+    //   `{c:.2}` 这种写法**原样留在界面上**（踩过）⇒ 先自己格式化好再传进去。
+    let cpu_txt = format!("{cpu_sum:.2}%");
+    let mem_txt = human_size_bin(mem_sum);
+    trf!("CPU {c} · 内存 {m}", c = cpu_txt, m = mem_txt)
+}
+
+/// **资源列排序用的 CPU 值**（从列里的文案取 ⇒ 排序按 CPU 百分比）。
+fn res_cpu_value(text: &str) -> f64 {
+    // 文案形如 `CPU 2.30% · 内存 52.84MiB` ⇒ 取 `CPU ` 后面那一段。
+    let Some(rest) = text.strip_prefix("CPU ") else {
+        return 0.0;
+    };
+    let num: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    num.parse::<f64>().unwrap_or(0.0)
 }
 
 
@@ -1741,68 +1470,6 @@ fn state_markup(state: &str) -> String {
 }
 
 /// 图例里的**色块**（**跟着主题走** ⇒ 切主题不用重建图例）。
-fn mk_swatch(idx: usize) -> gtk::DrawingArea {
-    let d = gtk::DrawingArea::new();
-    d.set_content_width(10);
-    d.set_content_height(10);
-    d.set_valign(gtk::Align::Center);
-    d.set_draw_func(move |_a, cr, w, h| {
-        let pal = ChartPalette::current();
-        let c = pal.series[idx % pal.series.len()];
-        cr.set_source_rgb(c.0, c.1, c.2);
-        let _ = cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
-        let _ = cr.fill();
-    });
-    d
-}
-
-/// 建一张图的**整块**（**标题 ＋ 画布 ＋ 图例**）。
-///
-/// ⚠️ **为什么要标题与图例**（UI 审查 D3）：一屏四个裸框 ⇒ 用户得靠猜
-///   「哪张是 CPU」「橙线是收还是发」⇒ 标题说清楚，图例说清楚哪条线是谁。
-fn mk_chart_box(
-    title: &str,
-    chart: &gtk::DrawingArea,
-    legend: &[(&str, usize)],
-) -> gtk::Box {
-    let head = gtk::Label::new(Some(title));
-    head.set_xalign(0.0);
-    head.add_css_class("heading");
-    let b = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    b.set_hexpand(true);
-    b.append(&head);
-    b.append(chart);
-    if !legend.is_empty() {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        row.set_margin_start(2);
-        row.set_margin_bottom(2);
-        for (name, idx) in legend {
-            row.append(&mk_swatch(*idx));
-            let l = gtk::Label::new(Some(name));
-            l.set_xalign(0.0);
-            row.append(&l);
-        }
-        b.append(&row);
-    }
-    b
-}
-
-/// 把字节/秒变成**人能读**的字符串（`B/s` / `KB/s` / `MB/s`）。
-fn fmt_rate(v: f64) -> String {
-    if !v.is_finite() || v < 1.0 {
-        return "0 B/s".to_string();
-    }
-    if v < 1024.0 {
-        return format!("{v:.0} B/s");
-    }
-    if v < 1024.0 * 1024.0 {
-        return format!("{:.1} KB/s", v / 1024.0);
-    }
-    if v < 1024.0 * 1024.0 * 1024.0 {
-        return format!("{:.1} MB/s", v / (1024.0 * 1024.0));
-    }
-    format!("{:.1} GB/s", v / (1024.0 * 1024.0 * 1024.0))
-}
 
 /// 日志页的控件（阶段 112）。
 struct LogUi {
@@ -1988,6 +1655,8 @@ impl DockerUi {
         // ⚠️ **端口一个一行**（用户 2026-11-23）：docker 的端口串是逗号
         //   分隔的长串 ⇒ 单行会被省略号截掉 ⇒ 换成换行符。
         let ports = ports_multiline(&c.ports);
+        // ⚠️ **阶段 164：资源列**（CPU 百分比 ＋ 内存占用；一列两样）。
+        let res = res_text(&c.cpu, &c.mem);
         self.model.set(
             it,
             &[
@@ -2004,6 +1673,7 @@ impl DockerUi {
                 //   英文界面下会变 ⇒ 不能拿它判断）。
                 (COL_RAW_STATE as u32, &c.state),
                 (COL_STATE_MK as u32, &mk),
+                (COL_RES as u32, &res),
             ],
         );
     }
@@ -2032,6 +1702,8 @@ impl DockerUi {
             trf!("{n} 个镜像", n = imgs.len())
         };
         let cnt = trf!("{r}/{n} 运行中", r = running, n = n);
+        // ⚠️ **阶段 164：项目行的资源**（CPU 合计 ＋ 内存合计）。
+        let res = project_res_text(items);
         // ⚠️ **父行没有自己的状态** ⇒ 色点用「灰」（不假装它在跑）。
         let mk = format!(
             "<span foreground=\"{c}\">●</span> {t}",
@@ -2068,6 +1740,7 @@ impl DockerUi {
                     },
                 ),
                 (COL_STATE_MK as u32, &mk),
+                (COL_RES as u32, &res),
             ],
         );
     }
@@ -2546,40 +2219,16 @@ impl DockerUi {
 
     /* ---------------- 阶段 112：日志 ---------------- */
 
-    /// **日志页是不是正开着**（用户在看日志）。
+    /// **日志窗是不是开着**（用户在看日志）。
+    ///
+    /// ⚠️ **阶段 165**：日志是**独立窗口**（不再是页签）⇒ 判据变成
+    ///   「那扇窗可见吗」。
     fn log_page_visible(&self) -> bool {
-        self.stack.visible_child_name().as_deref() == Some(PAGE_LOGS)
-    }
-
-    /// **监控页**是不是正开着（**阶段 114**）。
-    fn stat_page_visible(&self) -> bool {
-        self.stack.visible_child_name().as_deref() == Some(PAGE_MONITOR)
-    }
-
-    /// 收到**一个采样点** ⇒ 追加到曲线 ＋ 更新指标卡 ＋ 重画四张图
-    /// （**阶段 114**）。
-    fn push_stat_point(&self, pt: docker::StatPoint) {
-        self.monitor_data.borrow_mut().push(pt);
-        // ---- 指标卡的当前值 ----
-        self.monitor
-            .val_cpu
-            .set_text(&format!("{:.2}%", pt.cpu));
-        self.monitor
-            .val_mem
-            .set_text(&format!("{:.2}%", pt.mem));
-        self.monitor
-            .val_net
-            .set_text(&fmt_rate(pt.net_rx + pt.net_tx));
-        self.monitor
-            .val_blk
-            .set_text(&fmt_rate(pt.blk_read + pt.blk_write));
-        // ---- 重画四张图 ----
-        //
-        // ⚠️ **只重画这四张**（不是整页）⇒ 采样每 2 秒一次 ⇒ 开销很小。
-        self.monitor.chart_cpu.queue_draw();
-        self.monitor.chart_mem.queue_draw();
-        self.monitor.chart_net.queue_draw();
-        self.monitor.chart_blk.queue_draw();
+        self.logs_window
+            .borrow()
+            .as_ref()
+            .map(|w| w.is_visible())
+            .unwrap_or(false)
     }
 
     /// 收到**一块**日志 ⇒ 拆成行、收下、该显示就显示。
@@ -3041,12 +2690,14 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         // ⚠️ **模型列号 ≠ 视图列下标**（阶段 155）：CPU / 内存 / 详情三列
         //    退役了 ⇒ 视图下标跟模型列号**不再相等** ⇒ 这里**必须带模型列号**
         //    走，别再拿循环下标当模型列号（以前两者恰好相等 ⇒ 删列就错位）。
-        let cols: [(usize, &str); 5] = [
+        let cols: [(usize, &str); 6] = [
             (COL_NAME, tr("名称")),
             (COL_ID, tr("ID")),
             (COL_IMAGE, tr("镜像")),
             (COL_PORTS, tr("端口（主机:容器）")),
             (COL_STATE, tr("状态")),
+            // ⚠️ **阶段 164**：资源列回来了（CPU 百分比 ＋ 内存占用）。
+            (COL_RES, tr("资源（CPU / 内存）")),
         ];
         for (model_col, t) in cols {
             let col = gtk::TreeViewColumn::new();
@@ -3175,24 +2826,49 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             //   「容器名称列还是太宽了……既要尽量显示全所有的信息，又要各列之间
             //   有合理的比例」）⇒ **都不展开** ⇒ 富余宽度全给**最后一列**
             //   （操作列，图标右对齐）⇒ **中间的列之间不会隔出空洞**。
+            //
+            // ⚠️ **阶段 164：富余怎么分**（用户 2026-11-24：「操作列太宽了，
+            //   按钮们太靠右了，没有一点留白」）：
+            // - **实测 GTK4 的规矩**：**一列都不展开 ⇒ 富余全给最后一列**
+            //   （临时实验：6 列各 200、窗口 1600 ⇒ 最后一列拿到 600）；
+            //   **多列一起展开 ⇒ 富余在它们之间平分**（实测 333/333/334）⇒
+            //   所以「操作」列**必须**显式 `set_expand(false)`，而且**得有几列
+            //   展开**不然 GTK 又会把富余塞回最后一列；
+            // - ⇒ **镜像 / 端口 / 状态 / 资源 四列一起展开** ⇒ 富余被摊开
+            //   ⇒ 没有哪一列变成空谷，**按钮那边也留得下白**。
             match model_col {
                 COL_NAME => {
                     // ⚠️ **不展开**（用户明说「太宽了」）⇒ 200（够放 20 来个字符）。
                     col.set_min_width(200);
                     col.set_expand(false);
                 }
-                // ⚠️ **ID 只显示前 8 位**（阶段 158）⇒ 96 足够。
-                COL_ID => col.set_min_width(96),
-                COL_IMAGE => {
-                    // ⚠️ **镜像名最长**（`emqx/emqx-enterprise:latest` 约 28 字）
-                    //   ⇒ 280（阶段 157 时只有 230 ⇒ 会被省略号截掉）。
-                    col.set_min_width(280);
+                // ⚠️ **ID 只显示前 8 位**（阶段 158）⇒ 84 足够。
+                COL_ID => {
+                    col.set_min_width(84);
                     col.set_expand(false);
                 }
-                // ⚠️ **端口可能有两个**（`3306/tcp, 33060/tcp`）⇒ 190。
-                COL_PORTS => col.set_min_width(190),
+                COL_IMAGE => {
+                    // ⚠️ **镜像名最长**（`emqx/emqx-enterprise:latest` 约 28 字）
+                    //   ⇒ 240（阶段 157 时只有 230 ⇒ 会被省略号截掉）。
+                    col.set_min_width(240);
+                    // ⚠️ **阶段 164：这一列参与分富余**（见下面「富余怎么分」）。
+                    col.set_expand(true);
+                }
+                // ⚠️ **端口可能有两个**（`3306/tcp, 33060/tcp`）⇒ 180。
+                COL_PORTS => {
+                    col.set_min_width(180);
+                    col.set_expand(true);
+                }
                 // ⚠️ **阶段 158**：药丸文字变成「运行 2 小时」⇒ 比「运行中」宽。
-                COL_STATE => col.set_min_width(130),
+                COL_STATE => {
+                    col.set_min_width(125);
+                    col.set_expand(true);
+                }
+                // ⚠️ **阶段 164：资源列**（`CPU 2.30% · 内存 52.84MiB`）⇒ 190。
+                COL_RES => {
+                    col.set_min_width(190);
+                    col.set_expand(true);
+                }
                 _ => {}
             }
             // ⚠️ **每一列都能排序**（UI 审查 D4）：给列头一个排序 id ⇒
@@ -3209,15 +2885,26 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         // ⚠️ **这一列不排序**（图标没法比大小）⇒ 不给 `set_sort_column_id`。
         action_col.set_title(tr("操作"));
         action_col.set_resizable(false);
-        // ⚠️ **阶段 158：这一列吸收表格的富余宽度** ⇒ 图标组**右对齐**
-        //   （贴着窗口右缘）⇒ 中间的列之间不会隔出一大片空白。
-        action_col.set_expand(true);
-        // ⚠️ **表头也跟着右对齐**（否则标题在左、图标在右 ⇒ 对不上）。
-        action_col.set_alignment(1.0);
-        // ⚠️ **宽度按最多的那种行算**（compose 项目 6 颗）⇒ 容器行（5 颗）
-        //   右边空一格，没关系（不能反过来把项目行的最后一颗挤掉）。
+        // ⚠️ **阶段 164：这一列**不再**吸收富余宽度**（用户 2026-11-24：
+        //   「操作列太宽了，按钮们太靠右了，没有一点留白」）。
+        //
+        //   **为什么以前是「吸收」**：阶段 158 的想法是「富余全给最后一列 ⇒
+        //   图标右对齐 ⇒ 中间的列之间不会隔出空洞」⇒ 实测**GTK4 就是这么
+        //   干的**（临时实验：6 列各 200、窗口 1600 ⇒ **不设 expand 时
+        //   富余 400 全给了最后一列**）⇒ 结果就是**操作列 480px 宽、里面只有
+        //   4 颗 16px 的图标贴在最右边** ⇒ 一大片空白 ＋ 按钮贴死窗口右缘。
+        //
+        //   ⇒ 现在让**中间几列（镜像 / 端口 / 状态 / 资源）一起展开**
+        //   ⇒ GTK4 会把富余**平分**给它们（实测：3 列展开 ⇒ 400 变成
+        //   133/133/134）⇒ **没有任何一列变成空谷**，按钮那边也留得下白。
+        action_col.set_expand(false);
+        // ⚠️ **表头跟图标组一起左对齐**（图标组现在也是左对齐 ⇒ 标题正好
+        //   压在第一颗图标上面；右对齐的话标题会跑到图标右边，对不上）。
+        action_col.set_alignment(0.0);
+        // ⚠️ **宽度按最多的那种行算**（compose 项目 4 颗）＋ **右边留一截
+        //   空白**（⇒ 按钮不贴着窗口右缘）。
         action_col.set_min_width(
-            (crate::panel::actioncell::SLOT_W * action_col_icons_max() as i32) + 8,
+            (crate::panel::actioncell::SLOT_W * action_col_icons_max() as i32) + 24,
         );
         action_col.pack_start(&action_renderer, false);
         action_col.set_cell_data_func(&action_renderer, move |_col, cell, model, iter| {
@@ -3239,6 +2926,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     //
     // ⚠️ **每个列都要注册**：GTK 不知道没注册的列该怎么排 ⇒ 点了没反应。
     // ⚠️ **阶段 155**：CPU / 内存列退役 ⇒ 只剩文字列 ⇒ 全部按字典序排。
+    // ⚠️ **阶段 164：资源列回来了** ⇒ 它**按 CPU 百分比排**（不是按字符串
+    //   ⇒ `"9.50%"` 排在 `"50.80%"` 前面 ⇒ 找「最占 CPU 的容器」不会看错）。
     {
         for col in [COL_NAME, COL_ID, COL_IMAGE, COL_PORTS, COL_STATE] {
             model.set_sort_func(
@@ -3257,6 +2946,20 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 },
             );
         }
+        model.set_sort_func(
+            gtk::SortColumn::Index(COL_RES as u32),
+            move |m, a, b| {
+                let sa: String = m.get(a, COL_RES as i32);
+                let sb: String = m.get(b, COL_RES as i32);
+                let va = res_cpu_value(&sa);
+                let vb = res_cpu_value(&sb);
+                match va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal) {
+                    std::cmp::Ordering::Less => gtk::Ordering::Smaller,
+                    std::cmp::Ordering::Greater => gtk::Ordering::Larger,
+                    std::cmp::Ordering::Equal => gtk::Ordering::Equal,
+                }
+            },
+        );
     }
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
@@ -3525,154 +3228,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     log_root.append(&log_scroll);
     log_root.append(&log_status);
 
-    // ---- 监控页（阶段 114）：4 个指标卡 ＋ 4 张折线图 ----
-    //
-    // ⚠️ **数据是共享的**：四张图的绘制回调是 GTK 异步调的 ⇒ 它们得能
-    //   拿到最新的点 ⇒ 数据放在 `Rc<RefCell<MonitorData>>` 里，四张图
-    //   与界面**共享同一份**。
-    let monitor_data = Rc::new(RefCell::new(MonitorData::default()));
-
-    /// 建一张折线图（`kind` 决定画哪几条线）。
-    let mk_chart = |kind: u8| -> gtk::DrawingArea {
-        let data = Rc::downgrade(&monitor_data);
-        let d = gtk::DrawingArea::new();
-        d.set_hexpand(true);
-        // ⚠️ **不 vexpand**：这张图在**滚动容器**里（见下面的 `mon_scroll`）
-        //   ⇒ vexpand 会让它被拉得比内容还高 ⇒ 监控页越撑越高。
-        d.set_vexpand(false);
-        d.set_content_height(108);
-        d.set_draw_func(move |_a, cr, w, h| {
-            // ⚠️ **回调只抓弱引用**（AGENTS.md 红线：不然引用环 ⇒ 面板释放不掉）。
-            let Some(data) = data.upgrade() else { return };
-            let d = data.borrow();
-            // ⚠️ **颜色从主题取**（UI 审查 D1）⇒ 暗色主题下不再是白底。
-            let pal = ChartPalette::current();
-            // ⚠️ **量程**：百分比固定 0..100；网络 / 磁盘自动（取整到好看的数）。
-            match kind {
-                0 => draw_chart(cr, w, h, &[(&d.cpu, pal.series[0])], Some(100.0), &pal),
-                1 => draw_chart(cr, w, h, &[(&d.mem, pal.series[1])], Some(100.0), &pal),
-                2 => draw_chart(
-                    cr,
-                    w,
-                    h,
-                    &[(&d.net_rx, pal.series[2]), (&d.net_tx, pal.series[3])],
-                    None,
-                    &pal,
-                ),
-                _ => draw_chart(
-                    cr,
-                    w,
-                    h,
-                    &[(&d.blk_read, pal.series[0]), (&d.blk_write, pal.series[1])],
-                    None,
-                    &pal,
-                ),
-            }
-        });
-        d
-    };
-
-    /// 建一个指标卡（标题 ＋ 当前值）。
-    let mk_card = |title: &str| -> (gtk::Box, gtk::Label) {
-        let t = gtk::Label::new(Some(title));
-        t.set_xalign(0.0);
-        t.add_css_class("dim-label");
-        let v = gtk::Label::new(Some("-"));
-        v.set_xalign(0.0);
-        v.add_css_class("heading");
-        let b = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        b.set_margin_start(8);
-        b.set_margin_end(8);
-        b.set_margin_top(4);
-        b.append(&t);
-        b.append(&v);
-        (b, v)
-    };
-
-    // ⚠️ **变量名加 `m` 前缀**：详情区那边也有 `card_net` / `card_env`
-    //   之类 ⇒ 同名会互相覆盖（编译器只报类型不匹配，不报「覆盖」）。
-    // ⚠️ **标题写清楚单位**（UI 审查 D21）：表格的「内存」列给的是
-    //   **绝对值 + 百分比**（`8.4% · 52.84MiB / 63.00GiB`）⇒ 这里的
-    //   「内存使用率」（百分比）就能跟它**对照** ⇒ 同一个量、单位一致。
-    let (mcard_cpu, val_cpu) = mk_card(tr("CPU 使用率"));
-    let (mcard_mem, val_mem) = mk_card(tr("内存使用率"));
-    let (mcard_net, val_net) = mk_card(tr("网络吞吐"));
-    let (mcard_blk, val_blk) = mk_card(tr("磁盘吞吐"));
-    let cards = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    cards.append(&mcard_cpu);
-    cards.append(&mcard_mem);
-    cards.append(&mcard_net);
-    cards.append(&mcard_blk);
-
-    let chart_cpu = mk_chart(0);
-    let chart_mem = mk_chart(1);
-    let chart_net = mk_chart(2);
-    let chart_blk = mk_chart(3);
-    // ⚠️ **每张图都有标题与图例**（UI 审查 D3）：一屏四个裸框 ⇒ 用户得靠
-    //   猜「哪张是 CPU」「橙线是收还是发」。
-    let charts = gtk::Grid::new();
-    charts.set_row_spacing(6);
-    charts.set_column_spacing(6);
-    charts.attach(
-        &mk_chart_box(tr("CPU 使用率"), &chart_cpu, &[]),
-        0,
-        0,
-        1,
-        1,
-    );
-    charts.attach(
-        &mk_chart_box(tr("内存使用率"), &chart_mem, &[]),
-        1,
-        0,
-        1,
-        1,
-    );
-    charts.attach(
-        &mk_chart_box(
-            tr("网络吞吐（字节/秒）"),
-            &chart_net,
-            &[(tr("接收"), 2), (tr("发送"), 3)],
-        ),
-        0,
-        1,
-        1,
-        1,
-    );
-    charts.attach(
-        &mk_chart_box(
-            tr("磁盘吞吐（字节/秒）"),
-            &chart_blk,
-            &[(tr("读取"), 0), (tr("写入"), 1)],
-        ),
-        1,
-        1,
-        1,
-        1,
-    );
-
-    let mon_status = gtk::Label::new(Some(""));
-    mon_status.set_xalign(0.0);
-    mon_status.set_margin_start(6);
-    mon_status.set_margin_end(6);
-    mon_status.set_margin_bottom(2);
-    mon_status.add_css_class("dim-label");
-
-    let mon_root = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    mon_root.set_margin_start(6);
-    mon_root.set_margin_end(6);
-    mon_root.set_margin_bottom(6);
-    mon_root.append(&cards);
-    mon_root.append(&charts);
-    mon_root.append(&mon_status);
-    // ⚠️ **监控页自己带滚动容器**（UI 审查 D2）：详情区的高度是
-    //   「窗口高 − 写死的 360」⇒ 窗口一矮（主窗默认 1200×780）第二行图
-    //   整行就在窗口外 ⇒ **看不见也够不着**。⇒ 自己能滚 ⇒ 一定够得着。
-    let mon_scroll = gtk::ScrolledWindow::new();
-    mon_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    mon_scroll.set_vexpand(true);
-    mon_scroll.set_hexpand(true);
-    mon_scroll.set_child(Some(&mon_root));
-
     // ---- 文件页（阶段 116）：路径栏 ＋ 文件表 ＋ 上传 / 下载 / 查看 ----
     //
     // ⚠️ **容器里没有 SFTP** ⇒ 一切靠 `docker exec`（见 `backend/docker.rs`）。
@@ -3747,48 +3302,59 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let f_path_cb = f_path.clone();
     let f_view_cb = f_view_tbl.clone();
 
-    // ---- 详情区：概览 / 日志 / 监控 三页（**Stack**）----
+    // ---- 阶段 165：概览 / 日志 / 文件**各一扇独立窗口** ----
     //
-    // ⚠️ 用 **Stack**（不是两个盒子轮流 `set_visible`）⇒ 页面切换是 GTK
-    //    自己的事 ⇒ 不会出现「两个都显示」或「两个都不显示」。
-    let stack = gtk::Stack::new();
-    stack.set_vexpand(true);
-    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    // ⚠️ 页面的**标题**（页签上显示的字）要单独设 ⇒ 页名是内部标识
-    //    （`overview` / `logs`），不能直接拿来做界面文案。
-    let page_overview = stack.add_named(&grid, Some(PAGE_OVERVIEW));
-    page_overview.set_title(tr("概览"));
-    let page_logs = stack.add_named(&log_root, Some(PAGE_LOGS));
-    page_logs.set_title(tr("日志"));
-    // ⚠️ **阶段 114**：监控页（4 个指标卡 ＋ 4 张折线图）。
-    //
-    // ⚠️ **页面本体是滚动容器**（UI 审查 D2）⇒ 窗口再矮也够得着第二行图。
-    let page_monitor = stack.add_named(&mon_scroll, Some(PAGE_MONITOR));
-    page_monitor.set_title(tr("监控"));
+    // ⚠️ **用户 2026-11-24**：「其他这几个 tab 都单独出来吧，每次点鼠标
+    //   右键就只出来一个窗口就行了」
+    //   ⇒ 以前是「一个弹窗里放页签（Stack ＋ StackSwitcher）」⇒ 现在
+    //   **拆成三扇窗**（概览 / 日志 / 文件），同一时刻只显示一扇。
+    // ⚠️ **「监控」页整个删掉**（同一天：「如果真需要监控，我肯定会搭建
+    //   监控的基础设施，而不是从这里看」）⇒ 连它的采样流与折线图一起删。
 
-    // ⚠️ **阶段 116**：文件页（浏览 ＋ 上传 ＋ 下载）。
-    let page_files = stack.add_named(&f_root, Some(PAGE_FILES));
-    page_files.set_title(tr("文件"));
-
-    // ⚠️ **阶段 152：终端不再占详情区的一页**（用户 2026-11-23：改成
-    //   弹独立窗口）⇒ 详情区只剩「概览 / 日志 / 监控 / 文件」四页。
-
-    let switcher = gtk::StackSwitcher::new();
-    switcher.set_stack(Some(&stack));
-    // ⚠️ **页签条占满整幅**（UI 审查 D17）：以前 `set_halign(Start)` ⇒
-    //   页签条只占 ≈537px，详情区 1000px ⇒ 右边空一大块（看着像没做完）。
-    switcher.set_halign(gtk::Align::Fill);
-    switcher.set_hexpand(true);
-
+    // ---- 概览：标题行 ＋ 四张键值卡（原来 `grid` 是 stack 里的那一页）----
     let d_root = gtk::Box::new(gtk::Orientation::Vertical, 4);
     d_root.set_margin_start(6);
     d_root.set_margin_end(6);
     d_root.set_margin_bottom(6);
     d_root.append(&d_row);
-    d_root.append(&switcher);
-    d_root.append(&stack);
-    // ⚠️ **没选容器时不显示**（Paned 里隐藏的子控件不占地方 ⇒ 列表拿满）。
+    d_root.append(&grid);
+    // ⚠️ **没选容器时不显示**（`apply_detail` / `show_project` 会打开它）。
     d_root.set_visible(false);
+
+    // ---- 日志窗：标题行 ＋ 日志正文 ----
+    //
+    // ⚠️ **标题行里放一个「关闭」**（跟概览窗一个口径）⇒ 普通 `GtkWindow`
+    //   没有自带标题栏 ⇒ 用户可能一个关闭入口都看不到。
+    let log_head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    log_head.set_margin_start(8);
+    log_head.set_margin_end(8);
+    log_head.set_margin_top(4);
+    let log_head_title = gtk::Label::new(Some(tr("容器日志")));
+    log_head_title.set_xalign(0.0);
+    log_head_title.set_hexpand(true);
+    log_head_title.add_css_class("heading");
+    let log_close = detail_close_button();
+    log_head.append(&log_head_title);
+    log_head.append(&log_close);
+    let logs_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    logs_box.append(&log_head);
+    logs_box.append(&log_root);
+
+    // ---- 文件窗：标题行 ＋ 文件区 ----
+    let files_head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    files_head.set_margin_start(8);
+    files_head.set_margin_end(8);
+    files_head.set_margin_top(4);
+    let files_head_title = gtk::Label::new(Some(tr("容器文件")));
+    files_head_title.set_xalign(0.0);
+    files_head_title.set_hexpand(true);
+    files_head_title.add_css_class("heading");
+    let files_close = detail_close_button();
+    files_head.append(&files_head_title);
+    files_head.append(&files_close);
+    let files_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    files_box.append(&files_head);
+    files_box.append(&f_root);
 
     // ---- compose 项目详情（阶段 155：**也搬进弹窗**了）----
     //
@@ -3962,8 +3528,17 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         last_action_click: Cell::new(None),
         action_col: action_col.clone(),
         detail_box: detail_box.clone(),
+        logs_box: logs_box.clone(),
+        files_box: files_box.clone(),
         detail_window: RefCell::new(None),
-        detail_close_btns: RefCell::new(vec![d_close.clone(), p_close.clone()]),
+        logs_window: RefCell::new(None),
+        files_window: RefCell::new(None),
+        detail_close_btns: RefCell::new(vec![
+            d_close.clone(),
+            p_close.clone(),
+            log_close.clone(),
+            files_close.clone(),
+        ]),
         detail: DetailUi {
             root: d_root,
             title: d_title,
@@ -3988,7 +3563,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             wrap: log_wrap.clone(),
             status: log_status,
         },
-        stack: stack.clone(),
         log_name: RefCell::new(String::new()),
         log_lines: RefCell::new(Vec::new()),
         log_partial: RefCell::new(String::new()),
@@ -3996,23 +3570,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         log_search: RefCell::new(String::new()),
         log_stop: RefCell::new(None),
         log_running: Cell::new(false),
-        monitor: MonitorUi {
-            root: mon_root,
-            val_cpu,
-            val_mem,
-            val_net,
-            val_blk,
-            chart_cpu,
-            chart_mem,
-            chart_net,
-            chart_blk,
-            status: mon_status,
-        },
-        monitor_data: monitor_data.clone(),
-        stat_name: RefCell::new(String::new()),
-        stat_stop: RefCell::new(None),
-        stat_running: Cell::new(false),
-        stat_last_raw: RefCell::new(None),
         seg: seg_stack.clone(),
         seg_buttons: RefCell::new(seg_buttons.clone()),
         seg_current: Cell::new(SEG_CONTAINERS),
@@ -4042,7 +3599,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         volumes_pending: Cell::new(false),
         networks_pending: Cell::new(false),
         files: FilesUi {
-            root: f_root,
             path: f_path,
             store: f_store,
             view: f_view_tbl,
@@ -4384,12 +3940,10 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                                         start_logs(&st, &u, &name);
                                     }
                                 }
-                                // ⚠️ **监控页正开着** ⇒ 同理（**阶段 114**）。
-                                if u.stat_page_visible() && !u.stat_running.get() {
-                                    if let Some(st) = stw.upgrade() {
-                                        start_stats(&st, &u, &name);
-                                    }
-                                }
+                                // ⚠️ **阶段 165：「监控」页整个删了**（用户
+                                //   2026-11-24：「如果真需要监控，我肯定会搭建监控
+                                //   的基础设施，而不是从这里看」）⇒ 采样流与折线图
+                                //   一并退场。
                                 // ⚠️ **文件页正开着** ⇒ 同理（**阶段 116**）。
                                 if files_page_visible(&u) {
                                     if let Some(st) = stw.upgrade() {
@@ -4412,12 +3966,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             continue;
                         }
                         u.log_running.set(false);
-                        let msg = if code == 0 {
-                            tr("日志流已结束").to_string()
-                        } else {
-                            trf!("日志流已结束（退出码 {c}）", c = code)
-                        };
-                        u.log.status.set_text(&msg);
+                        let empty = u.log_lines.borrow().is_empty();
+                        u.log.status.set_text(&log_end_status(empty, code));
                     }
                     Msg::LogError { name, msg } => {
                         if u.log_name.borrow().as_str() != name {
@@ -4425,34 +3975,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         }
                         u.log_running.set(false);
                         u.log.status.set_text(&msg);
-                    }
-                    Msg::StatPoint { name, pt, raw } => {
-                        // ⚠️ **只认现在这条流的**（换了容器 ⇒ 旧流的数据丢掉）。
-                        if u.stat_name.borrow().as_str() != name {
-                            continue;
-                        }
-                        // ⚠️ **留着原始行**（测试要拿它跟指标卡对照）。
-                        *u.stat_last_raw.borrow_mut() = Some(raw);
-                        u.push_stat_point(pt);
-                    }
-                    Msg::StatEnd { name, code } => {
-                        if u.stat_name.borrow().as_str() != name {
-                            continue;
-                        }
-                        u.stat_running.set(false);
-                        let msg = if code == 0 {
-                            tr("监控采样已结束").to_string()
-                        } else {
-                            trf!("监控采样已结束（退出码 {c}）", c = code)
-                        };
-                        u.monitor.status.set_text(&msg);
-                    }
-                    Msg::StatError { name, msg } => {
-                        if u.stat_name.borrow().as_str() != name {
-                            continue;
-                        }
-                        u.stat_running.set(false);
-                        u.monitor.status.set_text(&msg);
                     }
                     Msg::Action(msg) => {
                         *u.last_action.borrow_mut() = msg.clone();
@@ -4524,16 +4046,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     if u.log_name.borrow().as_str() != n {
                         stop_logs(&u);
                         u.log_reset();
-                    }
-                    // ⚠️ **换容器了** ⇒ 监控流也得换（**阶段 114**）⇒
-                    //    否则曲线还是上一个容器的（用户会以为看错了）。
-                    if u.stat_name.borrow().as_str() != n {
-                        stop_stats(&u);
-                        u.monitor_data.borrow_mut().clear();
-                        // 监控页正开着 ⇒ **立刻**起新流（不用等详情回来）。
-                        if u.stat_page_visible() {
-                            start_stats(&st, &u, &n);
-                        }
                     }
                     // ⚠️ **换容器了** ⇒ 容器终端也得换（它显示的是**这个
                     //    容器**的 shell）。
@@ -4611,49 +4123,13 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             true
         });
     }
-    // ================= 阶段 112：日志页 =================
-    // **切到「日志」页 ⇒ 起流；切走 ⇒ 停流**（监控页同理，**阶段 114**）。
-    //
-    // ⚠️ **为什么切走就停**：`docker logs -f` / `docker stats` 是长跑的 ⇒
-    //    一直挂着就是在用户的服务器上白占一个进程（还占着一条 SSH 通道）
-    //    ⇒ 离开这页就该把它收掉。
-    //
-    // ⚠️ **两个流互斥**：日志页与监控页**只有一个可见** ⇒ 同一时刻只有
-    //    一条流在跑（切页时另一个被停掉）⇒ 不会白占两条通道。
-    {
-        let stw = Rc::downgrade(st);
-        let u = Rc::downgrade(&ui);
-        stack.connect_visible_child_name_notify(move |s| {
-            let Some(u) = u.upgrade() else { return };
-            let page = s.visible_child_name();
-            let on_logs = page.as_deref() == Some(PAGE_LOGS);
-            let on_monitor = page.as_deref() == Some(PAGE_MONITOR);
-            let on_files = page.as_deref() == Some(PAGE_FILES);
-            if !on_logs {
-                stop_logs(&u);
-            }
-            if !on_monitor {
-                stop_stats(&u);
-            }
-            // ⚠️ **还没选中容器** ⇒ 等详情到了再起（见消息循环里的处理）。
-            let name = u.selected.borrow().clone();
-            if name.is_empty() {
-                return;
-            }
-            let Some(st) = stw.upgrade() else { return };
-            if on_logs && !u.log_running.get() {
-                start_logs(&st, &u, &name);
-            }
-            if on_monitor && !u.stat_running.get() {
-                start_stats(&st, &u, &name);
-            }
-            // ⚠️ **阶段 116**：切到「文件」页 ⇒ 列一次目录（换了容器 ⇒
-            //   回到根目录重新列）。
-            if on_files {
-                files_ensure(&st, &u, &name);
-            }
-        });
-    }
+    // ================= 阶段 112：日志 =================
+    // ⚠️ **阶段 165：日志是独立窗口** ⇒ 起流 / 停流都挂在**窗口**上，
+    //   不再挂在「页签切换」上：
+    // - 打开日志窗 ⇒ 起流（`open_logs_window` 里显式调）；
+    // - 关掉日志窗 ⇒ 停流（`ensure_logs_window` 的 `connect_hide`）。
+    // ⚠️ **为什么关窗就停**：`docker logs -f` 是长跑的 ⇒ 一直挂着就是在
+    //   用户的服务器上白占一个进程（还占着一条 SSH 通道）。
     // ================= 阶段 116：文件页 =================
     {
         let stw = Rc::downgrade(st);
@@ -5559,8 +5035,7 @@ fn dispatch_row_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, hit: &ActionHit) 
                 ui.detail.proj_root.set_visible(false);
                 load_detail(st, ui, &name);
             }
-            // 弹窗**从概览页**打开（其余页签在弹窗的页签条上）。
-            ui.stack.set_visible_child_name(PAGE_OVERVIEW);
+            // 概览窗（阶段 165：概览 / 日志 / 文件各一扇窗）。
             let title = if is_project {
                 trf!("compose 项目：{n}", n = name)
             } else {
@@ -5611,23 +5086,13 @@ fn dispatch_row_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, hit: &ActionHit) 
             }
         }
         ActionKind::Files => {
-            // ⚠️ **文件页看的是「选中容器的目录」** ⇒ 得先把这个容器设成选中。
-            *ui.selected.borrow_mut() = name.clone();
-            *ui.selected_project.borrow_mut() = String::new();
-            ui.detail.proj_root.set_visible(false);
-            ui.stack.set_visible_child_name(PAGE_FILES);
-            // ⚠️ **阶段 155**：详情在**弹窗**里 ⇒ 「文件」得把弹窗一起打开
-            //   （不然切了页签，用户什么也没看见）。
-            open_detail_window(st, ui, &trf!("容器：{n}", n = name));
+            // ⚠️ **文件窗看的是「选中容器的目录」** ⇒ 打开时就把它设成选中。
+            open_files_window(st, ui, &name);
         }
         ActionKind::Logs => {
-            // ⚠️ **切到日志页** ⇒ 那一页自己会起流（见 stack 的
-            //   `visible-child-name` 回调）。
-            *ui.selected.borrow_mut() = name.clone();
-            *ui.selected_project.borrow_mut() = String::new();
-            ui.detail.proj_root.set_visible(false);
-            ui.stack.set_visible_child_name(PAGE_LOGS);
-            open_detail_window(st, ui, &trf!("容器：{n}", n = name));
+            // ⚠️ **阶段 165**：日志**独立一扇窗**，打开就起流（不再靠
+            //   「页签变了」这种隐式触发 ⇒ 换一个容器再点也照样起流）。
+            open_logs_window(st, ui, &name);
         }
         ActionKind::CopyId => {
             let id = ui.selected_container_id();
@@ -5674,63 +5139,57 @@ fn detail_close_button() -> gtk::Button {
     b
 }
 
-/// **详情弹窗**（第一次用时建；以后**复用**）。
+/// **三扇详情窗里的哪一扇**（阶段 165）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailWin {
+    /// 概览（容器详情 ＋ compose 项目详情）。
+    Overview,
+    /// 日志。
+    Logs,
+    /// 文件。
+    Files,
+}
+
+/// **建一扇工具窗**（阶段 165：概览 / 日志 / 文件各一扇）。
 ///
-/// ⚠️ **建一次、复用**：关掉只是**隐藏**（不销毁）⇒ 控件状态不丢
-///   （日志页的搜索词、监控页的曲线、文件页的目录都不用重来）。
-/// ⚠️ **必须挂到宿主窗口下面**（transient parent）⇒ 不然弹窗可能落在
-///   主窗**后面**（UI 审查 D19 的老坑）。
-fn ensure_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
-    if let Some(w) = ui.detail_window.borrow().as_ref() {
-        return w.clone();
-    }
+/// ⚠️ **三扇窗的规矩一样**（记尺寸 / 挂宿主窗口 / Esc 关闭 / 只藏不销毁）
+///   ⇒ 写一份，三处共用（免得各写各的、行为慢慢漂移）。
+///
+/// ⚠️ **关掉只是隐藏，不销毁**（AGENTS.md 的老坑）：窗里装的是**共享的**
+///   控件 ⇒ 销毁了就再也开不出来（控件全成悬空句柄）。
+fn new_tool_window(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    size_key: &str,
+    title: &str,
+    child: &gtk::Box,
+) -> gtk::Window {
     let win = gtk::Window::new();
-    win.set_title(Some(tr("容器详情")));
+    win.set_title(Some(title));
     // ⚠️ **阶段 156**：**记住尺寸**（AGENTS.md：工具窗要记尺寸）⇒ 下次按它开。
     let (mut dw, mut dh) = (880, 620);
-    if let Some((w, h)) = crate::settings::window_size("docker_detail") {
+    if let Some((w, h)) = crate::settings::window_size(size_key) {
         if w >= 240 && h >= 180 {
             dw = w;
             dh = h;
         }
     }
     win.set_default_size(dw, dh);
+    // ⚠️ **必须挂到宿主窗口下面**（transient parent）⇒ 不然弹窗可能落在
+    //   主窗**后面**（UI 审查 D19 的老坑）。
     if let Some(parent) = host_window(ui, st) {
         win.set_transient_for(Some(&parent));
     }
-    win.set_child(Some(&ui.detail_box));
-    // ⚠️ **关掉 ⇒ 回到概览页** ⇒ 日志 / 监控两条流自动停掉
-    //   （不然远端一直挂着 `docker logs -f` / `docker stats`）。
-    //
-    // ⚠️ **阶段 156：这里必须 `hide` + `Stop`，不能 `Proceed`**：
-    //   `Proceed` = 继续走 GTK 的默认处理 ⇒ 它会把窗口**销毁**
-    //   （见 `src/panel/dbui.rs:5616-5618` 的老坑）⇒ 而弹窗里装的是
-    //   **共享的 `detail_box`** ⇒ 一关整块详情内容就没了 ⇒ 下次打开是坏的
-    //   （`ensure_detail_window` 还会返回已销毁的句柄 ⇒ `present()` 无效）。
+    win.set_child(Some(child));
+    // ⚠️ **这里必须 `hide` + `Stop`，不能 `Proceed`**：`Proceed` = 继续走
+    //   GTK 的默认处理 ⇒ 它会把窗口**销毁**（见 `src/panel/dbui.rs:5616-5618`
+    //   的老坑）⇒ 而窗里装的是**共享控件** ⇒ 一关内容就没了 ⇒ 下次打开是坏的。
     {
+        let key = size_key.to_string();
         win.connect_close_request(move |w| {
-            crate::settings::save_window_size("docker_detail", w);
+            crate::settings::save_window_size(&key, w);
             w.set_visible(false);
             glib::Propagation::Stop
-        });
-    }
-    // ⚠️ **一藏就回概览页** ⇒ 所有关法（按钮 / X / Esc）统一走这一条路。
-    {
-        let u = Rc::downgrade(ui);
-        win.connect_hide(move |_| {
-            if let Some(u) = u.upgrade() {
-                u.stack.set_visible_child_name(PAGE_OVERVIEW);
-            }
-        });
-    }
-    // ⚠️ **万一还是被销毁了**（将来谁又引入了 destroy）⇒ 把句柄摘掉
-    //   ⇒ 下次**重建**，而不是拿一个野句柄去 `present()`。
-    {
-        let u = Rc::downgrade(ui);
-        win.connect_destroy(move |_| {
-            if let Some(u) = u.upgrade() {
-                *u.detail_window.borrow_mut() = None;
-            }
         });
     }
     // ⚠️ **Esc 关闭**（普通 `GtkWindow` 不像 `GtkDialog` 那样 Esc 自动关）。
@@ -5739,7 +5198,7 @@ fn ensure_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
         let key = gtk::EventControllerKey::new();
         key.connect_key_pressed(move |_, keyval, _, _| {
             if keyval == gtk::gdk::Key::Escape {
-                // ⚠️ **光标在输入框里时不抢 Esc**（日志页的搜索框要靠 Esc
+                // ⚠️ **光标在输入框里时不抢 Esc**（日志窗的搜索框要靠 Esc
                 //   清空）⇒ 只在焦点**不在可编辑控件**上时才关窗。
                 if let Some(f) = gtk::prelude::GtkWindowExt::focus(&w) {
                     if f.is::<gtk::Entry>() {
@@ -5754,28 +5213,153 @@ fn ensure_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
         });
         win.add_controller(key);
     }
+    win
+}
+
+/// **概览弹窗**（容器详情 ＋ compose 项目详情）。
+fn ensure_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
+    if let Some(w) = ui.detail_window.borrow().as_ref() {
+        return w.clone();
+    }
+    let win = new_tool_window(
+        st,
+        ui,
+        "docker_detail",
+        tr("容器详情"),
+        &ui.detail_box,
+    );
+    // ⚠️ **万一还是被销毁了**（将来谁又引入了 destroy）⇒ 把句柄摘掉
+    //   ⇒ 下次**重建**，而不是拿一个野句柄去 `present()`。
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_destroy(move |_| {
+            if let Some(u) = u.upgrade() {
+                *u.detail_window.borrow_mut() = None;
+            }
+        });
+    }
     *ui.detail_window.borrow_mut() = Some(win.clone());
     win
 }
 
-/// **关掉详情弹窗**（页签关掉时走的就是它）。
-///
-/// ⚠️ **只隐藏，不销毁**：弹窗里装着详情区的控件（概览 / 日志 / 监控 /
-///   文件）⇒ 销毁了 ⇒ 下次打开就是一片空白 ⇒ 只隐藏（控件留着）。
-fn close_detail_window(ui: &Rc<DockerUi>) {
-    if let Some(w) = ui.detail_window.borrow().as_ref() {
-        w.set_visible(false);
+/// **日志弹窗**（阶段 165：日志**独立一扇窗**）。
+fn ensure_logs_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
+    if let Some(w) = ui.logs_window.borrow().as_ref() {
+        return w.clone();
     }
-    // 回概览页 ⇒ 日志 / 监控两条流自动停掉（不白占远端进程）。
-    // （弹窗藏起来时 `hide` 钩子也会做这件事 ⇒ 这里再兜一层。）
-    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
+    let win = new_tool_window(st, ui, "docker_logs", tr("容器日志"), &ui.logs_box);
+    // ⚠️ **藏起来 ⇒ 日志流停掉**（不然远端一直挂着 `docker logs -f`）。
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_hide(move |_| {
+            if let Some(u) = u.upgrade() {
+                stop_logs(&u);
+            }
+        });
+    }
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_destroy(move |_| {
+            if let Some(u) = u.upgrade() {
+                *u.logs_window.borrow_mut() = None;
+            }
+        });
+    }
+    *ui.logs_window.borrow_mut() = Some(win.clone());
+    win
 }
 
-/// **打开详情弹窗**（标题带上是谁）。
+/// **文件弹窗**（阶段 165：文件**独立一扇窗**）。
+fn ensure_files_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>) -> gtk::Window {
+    if let Some(w) = ui.files_window.borrow().as_ref() {
+        return w.clone();
+    }
+    let win = new_tool_window(st, ui, "docker_files", tr("容器文件"), &ui.files_box);
+    {
+        let u = Rc::downgrade(ui);
+        win.connect_destroy(move |_| {
+            if let Some(u) = u.upgrade() {
+                *u.files_window.borrow_mut() = None;
+            }
+        });
+    }
+    *ui.files_window.borrow_mut() = Some(win.clone());
+    win
+}
+
+/// **只留一扇详情窗**（阶段 165：用户 2026-11-24「每次点鼠标右键就只出来
+///   一个窗口就行了」）。
+///
+/// ⚠️ **关掉日志窗会停掉日志流**（`connect_hide`）⇒ 这正是我们要的：
+///   同一时刻只有一扇窗 ⇒ 只有一条流。
+fn show_only(ui: &Rc<DockerUi>, keep: DetailWin) {
+    if keep != DetailWin::Overview {
+        if let Some(w) = ui.detail_window.borrow().as_ref() {
+            w.set_visible(false);
+        }
+    }
+    if keep != DetailWin::Logs {
+        if let Some(w) = ui.logs_window.borrow().as_ref() {
+            w.set_visible(false);
+        }
+    }
+    if keep != DetailWin::Files {
+        if let Some(w) = ui.files_window.borrow().as_ref() {
+            w.set_visible(false);
+        }
+    }
+}
+
+/// **关掉全部详情窗**（面板关掉时走的就是它）。
+fn close_detail_window(ui: &Rc<DockerUi>) {
+    // ⚠️ **三扇全关**（不是只关概览）⇒ 阶段 165 之后它们是**三扇独立的窗**。
+    for w in [
+        ui.detail_window.borrow().as_ref().cloned(),
+        ui.logs_window.borrow().as_ref().cloned(),
+        ui.files_window.borrow().as_ref().cloned(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        w.set_visible(false);
+    }
+}
+
+/// **打开概览窗**（标题带上是谁）。
 fn open_detail_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, title: &str) {
     let win = ensure_detail_window(st, ui);
     win.set_title(Some(&format!("{} · {}", tr("容器详情"), title)));
+    show_only(ui, DetailWin::Overview);
     win.present();
+}
+
+/// **打开日志窗**（并给这个容器起流）。
+///
+/// ⚠️ **为什么显式起流**（阶段 165 修的坑）：以前靠「切到日志页」这个
+///   **隐式事件**起流 ⇒ **已经开着日志页时再点另一个容器的「日志」**
+///   ⇒ 页签没变 ⇒ **不起流** ⇒ 看到的还是上一个容器的日志（或一片空白）。
+///   ⇒ 现在**打开窗口就起流**，跟「页签有没有变」无关。
+fn open_logs_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    *ui.selected.borrow_mut() = name.to_string();
+    *ui.selected_project.borrow_mut() = String::new();
+    ui.detail.proj_root.set_visible(false);
+    let win = ensure_logs_window(st, ui);
+    win.set_title(Some(&format!("{} · {}", tr("容器日志"), name)));
+    show_only(ui, DetailWin::Logs);
+    win.present();
+    start_logs(st, ui, name);
+}
+
+/// **打开文件窗**（并列出这个容器的目录）。
+fn open_files_window(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
+    *ui.selected.borrow_mut() = name.to_string();
+    *ui.selected_project.borrow_mut() = String::new();
+    ui.detail.proj_root.set_visible(false);
+    let win = ensure_files_window(st, ui);
+    win.set_title(Some(&format!("{} · {}", tr("容器文件"), name)));
+    show_only(ui, DetailWin::Files);
+    win.present();
+    files_ensure(st, ui, name);
 }
 
 /// 容器页的**宿主窗口**（弹窗的 transient parent）。
@@ -5884,6 +5468,30 @@ fn load_detail(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     });
 }
 
+/// 日志流**结束时的状态文案**（**纯函数** ⇒ 好测）。
+///
+/// ⚠️ **阶段 165：一条日志都没有 ⇒ 说清楚**（用户 2026-11-24：「这个日志
+///   窗口我从来没看到日志」）。
+///
+/// ⚠️ **为什么以前那句不够**：以前只写「日志流已结束」⇒ 用户分不清是
+///   「功能坏了」还是「这个容器本来就不写日志」⇒ 白白地怀疑功能。
+///   ⇒ **实测**：大多数容器 `docker logs` 就是空的（实测本机 4 个容器里
+///   有 2 个零输出）⇒ 这句话**很常见** ⇒ 必须说人话。
+///
+/// ⚠️ **退出码非 0 时不这么说**：那种情况多半是命令本身出了错（容器没了
+///   / 没权限）⇒ 错误原文已经落在日志正文里了 ⇒ 只补一句退出码。
+pub fn log_end_status(empty: bool, code: i32) -> String {
+    if empty && code == 0 {
+        tr("这个容器没有日志输出（docker logs 是空的）").to_string()
+    } else if empty {
+        trf!("这个容器没有日志输出（退出码 {c}）", c = code)
+    } else if code == 0 {
+        tr("日志流已结束").to_string()
+    } else {
+        trf!("日志流已结束（退出码 {c}）", c = code)
+    }
+}
+
 /// 起一条**日志流**（后台任务读，增量发回主线程）。
 ///
 /// ⚠️ **不新增 SSH 连接**：走**共享连接**上的**独立 exec 通道**
@@ -5896,6 +5504,27 @@ fn start_logs(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
     *ui.log_name.borrow_mut() = name.to_string();
     ui.log_running.set(true);
     ui.log.status.set_text(tr("正在接收日志…"));
+
+    // ⚠️ **阶段 165：等了几秒还没输出 ⇒ 说清楚**（用户 2026-11-24：
+    //   「这个日志窗口我从来没看到日志」）。
+    //
+    // ⚠️ **为什么要这句**：容器**运行中**时 `docker logs -f` **不会自己结束**
+    //   ⇒ 状态一直停在「正在接收日志…」⇒ 而正文区**一片空白** ⇒ 用户看着
+    //   像坏了。⇒ 3 秒后如果**一行都没来**，就把话说透：「这个容器暂时没有
+    //   输出（它可能根本不往 stdout/stderr 写东西）」。
+    {
+        let u = Rc::downgrade(ui);
+        glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+            let Some(u) = u.upgrade() else { return };
+            // ⚠️ **已经有输出了**（或流已经停了）⇒ 不用改状态。
+            if !u.log_running.get() || !u.log_lines.borrow().is_empty() {
+                return;
+            }
+            u.log.status.set_text(tr(
+                "正在接收日志…（暂时还没有输出；这个容器可能根本不写日志）",
+            ));
+        });
+    }
 
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
@@ -5967,108 +5596,6 @@ pub fn stop_logs(ui: &Rc<DockerUi>) {
         let _ = tx.send(());
     }
     ui.log_running.set(false);
-}
-
-/// 起一条**监控采样**流（`docker stats` 持续模式，**阶段 114**）。
-///
-/// ⚠️ **走共享连接**上的独立 exec 通道 ⇒ 一台服务器仍然只有一条 SSH 连接。
-/// ⚠️ **后台做节流**：docker stats 每 500ms 刷一次 ⇒ 每 `STATS_INTERVAL`
-///   秒才出一个点（曲线才好看、消息才不多）。
-/// ⚠️ **半行缓冲**：一次 `Data` 里可能只有半行 ⇒ 拼起来再解析。
-fn start_stats(st: &Rc<PanelState>, ui: &Rc<DockerUi>, name: &str) {
-    stop_stats(ui);
-    ui.monitor_data.borrow_mut().clear();
-    *ui.stat_name.borrow_mut() = name.to_string();
-    ui.stat_running.set(true);
-    ui.monitor.status.set_text(tr("正在采样…"));
-
-    let opts = st.opts.clone();
-    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
-    let name = name.to_string();
-    let tx = ui.tx.clone();
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    *ui.stat_stop.borrow_mut() = Some(stop_tx);
-
-    let rt = crate::backend::hub::runtime();
-    rt.spawn(async move {
-        let session = match shared_session(&opts, pw).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = tx.send_blocking(Msg::StatError { name, msg: e });
-                return;
-            }
-        };
-        let ch = match docker::open_stats(&session, &name).await {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send_blocking(Msg::StatError { name, msg: e.0 });
-                return;
-            }
-        };
-        let mut sampler = docker::StatsSampler::default();
-        let mut partial = String::new();
-        let t0 = std::time::Instant::now();
-        // ⚠️ **停止信号要能被反复问**：`select!` 会把 future 移走 ⇒ 用
-        //    `&mut` 问它（`oneshot::Receiver` 是 Unpin ⇒ 取消安全）。
-        let mut stop_rx = stop_rx;
-        loop {
-            tokio::select! {
-                ev = ch.next_event() => {
-                    match ev {
-                        Some(ShellEvent::Data(b)) => {
-                            partial.push_str(&String::from_utf8_lossy(&b));
-                            // ⚠️ **按行切**（半行留着 ⇒ 下次拼上）。
-                            while let Some(i) = partial.find('\n') {
-                                let line: String = partial.drain(..=i).collect();
-                                let line = line.trim_end_matches(['\r', '\n']);
-                                let Some(sample) = docker::parse_stats_line(line) else {
-                                    continue;
-                                };
-                                let now = t0.elapsed().as_secs_f64();
-                                let Some(pt) = sampler.push(&sample, now, STATS_INTERVAL) else {
-                                    continue;
-                                };
-                                if tx
-                                    .send_blocking(Msg::StatPoint {
-                                        name: name.clone(),
-                                        pt,
-                                        raw: line.to_string(),
-                                    })
-                                    .is_err()
-                                {
-                                    // 界面没了 ⇒ 关通道（别让远端白挂着）。
-                                    ch.close();
-                                    break;
-                                }
-                            }
-                        }
-                        Some(ShellEvent::Exit(code)) => {
-                            let _ = tx.send_blocking(Msg::StatEnd { name, code });
-                            break;
-                        }
-                        None => {
-                            let _ = tx.send_blocking(Msg::StatEnd { name, code: 0 });
-                            break;
-                        }
-                    }
-                }
-                _ = &mut stop_rx => {
-                    // ⚠️ **主动关通道** ⇒ 远端 `docker stats` 退出
-                    //    （看门狗收尾 ⇒ 服务器上不留进程）。
-                    ch.close();
-                    break;
-                }
-            }
-        }
-    });
-}
-
-/// 停掉监控流（**关通道** ⇒ 远端的 `docker stats` 退出）。
-pub fn stop_stats(ui: &Rc<DockerUi>) {
-    if let Some(tx) = ui.stat_stop.borrow_mut().take() {
-        let _ = tx.send(());
-    }
-    ui.stat_running.set(false);
 }
 
 /// 做一次**写操作**（启停 / 重启）。
@@ -6809,8 +6336,6 @@ pub fn mount(st: &Rc<PanelState>) {
                 stop_auto(&u);
                 // ⚠️ **日志流也得停**（否则远端的 `docker logs -f` 一直挂着）。
                 stop_logs(&u);
-                // ⚠️ **监控流也得停**（否则远端的 `docker stats` 一直挂着）。
-                stop_stats(&u);
                 // ⚠️ **容器内终端也得停**（否则容器里留着孤儿 shell）。
                 stop_terminal(&u);
                 // ⚠️ **详情弹窗也得关**（否则关掉页签后屏幕上还留着一扇窗）。
@@ -7107,6 +6632,33 @@ pub fn close_detail_for_test(st: &Rc<PanelState>) {
     }
 }
 
+/// 测试钩子：**概览窗**开着吗（阶段 165：三扇窗之一）。
+pub fn overview_window_open_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .and_then(|u| u.detail_window.borrow().as_ref().cloned())
+        .map(|w| w.is_visible())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：**日志窗**开着吗（阶段 165：三扇窗之一）。
+pub fn logs_window_open_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .and_then(|u| u.logs_window.borrow().as_ref().cloned())
+        .map(|w| w.is_visible())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：**文件窗**开着吗（阶段 165：三扇窗之一）。
+pub fn files_window_open_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .and_then(|u| u.files_window.borrow().as_ref().cloned())
+        .map(|w| w.is_visible())
+        .unwrap_or(false)
+}
+
 /// 测试钩子：详情弹窗**还活着**吗（没被销毁）（阶段 156）。
 ///
 /// ⚠️ 验的是「句柄还在」⇒ 抓「关一次就把共享内容销毁了」那种回归。
@@ -7130,6 +6682,36 @@ pub fn detail_content_attached_for_test(st: &Rc<PanelState>) -> bool {
         Some(w) => u.detail_box.is_ancestor(w),
         None => false,
     }
+}
+
+/// 测试钩子：详情区（页签栈）**在屏幕上吗**（阶段 165）。
+///
+/// ⚠️ **为什么要有这个判据**（阶段 165 踩出来的）：`is_visible()` 只看控件
+///   自己的「可见」标记 ⇒ **祖先被藏起来时它照样返回 true** ⇒ 光看它抓不到
+///   「整块内容其实没画出来」那种 bug ⇒ 得看 `is_mapped()`（**真的映射到
+///   屏幕上了**）。
+pub fn detail_stack_mapped_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    // ⚠️ **阶段 165**：概览窗里没有页签栈了 ⇒ 改看**概览内容盒**。
+    slot.as_ref().map(|u| u.detail_box.is_mapped()).unwrap_or(false)
+}
+
+/// 测试钩子：日志正文**在屏幕上吗**（阶段 165）。
+pub fn log_view_mapped_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.log.view.is_mapped()).unwrap_or(false)
+}
+
+/// 测试钩子：日志正文**自己的可见标记**（不查祖先）。
+pub fn log_view_visible_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.log.view.is_visible()).unwrap_or(false)
+}
+
+/// 测试钩子：详情区外框（装着页签栈的那个盒子）**可见吗**（阶段 165）。
+pub fn detail_box_mapped_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.detail.root.is_mapped()).unwrap_or(false)
 }
 
 /// 测试钩子：**模拟点窗口的 X**（走 `close-request` 那条路）（阶段 156）。
@@ -7719,89 +7301,13 @@ pub fn loading_spinners_for_test(st: &Rc<PanelState>) -> (bool, bool, bool) {
     )
 }
 
-/// 测试钩子：**切到监控页**（**阶段 114**）。
-pub fn monitor_show_page_for_test(st: &Rc<PanelState>) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    ui.stack.set_visible_child_name(PAGE_MONITOR);
-}
-
-/// 测试钩子：**切回概览页**（**阶段 114**）。
-pub fn monitor_show_overview_for_test(st: &Rc<PanelState>) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
-}
-
-/// 测试钩子：监控流**是不是在跑**（**阶段 114**）。
-pub fn stat_running_for_test(st: &Rc<PanelState>) -> bool {
-    let slot = st.docker_ui.borrow();
-    slot.as_ref().map(|u| u.stat_running.get()).unwrap_or(false)
-}
-
-/// 测试钩子：曲线上**有多少个点**（**阶段 114**）。
-///
-/// ⚠️ 返回 `(CPU点数, 网络接收点数)` —— 两条线代表「曲线真的在画」。
-pub fn stat_points_for_test(st: &Rc<PanelState>) -> (usize, usize) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return (0, 0) };
-    let d = ui.monitor_data.borrow();
-    (d.cpu.len(), d.net_rx.len())
-}
-
-/// 测试钩子：四个指标卡的**当前值**（**阶段 114**）。
-pub fn stat_values_for_test(st: &Rc<PanelState>) -> (String, String, String, String) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else {
-        return (
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        );
-    };
-    (
-        ui.monitor.val_cpu.text().to_string(),
-        ui.monitor.val_mem.text().to_string(),
-        ui.monitor.val_net.text().to_string(),
-        ui.monitor.val_blk.text().to_string(),
-    )
-}
-
-/// 测试钩子：**最后一个采样点的原始行**（**带 ANSI**，阶段 114）。
-///
-/// ⚠️ **为什么留它**：冒烟要拿它跟指标卡**对照** ⇒ 能抓到「忘了剥 ANSI
-///   ⇒ 解析出来的值全是 0」这类退化（光看指标卡抓不到）。
-pub fn stat_last_raw_for_test(st: &Rc<PanelState>) -> Option<String> {
-    let slot = st.docker_ui.borrow();
-    let ui = slot.as_ref()?;
-    ui.stat_last_raw.borrow().clone()
-}
-
-/// 测试钩子：监控页的**状态行**（**阶段 114**）。
-pub fn stat_status_for_test(st: &Rc<PanelState>) -> String {
-    let slot = st.docker_ui.borrow();
-    slot.as_ref()
-        .map(|u| u.monitor.status.text().to_string())
-        .unwrap_or_default()
-}
-
-/// 测试钩子：灌一个采样点进曲线（**不连服务器**）。
-pub fn push_stat_for_test(st: &Rc<PanelState>, pt: docker::StatPoint) {
-    let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    ui.push_stat_point(pt);
-}
-
 /// 测试钩子：**关掉容器内终端的窗口**（冒烟截图用）。
 pub fn close_terminal_window_for_test(st: &Rc<PanelState>) {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
     // ⚠️ **终端现在在独立窗口里**（阶段 152）⇒ 「关掉」＝ 停掉会话 ＋
     //   **关掉那个窗口**（`stop_terminal` 已经会关 ⇒ 不会留在屏幕上）。
-    //   ⇒ 详情区切回概览页只是顺手（终端不在详情区了，切不切都行）。
     stop_terminal(ui);
-    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
 }
 
 /// 测试钩子：**展开所有 compose 项目**。///
@@ -7931,19 +7437,40 @@ pub fn log_set_search_for_test(st: &Rc<PanelState>, q: &str) {
     ui.log.search.set_text(q);
 }
 
-/// 测试钩子：**切到日志页**（走真实的 Stack 切换 ⇒ 会起流）。
+/// 测试钩子：**打开日志窗**（走真实的打开流程 ⇒ 会起流）。
+///
+/// ⚠️ **阶段 165**：日志是独立窗口（不再是页签）⇒ 这里开的是**那扇窗**。
 pub fn log_show_page_for_test(st: &Rc<PanelState>) -> bool {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
-    ui.stack.set_visible_child_name(PAGE_LOGS);
+    let name = ui.selected.borrow().clone();
+    if name.is_empty() {
+        return false;
+    }
+    open_logs_window(st, ui, &name);
     true
 }
 
-/// 测试钩子：**切回概览页**（走真实的 Stack 切换 ⇒ 日志流停）。
+/// 测试钩子：**只开日志窗**（**不起流**）。
+///
+/// ⚠️ **为什么单独给一个**：纯界面行为（搜索 / 暂停 / 清空）要在**假面板**
+///   上测 ⇒ 不能真的去连服务器 ⇒ 不能走 `open_logs_window`（它会起流）。
+///   ⇒ 这里只把窗打开（界面行为照样是真的）⇒ 不碰网络。
+pub fn log_window_show_only_for_test(st: &Rc<PanelState>) -> bool {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let win = ensure_logs_window(st, ui);
+    win.present();
+    true
+}
+
+/// 测试钩子：**关掉日志窗**（⇒ 日志流停）。
 pub fn log_show_overview_for_test(st: &Rc<PanelState>) -> bool {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
-    ui.stack.set_visible_child_name(PAGE_OVERVIEW);
+    if let Some(w) = ui.logs_window.borrow().as_ref() {
+        w.set_visible(false);
+    }
     true
 }
 
@@ -7951,6 +7478,14 @@ pub fn log_show_overview_for_test(st: &Rc<PanelState>) -> bool {
 pub fn log_page_visible_for_test(st: &Rc<PanelState>) -> bool {
     let slot = st.docker_ui.borrow();
     slot.as_ref().map(|u| u.log_page_visible()).unwrap_or(false)
+}
+
+/// 测试钩子：日志区的**状态行**文字（阶段 165）。
+pub fn log_status_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref()
+        .map(|u| u.log.status.text().to_string())
+        .unwrap_or_default()
 }
 
 /// 测试钩子：日志流**是不是在跑**。
@@ -8255,6 +7790,116 @@ mod tests {
     }
 
     /* ---------------- 阶段 155：「操作」列的纯函数 ---------------- */
+
+    /// **阶段 164：资源列的取值与格式化**（CPU 百分比 ＋ 内存占用）。
+    ///
+    /// ⚠️ **这几条是踩过坑的**：
+    /// - **`trf!` 不支持格式说明**（`{c:.2}` 会**原样显示**在界面上）⇒
+    ///   数字得**先格式化好**再传进去；
+    /// - **GiB 的除数写错**（拿 MiB 当 GiB）⇒ 20MiB 显示成「20.00GiB」
+    ///   ⇒ **截图复检**才看出来 ⇒ 下面有专门的断言。
+    #[test]
+    fn 资源列的文案是cpu百分比加内存占用() {
+        // ⚠️ **内存只取「用了多少」**（`docker stats` 给的是「用了 / 上限」）。
+        assert_eq!(mem_used("52.84MiB / 63.00GiB"), "52.84MiB");
+        assert_eq!(mem_used("10MiB"), "10MiB");
+        assert_eq!(mem_used(""), "");
+        // CPU 百分比。
+        assert!((cpu_pct("2.30%") - 2.3).abs() < 0.001);
+        assert!((cpu_pct("0.00%") - 0.0).abs() < 0.001);
+        assert!((cpu_pct("") - 0.0).abs() < 0.001);
+        // ⚠️ **单位不能搞错**（曾把 20MiB 写成 20.00GiB ⇒ 除数拿错了）。
+        assert_eq!(human_size_bin(10 * 1024 * 1024), "10.00MiB");
+        assert_eq!(human_size_bin(20 * 1024 * 1024), "20.00MiB");
+        assert_eq!(human_size_bin(1024 * 1024 * 1024), "1.00GiB");
+        assert_eq!(human_size_bin(512), "512 B");
+        // 文案：一行，两个指标。
+        let t = res_text("2.30%", "52.84MiB / 63.00GiB");
+        assert!(t.contains("2.30%"), "资源列里要有 CPU 百分比：{t}");
+        assert!(t.contains("52.84MiB"), "资源列里要有内存占用：{t}");
+        assert!(!t.contains("63.00GiB"), "资源列里不该有内存上限：{t}");
+        // ⚠️ **没采样到（已停止的容器）⇒ 就一个「—」**。
+        assert_eq!(res_text("", ""), "—");
+    }
+
+    /// **阶段 165：容器行与项目行的小数位/单位都要一致**（截图里发现的）。
+    ///
+    /// ⚠️ **踩过的坑**：docker 原样给的是 `67.9MiB`（**一位小数**）⇒ 而
+    ///   项目行是**合计** ⇒ 走 `human_size_bin` ⇒ **两位小数**
+    ///   （`67.90MiB`）⇒ 同一列里父子两行**一个模子**（不然看着像两个
+    ///   不同的量 ⇒ 用户会以为项目占得比容器还多）。
+    #[test]
+    fn 资源列的单位父子一致() {
+        // docker 原样：一位小数。
+        let raw = res_text("0.00%", "67.9MiB");
+        // 项目行合计：两位小数。
+        let sum = human_size_bin(67 * 1024 * 1024 + 942_080);
+        assert!(
+            raw.contains(&sum),
+            "容器行应当也是 {sum}（docker 原样是 67.9MiB ⇒ 少一位小数）：{raw}"
+        );
+        // ⚠️ **两边的小数位要一样**（都是两位）。
+        assert!(raw.contains("67.90MiB"), "{raw}");
+        // ⚠️ **CPU 也一样**（docker 原样 `1.0%` ⇒ 统一成 `1.00%`）。
+        let cpu = res_text("1.0%", "10MiB");
+        assert!(cpu.contains("1.00%"), "CPU 小数位要统一：{cpu}");
+        assert!(!cpu.contains("1.0% ·"), "CPU 小数位要统一：{cpu}");
+    }
+
+    /// **阶段 164：项目行的资源是合计**（CPU 相加 ＋ 内存按字节相加）。
+    #[test]
+    fn 项目行的资源是合计() {
+        let mk = |name: &str, cpu: &str, mem: &str| crate::backend::docker::ContainerInfo {
+            id: format!("{name}-id"),
+            name: name.to_string(),
+            image: "img:1".into(),
+            status: "Up".into(),
+            state: "running".into(),
+            ports: String::new(),
+            compose: "proj".into(),
+            compose_files: String::new(),
+            compose_dir: String::new(),
+            cpu: cpu.into(),
+            mem: mem.into(),
+            duration: None,
+        };
+        let items = vec![mk("a", "1.00%", "10MiB"), mk("b", "1.00%", "10MiB")];
+        let t = project_res_text(&items);
+        assert!(t.contains("2.00%"), "CPU 应当相加：{t}");
+        // ⚠️ **20MiB 不能写成 20.00GiB**（除数拿错过 ⇒ 截图才发现）。
+        assert!(t.contains("20.00MiB"), "内存应当按字节相加：{t}");
+        assert!(!t.contains("GiB"), "不该出现 GiB：{t}");
+    }
+
+    /// **阶段 164：资源列排序按 CPU 百分比**（不是按字符串 ⇒ 「9.50%」要排在
+    ///   「50.80%」前面）。
+    #[test]
+    fn 资源列排序取cpu百分比() {
+        assert!((res_cpu_value("CPU 9.50% · 内存 10MiB") - 9.5).abs() < 0.001);
+        assert!((res_cpu_value("CPU 50.80% · 内存 10MiB") - 50.8).abs() < 0.001);
+        assert!((res_cpu_value("—") - 0.0).abs() < 0.001);
+    }
+
+    /// **阶段 164：操作列不再吸收富余**（用户 2026-11-24：「操作列太宽了，
+    ///   按钮们太靠右了，没有一点留白」）。
+    ///
+    /// ⚠️ **GTK4 的规矩**（实测）：**一列都不展开 ⇒ 富余全给最后一列**
+    ///   ⇒ 「操作」列必须显式 `set_expand(false)`；而且**得有几列展开**，
+    ///   不然 GTK 又把富余塞回最后一列。
+    #[test]
+    fn 操作列不吸收富余() {
+        // 图标组**左对齐** ⇒ 按钮不再贴着窗口右缘。
+        assert_eq!(crate::panel::actioncell::group_offset(400, 4), 0);
+        // 列宽按最多的那种行算 ＋ 右边留一截空白。
+        let w = (crate::panel::actioncell::SLOT_W * action_col_icons_max() as i32) + 24;
+        // ⚠️ **图标组必须在列宽之内**（否则最后一颗被挤出去 ⇒ 点不到）。
+        let group = crate::panel::actioncell::SLOT_W * action_col_icons_max() as i32
+            - crate::panel::actioncell::ICON_GAP;
+        assert!(
+            group < w,
+            "图标组（{group}）比列宽（{w}）还宽 ⇒ 最后一颗会被挤出格子"
+        );
+    }
 
     /// ⚠️ **阶段 160：操作列只留 3 颗**（启动 / 停止 / 重启）——
     ///   **容器行**（用户 2026-11-24：「操作列只保留启动、停止、重启，
@@ -8717,6 +8362,33 @@ mod tests {
         );
     }
 
+    /// **阶段 165：空日志要说清楚**（纯函数 ⇒ 单测能守住）。
+    ///
+    /// ⚠️ **为什么值钱**：用户 2026-11-24 报「这个日志窗口我从来没看到
+    ///   日志」⇒ 根因是**反馈没写清楚**（容器本来就没日志）⇒ 这句话是
+    ///   这次改动的核心 ⇒ 钉死它。
+    #[test]
+    fn 空日志的状态文案说清楚() {
+        // 一条都没有 ＋ 正常退出 ⇒ **明确说「没有日志输出」**。
+        let s = log_end_status(true, 0);
+        assert!(
+            s.contains("没有日志输出"),
+            "空日志要说清楚：{s}"
+        );
+        // ⚠️ **不能跟「正常结束」混为一谈**（那会让用户以为功能坏了）。
+        assert!(
+            !s.contains("日志流已结束"),
+            "空日志不该说成「日志流已结束」：{s}"
+        );
+        // 有日志 ＋ 正常退出 ⇒ 照旧说「日志流已结束」。
+        let s2 = log_end_status(false, 0);
+        assert!(s2.contains("日志流已结束"), "{s2}");
+        assert!(!s2.contains("没有日志输出"), "{s2}");
+        // 退出码非 0 ⇒ 两边都要带退出码（**别把错误吃掉**）。
+        assert!(log_end_status(true, 3).contains("3"), "得带退出码");
+        assert!(log_end_status(false, 3).contains("3"), "得带退出码");
+    }
+
     /// 文件页的报错 ⇒ **说人话**（阶段 140：容器里没有 `ls`）。
     #[test]
     fn 文件页报错说人话() {
@@ -8731,44 +8403,6 @@ mod tests {
         assert_eq!(files_err_zh(""), "");
     }
 
-    /// 纵轴量程取整（UI 审查 D3：刻度上的数字要读得懂）。
-    #[test]
-    fn 纵轴量程取整到好看的数() {
-        assert_eq!(nice_max(0.0), 1.0);
-        assert_eq!(nice_max(0.5), 1.0);
-        assert_eq!(nice_max(1.2), 2.0);
-        assert_eq!(nice_max(7.0), 10.0);
-        assert_eq!(nice_max(999.0), 1000.0);
-        // ⚠️ **不能小于观测值**（否则曲线会顶出格子）。
-        assert!(nice_max(1234.0) >= 1234.0);
-    }
-
-    /// 纵轴刻度的文字（**短**）。
-    #[test]
-    fn 纵轴刻度文字够短() {
-        assert_eq!(fmt_axis(100.0), "100");
-        assert_eq!(fmt_axis(0.0), "0");
-        assert_eq!(fmt_axis(12000.0), "12K");
-        assert_eq!(fmt_axis(2_000_000.0), "2.0M");
-        // ⚠️ **纯 ASCII** ⇒ cairo 的玩具文字接口才画得出来。
-        for v in [0.0, 100.0, 12000.0, 2_000_000.0, 3_000_000_000.0] {
-            assert!(
-                fmt_axis(v).chars().all(|c| c.is_ascii()),
-                "刻度文字必须是 ASCII：{:?}",
-                fmt_axis(v)
-            );
-        }
-    }
-
-    /// 百分比类的图**固定量程** 0..100（UI 审查 D3：曲线高度就是百分比）。
-    #[test]
-    fn 百分比图固定量程() {
-        let series: Vec<(&[(f64, f64)], (f64, f64, f64))> = vec![(&[(0.0, 5.0)], (0.0, 0.0, 0.0))];
-        assert_eq!(chart_max(&series, Some(100.0)), 100.0);
-        // ⚠️ **超过 100% 时不许被裁掉**（多核容器会超）。
-        let hot: Vec<(&[(f64, f64)], (f64, f64, f64))> = vec![(&[(0.0, 150.0)], (0.0, 0.0, 0.0))];
-        assert_eq!(chart_max(&hot, Some(100.0)), 150.0);
-    }
 }
 
 
@@ -9303,7 +8937,11 @@ fn files_remote_path(ui: &Rc<DockerUi>, name: &str) -> String {
 
 /// **文件页是不是正开着**。
 fn files_page_visible(ui: &Rc<DockerUi>) -> bool {
-    ui.stack.visible_child_name().as_deref() == Some(PAGE_FILES)
+    ui.files_window
+        .borrow()
+        .as_ref()
+        .map(|w| w.is_visible())
+        .unwrap_or(false)
 }
 
 /// 切到文件页时：**没列过 / 换了容器** ⇒ 列一次（**阶段 116**）。
@@ -9530,16 +9168,17 @@ fn show_file_window(st: Option<&Rc<PanelState>>, path: &str, content: &str) {
 
 /* ---------------- 阶段 116：测试钩子 ---------------- */
 
-/// 测试钩子：切到「文件」页（**真的切** ＋ 列目录）。
+/// 测试钩子：打开「文件」窗（**真的开** ＋ 列目录）。
+///
+/// ⚠️ **阶段 165**：文件是独立窗口（不再是页签）⇒ 这里开的是**那扇窗**。
 pub fn files_show_for_test(st: &Rc<PanelState>) {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return };
-    ui.stack.set_visible_child_name(PAGE_FILES);
     let name = ui.selected.borrow().clone();
     if name.is_empty() {
         return;
     }
-    files_ensure(st, ui, &name);
+    open_files_window(st, ui, &name);
 }
 
 /// 测试钩子：去**某个目录**（阶段 116；冒烟要传到容器的 /tmp 里）。

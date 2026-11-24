@@ -38,7 +38,7 @@
 | **回环目标的 spawn argv 多两条 `-o`**（`UserKnownHostsFile=/dev/null` + `GlobalKnownHostsFile=/dev/null`，**只在 host 是回环时加**） | 堡垒机在本地开**随机端口**、隧道**按访问轮换主机密钥** ⇒ OpenSSH 按 `[host]:port` 记的 known_hosts **必然对不上** ⇒ `REMOTE HOST IDENTIFICATION HAS CHANGED` + **硬失败（255）** ⇒ 用户报「在堡垒机上分屏失败」。⚠️ C 版（`sftp_backend.c`）与 Rust 的**进程内那条路**（`backend::conn::is_loopback`）**本来就跳过回环的主机密钥校验** ⇒ 只有 spawn 这条路漏了 ⇒ 现在三条路一致。**普通主机的 argv 一个字节都不变**（⇒ `compat_check.sh` 的对照用例要按 host 归一化这两条）。⚠️ `StrictHostKeyChecking=no` 不是解法（实测照样刷那句吓人的警告） |
 
 ## Rust-only 功能（Rust 版专属，不回移 C）
-| 远程容器面板（容器列表 / 详情 / 启停 / compose / 日志流 / 监控曲线 / 镜像·卷·网络 / **容器内文件浏览·上传·下载**） | C 版没有这个面板（C 版只有 SFTP 文件面板）⇒ 阶段 109 起的容器功能全是 Rust 版独有，不回移 C |
+| 远程容器面板（容器列表 / 详情 / 启停 / compose / 日志流 / 镜像·卷·网络 / **容器内文件浏览·上传·下载**；⚠ **阶段 165 把「监控曲线」页删了**——用户：「如果真需要监控，我肯定会搭建监控的基础设施，而不是从这里看」⇒ 表格里的**资源列**（CPU / 内存）还在，但**不再有**持续采样曲线页） | C 版没有这个面板（C 版只有 SFTP 文件面板）⇒ 阶段 109 起的容器功能全是 Rust 版独有，不回移 C |
 
 
 

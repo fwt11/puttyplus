@@ -101,21 +101,28 @@ pub fn tint_matrix(color: &gdk::RGBA) -> graphene::Matrix {
 ///   （实测截图：实心黑方块在一排细线图标里特别扎眼）。
 ///   ⇒ 自己画**描边**版本 ⇒ 一整排图标是**同一套语言**。
 ///
-/// ⚠️ **描边线宽**：1.6px（跟 Adwaita 符号图标的笔画粗细接近）。
+/// ⚠️ **描边线宽**：2.0px（跟 Adwaita 符号图标的笔画粗细接近）。
+///
+/// ⚠️ **阶段 164：只有「启动 / 停止」自绘**（用户 2026-11-24：「这几个图标
+///   实在不够精致」）——**自绘的是因为主题里那两个是实心的**（▶ / ■）⇒ 混在
+///   一排线性图标里特别扎眼（阶段 157 的老结论）；而「重启 / 重建」**用主题
+///   自己的**符号图标（`view-refresh-symbolic` / `edit-copy-symbolic`）⇒
+///   它们本来就是按 16px 设计的 ⇒ 比自己画的清楚（实测：自己画的圆弧箭头
+///   在 16px 下**看不出箭头**，自己画的叠方框**糊成一团**）。
 fn custom_node(name: &str, color: &gdk::RGBA) -> Option<gtk::gsk::RenderNode> {
     let s = ICON_SIZE as f32;
     let mut pb = gtk::gsk::PathBuilder::new();
     match name {
         // ▶ 播放 / 启动：等腰三角形（描边）
         "pp-play" => {
-            pb.move_to(s * 0.26, s * 0.16);
+            pb.move_to(s * 0.28, s * 0.17);
             pb.line_to(s * 0.80, s * 0.50);
-            pb.line_to(s * 0.26, s * 0.84);
+            pb.line_to(s * 0.28, s * 0.83);
             pb.close();
         }
         // ■ 停止：方框（描边）
         "pp-stop" => {
-            let m = s * 0.20;
+            let m = s * 0.22;
             pb.move_to(m, m);
             pb.line_to(s - m, m);
             pb.line_to(s - m, s - m);
@@ -135,18 +142,21 @@ fn custom_node(name: &str, color: &gdk::RGBA) -> Option<gtk::gsk::RenderNode> {
     snap.to_node()
 }
 
-/// **图标组在格子里的左边缘**（右对齐 ⇒ 贴着格子的右边）。
+/// **图标组在格子里的左边缘**（**左对齐** ⇒ 紧跟在上一列后面）。
 ///
-/// ⚠️ **为什么右对齐**（阶段 158）：表格宽的时候，**富余宽度全在最后一列**
-///   ⇒ 图标组贴着右边 ⇒ 一排操作按钮落在窗口右缘（跟 Docker Desktop /
-///   Portainer 一个样子）⇒ 中间的列之间**不会隔出一大片空白**
-///   （用户 2026-11-24：「各列之间要有合理的比例」）。
-///
-/// ⚠️ **命中判定必须跟绘制用同一个算术** ⇒ 画和判都调这个函数
+/// ⚠️ **阶段 158：曾经是右对齐**（贴着格子的右边）——那是因为「操作」列
+///   **吸收了表格的富余宽度**（一个 480px 宽的列里只有 4 颗 16px 的图标
+///   贴在最右边 ⇒ 中间一大片空白 ⇒ 用户 2026-11-24：「操作列太宽了，按钮们
+///   太靠右了，没有一点留白」）。
+/// ⚠️ **阶段 164 改成左对齐**：
+/// - 「操作」列**不再吸收富余**（固定窄宽）⇒ 按钮跟着列走，**离窗口右缘
+///   有一截留白**（列宽里图标右边那一截就是留白）；
+/// - 列头也跟着左对齐 ⇒ **「操作」两个字正好压在第一颗图标上面**
+///   （右对齐的话标题会跑到图标右边，对不上）。
+/// - ⚠️ **命中判定必须跟绘制用同一个算术** ⇒ 画和判都调这个函数
 ///   （以前一个在渲染器里、一个在 `dockerui` 里各写一份 ⇒ 迟早漂移）。
-pub fn group_offset(cell_w: i32, n: usize) -> i32 {
-    let group_w = (n as i32 * SLOT_W - ICON_GAP).max(ICON_SIZE);
-    (cell_w - group_w).max(0)
+pub fn group_offset(_cell_w: i32, _n: usize) -> i32 {
+    0
 }
 
 /// **格内坐标 ⇒ 命中第几颗图标**（**纯函数** ⇒ 画与判共用一份算术）。
@@ -154,7 +164,7 @@ pub fn group_offset(cell_w: i32, n: usize) -> i32 {
 /// ⚠️ **`n` 必须是「这一行」有几颗** ⇒ 不能用渲染器里存着的那个
 ///   （渲染器里存的是**最后绘制的那一行**的图标 ⇒ 拿它算会错位）。
 ///
-/// ⚠️ 图标组**右对齐**（阶段 158）⇒ 先减去组在格内的左边缘。
+/// ⚠️ 图标组**左对齐**（阶段 164）⇒ 先减去组在格内的左边缘。
 pub fn hit_index_at(cell_x: i32, cell_w: i32, n: usize) -> Option<usize> {
     if n == 0 || cell_x < 0 {
         return None;
@@ -291,7 +301,7 @@ mod imp {
             //   不会拖一条空荡荡的灰条。
             let hovered = flags.contains(gtk::CellRendererState::PRELIT);
             let group_w = (icons.len() as i32 * SLOT_W - ICON_GAP).max(ICON_SIZE);
-            // ⚠️ **右对齐**（阶段 158）⇒ 图标组贴着格子的右边。
+            // ⚠️ **左对齐**（阶段 164）⇒ 图标组贴着格子的左边。
             let x0 = cell_area.x() as f32 + group_offset(cell_area.width(), icons.len()) as f32;
             let y0 = cell_area.y() as f32 + (cell_area.height() as f32 - ICON_SIZE as f32) / 2.0;
             {
@@ -356,7 +366,7 @@ impl ActionCellRenderer {
     ///
     /// ⚠ 坐标是**格内**的（`TreeView::path_at_pos` 给的 `cell_x`）
     ///    ⇒ 不用管列在窗口里的位置。
-    /// ⚠ **图标组是右对齐的**（阶段 158）⇒ 得先减去它在格内的左边缘
+    /// ⚠ **图标组是左对齐的**（阶段 164）⇒ 得先减去它在格内的左边缘
     ///    （`group_offset`）⇒ 跟绘制用的是同一套算术。
     /// ⚠ 超出这一行的图标数 ⇒ None（点到空白处 ⇒ 不当作点了哪颗）。
     pub fn hit_index(&self, cell_x: i32, cell_w: i32) -> Option<usize> {
@@ -383,20 +393,38 @@ mod tests {
         assert_eq!((-1i32).div_euclid(SLOT_W), -1);
     }
 
-    /// **阶段 158：图标组右对齐** ⇒ 左边缘 = 格子宽 − 组宽。
+    /// **阶段 164：图标组左对齐** ⇒ 左边缘恒为 0（紧跟上一列）。
+    ///
+    /// ⚠️ **阶段 158 曾经是右对齐**（贴着格子右边）⇒ 那是「操作」列吸收了
+    ///   表格富余宽度造成的 ⇒ 用户 2026-11-24 报「操作列太宽、按钮太靠右」。
+    ///   ⇒ 现在「操作」列固定窄宽 ＋ 图标左对齐 ⇒ 窗口右缘留出一截空白。
     #[test]
-    fn 图标组右对齐() {
-        // 5 颗图标 ⇒ 组宽 = 5×24 − 8 = 112。
+    fn 图标组左对齐() {
+        // 5 颗图标 ⇒ 组宽 = 5×24 − 8 = 112（宽度还是那个宽度）。
         let group_w = 5 * SLOT_W - ICON_GAP;
         assert_eq!(group_w, 112);
-        // 格子 200 宽 ⇒ 图标组从 88 开始（右边留 112 给图标）。
-        assert_eq!(group_offset(200, 5), 88);
-        // 格子正好等于组宽 ⇒ 从 0 开始（不越界）。
+        // ⚠️ **左边缘恒为 0**（不管格子多宽、几颗图标）。
+        assert_eq!(group_offset(200, 5), 0);
         assert_eq!(group_offset(group_w, 5), 0);
-        // 格子比组宽还窄 ⇒ 夹到 0（不能是负数）。
         assert_eq!(group_offset(10, 5), 0);
-        // 0 颗图标 ⇒ 组宽按最小值算 ⇒ 不会算出负偏移。
-        assert_eq!(group_offset(200, 0), 200 - ICON_SIZE);
+        // 0 颗图标 ⇒ 也不能算出负偏移。
+        assert_eq!(group_offset(200, 0), 0);
+    }
+
+    /// **阶段 164：命中判定跟绘制用同一套算术** ⇒ 左对齐后格内坐标直接
+    /// 除以槽宽就是第几颗。
+    #[test]
+    fn 命中判定按左对齐算() {
+        // 4 颗图标 ⇒ 第 0/1/2/3 颗分别在各自槽位里。
+        assert_eq!(hit_index_at(0, 120, 4), Some(0));
+        assert_eq!(hit_index_at(SLOT_W - 1, 120, 4), Some(0));
+        assert_eq!(hit_index_at(SLOT_W, 120, 4), Some(1));
+        assert_eq!(hit_index_at(3 * SLOT_W, 120, 4), Some(3));
+        // 超出最后一颗 ⇒ 空白处 ⇒ 不算命中。
+        assert_eq!(hit_index_at(4 * SLOT_W, 120, 4), None);
+        // 负坐标 / 0 颗图标 ⇒ 不命中。
+        assert_eq!(hit_index_at(-1, 120, 4), None);
+        assert_eq!(hit_index_at(0, 120, 0), None);
     }
 
     #[test]

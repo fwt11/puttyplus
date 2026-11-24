@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2151] = [
+pub static EN: [(&str, &str); 2158] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -39,6 +39,7 @@ pub static EN: [(&str, &str); 2151] = [
     ("<b>连接</b>", "<b>Connect</b>"),
     ("<b>通知中心</b>", "<b>Notification Center</b>"),
     ("Argon2 参数无效: {e}", "Invalid Argon2 parameters: {e}"),
+    ("CPU {c} · 内存 {m}", "CPU {c} · memory {m}"),
     ("CPU 使用率", "CPU usage"),
     ("CSV / 文本文件", "CSV / text file"),
     ("CSV 引号没有闭合（最后一行少一个 `\"`）", "Unterminated CSV quote (the last line is missing a `\")"),
@@ -772,6 +773,8 @@ pub static EN: [(&str, &str); 2151] = [
     ("容器列表只支持 SSH 会话：当前协议没有可复用的 SSH 连接。", "The container list only supports SSH sessions: the current protocol has no reusable SSH connection."),
     ("容器名不合法", "The container name is not valid"),
     ("容器和网络会被删除，这个项目也会从列表里消失", "The containers and network will be deleted, and this project will disappear from the list"),
+    ("容器文件", "Container files"),
+    ("容器日志", "Container logs"),
     ("容器正在运行，不用再启动（先「停止」才能启动）", "The container is already running, no need to start it (stop it first)"),
     ("容器没有在运行，不用停（先「启动」才能停）", "The container is not running, no need to stop it (start it first)"),
     ("容器终端已经开着（在另一个窗口里）", "The container terminal is already open (in another window)"),
@@ -1436,6 +1439,7 @@ pub static EN: [(&str, &str); 2151] = [
     ("正在执行定义（{total} 条语句）…", "Executing the definition ({total} statements)…"),
     ("正在扫描本地与远程目录…", "Scanning the local and remote directories…"),
     ("正在接收日志…", "Receiving logs…"),
+    ("正在接收日志…（暂时还没有输出；这个容器可能根本不写日志）", "Receiving logs… (nothing yet — this container may simply not write any logs)"),
     ("正在推送镜像「{img}」…", "Pushing image \"{img}\"…"),
     ("正在搜索「{kw}」…", "Searching for \"{kw}\"…"),
     ("正在改表结构…", "Changing the table structure…"),
@@ -1869,6 +1873,7 @@ pub static EN: [(&str, &str); 2151] = [
     ("读表结构失败：{e}", "Reading the table structure failed: {e}"),
     ("读表结构返回的格式不对", "Reading the table structure returned an unexpected format"),
     ("调整伪终端大小失败", "Failed to resize the pseudoterminal"),
+    ("资源（CPU / 内存）", "Resources (CPU / memory)"),
     ("超紧凑", "Extra Compact"),
     ("超过 {v0} 层未处理", "More than {v0} levels were not processed"),
     ("跑在应用自己那条 SSH 连接上（不新建 SSH 连接、终端标签页关了也照样在）。\n堡垒机场景用它把内网服务映射到本机。格式与上面相同，行首 ! 同样是停用。", "It runs on the application's own SSH connection (no new SSH connection, and it keeps running after the terminal tab is closed).\nIn bastion setups it maps an intranet service to this machine. The format is the same as above, a leading ! disables the rule as well."),
@@ -1943,6 +1948,8 @@ pub static EN: [(&str, &str); 2151] = [
     ("这个会话下还没有数据库连接", "There is no database connection under this session yet"),
     ("这个凭据库没有主密码（不加密模式）。\n设一个主密码就会把它变成加密库——库里的连接密码原样保留。", "This credential vault has no master password (unencrypted mode).\nSetting one turns it into an encrypted vault — the connection passwords in it are kept as they are."),
     ("这个容器没有在运行（先启动它才能进终端）", "This container is not running (start it before opening a terminal)"),
+    ("这个容器没有日志输出（docker logs 是空的）", "This container has no log output (docker logs is empty)"),
+    ("这个容器没有日志输出（退出码 {c}）", "This container has no log output (exit code {c})"),
     ("这个容器里没有 ls 命令 ⇒ 列不了目录。换个带 ls 的镜像（常见的都有），或者用「终端」页进容器自己看。", "This container has no ls command, so its directory cannot be listed. Use an image that ships ls (most do), or open the \"Terminal\" page and look inside the container yourself."),
     ("这个容器里没有 {sh}（可以换一个：{list}）", "This container has no {sh} (you can pick another one: {list})"),
     ("这个容器里没有可用的 shell（试过 {list}）", "This container has no usable shell (tried {list})"),

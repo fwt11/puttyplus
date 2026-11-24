@@ -232,8 +232,14 @@ fn collect_text(w: &gtk::Widget, out: &mut String) {
 ///
 /// ⚠️ `pgrep -af '[d]ocker logs'` 里的 `[d]` 是老技巧：命令自己不会匹配自己
 ///    （不然 pgrep 那行命令自己也算一个 ⇒ 永远非空）。
+///
+/// ⚠️ **阶段 165：还要锚住「命令行的开头」**（实测踩到）：`[d]ocker logs`
+///    只躲开 pgrep 自己 ⇒ **别的进程**只要命令行里**含有**「docker logs」
+///    就会被算进来（实测：跑冒烟的那条 bash 命令里正好有这几个字 ⇒ 误报
+///    「远端还挂着 docker logs」）⇒ 加 `(^|/)` ⇒ 只认**真正在跑的那个
+///    docker 客户端**（`docker logs` 或 `/usr/bin/docker logs`）。
 fn remote_procs(opts: &ConnOptions, what: &str) -> String {
-    let pat = format!("[{}]{}", &what[..1], &what[1..]);
+    let pat = format!("(^|/){}", what[..1].to_string() + &what[1..]);
     let keyfile = opts.keyfile.clone().unwrap_or_default();
     let user = opts.user.clone();
     let host = opts.host.clone();
@@ -1092,7 +1098,7 @@ fn main() {
                         && names.contains(&"pp-play")
                         && names.contains(&"pp-stop")
                         && names.contains(&"view-refresh-symbolic")
-                        && names.contains(&"go-up-symbolic")
+                        && names.contains(&"edit-copy-symbolic")
                         && !names.contains(&"go-down-symbolic"),
                     format!("项目行的图标是：{names:?}")
                 );
@@ -1324,12 +1330,13 @@ fn main() {
         //    （消息循环、拆行、过滤、暂停……全是真的）。
         dockerui::log_watch_for_test(&panel.st, "web");
         pump(100);
-        dockerui::log_show_page_for_test(&panel.st);
+        // ⚠️ **只开窗、不起流**（这一组是**纯界面行为** ⇒ 不能真连服务器）。
+        dockerui::log_window_show_only_for_test(&panel.st);
         pump(200);
         check!(
-            "⑭ 能切到日志页",
+            "⑭ 能打开日志窗",
             dockerui::log_page_visible_for_test(&panel.st),
-            "切不过去"
+            "开不出来"
         );
         check!(
             "⑭ 日志正文是等宽的",
@@ -1553,6 +1560,44 @@ fn main() {
                 pump(300);
                 shot(&format!("{base}-log.png"));
             }
+            // ---- ⑰ 之二：**没有日志的容器** ⇒ 状态行要说清楚（阶段 165）----
+            //
+            // ⚠️ **用户 2026-11-24**：「这个日志窗口我从来没看到日志」。
+            //   ⇒ 根因：那个容器**本来就没有日志**（`docker logs` 是空的）
+            //   ⇒ 以前界面只写「日志流已结束」⇒ 用户以为是功能坏了。
+            //   ⇒ 现在要明说「这个容器没有日志输出」。
+            {
+                let cs = dockerui::containers_for_test(&panel2.st);
+                // 找一个**没有日志**的容器（已停止的多半没有）。
+                let silent = cs.iter().find(|c| c.state != "running").map(|c| c.name.clone());
+                if let Some(sname) = silent {
+                    dockerui::dispatch_action_for_test(
+                        &panel2.st,
+                        &sname,
+                        "container",
+                        "logs",
+                    );
+                    pump(300);
+                    // 等流结束（已停止的容器 ⇒ `docker logs -f` 立刻退出）。
+                    let mut w = 0;
+                    while w < 30 && dockerui::log_running_for_test(&panel2.st) {
+                        pump(200);
+                        w += 1;
+                    }
+                    let status = dockerui::log_status_for_test(&panel2.st);
+                    println!("[信息] 空日志容器的状态行：{status:?}");
+                    check!(
+                        "⑰ 之二 没有日志的容器 ⇒ 状态行说清楚「没有日志输出」",
+                        status.contains("没有日志输出"),
+                        format!("状态行是：{status:?}")
+                    );
+                    // 关掉日志窗（别留着挡屏幕）。
+                    dockerui::log_show_overview_for_test(&panel2.st);
+                    pump(200);
+                } else {
+                    println!("[信息] 没有已停止的容器（跳过空日志检查）");
+                }
+            }
             // 切回概览 ⇒ 流停 ⇒ **远端不许留进程**（看门狗）。
             dockerui::log_show_overview_for_test(&panel2.st);
             pump(300);
@@ -1689,6 +1734,56 @@ fn main() {
                 }
                 dockerui::close_row_menu_for_test(&panel2.st);
                 pump(200);
+            }
+
+            // ================= ⑰ 组：阶段 165 —— 概览 / 日志 / 文件 各一扇窗 =================
+            //
+            // ⚠️ **用户 2026-11-24**：「其他这几个 tab 都单独出来吧，每次点鼠标
+            //   右键就只出来一个窗口就行了」⇒ 三块内容**各一扇窗**，同一时刻
+            //   **只显示一扇**。
+            {
+                // ---- 点「日志」⇒ 日志窗开、别的窗关 ----
+                dockerui::dispatch_action_for_test(&panel2.st, &name, "container", "logs");
+                pump(400);
+                check!(
+                    "⑰ 点「日志」弹出的是日志窗",
+                    dockerui::logs_window_open_for_test(&panel2.st),
+                    "日志窗没开"
+                );
+                check!(
+                    "⑰ 同一时刻只出来一个窗口（概览窗关着）",
+                    !dockerui::overview_window_open_for_test(&panel2.st),
+                    "概览窗还开着"
+                );
+                // ---- 点「属性」⇒ 概览窗开、日志窗关 ----
+                dockerui::dispatch_action_for_test(&panel2.st, &name, "container", "detail");
+                pump(400);
+                check!(
+                    "⑰ 点「属性」弹出的是概览窗",
+                    dockerui::overview_window_open_for_test(&panel2.st),
+                    "概览窗没开"
+                );
+                check!(
+                    "⑰ 概览窗开了 ⇒ 日志窗自动关掉（一次只出来一个窗口）",
+                    !dockerui::logs_window_open_for_test(&panel2.st),
+                    "日志窗还开着"
+                );
+                // ---- 点「文件」⇒ 文件窗开、概览窗关 ----
+                dockerui::dispatch_action_for_test(&panel2.st, &name, "container", "files");
+                pump(400);
+                check!(
+                    "⑰ 点「文件」弹出的是文件窗",
+                    dockerui::files_window_open_for_test(&panel2.st),
+                    "文件窗没开"
+                );
+                check!(
+                    "⑰ 文件窗开了 ⇒ 概览窗自动关掉",
+                    !dockerui::overview_window_open_for_test(&panel2.st),
+                    "概览窗还开着"
+                );
+                if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                    shot(&format!("{base}-files.png"));
+                }
             }
 
             // ---- ⑯ 之二：**compose 项目行**的右键菜单 ⇒ 截图看看（阶段 163）----
@@ -1975,128 +2070,6 @@ fn main() {
         win3.close();
     }
 
-    // ================= K 组：阶段 114 —— 监控曲线（真连真容器） =================
-    //
-    // ⚠️ 复用 **F / G 组那个面板**（panel2）：它已经真连上了、也已经选中了
-    //   一个运行中的容器 ⇒ 这里直接切到「监控」页就能起流。
-    {
-        let cs = dockerui::containers_for_test(&panel2.st);
-        let c0 = cs
-            .iter()
-            .find(|c| c.state == "running")
-            .or_else(|| cs.first())
-            .cloned();
-        if let Some(c0) = c0 {
-            let name = c0.name.clone();
-            println!("[信息] 监控页看的是容器：{name}");
-            // ---- 切到监控页 ⇒ 起流 ----
-            dockerui::monitor_show_page_for_test(&panel2.st);
-            let mut waited = 0;
-            while waited < 40 && !dockerui::stat_running_for_test(&panel2.st) {
-                pump(200);
-                waited += 1;
-            }
-            check!(
-                "⑲ 监控流起来了",
-                dockerui::stat_running_for_test(&panel2.st),
-                format!("等了 {waited} 次还没起来")
-            );
-            // ---- 等点（**2 秒一个点** ⇒ 至少等 4~5 秒）----
-            let mut waited2 = 0;
-            while waited2 < 40 && dockerui::stat_points_for_test(&panel2.st).0 == 0 {
-                pump(200);
-                waited2 += 1;
-            }
-            let (cpu_n, net_n) = dockerui::stat_points_for_test(&panel2.st);
-            check!(
-                "⑲ 曲线上真的有点了",
-                cpu_n > 0 && net_n > 0,
-                format!("CPU {cpu_n} 点 / 网络 {net_n} 点（等了 {waited2} 次）")
-            );
-            // ---- 再等几个点 ⇒ **曲线真的画出来了**（一个点画不出线）----
-            //
-            // ⚠️ **为什么多等**：折线要 ≥2 个点才画得出线 ⇒ 等 3 个点，
-            //   截图里才看得见「曲线」而不是四个空框。
-            let mut waited_pts = 0;
-            while waited_pts < 30 && dockerui::stat_points_for_test(&panel2.st).0 < 3 {
-                pump(300);
-                waited_pts += 1;
-            }
-            let (cpu_n3, _) = dockerui::stat_points_for_test(&panel2.st);
-            check!(
-                "⑲ 曲线攒够了点（能画出线）",
-                cpu_n3 >= 3,
-                format!("CPU 只有 {cpu_n3} 点（等了 {waited_pts} 次）")
-            );
-            // ---- 指标卡有当前值 ----
-            let (cpu, mem, net, blk) = dockerui::stat_values_for_test(&panel2.st);
-            println!("[信息] 指标卡：CPU {cpu}｜内存 {mem}｜网络 {net}｜磁盘 {blk}");
-            check!(
-                "⑲ 指标卡有当前值",
-                cpu.contains('%') && net.contains("B/s"),
-                format!("CPU={cpu} 网络={net}")
-            );
-            // ---- 剥 ANSI 后解析出来的值要跟**原始行**对得上 ----
-            //
-            // ⚠️ **为什么必须跟原始行对照**：`docker stats` 的持续模式
-            //   带 ANSI（`\x1b[H`…）⇒ 忘了剥 ⇒ 解析出来的 CPU **全是 0**
-            //   ⇒ 光看「指标卡有当前值」**抓不住**（0.00% 也是"有值"）
-            //   ⇒ 得拿**原始行**做对照才抓得住。
-            let raw = dockerui::stat_last_raw_for_test(&panel2.st).unwrap_or_default();
-            check!(
-                "⑲ 拿到了原始采样行",
-                !raw.is_empty(),
-                "没拿到原始行（钩子空）"
-            );
-            check!(
-                "⑲ 原始行确实带 ANSI（所以必须剥）",
-                raw.contains('\u{1b}'),
-                format!("原始行：{raw:?}")
-            );
-            // 独立地从原始行里取 CPU 数字（**不复用程序里的解析**）
-            // ⇒ 免得「程序和程序自己比」变成同义反复。
-            let cpu_field = raw.split('|').next().unwrap_or("");
-            let digits: String = cpu_field
-                .trim_end_matches('%')
-                .trim()
-                .chars()
-                .rev()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            let expect = digits
-                .parse::<f64>()
-                .ok()
-                .map(|v| format!("{v:.2}%"))
-                .unwrap_or_default();
-            check!(
-                "⑲ 指标卡 CPU 与原始行一致（说明 ANSI 剥对了）",
-                !expect.is_empty() && cpu == expect,
-                format!("卡片={cpu} 原始行推出来的={expect}（原始={raw:?}）")
-            );
-            // 截一张（曲线真的画出来了才好看）。
-            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
-                shot(&format!("{base}-monitor.png"));
-            }
-            // ---- 切走 ⇒ 远端不许留孤儿 `docker stats` ----
-            dockerui::monitor_show_overview_for_test(&panel2.st);
-            let mut waited3 = 0;
-            let mut leftover = String::new();
-            while waited3 < 20 {
-                leftover = remote_procs(&opts_f, "docker stats");
-                if leftover.is_empty() {
-                    break;
-                }
-                pump(300);
-                waited3 += 1;
-            }
-            check!(
-                "⑲ 切走后远端没有残留的 docker stats 进程",
-                leftover.is_empty(),
-                format!("远端还挂着：{leftover}")
-            );
     // ================= L 组：阶段 115 —— 镜像 / 卷 / 网络 =================
     //
     // ⚠️ 复用 **F / G / K 组那个面板**（panel2）：它已经真连上了 ⇒ 这里
@@ -3140,9 +3113,6 @@ fn main() {
             msg.contains("推送") && msg.contains("失败") && msg.len() > 8,
             format!("状态行={msg:?}")
         );
-    }
-
-        }
     }
     }
 
