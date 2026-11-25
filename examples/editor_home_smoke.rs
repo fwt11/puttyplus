@@ -147,22 +147,19 @@ fn check(app: &gtk::Application) {
     );
     println!("[2] 关掉终端 ⇒ 那一格收拢 ✔");
 
-    // ---- 3. 新建终端（落在还活着的那一格）----
+    // ---- 3. 新建终端（**走生产路径**：`Tabs::new_term_page_cwd`）----
+    //
+    // ⚠️ **必须走生产函数**（不是自己造页签）⇒ 才能覆盖用户那条路
+    //   （顶部「+」菜单 → 「新建终端」）：它内部取的是 `panel_st.sub_tabs()`
+    //   —— **动态解析** ⇒ 拿到的必须是**活的**容器（还在树上、看得见的）。
+    tabs.new_term_page_cwd(&page, None);
+    pump(800);
     let alive = tree
         .ids()
         .into_iter()
         .find(|id| is_live(&tree, *id))
         .expect("应当还剩一格");
     let alive_sub = tree.cell(alive).expect("还活着的那格").tabs.clone();
-    let new_term = alive_sub.add_page_icon_kind(
-        Some("utilities-terminal-symbolic"),
-        "终端",
-        PageKind::Terminal,
-        gtk::Label::new(Some("新终端")).upcast(),
-        None,
-    );
-    alive_sub.switch_to(new_term);
-    pump(200);
     assert!(
         has_terminal(&alive_sub),
         "新终端应当落在还活着的那一格"

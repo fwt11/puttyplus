@@ -304,15 +304,40 @@ jobs:
                      localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke \
                      editor_home_smoke; do
             echo "::group::$ex"
-            if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
+            # ⚠️⚠️ **先编，再直接跑二进制**（别用 `cargo run`）：2026-11-26 实测
+            #    `cargo run` 会把**几百行编译警告**也混进同一个日志 ⇒ 失败时
+            #    日志前面全是警告 ⇒ 真正有用的报错（panic 消息）在**最后** ⇒
+            #    又被「GitHub 每个 step 只保留**前 10 条**注解」截掉 ⇒
+            #    **失败原因根本看不到**（这次查 `ssh_fail_hint_smoke` 就是这么
+            #    折腾了半天的）。⇒ 编译输出丢掉，只把**运行输出**留在日志里。
+            if ! cargo build --release --locked --example "$ex" >/dev/null 2>&1; then
+              echo "$ex: 编译失败"
+              echo "::error::$ex 编译失败（cargo build --release --example $ex）"
+              rc=1
+              echo "::endgroup::"
+              continue
+            fi
+            if timeout 180 xvfb-run -a "./target/release/examples/$ex" \
                  > "/tmp/$ex.log" 2>&1; then
               echo "$ex: OK"
             else
               code=$?
               echo "$ex: 失败（退出码 $code）"
+              # ⚠️ **先发一条人眼能直接读的**（gz 分片要自己解压才看得到）：
+              #    ⚠️ 注解是**单行**文本 ⇒ 换行/控制字符会把整条注解吃掉 ⇒
+              #    ⚠️ `%` 要转成 `%25`、`::` 要转成 `%3A%3A`（否则被当命令）。
+              #    ⚠️ **必须先发这条**：GitHub 每个 step 只保留**前 10 条**注解 ⇒
+              #    后面 gz 分片可能被截掉 ⇒ 这条要占住前 10 条里的第 1 条。
+              tail -40 "/tmp/$ex.log" 2>/dev/null \
+                | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\r//g' \
+                | tr '\n' ' ' | cut -c1-1200 \
+                | sed -e 's/%/%25/g' -e 's/::/%3A%3A/g' \
+                | sed "s|^|::error::$ex 日志尾部: |"
               # ⚠️ 注解是单行文本：日志里有 ANSI/控制字符会**把整条注解吃掉**，
               #    整条太长也会被丢弃 ⇒ 先 gzip 再 base64，并**分段**发。
-              gzip -c "/tmp/$ex.log" > "/tmp/$ex.gz" 2>/dev/null || true
+              #    ⚠️ **只包尾部**（前面多半是 GTK 的噪音警告）⇒ 分片更少、
+              #    不会被 10 条上限截掉。
+              tail -c 40000 "/tmp/$ex.log" 2>/dev/null | gzip -c > "/tmp/$ex.gz" 2>/dev/null || true
               rm -f "/tmp/$ex.part."*
               split -b 800 -d "/tmp/$ex.gz" "/tmp/$ex.part." 2>/dev/null || true
               for f in /tmp/$ex.part.*; do

@@ -134,18 +134,21 @@ fn check_path(mode: &str, expect_term_line: bool) {
     assert!(got, "[{mode}] 没等到失败提示框");
 
     let text = dialog_text(&dlg);
+    // ⚠️ **失败时把终端屏幕也打出来**：框里只有「退出码 255」时，
+    //    「屏幕上到底有没有 ssh 那行报错、它长什么样」是唯一的线索
+    //    （2026-11-26：CI 上就是这样查出来的）。
+    let screen = screen_text(&pane);
     assert!(
         text.contains("连不上服务器"),
-        "[{mode}] 框里没说明原因（要告诉用户是网络/端口的问题）\n框里文字：\n{text}"
+        "[{mode}] 框里没说明原因（要告诉用户是网络/端口的问题）\n框里文字：\n{text}\n终端屏幕：\n{screen}"
     );
     assert!(
         has_button(&dlg, "重试"),
-        "[{mode}] 框里没有「重试」按钮 ⇒ 用户只能干瞪眼\n框里文字：\n{text}"
+        "[{mode}] 框里没有「重试」按钮 ⇒ 用户只能干瞪眼\n框里文字：\n{text}\n终端屏幕：\n{screen}"
     );
     println!("[{mode}] 弹框说清楚了原因，也有「重试」 ✔");
 
     // 终端里也要看得见（进程内那条路终端本来一个字都没有）
-    let screen = screen_text(&pane);
     if expect_term_line {
         assert!(
             screen.contains("会话已结束"),

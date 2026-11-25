@@ -142,14 +142,13 @@ pub fn exit_code(raw: i32) -> i32 {
 /// ⚠ 屏幕上可能还有用户自己的输出 ⇒ 只取**尾部**几行（ssh 的报错总在最后）。
 /// 返回空串 = 屏幕上没看出 ssh 的报错。
 pub fn ssh_error_tail(screen: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = screen.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..]
-        .iter()
-        .map(|s| s.trim_end())
+    let lines: Vec<&str> = screen
+        .lines()
+        .map(str::trim_end)
         .filter(|s| !s.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }
 
 /// ssh/plink 自己会打的那些行（**行首特征**）。
@@ -191,8 +190,22 @@ pub fn is_ssh_error_line(line: &str) -> bool {
 ///    恰恰是退出码最靠不住的时候 ⇒ 只能看 **ssh 自己打的报错**。
 ///
 /// 返回 None = 屏幕上没看出 ssh 的报错（那是正常的会话结束，别乱弹框）。
+///
+/// ⚠️⚠️ **空行必须先滤掉**（2026-11-26 修的真 bug，**CI 上必红**）：
+///   终端屏幕**底部常有一堆空行**（VTE 可见区没内容就是空的）⇒ 若按
+///   「屏幕的最后 N 行」取 ⇒ 那 N 行**全是空行** ⇒ 真正那句
+///   `ssh: connect to host …`（它在屏幕**上面**）**被顶出去** ⇒
+///   认不出原因 ⇒ 用户只看到「ssh 客户端退出码 255」（**没有原因**）。
+///   ⇒ 实测：同一段内容，**屏幕底部有没有空行 ⇒ 结论完全相反**
+///   （本机普通 HOME 底部没空行 ⇒ 碰巧过；CI 的 HOME 底部有空行 ⇒ 红）。
+///   ⇒ ⇒ **先滤掉空行，再取尾部 N 行**（保住「只看尾部」的语义，
+///   又不被空行顶出去）。
 pub fn find_ssh_error_line(screen: &str, max_lines: usize) -> Option<(Kind, String)> {
-    let lines: Vec<&str> = screen.lines().collect();
+    let lines: Vec<&str> = screen
+        .lines()
+        .map(str::trim_end)
+        .filter(|s| !s.trim().is_empty())
+        .collect();
     let start = lines.len().saturating_sub(max_lines);
     for line in &lines[start..] {
         if is_ssh_error_line(line) {
@@ -313,5 +326,41 @@ mod tests {
 
         // 屏幕里没有 ssh 报错 ⇒ 不该有 ⇒ 免得误弹框
         assert!(find_ssh_error_line("user@host:~$ ls\nREADME\n", 6).is_none());
+    }
+
+    /// ⚠️ **屏幕底部有一堆空行** ⇒ 报错那句在屏幕**上面** ⇒
+    ///   **照样要认得出**（2026-11-26：CI 上就是栽在这里 ⇒ 必红）。
+    #[test]
+    fn 屏幕底部全是空行也认得出() {
+        let mut screen = String::from("ssh: connect to host 127.0.0.1 port 1: Connection refused\n");
+        screen.push('\n');
+        screen.push_str("== 会话已结束（退出码 255）。点上方「重新连接」可重建会话 ==\n");
+        // 屏幕底部还有 20 多行空行（VTE 可见区没内容就是空的）
+        for _ in 0..22 {
+            screen.push('\n');
+        }
+        let (kind, line) = find_ssh_error_line(&screen, 6).expect("底部全是空行也要认得出");
+        assert_eq!(kind, Kind::Network);
+        assert!(
+            line.contains("Connection refused"),
+            "认错了行：{line}"
+        );
+
+        // 尾部那几行也一样（空行不算内容）
+        let tail = ssh_error_tail(&screen, 1);
+        assert!(
+            tail.contains("会话已结束"),
+            "尾部要含最后那行内容：{tail}"
+        );
+        assert!(
+            !tail.contains("Connection refused"),
+            "只取一行就不该带上更上面的报错：{tail}"
+        );
+        // 取两行 ⇒ 两行都要（滤空行后，非空行本来就只有这两行）
+        let tail2 = ssh_error_tail(&screen, 2);
+        assert!(
+            tail2.contains("会话已结束") && tail2.contains("Connection refused"),
+            "取两行要把两行都带上：{tail2}"
+        );
     }
 }
