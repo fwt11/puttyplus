@@ -90,6 +90,22 @@ pub struct Tab {
     pub active: Rc<RefCell<Option<TermPane>>>,
 }
 
+impl Tab {
+    /// **这一页现在在哪个格子的容器里**（页签可以被拖到别的格子）。
+    ///
+    /// ⚠️ **为什么不能靠「面板记着的那一个」**（阶段 151）：
+    ///   面板只记了**建页时**的那一个容器 ⇒
+    ///   - 格子被关掉 ⇒ 它**已经不在树上**（挂上去 = 看不见）；
+    ///   - 页签被拖走 ⇒ 它**在别的格子里**（在旧容器里找 = 找不到）。
+    ///   ⇒ 一律**按页签 id 到树里问**。
+    pub fn sub_of_page(&self, page_id: u64) -> Option<Rc<panel::subtabs::SubTabs>> {
+        self.cell_tree
+            .cell_of_page(page_id)
+            .and_then(|id| self.cell_tree.cell(id))
+            .map(|c| c.tabs.clone())
+    }
+}
+
 /// 终端子页签的内容：一个 **Paned 容器**。
 ///
 /// **为什么要容器**（阶段 37）：分屏要把目标面板塞进一个新的 Paned，而
@@ -887,6 +903,12 @@ impl Tabs {
             //    配的）⇒ 宁可少一格，也别白屏。
             None => crate::layout::tree::CellTree::new(sub.clone()),
         };
+        // ⚠️ **把格子树交给面板**（阶段 151：面板要问「家是哪一格」）。
+        //
+        // ⚠️ **弱引用**（AGENTS.md 的引用环红线）：格子树 → 格子 → 容器 →
+        //   「+」菜单闭包 → `Rc<Tabs>` → 标签 → `Rc<PanelState>`
+        //   ⇒ 面板**强引用**树 = 环 ⇒ 面板永远释放不掉。
+        *sp.st.cell_tree.borrow_mut() = Some(Rc::downgrade(&cell_tree));
         // ⚠️ **阶段 145：新拆出来的格子也要能建终端** ⇒ 给它装同一套
         //    「+」菜单（建在**它自己**里面）。
         let page = cell_tree.root().clone();
@@ -1342,7 +1364,10 @@ impl Tabs {
             let Some(t) = tabs.iter().find(|t| t.page == *page) else {
                 return;
             };
-            let Some(sub) = t.panel_st.sub_tabs.borrow().clone() else {
+            // ⚠️ **要「活的」那个容器**（阶段 151）：直接读字段拿到的是
+            //   **建页时的快照** ⇒ 那一格收拢之后就挂到看不见的地方了
+            //   ⇒ 新终端**根本不出现**（跟编辑器是同一个毛病）。
+            let Some(sub) = t.panel_st.sub_tabs() else {
                 return;
             };
             sub
@@ -1617,9 +1642,13 @@ impl Tabs {
         let (sub, sub_id) = {
             let tabs = self.tabs.borrow();
             let Some(t) = tabs.get(i) else { return };
+            let sub_id = t.term_sub_id.get();
             (
-                t.panel_st.sub_tabs.borrow().clone(),
-                t.term_sub_id.get(),
+                // ⚠️ **找终端页现在待的那一格**（阶段 151）：它可能被拖到
+                //   别的格子，也可能在**已经收拢**的那一格（= 看不见）
+                //   ⇒ 一律按页签 id 到树里问。
+                t.sub_of_page(sub_id).or_else(|| t.panel_st.sub_tabs()),
+                sub_id,
             )
         };
         let Some(sub) = sub else { return };
@@ -1668,7 +1697,9 @@ impl Tabs {
         let (sub, st, opts, page, active) = {
             let tabs = self.tabs.borrow();
             let Some(t) = tabs.get(i) else { return };
-            let Some(sub) = t.panel_st.sub_tabs.borrow().clone() else {
+            // ⚠️ **要「活的」那个容器**（阶段 151）：重建出来的终端页必须
+            //   落在**看得见**的那一格 ⇒ 用「家」（装终端页的那一格）。
+            let Some(sub) = t.panel_st.sub_tabs() else {
                 return;
             };
             (
@@ -2006,7 +2037,9 @@ impl Tabs {
 
         // ② 只剩一块 / ③ 额外终端子页签 → **关掉那个终端子页签**
         if !(in_tree && t.leaves_of(sub_id).len() > 1) {
-            let sub = t.panel_st.sub_tabs.borrow().clone();
+            // ⚠️ **找那一页现在待的那一格**（阶段 151）：页签可以被拖到
+            //   别的格子 ⇒ 在旧容器里关 = **关不掉**（用户看着没反应）。
+            let sub = t.sub_of_page(sub_id).or_else(|| t.panel_st.sub_tabs());
             // ⚠️ 必须先放掉 tabs 的借用：`close_page` 会触发子页签的关闭钩子，
             // 钩子回头要 `self.tabs.borrow_mut()`——还持着就是双重借用 panic。
             drop(tabs);

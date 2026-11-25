@@ -294,10 +294,15 @@ jobs:
           #     ＋ 图标名在主题里真的存在 ＋ 按原始状态决定启停能不能点 ＋
           #     点「详情」开弹窗 ＋ 点「停止」有二次确认。⚠️ **不连远端**
           #     （只往模型里灌假容器）⇒ CI 上跑得动。
+          #   - `editor_home_smoke`：**关掉终端 ⇒ 新建终端 ⇒ 再打开文件编辑**
+          #     ⇒ 编辑器**必须出现**（用户 2026-11-25 报「编辑器不出现」）
+          #     ⇒ 根因是「家格子」指向了**已经收拢的那一格** ⇒ 页挂到了
+          #     看不见的地方。⚠️ **不连服务器** ⇒ CI 上跑得动。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
                      docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke \
-                     localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke; do
+                     localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke \
+                     editor_home_smoke; do
             echo "::group::$ex"
             if timeout 180 xvfb-run -a cargo run --release --example "$ex" --locked \
                  > "/tmp/$ex.log" 2>&1; then

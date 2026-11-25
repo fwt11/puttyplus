@@ -433,6 +433,21 @@ pub struct CellTree {
     /// ⚠️ **怎么定"当前"**：谁被点过 / 谁刚切过页签 ⇒ 两个信号
     ///    （`switch-page` ＋ 格子里的点击手势）⇒ 取最后动的那个。
     current: std::cell::Cell<CellId>,
+    /// **「家」格子**（新开的页——编辑器 / 数据库 / 容器——该挂到哪一格）。
+    ///
+    /// ⚠️ **为什么要有**（2026-11-25 修的真 bug）：
+    ///   格子会增删（**关掉某一格里的最后一个页签 ⇒ 那一格收拢**）⇒
+    ///   之前记着的那个容器**已经不在树上了** ⇒ 把页挂上去 = 挂在**看不见
+    ///   的地方** ⇒ 用户点「打开文件编辑」**毫无反应**（用户 2026-11-25 报的
+    ///   「关掉终端 ⇒ 新建终端 ⇒ 编辑器不出现」）。
+    ///
+    /// ⚠️ **判据**：那一格**装着终端页**（终端是主角 ⇒ 那一格最宽）⇒
+    ///   终端那一格收拢了 ⇒ 退到**当前格子**。
+    ///
+    /// ⚠️ **为什么记在树里而不是记在面板上**：面板只知道自己记着的那一个
+    ///   容器 ⇒ 收拢之后它就过期了 ⇒ 得由**知道所有格子**的那一方来回答
+    ///   「现在该挂哪一格」。
+    home: RefCell<Option<CellId>>,
     /// **新建格子时的回调**（阶段 145）。
     ///
     /// `(新格子编号, 新格子的容器)` ⇒ 上层给新格子装「+」菜单
@@ -470,6 +485,7 @@ impl CellTree {
             host: gtk::Box::new(gtk::Orientation::Vertical, 0),
             next_id: std::cell::Cell::new(2),
             current: std::cell::Cell::new(id),
+            home: RefCell::new(None),
             new_cell_hook: RefCell::new(None),
             root_pos_hook: RefCell::new(None),
             rebuilt_hook: RefCell::new(None),
@@ -746,6 +762,7 @@ impl CellTree {
             host: gtk::Box::new(gtk::Orientation::Vertical, 0),
             next_id: std::cell::Cell::new(next_id),
             current: std::cell::Cell::new(CellId(1)),
+            home: RefCell::new(None),
             new_cell_hook: RefCell::new(None),
             root_pos_hook: RefCell::new(None),
             rebuilt_hook: RefCell::new(None),
@@ -779,6 +796,58 @@ impl CellTree {
         self.current.set(id);
     }
 
+    /// **「家」格子**：新开的页（编辑器 / 数据库 / 容器）该挂到哪一格。
+    ///
+    /// ⚠️ **判据**：**装着终端页的那一格**（终端是主角 ⇒ 那一格最宽 ⇒
+    ///   编辑器放那儿才看得清）。
+    ///
+    /// ⚠️ **粘性**：记下的那一格**还活着**就继续用它 ⇒ 这样「开着的编辑器
+    ///   那一格」不会因为别的格子变化而换人 ⇒ 关它 / 切它还找得到。
+    ///
+    /// ⚠️ **那一格没了**（收拢了）⇒ 重新找：先找**当前格子**（用户刚动过
+    ///   的那一格），再退到**第一个格子** ⇒ 绝不返回「不在树上」的容器。
+    pub fn home_cell(&self) -> CellId {
+        // ① 记下的那一格还活着 ⇒ 就用它。
+        if let Some(id) = *self.home.borrow() {
+            if self.cell(id).is_some() {
+                return id;
+            }
+        }
+        // ② 重新找：**当前格子**优先（用户刚动过的那一格）。
+        let cur = self.current_cell();
+        // ⚠️ **先看当前格子自己有没有终端页**（有就用它 ⇒ 别被别的格子的
+        //   终端页抢走 ⇒ 用户在哪个格子工作，编辑器就跟在那个格子后面）。
+        let cur_has_term = self
+            .cell(cur)
+            .map(|c| {
+                !c.tabs
+                    .page_ids_of_kind(crate::panel::subtabs::PageKind::Terminal)
+                    .is_empty()
+            })
+            .unwrap_or(false);
+        // ③ 哪些格子装着终端页（按树里的顺序）。
+        let term_cells: Vec<CellId> = self
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                self.cell(*id)
+                    .map(|c| {
+                        !c.tabs
+                            .page_ids_of_kind(crate::panel::subtabs::PageKind::Terminal)
+                            .is_empty()
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        let pick = pick_home_cell(cur, cur_has_term, &term_cells);
+        *self.home.borrow_mut() = Some(pick);
+        pick
+    }
+
+    /// **「家」格子的容器**（`None` = 一个格子都没有 ⇒ 树刚拆完）。
+    pub fn home_tabs(&self) -> Option<Rc<crate::panel::subtabs::SubTabs>> {
+        self.cell(self.home_cell()).map(|c| c.tabs.clone())
+    }
     /// **拆一个格子** ⇒ 返回新格子的编号。
     ///
     /// `zone` 决定新格子在**哪一边**（左 / 右 / 上 / 下）。
@@ -944,6 +1013,25 @@ impl CellTree {
     }
 }
 
+/// **纯函数**：在「当前格子」与「装着终端页的格子」之间挑「家」。
+///
+/// ⚠️ **为什么抽成纯函数**：这一段是**决策**（不碰 GTK）⇒ 能单测 ⇒
+///   「终端那一格没了会退到哪儿」这条规则钉得住（阶段 151）。
+///
+/// - `current` = 当前格子（用户刚动过的那一格）；
+/// - `current_has_term` = 当前格子**自己**有没有终端页；
+/// - `term_cells` = 所有**装着终端页**的格子（按树里的顺序）。
+///
+/// ⇒ **当前格子有终端页 ⇒ 就用它**（用户在哪个格子工作，编辑器就跟在
+///   那个格子后面）；**没有** ⇒ 退到**第一个装着终端页的格子**；
+///   **一个都没有**（终端全关了）⇒ 留在当前格子。
+pub fn pick_home_cell(current: CellId, current_has_term: bool, term_cells: &[CellId]) -> CellId {
+    if current_has_term {
+        return current;
+    }
+    term_cells.first().copied().unwrap_or(current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,6 +1110,33 @@ mod tests {
     fn 关掉叶子后少一个() {
         let t = close(&grid2x2(), CellId(1)).unwrap();
         assert_eq!(flatten(&t), vec![CellId(2), CellId(3), CellId(4)]);
+    }
+
+    /// ⚠️ **「家格子」的决策规则**（阶段 151）。
+    ///
+    /// 背景：用户 2026-11-25 报「关掉终端 ⇒ 新建终端 ⇒ 编辑器不出现」⇒
+    /// 根因是「家」指向了**已经收拢的那一格** ⇒ 规则必须保证「家永远在树上」。
+    #[test]
+    fn 家格子跟着当前格子走() {
+        // 当前格子自己就有终端页 ⇒ 家就是它（用户在哪个格子工作，
+        // 编辑器就跟在那个格子后面）。
+        assert_eq!(
+            pick_home_cell(CellId(7), true, &[CellId(3), CellId(7)]),
+            CellId(7),
+            "当前格子有终端页 ⇒ 家就该是当前格子"
+        );
+        // 当前格子**没有**终端页 ⇒ 退到装着终端页的那一格。
+        assert_eq!(
+            pick_home_cell(CellId(1), false, &[CellId(3), CellId(7)]),
+            CellId(3),
+            "当前格子没终端 ⇒ 退到第一个装着终端页的格子"
+        );
+        // 一个终端页都没有（终端全关了）⇒ 留在当前格子。
+        assert_eq!(
+            pick_home_cell(CellId(1), false, &[]),
+            CellId(1),
+            "没有终端页 ⇒ 留在当前格子（总比指向一个死格子强）"
+        );
     }
 
     #[test]

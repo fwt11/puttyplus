@@ -113,6 +113,16 @@ pub struct FileEdit {
     findbar: findbar::FindBar,
     /// 本编辑器在子标签里的页 id
     pub tab_id: Cell<u64>,
+    /// **本编辑器挂在哪个格子的容器里**（阶段 151）。
+    ///
+    /// ⚠️ **为什么要自己记一份**（而不是每次问面板）：
+    ///   编辑器**可以被拖到别的格子**（用户 2026-11-22 拖过）⇒ 之后要
+    ///   关它 / 切到它 ⇒ 得找**它自己那一格** ⇒ 问「面板当前的家」会找错
+    ///   ⇒ 关不掉（页签还在）/ 切不过去（点了没反应）。
+    ///
+    /// ⚠️ **为什么不用弱引用**：容器（`SubTabs`）持有编辑器页 ⇒ 编辑器
+    ///   强引用容器 = 环 ⇒ 用弱引用就断了（面板那边也只拿弱引用）。
+    pub host: RefCell<Option<std::rc::Weak<super::subtabs::SubTabs>>>,
     /// 面板（弱引用）：改脏了要更新子标签上的标题（● 标记）。
     ///
     /// 用弱引用：面板持有子标签，子标签持有这个编辑器（回调），
@@ -894,6 +904,13 @@ fn forget(st: &Rc<PanelState>, id: u64) {
     st.pending_file_reads.borrow_mut().remove(&id);
 }
 
+/// **这个编辑器挂在哪个格子的容器里**（阶段 151）。
+///
+/// ⚠️ **拿不到就返回 `None`**（容器被销毁了）⇒ 调用方退回「面板当前的家」。
+fn host_of(e: &FileEdit) -> Option<Rc<super::subtabs::SubTabs>> {
+    e.host.borrow().as_ref().and_then(|w| w.upgrade())
+}
+
 /// 同一路径已经开着一个窗口就聚焦它，返回 true。
 /// 两个窗口各改各的会互相覆盖，而用户以为自己看到的只有一份。
 ///
@@ -911,7 +928,10 @@ fn focus_existing(st: &Rc<PanelState>, remote: bool, path: &str, readonly: bool)
     let Some(e) = existing else { return false };
     if e.base_readonly == readonly || !e.base_readonly {
         // 聚焦已开的那一页（阶段 107：编辑区里切过去）
-        if let Some(sub) = st.sub_tabs() {
+        //
+        // ⚠️ **找它自己那一格**（阶段 151）：编辑器可能被拖到别的格子 ⇒
+        //   问「面板当前的家」会切错地方 ⇒ 点了没反应。
+        if let Some(sub) = host_of(&e).or_else(|| st.sub_tabs()) {
             sub.switch_editor(e.tab_id.get());
         }
         return true;
@@ -1176,13 +1196,16 @@ fn attach_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
         Some(on_close),
     );
     e.tab_id.set(editor_id);
+    // ⚠️ **记住自己挂在哪一格**（阶段 151）⇒ 之后关它 / 切它都找得回来
+    //   （编辑器可以被拖到别的格子 ⇒ 不能每次都问「面板当前的家」）。
+    *e.host.borrow_mut() = Some(Rc::downgrade(&sub));
     sub.switch_editor(editor_id);
 }
 
 /// 关掉编辑器所在的**编辑区页**（**已经确认过**可以直接关的路径用这个）。
 fn close_tab(st: &Rc<PanelState>, e: &Rc<FileEdit>) {
     forget(st, e.id);
-    match st.sub_tabs() {
+    match host_of(e).or_else(|| st.sub_tabs()) {
         Some(sub) => {
             sub.remove_editor(e.tab_id.get());
         }
@@ -1637,6 +1660,7 @@ fn build(
         toolbar,
         findbar,
         tab_id: Cell::new(0),
+        host: RefCell::new(None),
         st: Rc::downgrade(st),
         remote,
         path: path.to_string(),
@@ -2073,7 +2097,9 @@ fn update_ui(e: &FileEdit) {
     // 子标签上的标题也跟着走（脏文件前面加 ●；**不带「编辑」二字**——
     // 编辑/查看由图标表示，标题只留文件名）
     if let Some(st) = e.st.upgrade() {
-        if let Some(sub) = st.sub_tabs() {
+        // ⚠️ **找它自己那一格**（阶段 151）：编辑器被拖到别的格子 ⇒
+        //   问「面板当前的家」会改错那一页的标题。
+        if let Some(sub) = host_of(e).or_else(|| st.sub_tabs()) {
             sub.set_editor_title(e.tab_id.get(), &tab_title(e));
         }
     }
@@ -2451,12 +2477,25 @@ fn select_nearest(e: &Rc<FileEdit>, pos: i32) {
 /// 但用户此刻可能正停在编辑器的子标签上——那一下该是**编辑器查找**。
 /// 这个函数负责把两者分开。
 pub fn active_editor(st: &Rc<PanelState>) -> Option<Rc<FileEdit>> {
-    let sub = st.sub_tabs()?;
-    let id = sub.current_editor()?;
-    st.file_edits
-        .borrow()
+    let edits = st.file_edits.borrow();
+    // ① 先问「家」（绝大多数情况）。
+    if let Some(sub) = st.sub_tabs() {
+        if let Some(id) = sub.current_editor() {
+            if let Some(e) = edits.iter().find(|e| e.tab_id.get() == id) {
+                return Some(e.clone());
+            }
+        }
+    }
+    // ② 兜底：编辑器**被拖到别的格子**了 ⇒ 逐个问它自己那一格
+    //    （阶段 151：不能只问「家」，否则拖走的那个编辑器找不到）。
+    edits
         .iter()
-        .find(|e| e.tab_id.get() == id)
+        .find(|e| {
+            host_of(e)
+                .and_then(|h| h.current_editor())
+                .map(|id| id == e.tab_id.get())
+                .unwrap_or(false)
+        })
         .cloned()
 }
 

@@ -590,14 +590,44 @@ impl TermInner {
     ///
     /// ⚠ ssh 的报错**已经在终端里了** ⇒ 这里只弹框，不再往终端里重复
     ///    写一遍（避免两行说同一件事）。
+    ///
+    /// ⚠️ **别在「退出信号到达的那一刻」就判**（2026-11-25 修的 CI 偶发红灯）：
+    ///   「连接被拒绝」是**秒退** ⇒ 退出信号**常常比 VTE 把那行报错画出来
+    ///   更早** ⇒ 那一刻屏幕上还是**空的** ⇒ 认不出原因 ⇒ 只能说出
+    ///   「ssh 客户端退出码 255」⇒ 用户不知道是网络问题；
+    ///   ⇒ CI 上就变成**偶发红**（本机有时过、有时不过 ⇒ 实测过）。
+    /// ⇒ ⇒ **延后一点再判**（见 [`TermInner::try_report_spawn_failure`]）：
+    ///   读不到就再等，最长约 1 秒 ⇒ VTE 画完那一行就够了。
     fn report_spawn_failure(self: &Rc<Self>, status: i32) {
+        let me = Rc::clone(self);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+            me.try_report_spawn_failure(status, 0);
+        });
+    }
+
+    /// **延后一点判**（等 VTE 把 ssh 那行报错画出来）。
+    ///
+    /// ⚠️ **为什么要有这一层**：`report_spawn_failure` 的说明里写了那个坑
+    ///   （秒退 ⇒ 信号比渲染早）⇒ 这里**轮询**着等，最多约 1 秒。
+    ///
+    /// ⚠️ **等不到也别乱说**：认不出原因就退回「退出码 255」那条兜底
+    ///   （只说「ssh 自己报错了」，**不瞎猜**是网络问题）。
+    fn try_report_spawn_failure(self: &Rc<Self>, status: i32, tries: u32) {
         let screen = self.term.visible_text().unwrap_or_default();
         // ① ssh 自己打的报错（最可靠）
         if let Some((kind, line)) = crate::sshfail::find_ssh_error_line(&screen, 6) {
             ssh_failure_dialog(self, kind, &line);
             return;
         }
-        // ② 退出码 255 ⇒ 是 ssh 自己报的错（屏幕上的字认不出来）
+        // ② 还没画出来 ⇒ 再等等（**上限约 1 秒**）。
+        if tries < 8 {
+            let me = Rc::clone(self);
+            glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+                me.try_report_spawn_failure(status, tries + 1);
+            });
+            return;
+        }
+        // ③ 退出码 255 ⇒ 是 ssh 自己报的错（屏幕上的字认不出来）
         if crate::sshfail::is_ssh_error_exit(status) {
             let code = crate::sshfail::exit_code(status);
             let raw = trf!("ssh 客户端退出码 {code}", code = code);

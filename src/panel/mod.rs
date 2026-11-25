@@ -296,6 +296,20 @@ pub struct PanelState {
     /// （对标 XTerminal 的第二层标签栏）——弹窗把屏幕切碎了，数据库工作台
     /// 那点宽度根本不够用。
     pub sub_tabs: RefCell<Option<Rc<subtabs::SubTabs>>>,
+
+    /// **连接页的格子树**（阶段 151 起是「格子树」，不是一个页签栏）。
+    ///
+    /// ⚠️ **为什么面板要拿着它**（2026-11-25 修的真 bug）：
+    ///   格子会增删（关掉某一格里的最后一个页签 ⇒ **那一格收拢**）⇒
+    ///   `sub_tabs` 里记的那个容器**可能已经不在树上了** ⇒ 把页挂上去 =
+    ///   挂在**看不见的地方** ⇒ 用户点「打开文件编辑」**毫无反应**
+    ///   （用户 2026-11-25 报的「关掉终端 ⇒ 新建终端 ⇒ 编辑器不出现」）。
+    ///
+    /// ⚠️ **为什么是弱引用**（AGENTS.md 的引用环红线）：格子树 → 格子 →
+    ///   容器 → 「+」菜单闭包 → `Rc<Tabs>` → 标签 → `Rc<PanelState>`
+    ///   ⇒ 面板**强引用**树 = **环** ⇒ 面板永远释放不掉。
+    ///   ⇒ 这里只拿**弱引用**（树由标签那边持有 ⇒ 会话活着它就活着）。
+    pub cell_tree: RefCell<Option<std::rc::Weak<crate::layout::tree::CellTree>>>,
 }
 
 impl PanelState {
@@ -370,7 +384,31 @@ impl PanelState {
     }
 
     /// 本连接页的子标签容器（阶段 12）。
+    ///
+    /// ⚠️ **现在是「动态解析」的**（2026-11-25 修的真 bug）：
+    ///   以前这里只是把 `self.sub_tabs` 里记着的那个容器**原样返回**
+    ///   （建页时记一次 ⇒ **之后再也不更新**）⇒ 格子树一变（关格子 /
+    ///   搬页签 / 拆格子）它就**过期** ⇒ 新开的页（编辑器 / 数据库 /
+    ///   容器）挂到**已经不在树上**的容器里 ⇒ **用户点了毫无反应**
+    ///   （用户 2026-11-25 报的「关掉终端 ⇒ 新建终端 ⇒ 编辑器不出现」）。
+    ///
+    /// ⇒ 现在先问格子树「**家**是哪一格」（那一格装着终端页 ⇒ 最宽），
+    ///   问不到才退回旧指针（老路径 / 单测 / 示例）。
+    ///
+    /// ⚠️ **为什么不是"随便找一个活着的格子"**：编辑器要跟**终端**并排
+    ///   （用户 2026-11-19：「默认打开还是显示为和 term 并列的 tab」）
+    ///   ⇒ 家 = 终端那一格。
     pub fn sub_tabs(&self) -> Option<Rc<subtabs::SubTabs>> {
+        let tree = self
+            .cell_tree
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade());
+        if let Some(t) = tree {
+            if let Some(s) = t.home_tabs() {
+                return Some(s);
+            }
+        }
         self.sub_tabs.borrow().clone()
     }
 }
@@ -459,6 +497,7 @@ impl SftpPanel {
             status: RefCell::new(None),
             pending_uploads: RefCell::new(HashMap::new()),
             sub_tabs: RefCell::new(None),
+            cell_tree: RefCell::new(None),
             opts: opts.clone(),
         });
 
