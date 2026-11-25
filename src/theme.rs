@@ -34,7 +34,12 @@ pub enum Theme {
 }
 
 impl Theme {
-    pub const ALL: [Theme; 4] = [Theme::System, Theme::Dark, Theme::Light, Theme::HighContrast];
+    pub const ALL: [Theme; 4] = [
+        Theme::System,
+        Theme::Dark,
+        Theme::Light,
+        Theme::HighContrast,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -183,11 +188,7 @@ pub fn mix_hex(fg: &str, bg: &str, t: f64) -> String {
         return fg.to_string();
     };
     let c = |f: f64, b: f64| (f + (b - f) * t).round().clamp(0.0, 255.0) as u8;
-    format!("#{:02x}{:02x}{:02x}",
-        c(f.0, b.0),
-        c(f.1, b.1),
-        c(f.2, b.2)
-    )
+    format!("#{:02x}{:02x}{:02x}", c(f.0, b.0), c(f.1, b.1), c(f.2, b.2))
 }
 
 /// 给「跟随系统」算一个**读得清**的次要文字色。
@@ -226,6 +227,52 @@ pub fn dim_for(fg: &str, bgs: &[&str]) -> String {
         }
     }
     best
+}
+
+fn solid_color_pair(bg: &str, preferred_fg: &str) -> (String, String) {
+    if contrast_ratio(bg, preferred_fg) >= CONTRAST_AA {
+        return (bg.to_string(), preferred_fg.to_string());
+    }
+    let alternate = if preferred_fg == "#000000" {
+        "#ffffff"
+    } else {
+        "#000000"
+    };
+    if contrast_ratio(bg, alternate) >= CONTRAST_AA {
+        return (bg.to_string(), alternate.to_string());
+    }
+    let fg = if contrast_ratio(bg, preferred_fg) >= contrast_ratio(bg, alternate) {
+        preferred_fg
+    } else {
+        alternate
+    };
+    let target = if rel_luminance(parse_hex_rgb(fg).expect("前景色是 hex")) > 0.179 {
+        "#000000"
+    } else {
+        "#ffffff"
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    let mut adjusted = bg.to_string();
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        let candidate = mix_hex(bg, target, mid);
+        if contrast_ratio(&candidate, fg) >= CONTRAST_AA {
+            adjusted = candidate;
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (adjusted, fg.to_string())
+}
+
+fn solid_state_bg(bg: &str, fg: &str, amount: f64) -> String {
+    let target = if rel_luminance(parse_hex_rgb(fg).expect("前景色是 hex")) > 0.179 {
+        "#000000"
+    } else {
+        "#ffffff"
+    };
+    solid_color_pair(&mix_hex(bg, target, amount), fg).0
 }
 
 /// 当前主题的次要文字色（CSS 里的 `pp_dim`）。
@@ -452,7 +499,8 @@ impl SynColors {
 }
 
 /// 某套主题下的语法高亮配色（纯函数，便于单测）。
-pub fn syn_colors_for(t: Theme) -> SynColors {    match t {
+pub fn syn_colors_for(t: Theme) -> SynColors {
+    match t {
         Theme::Dark => SYN_DARK,
         Theme::Light => SYN_LIGHT,
         Theme::HighContrast => SYN_CONTRAST,
@@ -668,8 +716,8 @@ fn saved_theme() -> Theme {
     Theme::parse(&crate::settings::get_str("ui", "theme"))
 }
 
-use std::cell::RefCell;
 use crate::i18n::tr;
+use std::cell::RefCell;
 
 /// 把主题装到当前 display 上。`Theme::System` = 摘掉 provider，还原成系统样式。
 ///
@@ -804,18 +852,30 @@ fn system_tokens() -> Option<String> {
     let ok = hex("success_color").unwrap_or_else(|| "#2e9e63".into());
     let warn = hex("warning_color").unwrap_or_else(|| "#b07d1a".into());
     let err = hex("error_color").unwrap_or_else(|| "#c0392b".into());
+    let (accent, on_accent) = solid_color_pair(&accent, &on_accent);
+    let (err, on_err) = solid_color_pair(&err, &on_accent);
+    let accent_hover = solid_state_bg(&accent, &on_accent, 0.08);
+    let accent_active = solid_state_bg(&accent, &on_accent, 0.16);
+    let err_hover = solid_state_bg(&err, &on_err, 0.08);
+    let err_active = solid_state_bg(&err, &on_err, 0.16);
 
-    Some(format!("@define-color pp_bg {bg};\n\
+    Some(format!(
+        "@define-color pp_bg {bg};\n\
          @define-color pp_panel {base};\n\
          @define-color pp_card {base};\n\
          @define-color pp_fg {fg};\n\
          @define-color pp_dim {dim};\n\
          @define-color pp_border {border};\n\
          @define-color pp_accent {accent};\n\
+         @define-color pp_accent_hover {accent_hover};\n\
+         @define-color pp_accent_active {accent_active};\n\
          @define-color pp_on_accent {on_accent};\n\
+         @define-color pp_on_err {on_err};\n\
          @define-color pp_ok {ok};\n\
          @define-color pp_warn {warn};\n\
          @define-color pp_err {err};\n\
+         @define-color pp_err_hover {err_hover};\n\
+         @define-color pp_err_active {err_active};\n\
          @define-color pp_hover mix(@pp_fg, @pp_bg, 0.92);\n\
          @define-color pp_accent_soft mix(@pp_accent, @pp_bg, 0.86);\n\
          @define-color pp_scroll mix(@pp_fg, @pp_bg, 0.72);\n\
@@ -1180,6 +1240,46 @@ paned > separator {
   background-color: @pp_border;
 }
 paned > separator:hover { background-color: @pp_accent; }
+/* 实心操作按钮：文字与图标是独立节点，必须显式跟随各自的语义前景色。 */
+button.pp-primary, button.suggested-action {
+  background-color: @pp_accent;
+  color: @pp_on_accent;
+  border-color: @pp_accent;
+}
+button.pp-primary { font-weight: 600; }
+button.pp-primary:hover, button.suggested-action:hover {
+  background-color: @pp_accent_hover;
+}
+button.pp-primary:active, button.suggested-action:active {
+  background-color: @pp_accent_active;
+}
+button.destructive-action {
+  background-color: @pp_err;
+  color: @pp_on_err;
+  border-color: @pp_err;
+}
+button.destructive-action:hover { background-color: @pp_err_hover; }
+button.destructive-action:active { background-color: @pp_err_active; }
+button:checked {
+  background-color: @pp_accent;
+  background-image: none;
+  color: @pp_on_accent;
+}
+button:checked:hover { background-color: @pp_accent_hover; }
+button:checked:active { background-color: @pp_accent_active; }
+button.pp-primary label, button.suggested-action label,
+button:checked label { color: @pp_on_accent; }
+button.flat:checked label { color: @pp_fg; }
+button.destructive-action label { color: @pp_on_err; }
+button.pp-primary image, button.suggested-action image { color: @pp_on_accent; }
+button.destructive-action image { color: @pp_on_err; }
+button.pp-primary:disabled {
+  background-color: @pp_hover;
+  color: @pp_dim;
+  border-color: @pp_border;
+}
+button.pp-primary:disabled label, button.pp-primary:disabled image { color: @pp_dim; }
+
 /* 对话框底部动作区：统一尺寸、圆角与"主/次/危险"三级层次 */
 .dialog-action-area {
   padding: 12px 16px 14px 16px;
@@ -1215,13 +1315,13 @@ paned > separator:hover { background-color: @pp_accent; }
   border-color: @pp_accent;
   color: @pp_on_accent;
 }
-.dialog-action-area button.suggested-action:hover { background-color: shade(@pp_accent, 0.92); }
+.dialog-action-area button.suggested-action:hover { background-color: @pp_accent_hover; }
 .dialog-action-area button.destructive-action {
   background-color: @pp_err;
   border-color: @pp_err;
-  color: @pp_on_accent;
+  color: @pp_on_err;
 }
-.dialog-action-area button.destructive-action:hover { background-color: shade(@pp_err, 0.92); }
+.dialog-action-area button.destructive-action:hover { background-color: @pp_err_hover; }
 
 /* 文件列表专用：窄滚动条（横向只占 8px，不跟终端抢高度） */
 .pp-thin-scrollbar scrollbar { background: transparent; border: none; margin: 0; min-width: 4px; min-height: 4px; }
@@ -1531,7 +1631,11 @@ button, .circular, .flat {
   color: @pp_fg;
 }
 button:hover { background-color: @pp_hover; }
-button:checked { background-color: @pp_accent; color: @pp_on_accent; }
+button:checked {
+  background-color: @pp_accent;
+  background-image: none;
+  color: @pp_on_accent;
+}
 button.flat { background-color: transparent; border-color: transparent; }
 button.flat:hover { background-color: @pp_hover; }
 /* 平面开关按钮（隐藏文件 / 跟随目录）checked 时必须单独给底色与前景色：
@@ -1549,7 +1653,7 @@ button.flat:checked:hover { background-color: mix(@pp_accent, @pp_bg, 0.80); }
    高于 blanket 的 `label` ⇒ 赢）。 */
 button:checked label,
 button.suggested-action label,
-button.destructive-action label {
+button.pp-primary label {
   color: @pp_on_accent;
 }
 /* 平面按钮的选中态是「淡强调底 + 正常文字」⇒ 文字也得跟着正常色 */
@@ -1567,44 +1671,6 @@ button.pp-icon-btn {
   min-width: 30px;
   min-height: 30px;
 }
-/* 主操作按钮（阶段 44）：dbx 的「新增字段」「应用变更」是**实心主按钮**，
-   一眼就知道该点哪个。我们阶段 39 把按钮文字全去掉后，所有按钮**权重完全
-   一样**——用户不知道哪个是"主操作"，哪个是"辅助"。
-   ⚠️ **别给主按钮加 `flat`**：Adwaita 的 `button.flat` 是
-   `background-color: transparent`，优先级比自定义类高——加了实心底就没了
-   （跟 `.pp-chip` 一个毛病）。 */
-button.pp-primary {
-  background-color: @pp_accent;
-  color: @pp_on_accent;
-  border-color: @pp_accent;
-  font-weight: 600;
-}
-button.pp-primary:hover { background-color: mix(@pp_accent, @pp_fg, 0.15); }
-button.pp-primary:active { background-color: mix(@pp_accent, @pp_fg, 0.28); }
-button.pp-primary:disabled {
-  background-color: @pp_hover;
-  color: @pp_dim;
-  border-color: @pp_border;
-}
-/* 主按钮里的图标要跟着文字变白（图标默认跟文字色走，但要显式写一遍：
-   `.pp-menu-icon` 那条规则给图标上过 @pp_dim）。 */
-button.pp-primary image { color: @pp_on_accent; }
-/* 主/危险按钮必须保住强调色：上面那条通用 button 规则会盖掉 Adwaita 的
-   .suggested-action 配色，结果是"生成""连接"这类主按钮和普通按钮长得一样。 */
-button.suggested-action {
-  background-color: @pp_accent;
-  color: @pp_on_accent;
-  border-color: @pp_accent;
-}
-button.suggested-action:hover { background-color: shade(@pp_accent, 0.92); }
-button.suggested-action:active { background-color: shade(@pp_accent, 0.84); }
-button.destructive-action {
-  background-color: @pp_err;
-  color: @pp_on_accent;
-  border-color: @pp_err;
-}
-button.destructive-action:hover { background-color: shade(@pp_err, 0.92); }
-
 entry, spinbutton, textview, .view {
   background-color: @pp_panel;
   color: @pp_fg;
@@ -1779,15 +1845,20 @@ const DARK_CSS: &str = concat!(
 @define-color pp_dim     #9aa0a6;
 @define-color pp_border  #3a3f47;
 @define-color pp_hover   #2f3339;
-@define-color pp_accent  #3d7dd6;
+@define-color pp_accent  #3774c4;
+@define-color pp_accent_hover #326db4;
+@define-color pp_accent_active #2d64a5;
 @define-color pp_on_accent #ffffff;
+@define-color pp_on_err #ffffff;
 @define-color pp_accent_soft #253349;
 @define-color pp_dim_sel #aab2bb;
 @define-color pp_scroll  #454b54;
 @define-color pp_chip    #33383f;
 @define-color pp_ok      #2fa86b;
 @define-color pp_warn    #c98a1f;
-@define-color pp_err     #d9534f;
+@define-color pp_err     #c74743;
+@define-color pp_err_hover #b7413d;
+@define-color pp_err_active #a93c38;
 "#,
     "BASE_PLACEHOLDER"
 );
@@ -1802,7 +1873,10 @@ const LIGHT_CSS: &str = concat!(
 @define-color pp_border  #d3d7dd;
 @define-color pp_hover   #e6e9ed;
 @define-color pp_accent  #2f6fd0;
+@define-color pp_accent_hover #2b66bf;
+@define-color pp_accent_active #275cad;
 @define-color pp_on_accent #ffffff;
+@define-color pp_on_err #ffffff;
 @define-color pp_accent_soft #e8f0fc;
 @define-color pp_dim_sel #4a5560;
 @define-color pp_scroll  #c5cad1;
@@ -1810,6 +1884,8 @@ const LIGHT_CSS: &str = concat!(
 @define-color pp_ok      #1a7f4b;
 @define-color pp_warn    #8a5a00;
 @define-color pp_err     #c0392b;
+@define-color pp_err_hover #b03526;
+@define-color pp_err_active #a13022;
 "#,
     "BASE_PLACEHOLDER"
 );
@@ -1824,7 +1900,10 @@ const CONTRAST_CSS: &str = concat!(
 @define-color pp_border  #ffffff;
 @define-color pp_hover   #333333;
 @define-color pp_accent  #0000ff;
+@define-color pp_accent_hover #0000e6;
+@define-color pp_accent_active #0000cc;
 @define-color pp_on_accent #ffffff;
+@define-color pp_on_err #000000;
 @define-color pp_accent_soft #0000ff;
 @define-color pp_dim_sel #ffffff;
 @define-color pp_scroll  #ffffff;
@@ -1832,6 +1911,8 @@ const CONTRAST_CSS: &str = concat!(
 @define-color pp_ok      #00ff88;
 @define-color pp_warn    #ffd400;
 @define-color pp_err     #ff5555;
+@define-color pp_err_hover #ff6767;
+@define-color pp_err_active #ff7a7a;
 "#,
     "BASE_PLACEHOLDER"
 );
@@ -1849,7 +1930,9 @@ fn css_with(base: &str) -> String {
 pub fn css_text(t: Theme) -> Option<String> {
     match t {
         Theme::System => system_tokens().map(|tok| format!("{tok}{FIX}{COMPONENTS}")),
-        _ => t.css().map(|base| format!("{}{}", css_with(base), COMPONENTS)),
+        _ => t
+            .css()
+            .map(|base| format!("{}{}", css_with(base), COMPONENTS)),
     }
 }
 
@@ -1881,10 +1964,7 @@ mod tests {
         for p in Palette::ALL {
             let (fg, bg, ansi) = p.colors();
             for c in [fg, bg].into_iter().chain(ansi) {
-                assert!(
-                    gdk::RGBA::parse(c).is_ok(),
-                    "{p:?} 里 {c} 不是合法颜色"
-                );
+                assert!(gdk::RGBA::parse(c).is_ok(), "{p:?} 里 {c} 不是合法颜色");
             }
         }
     }
@@ -1976,10 +2056,7 @@ mod tests {
         for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
             let css = css_text(t).expect("非 System 主题都该有 CSS");
             assert!(!css.contains("BASE_PLACEHOLDER"), "{t:?} 没拼上骨架");
-            assert!(
-                css.contains("window, .background"),
-                "{t:?} 缺窗口底色规则"
-            );
+            assert!(css.contains("window, .background"), "{t:?} 缺窗口底色规则");
             assert!(css.contains("scrollbar slider"), "{t:?} 缺滚动条规则");
             assert!(css.contains(".pp-section"), "{t:?} 缺组件类");
         }
@@ -2092,8 +2169,7 @@ mod tests {
             //    （= 假阳性，钉不住）。
             assert!(
                 css.contains(
-                    "button:checked label,\nbutton.suggested-action label,\n\
-                     button.destructive-action label {\n  color: @pp_on_accent;\n}"
+                    "button:checked label,\nbutton.suggested-action label,\nbutton.pp-primary label {\n  color: @pp_on_accent;\n}"
                 ),
                 "{t:?} 的 CSS 缺「按钮里的文字跟着状态色」⇒ 选中时蓝底黑字"
             );
@@ -2166,7 +2242,10 @@ mod tests {
         assert!((contrast_ratio("#ffffff", "#ffffff") - 1.0).abs() < 0.01);
         // #767676 是 WCAG 给出的"白底上刚好过 4.5:1"的那个灰
         let c = contrast_ratio("#767676", "#ffffff");
-        assert!((4.4..=4.6).contains(&c), "#767676 对白底应是 4.5:1 左右，实得 {c}");
+        assert!(
+            (4.4..=4.6).contains(&c),
+            "#767676 对白底应是 4.5:1 左右，实得 {c}"
+        );
     }
 
     /// 三套**固定**主题的说明文字色都要够 4.5:1（窗口底色与面板底色都算）。
@@ -2191,6 +2270,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn 实心语义色自动满足_aa() {
+        for (bg, fg) in [
+            ("#3584e4", "#ffffff"),
+            ("#3d7dd6", "#ffffff"),
+            ("#808080", "#ffffff"),
+            ("#ff5555", "#ffffff"),
+            ("#eeeeee", "#000000"),
+        ] {
+            let (bg, fg) = solid_color_pair(bg, fg);
+            assert!(
+                contrast_ratio(&bg, &fg) >= CONTRAST_AA,
+                "实心色 {bg} / {fg} 不够 AA"
+            );
+        }
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+            let css = css_text(t).expect("固定主题有 CSS");
+            let color = |name| css_color_for_test(&css, name);
+            assert!(contrast_ratio(&color("pp_accent"), &color("pp_on_accent")) >= CONTRAST_AA);
+            assert!(
+                contrast_ratio(&color("pp_accent_hover"), &color("pp_on_accent")) >= CONTRAST_AA
+            );
+            assert!(
+                contrast_ratio(&color("pp_accent_active"), &color("pp_on_accent")) >= CONTRAST_AA
+            );
+            assert!(contrast_ratio(&color("pp_err"), &color("pp_on_err")) >= CONTRAST_AA);
+            assert!(contrast_ratio(&color("pp_err_hover"), &color("pp_on_err")) >= CONTRAST_AA);
+            assert!(contrast_ratio(&color("pp_err_active"), &color("pp_on_err")) >= CONTRAST_AA);
+        }
+    }
+
+    fn css_color_for_test(css: &str, name: &str) -> String {
+        let prefix = format!("@define-color {name}");
+        css.lines()
+            .find_map(|line| {
+                let value = line
+                    .trim()
+                    .strip_prefix(&prefix)?
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim();
+                value.starts_with('#').then(|| value.to_string())
+            })
+            .unwrap_or_else(|| panic!("CSS 缺 {name}"))
     }
 
     /// 「跟随系统」算出来的说明文字色要够 4.5:1（拿几套真实系统配色代跑）。
@@ -2304,8 +2429,14 @@ mod tests {
         let lum = |hex: &str| contrast_ratio(hex, "#000000");
         // 暗色：窗底 < 面板 < 卡片，一层比一层亮
         let (bg, panel, card) = ("#17191c", "#1e2124", "#26292e");
-        assert!(lum(panel) > lum(bg), "暗色面板 {panel} 应比窗底 {bg} 亮一层");
-        assert!(lum(card) > lum(panel), "暗色卡片 {card} 应比面板 {panel} 亮一层");
+        assert!(
+            lum(panel) > lum(bg),
+            "暗色面板 {panel} 应比窗底 {bg} 亮一层"
+        );
+        assert!(
+            lum(card) > lum(panel),
+            "暗色卡片 {card} 应比面板 {panel} 亮一层"
+        );
         // 浅色：白卡片压浅灰窗底，同样分得开
         assert!(lum("#ffffff") > lum("#f3f4f6"), "浅色卡片应比窗底亮");
         // 高对比没有第三层可分（黑就是黑）——这是设计决定，不断言
@@ -2366,10 +2497,7 @@ mod tests {
         // ⚠️ **每条线都得是合法颜色**（cairo 要 RGB）。
         for set in [dark, light, contrast] {
             for c in set {
-                assert!(
-                    gdk::RGBA::parse(c).is_ok(),
-                    "曲线色 {c} 不是合法颜色"
-                );
+                assert!(gdk::RGBA::parse(c).is_ok(), "曲线色 {c} 不是合法颜色");
                 // ⚠️ **不许是纯白 / 纯黑**（在暗底/亮底上必然有一边看不见）。
                 assert_ne!(c.to_ascii_lowercase(), "#ffffff", "纯白曲线看不见");
                 assert_ne!(c.to_ascii_lowercase(), "#000000", "纯黑曲线看不见");
@@ -2412,7 +2540,10 @@ mod tests {
                 // 灰档（Dim）由 pillcell 用 mix_hex 现算，同样要够
                 let dim_bg = mix_hex(&dim_hex(), &panel_hex(), 0.84);
                 let c = contrast_ratio(&fg, &dim_bg);
-                assert!(c >= CONTRAST_AA, "{t:?} 的灰药丸底色 {dim_bg} 上的字只有 {c:.2}:1");
+                assert!(
+                    c >= CONTRAST_AA,
+                    "{t:?} 的灰药丸底色 {dim_bg} 上的字只有 {c:.2}:1"
+                );
             }
         }
     }
