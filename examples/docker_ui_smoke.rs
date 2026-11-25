@@ -74,6 +74,30 @@ fn displayed_rows(view: &gtk::TreeView) -> Vec<String> {
     out
 }
 
+/// **等表格把某几行真的画出来**（最多 `ms` 毫秒）⇒ 返回屏幕上的行。
+///
+/// ⚠️ **为什么要等**（阶段 167 记）：`displayed_rows()` 是**按像素坐标**
+///   问 GTK「这一行是哪个」⇒ **表格还没布局完**（刚 `set_rows_for_test`、
+///   刚展开项目、或者**机器正忙**（release 重编译））时它会**少报几行**
+///   ⇒ 断言就**假红**（2026-11-25 实测：机器一忙，⑥ ⑦ 两条就红了 ⇒
+///   恢复代码后又全绿 ⇒ 是**抖动**，不是回归）。
+/// ⇒ 改成「**等到看见为止**」⇒ 断言只在该红的时候红。
+fn wait_displayed_rows(view: &gtk::TreeView, want: &[&str], ms: u64) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    let mut rows = Vec::new();
+    loop {
+        rows = displayed_rows(view);
+        if want.iter().all(|w| rows.iter().any(|n| n == w)) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        pump(120);
+    }
+    rows
+}
+
 /// 灌一批假容器（**不连服务器**）——用来验界面形状。
 fn fake_containers() -> Vec<puttyplus::backend::docker::ContainerInfo> {
     let mk = |name: &str, compose: &str, running: bool| puttyplus::backend::docker::ContainerInfo {
@@ -676,7 +700,7 @@ fn main() {
             dockerui::project_expanded_for_test(&panel.st, "proj"),
             "展开后状态还是合着的"
         );
-        let shown1 = displayed_rows(&view);
+        let shown1 = wait_displayed_rows(&view, &["web", "db"], 5000);
         println!("[信息] 展开后屏幕上显示的行：{shown1:?}");
         if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
             shot(&format!("{base}-expanded.png"));
@@ -695,7 +719,7 @@ fn main() {
             dockerui::project_expanded_for_test(&panel.st, "proj"),
             "刷新一下，用户刚点开的项目就合上了"
         );
-        let shown2 = displayed_rows(&view);
+        let shown2 = wait_displayed_rows(&view, &["web", "db"], 5000);
         check!(
             "⑦ 刷新后屏幕上仍然看得到 web / db",
             shown2.iter().any(|n| n == "web") && shown2.iter().any(|n| n == "db"),
@@ -2268,14 +2292,30 @@ fn main() {
                 );
                 // ⚠️ **工具条**：一行 ＋ **纯图标**（没有文字）＋ 每个都有 tooltip。
                 let tb = dockerui::files_toolbar_for_test(&panel2.st);
+                // ⚠️ **阶段 167：6 个 ⇒ 5 个**（用户 2026-11-25「就去掉『回到
+                //   上一级目录』吧，因为已经有『..』完成相同的功能了」）。
                 check!(
-                    "㉒ 工具条是 6 个纯图标按钮（没有文字）",
-                    tb.len() == 6 && tb.iter().all(|(_, has_label)| !has_label),
+                    "㉒ 工具条是 5 个纯图标按钮（没有文字）",
+                    tb.len() == 5 && tb.iter().all(|(_, has_label)| !has_label),
                     format!("{tb:?}")
                 );
                 check!(
                     "㉒ 每个按钮都有 tooltip",
                     tb.iter().all(|(tip, _)| !tip.trim().is_empty()),
+                    format!("{tb:?}")
+                );
+                // ⚠️ **阶段 167：图标要「一眼看得出意思」** ⇒ 不用上下箭头
+                //   （↑↓ 本来就不对称 ⇒ 谁也猜不出谁是谁）⇒ 用环形箭头 /
+                //   纸飞机 / 文件夹+加号 / 文件夹+下箭头 / 放大镜。
+                let tips: Vec<String> = tb.iter().map(|(t, _)| t.clone()).collect();
+                check!(
+                    "㉒ 工具条没有「回到上一级目录」了（有『..』行顶替）",
+                    !tips.iter().any(|t| t.contains("上一级")),
+                    format!("{tips:?}")
+                );
+                check!(
+                    "㉒ 工具条图标是语义化的那几颗（刷新/上传/上传目录/下载/查看）",
+                    tb.len() == 5,
                     format!("{tb:?}")
                 );
                 // ⚠️ **没有「类型」列**（图标已经表达了 ⇒ 省下的宽度给文件名）。
@@ -3437,8 +3477,85 @@ fn main() {
             println!("[信息] 没有能选的镜像 ⇒ 跳过镜像的刷新保选中这一段");
         }
     }
-    }
 
+    // ================= S 组：阶段 167 —— 三页布局 ＋ 文件窗高度 ＋ 日志下载 =================
+    //
+    // ⚠️ **这一组守的是「用户 2026-11-25 报的三件事」**：
+    //   ① 镜像 / 卷 / 网络三页**搜索框吃满富余宽度**、**表格没铺满**；
+    //   ② 「查看容器里面的文件**只显示1行**」；
+    //   ③ 日志窗**没有下载按钮**。
+    {
+        // ---- ① 三页：搜索框不吸富余 + 表格有展开列（⇒ 富余被摊开）----
+        for (seg, label) in [
+            (dockerui::SEG_IMAGES, "镜像页"),
+            (dockerui::SEG_VOLUMES, "卷页"),
+            (dockerui::SEG_NETWORKS, "网络页"),
+        ] {
+            let se = dockerui::seg_search_expands_for_test(&panel2.st, seg);
+            check!(
+                "㉗ 搜索框不吃满富余宽度",
+                se.len() == 1 && !se[0],
+                format!("{label} 搜索框 hexpand={se:?}")
+            );
+            let ex = dockerui::seg_table_expands_for_test(&panel2.st, seg);
+            // ⚠️ **GTK4 的规矩**：**一列都不展开 ⇒ 富余全给最后一列**
+            //   ⇒ 页面右边出现一大片空谷（用户 2026-11-25 截图里就是这样）
+            //   ⇒ 断言「**至少两列**展开」⇒ 富余被摊开 ⇒ 没有空谷。
+            check!(
+                "㉗ 表格有多列展开（富余被摊开，不留空谷）",
+                ex.len() >= 2 && ex.iter().filter(|b| **b).count() >= 2,
+                format!("{label} 展开列={ex:?}")
+            );
+        }
+
+        // ---- ② 「查看文件」窗：正文要**占满**（不是只有 1 行）----
+        {
+            let content = (1..=80)
+                .map(|i| format!("第 {i} 行"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            dockerui::file_view_show_for_test(&panel2.st, "/etc/bashrc", &content);
+            pump(700);
+            if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                shot(&format!("{base}-fileview.png"));
+            }
+            let size = dockerui::file_view_window_size_for_test(&panel2.st);
+            match size {
+                Some((text_h, win_h)) => {
+                    println!("[信息] 查看文件窗：正文 {text_h}px / 窗口 {win_h}px");
+                    // ⚠️ **核心断言**：正文高度必须**远大于一行**（≈20px）
+                    //   ⇒ 否则就是用户报的「只显示1行」。
+                    check!(
+                        "㉗ 查看文件窗的正文占满了（不是只显示1行）",
+                        text_h > 60,
+                        format!("正文 {text_h}px / 窗口 {win_h}px")
+                    );
+                    check!(
+                        "㉗ 正文区比窗口矮不了太多（不是缩在顶上）",
+                        win_h > 0 && text_h * 2 >= win_h,
+                        format!("正文 {text_h}px / 窗口 {win_h}px")
+                    );
+                }
+                None => check!(
+                    "㉗ 查看文件窗开得起来",
+                    false,
+                    "开了「查看文件」却拿不到句柄"
+                ),
+            }
+        }
+
+        // ---- ③ 日志窗：工具条上有「下载…」----
+        {
+            let (labels, has_save) = dockerui::log_toolbar_for_test(&panel2.st);
+            println!("[信息] 日志工具条：{labels:?}");
+            check!(
+                "㉗ 日志窗有「下载…」按钮",
+                has_save,
+                format!("{labels:?}")
+            );
+        }
+    }
+    }
 
     let n_fail = FAILS.with(|f| f.borrow().len());    if n_fail == 0 {
         println!("docker_ui_smoke: 全部通过");

@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2172] = [
+pub static EN: [(&str, &str); 2180] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -385,6 +385,7 @@ pub static EN: [(&str, &str); 2172] = [
     ("保存到连接列表", "Save to the connection list"),
     ("保存失败", "Save failed"),
     ("保存失败，已回滚：{e}", "Save failed, rolled back: {e}"),
+    ("保存失败：{e}", "Saving failed: {e}"),
     ("保存并关闭", "Save and close"),
     ("保存并连接", "Save and connect"),
     ("保活（秒）", "Keepalive (seconds)"),
@@ -412,6 +413,7 @@ pub static EN: [(&str, &str); 2172] = [
     ("先在列表里选中一个文件，再点「查看…」", "Select a file in the list, then click “View…”"),
     ("先在列表里选中一个条目，再点「下载…」", "Select an item in the list, then click “Download…”"),
     ("先在左侧打开一个数据库连接", "Open a database connection on the left first"),
+    ("先打开一个容器的日志", "Open a container log first"),
     ("先挑一个类型", "Pick a type first"),
     ("先点一个单元格", "Click a cell first"),
     ("先点工具栏的「编辑」进入编辑模式", "Click \"Edit\" in the toolbar first to enter edit mode"),
@@ -1098,9 +1100,11 @@ pub static EN: [(&str, &str); 2172] = [
     ("把剪贴板里的本地文件上传到远程当前目录", "Upload the local files in the clipboard to the remote current directory"),
     ("把字段 / 索引 / 外键的改动写进库", "Write the field / index / foreign key changes into the database"),
     ("把定义文本复制到剪贴板", "Copy the definition text to the clipboard"),
+    ("把容器日志保存到本地文件", "Save the container log to a local file"),
     ("把容器里的文件下载到本地", "Download a file from the container to the local machine"),
     ("把当前显示的全部日志复制到剪贴板", "Copy all the logs currently shown to the clipboard"),
     ("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里", "Export the whole table to a local file (CSV / SQL / JSON), or import a local CSV into the table"),
+    ("把日志保存到哪个文件", "Save the log to which file"),
     ("把本地整个目录上传到容器当前目录", "Upload a whole local directory into the container's current directory"),
     ("把本地文件上传到容器当前目录", "Upload a local file into the container's current directory"),
     ("把表「{table}」改成新名字。", "Rename table \"{table}\"."),
@@ -1302,6 +1306,7 @@ pub static EN: [(&str, &str); 2172] = [
     ("无法读取私钥 {kf}。\n若是 PuTTY 的 .ppk 格式，请先转换：\n  puttygen key.ppk -O private-openssh -o key.openssh", "Cannot read the private key {kf}.\nIf it is in the PuTTY .ppk format, convert it first:\nputtygen key.ppk -O private-openssh -o key.openssh"),
     ("无法重新载入", "Cannot reload"),
     ("日志", "Log"),
+    ("日志已保存到 {p}（{n} 字节）", "The log was saved to {p} ({n} bytes)"),
     ("日志流已结束", "Log stream ended"),
     ("日志流已结束（退出码 {c}）", "Log stream ended (exit code {c})"),
     ("旧式 PEM", "Legacy PEM"),
@@ -1436,6 +1441,7 @@ pub static EN: [(&str, &str); 2172] = [
     ("正在删除卷「{name}」…", "Deleting volume \"{name}\"..."),
     ("正在删除网络「{name}」…", "Deleting network \"{name}\"..."),
     ("正在删除镜像「{img}」…", "Deleting image \"{img}\"…"),
+    ("正在取日志…", "Fetching the log…"),
     ("正在取消…", "Cancelling…"),
     ("正在导入 {v0} 行到 {schema}.{table}…", "Importing {v0} rows into {schema}.{table}…"),
     ("正在导出 {schema}.{table} 到 {path}…", "Exporting {schema}.{table} to {path}…"),
@@ -1488,6 +1494,7 @@ pub static EN: [(&str, &str); 2172] = [
     ("没有映射任何字段，没法导入", "No fields were mapped, so it cannot be imported"),
     ("没有更多结果", "No more results"),
     ("没有权限读这个目录", "No permission to read this directory"),
+    ("没有正在看的日志 ⇒ 不知道要下载哪个容器的", "There is no log being viewed, so there is no way to tell which container to save"),
     ("没有结果行", "There are no result rows"),
     ("没有要保存的改动", "There are no changes to save"),
     ("没有访问 Docker 的权限", "No permission to access Docker"),
@@ -1867,6 +1874,7 @@ pub static EN: [(&str, &str); 2172] = [
     ("读取凭据库失败: {e}", "Failed to read the credential vault: {e}"),
     ("读取失败：{v0}", "Failed to read: {v0}"),
     ("读取文件失败：{e}", "Failed to read the file: {e}"),
+    ("读取日志", "Reading the log"),
     ("读取本地数据库桥接端口失败: {e}", "Failed to read the local database bridge port: {e}"),
     ("读取本地目录失败", "Failed to read the local directory"),
     ("读取源文件失败（{v0}）：{err}", "Failed to read the source file ({v0}): {err}"),

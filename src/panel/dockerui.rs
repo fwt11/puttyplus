@@ -740,6 +740,13 @@ pub struct DockerUi {
     logs_window: RefCell<Option<gtk::Window>>,
     /// **文件弹窗**（阶段 165：文件**独立一扇窗**）。
     files_window: RefCell<Option<gtk::Window>>,
+    /// **「查看文件」窗**（阶段 167：双击文件弹出的只读文本窗）。
+    ///
+    /// ⚠️ **为什么存着**：冒烟要能量它的**正文高度**（用户 2026-11-25
+    ///   「查看容器里面的文件，现在只能显示1行」）⇒ 没有句柄就量不到。
+    file_view_window: RefCell<Option<gtk::Window>>,
+    /// 「查看文件」窗里的**正文控件**（同上，量高度用）。
+    file_view_text: RefCell<Option<gtk::TextView>>,
     /// 详情弹窗里的**「关闭」按钮**（阶段 156：容器详情 / 项目详情各一个）。
     ///
     /// ⚠️ **为什么内容里必须有它**（用户 2026-11-23 报的「弹出对话框没法
@@ -874,6 +881,10 @@ pub struct DockerUi {
     images_all: RefCell<Vec<docker::ImageInfo>>,
     volumes_all: RefCell<Vec<docker::VolumeInfo>>,
     networks_all: RefCell<Vec<docker::NetInfo>>,
+    /// **卷页的操作条**（阶段 167：搜索框 ＋ 删除按钮 ＋ 提示）。
+    volumes_bar: gtk::Box,
+    /// **网络页的操作条**（阶段 167：搜索框 ＋ 删除按钮 ＋ 提示）。
+    networks_bar: gtk::Box,
     /// 三个分段**各自的搜索词**。
     images_query: RefCell<String>,
     volumes_query: RefCell<String>,
@@ -1011,6 +1022,11 @@ enum Msg {
     /// 日志流**开不起来**（连不上 / 没权限 / 容器没了）。
     LogError {
         name: String,
+        msg: String,
+    },
+    /// **日志下载**的结果（阶段 167：存成本地文件）。
+    LogSave {
+        /// 中文结果（成功路径 / 失败原因）。
         msg: String,
     },
     /// **镜像列表**回来了（阶段 115）。
@@ -1529,6 +1545,8 @@ struct LogUi {
     follow: gtk::Switch,
     /// **「折行」开关**（UI 审查 D10；默认关 ⇒ 用横向滚动看全文）。
     wrap: gtk::ToggleButton,
+    /// **「下载…」按钮**（阶段 167：把日志存成本地文件）。
+    save: gtk::Button,
     /// 状态行（「正在接收…」「已结束」「出错原因」）。
     status: gtk::Label,
 }
@@ -3016,15 +3034,26 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             tr("大小"),
             tr("创建时间"),
         ],
-        &[130, 100, 90, 90, 170],
-        4,
+        &[150, 110, 100, 80, 190],
+        // ⚠️ **阶段 167：仓库 / 标签 / 创建时间 一起展开** ⇒ 富余被摊开
+        //   （实测 GTK4 只展开一列 ⇒ 富余全给它 ⇒ 右边一大片空谷）。
+        &[0, 1, 4],
         // ID 是十六进制 ⇒ 等宽；大小右对齐（美化·地基 3/5）
         &[ColStyle::Normal, ColStyle::Normal, ColStyle::Mono, ColStyle::Num, ColStyle::Normal],
     );
-    let (volumes_store, volumes_view) =
-        flat_table(&[tr("名称"), tr("驱动")], &[220, 140], 0, &[ColStyle::Normal; 2]);
-    let (networks_store, networks_view) =
-        flat_table(&[tr("名称"), tr("驱动"), tr("范围")], &[220, 140, 100], 0, &[ColStyle::Normal; 3]);
+    let (volumes_store, volumes_view) = flat_table(
+        &[tr("名称"), tr("驱动")],
+        &[260, 140],
+        // ⚠️ **两列都展开** ⇒ 富余平分 ⇒ 「驱动」不会孤零零地被推到最右边。
+        &[0, 1],
+        &[ColStyle::Normal; 2],
+    );
+    let (networks_store, networks_view) = flat_table(
+        &[tr("名称"), tr("驱动"), tr("范围")],
+        &[260, 140, 110],
+        &[0, 1, 2],
+        &[ColStyle::Normal; 3],
+    );
 
     // ---- 阶段 120：镜像的**操作条**（推送 / 导出 / 打标签 / 删除）----
     //
@@ -3042,9 +3071,15 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     images_hint.add_css_class("dim-label");
     // ⚠️ **搜索框**（UI 审查 D12）：容器页有，镜像 / 卷 / 网络三页以前
     //   **一点筛选都没有** ⇒ 镜像一多就只能肉眼扫。
+    //
+    // ⚠️ **阶段 167：搜索框**不**吸富余宽度**（用户 2026-11-25
+    //   「搜索框吃满富余宽度」）⇒ 跟容器页（阶段 157）**同一个口径**：
+    //   `hexpand(false)` ＋ 固定字符宽度 ⇒ 按钮不会被顶到天边。
     let images_search = gtk::SearchEntry::new();
     images_search.set_placeholder_text(Some(tr("搜索镜像")));
-    images_search.set_hexpand(true);
+    images_search.set_hexpand(false);
+    images_search.set_width_chars(16);
+    images_search.set_max_width_chars(26);
     let images_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     images_bar.set_margin_start(6);
     images_bar.set_margin_end(6);
@@ -3059,7 +3094,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // 卷 / 网络两页：搜索栏 ＋ **删除按钮**（阶段 166）。
     let volumes_search = gtk::SearchEntry::new();
     volumes_search.set_placeholder_text(Some(tr("搜索卷")));
-    volumes_search.set_hexpand(true);
+    volumes_search.set_hexpand(false);
+    volumes_search.set_width_chars(16);
+    volumes_search.set_max_width_chars(26);
     let volumes_remove_btn = gtk::Button::with_label(tr("删除"));
     volumes_remove_btn.set_tooltip_text(Some(tr("删除这个卷（docker volume rm；卷里的数据会一起没了）")));
     let volumes_hint = gtk::Label::new(Some(tr("选中一个卷才能删除")));
@@ -3075,7 +3112,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
 
     let networks_search = gtk::SearchEntry::new();
     networks_search.set_placeholder_text(Some(tr("搜索网络")));
-    networks_search.set_hexpand(true);
+    networks_search.set_hexpand(false);
+    networks_search.set_width_chars(16);
+    networks_search.set_max_width_chars(26);
     let networks_remove_btn = gtk::Button::with_label(tr("删除"));
     networks_remove_btn.set_tooltip_text(Some(tr("删除这个网络（docker network rm；用着它的容器会受影响）")));
     let networks_hint = gtk::Label::new(Some(tr("选中一个网络才能删除")));
@@ -3244,6 +3283,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let log_copy = gtk::Button::with_label(tr("复制全部"));
     log_copy.set_tooltip_text(Some(tr("把当前显示的全部日志复制到剪贴板")));
     log_copy.add_css_class("flat");
+    // ⚠️ **「下载…」**（阶段 167：用户 2026-11-25「日志要增加一个下载按钮」）
+    //   ⇒ 把**容器里的日志**存成本地文件（不是「另存当前显示的那几行」）
+    //   ⇒ 走 `docker logs --tail N`（**不带 `-f`**）一次性取回。
+    let log_save = gtk::Button::with_label(tr("下载…"));
+    log_save.set_tooltip_text(Some(tr("把容器日志保存到本地文件")));
+    log_save.add_css_class("flat");
 
     let log_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     log_bar.set_margin_start(6);
@@ -3254,6 +3299,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     log_bar.append(&log_follow_lbl);
     log_bar.append(&log_follow);
     log_bar.append(&log_wrap);
+    log_bar.append(&log_save);
     log_bar.append(&log_copy);
     log_bar.append(&log_clear);
 
@@ -3292,12 +3338,25 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     f_path.set_hexpand(true);
     f_path.set_width_chars(8);
     f_path.add_css_class("pp-path");
-    let f_up = icon_btn("go-up-symbolic", tr("回到上一级目录"));
+    // ⚠️ **阶段 167：去掉「回到上一级目录」**（用户 2026-11-25：
+    //   「就去掉『回到上一级目录』吧，因为已经有『..』完成相同的功能了」）。
+    //
+    //   **为什么去掉更好**：↑ / ↓ 这两个箭头**本来就不对称**（↑ 看着像
+    //   「上一级」、↓ 看着像「下载」⇒ 放在一排里谁也猜不出谁是谁）
+    //   ⇒ 用户的记忆负担全靠 tooltip 顶着 ⇒ 干脆去掉一个。
+    //
+    // ⚠️ **剩下的图标按「一眼看得出意思」挑**：
+    //   - 刷新 ⇒ **环形箭头**（`view-refresh`）⇒ 一眼就是「重新读一遍」；
+    //   - 上传文件 ⇒ **纸飞机**（`send-to`）⇒ 一眼就是「发出去」；
+    //   - 上传目录 ⇒ **文件夹 + 加号**（`folder-new`）⇒ 一眼就是「多一个目录」；
+    //   - 下载 ⇒ **文件夹 + 下箭头**（`folder-download`）⇒ 一眼就是「取下来」；
+    //   - 查看 ⇒ **放大镜**（`edit-find`）⇒ 一眼就是「看看内容」。
+    //   ⇒ **全是 Adwaita 真有的图标**（已核对 `/usr/share/icons/Adwaita/symbolic`）。
     let f_refresh = icon_btn("view-refresh-symbolic", tr("重新读取这个目录"));
-    let f_upload = icon_btn("document-send-symbolic", tr("把本地文件上传到容器当前目录"));
+    let f_upload = icon_btn("send-to-symbolic", tr("把本地文件上传到容器当前目录"));
     let f_uploaddir = icon_btn("folder-new-symbolic", tr("把本地整个目录上传到容器当前目录"));
-    let f_download = icon_btn("go-down-symbolic", tr("把容器里的文件下载到本地"));
-    let f_view = icon_btn("document-open-symbolic", tr("查看容器里这个文件的内容"));
+    let f_download = icon_btn("folder-download-symbolic", tr("把容器里的文件下载到本地"));
+    let f_view = icon_btn("edit-find-symbolic", tr("查看容器里这个文件的内容"));
 
     let f_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     f_bar.set_margin_start(6);
@@ -3305,14 +3364,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     f_bar.set_margin_top(2);
     f_bar.set_margin_bottom(2);
     f_bar.append(&f_path);
-    for b in [
-        &f_up,
-        &f_refresh,
-        &f_upload,
-        &f_uploaddir,
-        &f_download,
-        &f_view,
-    ] {
+    for b in [&f_refresh, &f_upload, &f_uploaddir, &f_download, &f_view] {
         f_bar.append(b);
     }
 
@@ -3585,6 +3637,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         detail_window: RefCell::new(None),
         logs_window: RefCell::new(None),
         files_window: RefCell::new(None),
+        file_view_window: RefCell::new(None),
+        file_view_text: RefCell::new(None),
         detail_close_btns: RefCell::new(vec![
             d_close.clone(),
             p_close.clone(),
@@ -3613,6 +3667,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             btn_clear: log_clear.clone(),
             follow: log_follow.clone(),
             wrap: log_wrap.clone(),
+            save: log_save.clone(),
             status: log_status,
         },
         log_name: RefCell::new(String::new()),
@@ -3638,6 +3693,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         images_all: RefCell::new(Vec::new()),
         volumes_all: RefCell::new(Vec::new()),
         networks_all: RefCell::new(Vec::new()),
+        volumes_bar: volumes_bar.clone(),
+        networks_bar: networks_bar.clone(),
         images_query: RefCell::new(String::new()),
         volumes_query: RefCell::new(String::new()),
         networks_query: RefCell::new(String::new()),
@@ -3663,7 +3720,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             store: f_store,
             view: f_view_tbl,
             btns: vec![
-                f_up.clone(),
                 f_refresh.clone(),
                 f_upload.clone(),
                 f_uploaddir.clone(),
@@ -4052,7 +4108,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         }
                     }
                     Msg::FileView { path, r } => match r {
-                        Ok(text) => show_file_window(stw.upgrade().as_ref(), &path, &text),
+                        Ok(text) => show_file_window(stw.upgrade().as_ref(), &path, &text, Some(&u)),
                         Err(msg) => {
                             if let Some(st) = stw.upgrade() {
                                 let parent = host_window(&u, &st);
@@ -4114,6 +4170,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             continue;
                         }
                         u.log_running.set(false);
+                        u.log.status.set_text(&msg);
+                    }
+                    Msg::LogSave { msg } => {
                         u.log.status.set_text(&msg);
                     }
                     Msg::Action(msg) => {
@@ -4343,25 +4402,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         return false;
                     }
                 }
-            });
-        }
-        // **「上一级」**
-        {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            f_up.connect_clicked(move |_| {
-                let Some(u) = u.upgrade() else { return };
-                let Some(st) = stw.upgrade() else { return };
-                let container = u.selected.borrow().clone();
-                if container.is_empty() {
-                    return;
-                }
-                let cur = u.files_path.borrow().clone();
-                if cur.is_empty() {
-                    return;
-                }
-                let parent = crate::util::path_parent(&cur);
-                files_goto(&st, &u, &container, &parent);
             });
         }
         // **「刷新」**
@@ -4650,6 +4690,17 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 .set_text(&trf!("已复制 {n} 个字符到剪贴板", n = text.chars().count()));
         });
     }
+    // **「下载…」**（阶段 167：把容器日志存成本地文件）
+    {
+        let stw = Rc::downgrade(st);
+        let u = Rc::downgrade(&ui);
+        log_save.connect_clicked(move |_| {
+            let (Some(u), Some(st)) = (u.upgrade(), stw.upgrade()) else {
+                return;
+            };
+            logs_save(&st, &u);
+        });
+    }
     // **自动跟随**：打开时立刻滚到底。
     {
         let u = Rc::downgrade(&ui);
@@ -4929,6 +4980,110 @@ fn copy_to_clipboard(text: &str) {
     if let Some(d) = gtk::gdk::Display::default() {
         d.clipboard().set_text(text);
     }
+}
+
+/// **把容器日志存成本地文件**（阶段 167：用户「日志要增加一个下载按钮」）。
+///
+/// ⚠️ **取的是「容器里的全部日志」**（`docker logs --tail N`）⇒ 不是
+///   「界面上现在显示的那几行」⇒ 用户存下来的东西是有用的。
+///
+/// ⚠️ **不带 `-f`**：跟随流是**通道**（`ShellChannel`）⇒ 拿不到「结尾」；
+///   下载要的是一个**完整的静态文本** ⇒ 另开一条命令取一次。
+fn logs_save(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    let name = ui.log_name.borrow().clone();
+    if name.is_empty() {
+        crate::panel::dialogs::show_error(
+            host_window(ui, st).as_ref(),
+            &tr("先打开一个容器的日志"),
+            &tr("没有正在看的日志 ⇒ 不知道要下载哪个容器的"),
+        );
+        return;
+    }
+    let top = host_window(ui, st);
+    let mut b = gtk::FileChooserNative::builder()
+        .modal(true)
+        .title(tr("把日志保存到哪个文件"))
+        .action(gtk::FileChooserAction::Save)
+        .accept_label(tr("保存"))
+        .cancel_label(tr("取消"));
+    if let Some(p) = top.as_ref() {
+        b = b.transient_for(p);
+    }
+    let ch = b.build();
+    // ⚠️ **默认文件名**：`<容器名>-<日期>.log`（省得自己想名字）。
+    let mut def = format!("{}-{}.log", name.replace('/', "_"), local_date_stamp());
+    if def.starts_with('-') {
+        def.remove(0);
+    }
+    ch.set_current_name(&def);
+    let (st2, u2) = (st.clone(), ui.clone());
+    ch.connect_response(move |c, r| {
+        if r == gtk::ResponseType::Accept {
+            if let Some(f) = c.file() {
+                if let Some(p) = f.path() {
+                    run_logs_save(&st2, &u2, &name, &p);
+                }
+            }
+        }
+        c.destroy();
+    });
+    ch.show();
+}
+
+/// **今天的日期**（`YYYYMMDD`）⇒ 当默认文件名的一部分。
+fn local_date_stamp() -> String {
+    // ⚠️ **不引新依赖**：`chrono` 之类没必要 ⇒ 用系统时间自己算
+    //   （UTC 的年月日就够了 ⇒ 文件名只要能区分天）。
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    // ⚠️ ** civil-from-days**（Howard Hinnant 的算法）⇒ 不引依赖也能算日期。
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}{m:02}{d:02}")
+}
+
+/// **下载日志**的后台部分（远端取一次 ⇒ 写本地文件）。
+fn run_logs_save(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    name: &str,
+    dest: &std::path::Path,
+) {
+    ui.log.status.set_text(tr("正在取日志…"));
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let name = name.to_string();
+    let dest = dest.to_path_buf();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let msg = match shared_session(&opts, pw).await {
+            Ok(session) => match docker::dump_logs(&session, &name, docker::LOG_DUMP_TAIL).await {
+                Ok(text) => match std::fs::write(&dest, text.as_bytes()) {
+                    Ok(()) => trf!(
+                        "日志已保存到 {p}（{n} 字节）",
+                        p = dest.display().to_string(),
+                        n = text.len()
+                    ),
+                    Err(e) => trf!("保存失败：{e}", e = e),
+                },
+                Err(e) => e.0,
+            },
+            Err(e) => e,
+        };
+        let _ = tx.send_blocking(Msg::LogSave { msg });
+    });
 }
 
 /// 启停 / 重启的**二次确认**（写操作 ⇒ 一律要问一句）。
@@ -8568,13 +8723,17 @@ enum ColStyle {
 fn flat_table(
     titles: &[&str],
     widths: &[i32],
-    expand_col: usize,
+    expand_cols: &[usize],
     styles: &[ColStyle],
 ) -> (gtk::TreeStore, gtk::TreeView) {
     let types: Vec<glib::Type> = titles.iter().map(|_| glib::Type::STRING).collect();
     let store = gtk::TreeStore::new(&types);
     let view = gtk::TreeView::new();
     view.set_model(Some(&store));
+    // ⚠️ **阶段 167：表格要铺满整页**（用户 2026-11-25「表格没铺满」）。
+    //   ⇒ `TreeView` 自己也要 `hexpand` ⇒ 否则它在 `ScrolledWindow` 里
+    //   **只占自然宽度**（= 各列宽度之和）⇒ 右边空一大块。
+    view.set_hexpand(true);
     for (i, t) in titles.iter().enumerate() {
         let r = gtk::CellRendererText::new();
         r.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -8595,9 +8754,17 @@ fn flat_table(
         // ⚠️ **必须显式绑 "text"**（跟容器表同一个坑：不绑就是一片空白）。
         col.add_attribute(&r, "text", i as i32);
         col.set_min_width(widths[i]);
-        // ⚠️ **哪一列展开**：镜像表是「创建时间」（最容易被截断的那列）⇒
-        //   展开它，别让「仓库」占满宽度把时间挤成「2026-11-15 19:33…」。
-        if i == expand_col {
+        // ⚠️ **哪几列展开**（阶段 167，改成**可以多列**）：
+        //
+        //   **实测 GTK4 的规矩**（`examples/_tmp_layout_probe.rs` 验过）：
+        //   - **一列都不展开** ⇒ 富余宽度**全给最后一列**（实测最后一列
+        //     拿到 870px，其余纹丝不动）⇒ 页面右边出现一大片空谷；
+        //   - **一列展开** ⇒ 富余**全给它那一列**（同样 870px）；
+        //   - **多列一起展开** ⇒ 富余**在它们之间平分**（实测 305/275/265/265）。
+        //
+        //   ⇒ 所以「哪个列展开」不是审美问题而是**算术问题**：想不出现空谷，
+        //   就得**让好几列一起分**（跟容器页阶段 164 同一个配方）。
+        if expand_cols.contains(&i) {
             col.set_expand(true);
         }
         view.append_column(&col);
@@ -9334,7 +9501,14 @@ fn files_view(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, remote: &
 }
 
 /// 弹一个**只读**的文本窗口（看文件内容用）。
-fn show_file_window(st: Option<&Rc<PanelState>>, path: &str, content: &str) {
+///
+/// ⚠️ **阶段 167**：`ui` 用来**记住窗与正文控件**（冒烟要量正文高度）。
+fn show_file_window(
+    st: Option<&Rc<PanelState>>,
+    path: &str,
+    content: &str,
+    ui: Option<&Rc<DockerUi>>,
+) {
     let win = gtk::Window::builder()
         .title(tr("查看文件"))
         .default_width(760)
@@ -9353,14 +9527,37 @@ fn show_file_window(st: Option<&Rc<PanelState>>, path: &str, content: &str) {
     title.add_css_class("heading");
     let view = gtk::TextView::new();
     view.set_editable(false);
+    view.set_cursor_visible(false);
     view.set_monospace(true);
+    view.set_wrap_mode(gtk::WrapMode::Word);
+    view.set_left_margin(6);
+    view.set_right_margin(6);
+    view.set_top_margin(4);
+    view.set_bottom_margin(4);
     view.buffer().set_text(content);
     let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    // ⚠️ **阶段 167：必须 `vexpand` ＋ `hexpand`**（用户 2026-11-25：
+    //   「查看容器里面的文件，现在只能显示1行」）。
+    //
+    //   **根因**：`ScrolledWindow` 放在**竖直 Box** 里却**没有设
+    //   `vexpand`** ⇒ GTK4 的 Box 只把**富余高度**分给**扩展型**子控件
+    //   ⇒ 它只拿到 `TextView` 的**最小高度**（= 1 行）⇒ 正文只显示 1 行，
+    //   下面全是空白（用户截图里滚动条正好压在第 1 行下面）。
+    //   ⇒ `vexpand` 才是「占满剩余空间」的开关。
+    scroll.set_vexpand(true);
+    scroll.set_hexpand(true);
     scroll.set_child(Some(&view));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    root.set_margin_bottom(6);
     root.append(&title);
     root.append(&scroll);
     win.set_child(Some(&root));
+    // ⚠️ **阶段 167：记住句柄**（冒烟量正文高度用）。
+    if let Some(u) = ui {
+        *u.file_view_window.borrow_mut() = Some(win.clone());
+        *u.file_view_text.borrow_mut() = Some(view.clone());
+    }
     win.present();
 }
 
@@ -9493,8 +9690,7 @@ pub fn files_toolbar_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {
 /// 测试钩子：文件表**每一列的标题 ＋ 是否可见**（阶段 140）。
 ///
 /// 干什么用：冒烟要钉住「**没有「类型」列**了」（图标已经表达了 ⇒ 省宽度）。
-pub fn files_cols_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {
-    let slot = st.docker_ui.borrow();
+pub fn files_cols_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {    let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return Vec::new() };
     ui.files
         .view
@@ -10293,4 +10489,106 @@ pub fn networks_rows_for_test(st: &Rc<PanelState>) -> Vec<(String, String, Strin
         }
     }
     out
+}
+
+/* ---------------- 阶段 167：新增的测试钩子 ---------------- */
+
+/// 测试钩子：**镜像 / 卷 / 网络三张表的列宽**（阶段 167）。
+///
+/// 干什么用：冒烟要钉住「**表格要铺满**」⇒ 至少有一列**拿到了富余**
+/// （GTK4 的规矩：**一列都不展开 ⇒ 富余全给最后一列**；`expand` 的列
+/// 才会分到富余 ⇒ 看「有没有列是 `expand`」就知道表格会不会铺满）。
+pub fn seg_table_expands_for_test(st: &Rc<PanelState>, seg: &str) -> Vec<bool> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let view = match seg {
+        SEG_IMAGES => &ui.images_view,
+        SEG_VOLUMES => &ui.volumes_view,
+        SEG_NETWORKS => &ui.networks_view,
+        _ => return Vec::new(),
+    };
+    view.columns()
+        .iter()
+        .map(|c| c.expands())
+        .collect()
+}
+
+/// 测试钩子：**三页的搜索框**是不是「不吸富余宽度」（阶段 167）。
+///
+/// ⚠️ **为什么重要**：GTK4 的 Box 会把富余宽度**全给扩展型子控件**
+///   ⇒ 搜索框 `hexpand(true)` ⇒ 它一个人吃掉整条工具条 ⇒ 按钮全被顶到
+///   最右边（用户 2026-11-25：「搜索框吃满富余宽度」）。
+pub fn seg_search_expands_for_test(st: &Rc<PanelState>, seg: &str) -> Vec<bool> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let bar = match seg {
+        SEG_IMAGES => &ui.images_bar,
+        SEG_VOLUMES => &ui.volumes_bar,
+        SEG_NETWORKS => &ui.networks_bar,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut child = bar.first_child();
+    while let Some(c) = child {
+        if c.is::<gtk::SearchEntry>() {
+            // ⚠️ **必须用 `hexpands()`（实际值）**，不能用 `is_hexpand_set()`
+            //   —— 后者的语义是「**有没有被显式设过**」⇒ 我们**显式设了
+            //   `false`**（这正是我们要的！）⇒ 它照样返回 true ⇒ 断言会假红。
+            out.push(c.hexpands());
+        }
+        child = c.next_sibling();
+    }
+    out
+}
+
+/// 测试钩子：**日志窗的工具条**上有没有「下载…」按钮（阶段 167）。
+///
+/// 返回 `(按钮文字列表, 「下载…」在不在)`。
+pub fn log_toolbar_for_test(st: &Rc<PanelState>) -> (Vec<String>, bool) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return (Vec::new(), false) };
+    let mut labels = Vec::new();
+    let mut has_save = false;
+    let mut child = ui.log.search.parent().and_then(|p| p.parent());
+    // ⚠️ **搜索框的父容器就是工具条** ⇒ 从它往上找一层。
+    let _ = &mut child;
+    let bar = ui.log.search.parent();
+    if let Some(bar) = bar {
+        let mut c = bar.first_child();
+        while let Some(w) = c {
+            if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                if let Some(l) = b.label() {
+                    let t = l.to_string();
+                    if t == tr("下载…") {
+                        has_save = true;
+                    }
+                    labels.push(t);
+                }
+            }
+            c = w.next_sibling();
+        }
+    }
+    (labels, has_save)
+}
+
+/// 测试钩子：**「查看文件」窗**的正文区是不是铺满了（阶段 167）。
+///
+/// 返回 `(正文控件的高度, 窗口的高度)`。
+///
+/// ⚠️ **为什么要有**：用户 2026-11-25「查看容器里面的文件，现在只能显示1行」
+///   ⇒ 根因是 `ScrolledWindow` **没设 `vexpand`** ⇒ 正文只拿到 1 行高度。
+///   ⇒ 断言「正文高度 > 窗口高度的一半」才能钉住这个修复。
+pub fn file_view_window_size_for_test(st: &Rc<PanelState>) -> Option<(i32, i32)> {
+    let slot = st.docker_ui.borrow();
+    let ui = slot.as_ref()?;
+    let w = ui.file_view_window.borrow().clone()?;
+    let view = ui.file_view_text.borrow().clone()?;
+    Some((view.height(), w.height()))
+}
+
+/// 测试钩子：**打开「查看文件」窗**（阶段 167；给冒烟用）。
+pub fn file_view_show_for_test(st: &Rc<PanelState>, path: &str, content: &str) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    show_file_window(Some(st), path, content, Some(ui));
 }

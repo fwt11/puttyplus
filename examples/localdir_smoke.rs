@@ -26,9 +26,19 @@ fn main() {
 
     // 必须在任何 glib/gtk 读用户目录之前隔离配置，也不能让测试用的
     // PUTTYPLUS_LOCALDIR 抢在记忆前面。
+    //
+    // ⚠️ **还要清掉 PUTTYPLUS_SETTINGS_INI**（2026-11-25 修 CI 红灯）：
+    //   本冒烟靠 `XDG_CONFIG_HOME` 隔离（断言文件在 `$cfg/puttyplus/`），
+    //   而 **`PUTTYPLUS_SETTINGS_INI` 的优先级比 `XDG_CONFIG_HOME` 高**
+    //   （`settings::path()` 先看它）⇒ CI 里导出了
+    //   `PUTTYPLUS_SETTINGS_INI=$HOME/settings.ini` ⇒ 设置被写到**别处**
+    //   ⇒ 本冒烟读 `$cfg/puttyplus/settings.ini` 时文件**根本不存在**
+    //   ⇒ `expect("settings.ini 没生成")` 直接 panic（exit 134）。
+    //   ⇒ 自己把变量清掉：**隔离以本冒烟的 XDG 为准**，不靠 CI 怎么设环境。
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
         std::env::remove_var("PUTTYPLUS_LOCALDIR");
+        std::env::remove_var("PUTTYPLUS_SETTINGS_INI");
     }
 
     gtk::init().expect("gtk init");

@@ -615,10 +615,76 @@ pub const LOG_TAIL: usize = 200;
 ///    `2>&1`（那是 **docker 进程**的 fd2，不是 shell 的）。
 /// ⚠️ **容器名必须 `sh_quote`**（名字来自远端 ⇒ 远端可控 ⇒ 防注入）。
 pub fn logs_cmd(name: &str, tail: usize) -> String {
+    watchdog_cmd(&format!(
+        "docker logs -f --tail {tail} {n} 2>&1",
+        n = crate::backend::checksum::sh_quote(name),
+    ))
+}
+
+/// 给「长跑命令」套上**看门狗**（通道一关就把它杀掉）。
+///
+/// ## ⚠️ 看门狗**必须自己留一份 stdin**（2026-11-25 修的真 bug，用户报的）
+///
+/// POSIX 规定：「**非交互 shell** 里，异步列表（`cmd &`）的 stdin
+/// **在显式重定向之前**视为指向 `/dev/null`」⇒ 于是
+/// `( read -r _; kill $p ) &` 里的 `read` **立刻读到 EOF**
+/// ⇒ 看门狗**当场**把 `docker logs` 杀掉 ⇒ **一行日志都收不到**
+/// ⇒ 界面只能说「这个容器没有日志输出」。
+///
+/// ⚠️ **只有一部分 shell 会这样 ⇒ 本机测不出来**：
+/// - **zsh**（本机 Deepin 的默认 shell）**不**重定向后台任务的 stdin
+///   ⇒ 看门狗正常 ⇒ 本地一切正常；
+/// - **bash**（绝大多数 Linux 服务器的默认 shell，**实测 aly 的 root 就是
+///   bash**）与 **dash**（`/bin/sh` 的常见实现）**会**重定向 ⇒ 日志永远是空的。
+/// ⇒ **实测对照**（aly，同一条命令）：现状 **0 行** ／ 修好后 **200 行**。
+///
+/// ⚠️ **为什么不能只写 `<&0`**：dash 里后台子进程的 fd 0 **先**被换成
+///   `/dev/null`，**再**应用重定向 ⇒ `<&0` 复制到的**已经是 /dev/null**
+///   ⇒ 还是秒退（实测）⇒ 必须**提前**把通道的 stdin **存进另一个 fd**。
+///
+/// ⇒ 做法：`exec 3<&0`（在**父 shell** 里就把通道的 stdin 存进 fd 3）
+///   ⇒ 看门狗从 **fd 3** 读 ⇒ 不受「后台任务 stdin 被重定向」的规则影响
+///   ⇒ 通道一关（EOF）⇒ 看门狗才动手。
+///
+/// ⇒ 实测 **dash / bash / zsh / aly 的 bash** 四种都正常。
+pub fn watchdog_cmd(inner: &str) -> String {
     format!(
-        "( docker logs -f --tail {tail} {n} 2>&1 & p=$!; ( read -r _; kill $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; wait $w 2>/dev/null ) 2>/dev/null",
+        "( exec 3<&0; {inner} & p=$!; ( read -r _ <&3; kill $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; wait $w 2>/dev/null ) 2>/dev/null"
+    )
+}
+
+/// 日志**导出**用的行数上限（`docker logs --tail N`）。
+///
+/// ⚠️ **为什么有上限**：日志可能**很大**（几十 MB）⇒ 一口气拉回本地
+///   会把内存吃满 ⇒ 限一个**够用**的量（要更多再说）。
+pub const LOG_DUMP_TAIL: usize = 10000;
+
+/// 日志**导出**命令（`docker logs`，**不带 `-f`** ⇒ 取完就退）。
+///
+/// ⚠️ **这里不能套看门狗**：不带 `-f` 的 `docker logs` **自己会退出**
+///   ⇒ 用看门狗反而会**在它输出之前**就把它杀掉（就是上面那个坑）。
+pub fn logs_dump_cmd(name: &str, tail: usize) -> String {
+    format!(
+        "docker logs --tail {tail} {n} 2>&1",
         n = crate::backend::checksum::sh_quote(name),
     )
+}
+
+/// 取这个容器的日志（**一次性**，不跟随）⇒ 用来存成本地文件。
+pub async fn dump_logs(
+    session: &Handle<HostKeyHandler>,
+    name: &str,
+    tail: usize,
+) -> BackendResult<String> {
+    if !valid_name(name) {
+        return Err(BackendError(tr("容器名不合法").to_string()));
+    }
+    let (code, out) = run_cmd(session, &logs_dump_cmd(name, tail)).await?;
+    if code == 0 {
+        Ok(out)
+    } else {
+        Err(BackendError(op_error_msg(tr("读取日志"), &out)))
+    }
 }
 
 /// 开一条**日志流**通道（`docker logs -f`）。
@@ -998,10 +1064,10 @@ pub async fn save_image_to(
 /// ⚠️ **持续模式会带 ANSI 转义**（docker 的「表格重绘」：`\x1b[H` /
 ///   `\x1b[K` / `\x1b[J`）⇒ 客户端要**剥掉**（见 [`strip_ansi`]）。
 pub fn stats_stream_cmd(name: &str) -> String {
-    format!(
-        "( docker stats --format '{{{{.CPUPerc}}}}|{{{{.MemPerc}}}}|{{{{.NetIO}}}}|{{{{.BlockIO}}}}' {n} 2>&1 & p=$!; ( read -r _; kill $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; wait $w 2>/dev/null ) 2>/dev/null",
+    watchdog_cmd(&format!(
+        "docker stats --format '{{{{.CPUPerc}}}}|{{{{.MemPerc}}}}|{{{{.NetIO}}}}|{{{{.BlockIO}}}}' {n} 2>&1",
         n = crate::backend::checksum::sh_quote(name),
-    )
+    ))
 }
 
 /// 开一条**监控采样**通道（`docker stats` 持续模式）。
@@ -2931,6 +2997,89 @@ mod tests {
         assert!(c.contains("kill $w"), "没回收看门狗：{c}");
         // ⚠️ 杀掉后台任务时 shell 会打 "Terminated" ⇒ 会混进日志 ⇒ 丢掉。
         assert!(c.contains("2>/dev/null"), "shell 的杂音没丢掉：{c}");
+    }
+
+    /// ⚠️ **看门狗必须自己留一份 stdin**（2026-11-25 修的真 bug）。
+    ///
+    /// POSIX：「**非交互 shell** 里，异步列表的 stdin **在显式重定向之前**
+    /// 视为 /dev/null」⇒ `( read -r _; kill $p ) &` 里的 `read` **立刻读到
+    /// EOF** ⇒ 看门狗**当场**杀掉 `docker logs` ⇒ **一行日志都收不到**。
+    ///
+    /// ⚠️ **只有 bash / dash 会这样**（zsh 不会）⇒ 本机（zsh）测不出来
+    ///   ⇒ 用户的 Linux 服务器（bash）上日志永远是空的（实测 aly：现状
+    ///   0 行 / 修好后 200 行）。
+    #[test]
+    fn 看门狗必须自己留一份stdin() {
+        let c = logs_cmd("web", 200);
+        assert!(
+            c.contains("exec 3<&0"),
+            "看门狗没提前把通道的 stdin 存进 fd 3（bash 上会立刻杀掉 docker logs）：{c}"
+        );
+        assert!(
+            c.contains("read -r _ <&3"),
+            "看门狗没从 fd 3 读（读 fd 0 会被重定向成 /dev/null）：{c}"
+        );
+        // ⚠️ **两处**带看门狗的命令都要（持续采样那条同理）。
+        let c2 = stats_stream_cmd("web");
+        assert!(
+            c2.contains("exec 3<&0") && c2.contains("read -r _ <&3"),
+            "采样命令的看门狗没有自己留 stdin：{c2}"
+        );
+    }
+
+    /// ⚠️ **真跑一次 shell** 验看门狗不误杀（**这条能本地复现 bash 的坑**）。
+    ///
+    /// 做法：把一条「先等 1 秒、再打印一行、再等」的假命令套上看门狗，
+    /// **stdin 保持打开**（模拟 SSH 通道：我们从不发数据、也不发 EOF）⇒
+    /// 看门狗的 `read` **必须阻塞** ⇒ 那一行**应该能收到**。
+    ///
+    /// ⚠️ **假命令必须用 `{ …; }` 包起来**：`cmd1; cmd2 &` 里**只有最后
+    ///   一条**进后台 ⇒ 前面的 `printf` 在前台跑 ⇒ 就算看门狗误杀也照样
+    ///   收到输出 ⇒ **测不出问题**（踩过一次）。
+    #[test]
+    #[cfg(unix)]
+    fn 看门狗在posix_sh下不误杀() {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let cmd = watchdog_cmd("{ sleep 1; printf 'hello\\n'; sleep 5; }");
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("起 /bin/sh");
+        // ⚠️ **stdin 管道一直开着**（不写、也不关）⇒ 模拟 SSH 通道。
+        let _keep_open = child.stdin.take();
+        let mut stdout = child.stdout.take().expect("有 stdout");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let mut buf = [0u8; 128];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        s.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if s.contains("hello") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(s);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap_or_else(|_| String::from("<超时>"));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            got.contains("hello"),
+            "看门狗把命令提前杀了（输出没到手）：{got:?}｜命令={cmd}"
+        );
     }
 
     /// 回看行数可以调。
