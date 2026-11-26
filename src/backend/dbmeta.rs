@@ -3089,8 +3089,9 @@ pub fn build_ddl(
         .map(|c| quote_ident(proto, &c.name))
         .collect();
     if !pk.is_empty() {
-        parts.push(format!("  CONSTRAINT {} PRIMARY KEY ({})",
-            quote_ident(proto, &format!("{table}_pkey")),
+        parts.push(format!(
+            "  {}PRIMARY KEY ({})",
+            pk_constraint_prefix(proto, columns, table),
             pk.join(", ")
         ));
     }
@@ -3106,6 +3107,35 @@ pub fn build_ddl(
         quote_qualified(proto, schema, table),
         parts.join(",\n")
     )
+}
+
+/// 主键约束在 `CREATE TABLE` 里的**写法前缀**（`build_ddl` 用）。
+///
+/// ⚠️ **为什么不能按 `<表名>_pkey` 猜**（这是真 bug，2026-11-27 修）：
+///   服务器**已经给了真名** —— `ColumnDef.pk_constraint` 来自
+///   `meta_columns` 的 `pk_name` 子查询（问 `information_schema.
+///   table_constraints`）⇒ 但 `build_ddl` 以前**没用它**，自己按约定拼了
+///   一个 `<表名>_pkey`。
+///   - **MySQL**：主键约束**恒叫 `PRIMARY`**（`information_schema` 里也是
+///     这个名字）⇒ 拼出来的 `demo_users_pkey` 是个**假名字**：MySQL 接受
+///     `CONSTRAINT symbol PRIMARY KEY (...)` 但**忽略这个 symbol** ⇒ 语句能
+///     跑，可这段 DDL 跟真实结构**对不上**（拿它重建库，约束名就变了）。
+///     ⇒ MySQL 直接写 `PRIMARY KEY (...)`，不带 CONSTRAINT 子句。
+///   - **PG**：主键约束名**可以是用户改过的**（同文件里「改主键」那段
+///     注释自己写着「不保证是 `<表名>_pkey`」）⇒ 猜名字会拼错 ⇒ 写真名；
+///     真名拿不到（老数据）才退回按约定拼。
+fn pk_constraint_prefix(proto: DbProto, columns: &[ColumnDef], table: &str) -> String {
+    if proto == DbProto::MySql {
+        // ⚠️ MySQL 的主键**没有**独立的约束名（恒为 `PRIMARY`）⇒ 不写
+        //   CONSTRAINT 子句；写了那个名字也不起作用，只是白写。
+        return String::new();
+    }
+    let name = columns
+        .iter()
+        .find_map(|c| c.pk_constraint.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("{table}_pkey"));
+    format!("CONSTRAINT {} ", quote_ident(proto, &name))
 }
 
 /// 构造 INSERT（插入一行新记录）。
@@ -3368,6 +3398,44 @@ mod tests {
         let ddl = build_ddl(DbProto::MySql, "demo", "t", &cols, &[]);
         assert!(ddl.contains("CREATE TABLE `demo`.`t`"), "{ddl}");
         assert!(ddl.contains("`id` int"), "{ddl}");
+    }
+
+    /// ⚠️ **主键约束名要用服务器给的真名**（阶段 174 / 2026-11-27 修）。
+    ///
+    /// 以前 `build_ddl` 按约定拼 `<表名>_pkey` ⇒ PG 上用户改过约束名就拼错，
+    /// MySQL 上更是凭空造了个**不存在的**名字。
+    #[test]
+    fn ddl_uses_the_real_pk_constraint_name() {
+        let mut id = col("id", "int");
+        id.is_pk = true;
+        id.pk_constraint = Some("my_own_pk".into());
+        let ddl = build_ddl(DbProto::Postgres, "public", "demo_users", &[id], &[]);
+        assert!(
+            ddl.contains("CONSTRAINT \"my_own_pk\" PRIMARY KEY (\"id\")"),
+            "没用服务器给的真名：{ddl}"
+        );
+        assert!(
+            !ddl.contains("demo_users_pkey"),
+            "不该再按约定猜名字：{ddl}"
+        );
+    }
+
+    /// ⚠️ **MySQL 的主键恒叫 `PRIMARY`** ⇒ 不带 CONSTRAINT 子句。
+    #[test]
+    fn ddl_mysql_primary_has_no_constraint_clause() {
+        let mut id = col("id", "int");
+        id.is_pk = true;
+        id.pk_constraint = Some("PRIMARY".into());
+        let ddl = build_ddl(DbProto::MySql, "demo", "demo_users", &[id], &[]);
+        assert!(ddl.contains("PRIMARY KEY (`id`)"), "{ddl}");
+        assert!(
+            !ddl.contains("CONSTRAINT"),
+            "MySQL 的主键不该带 CONSTRAINT 子句：{ddl}"
+        );
+        assert!(
+            !ddl.contains("demo_users_pkey"),
+            "MySQL 上不该出现按约定拼的假名字：{ddl}"
+        );
     }
 
     #[test]
