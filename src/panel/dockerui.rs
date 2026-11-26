@@ -846,7 +846,9 @@ fn apply_column_density(ui: &DockerUi, density: ColumnDensity) {
 }
 
 /// 自动刷新的间隔（秒）——跟 dbx 一致。
-const AUTO_REFRESH_SECS: u32 = 7;
+/// ⚠️ **公开**（阶段 176 / UI-14）：性能回归要**盯住**这个间隔
+///   （太密就是忙轮询 ⇒ 主线程白烧）⇒ 写死就盯不住。
+pub const AUTO_REFRESH_SECS: u32 = 7;
 
 /// 容器页的界面状态。
 pub struct DockerUi {

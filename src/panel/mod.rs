@@ -1238,6 +1238,13 @@ pub fn xfer_running_count(st: &Rc<PanelState>) -> usize {
 /// ⚠️ **相位按时间算**（见 `pulse::phase`）⇒ 这个定时器只负责"持续重绘"，
 ///    多个面板各起各的也**天然同步**（不会互相打架）。
 ///
+/// **传输动画的帧间隔**（毫秒，阶段 176 / UI-14）。
+///
+/// ⚠️ **为什么提成常量**：UI-14 的性能回归要**钉住**它（不限流 ⇒ 主线程
+///   一直在忙 ⇒ 项目踩过「整表重画把主线程拖死」）⇒ 写死在代码里就没法
+///   被测试盯住 ⇒ 提成常量，两边共用一个值。
+pub const XFER_ANIM_MS: u64 = 60;
+
 /// ⚠️ 定时器闭包只抓**弱引用**（面板没了就停）——抓强引用就是引用环。
 pub fn sync_xfer_anim(st: &Rc<PanelState>) {
     let busy = xfer_running(st).total() > 0;
@@ -1249,7 +1256,7 @@ pub fn sync_xfer_anim(st: &Rc<PanelState>) {
             return; // 已经在跑了
         }
         let weak = Rc::downgrade(st);
-        let id = glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+        let id = glib::timeout_add_local(std::time::Duration::from_millis(XFER_ANIM_MS), move || {
             let Some(st) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
