@@ -3,6 +3,8 @@
 use gtk::prelude::*;
 use crate::i18n::tr;
 use crate::trf;
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// 危险操作词表：按钮文案里有这些词 ⇒ 标成 destructive（红色）。
 ///
@@ -864,6 +866,155 @@ fn ask_one_by_one<F: FnOnce(Option<ConflictChoice>) + 'static>(
         ask_one_by_one(p2.clone(), items.clone(), idx + 1, out2.clone(), done2.clone());
     });
 }
+
+/// **表单窗口的高度策略**（阶段 172 / UI-04，治 P1-1「上密下空」）。
+///
+/// ⚠️ **老做法的问题**：连接管理器让**四个页签共用一个由最高页决定高度的
+///   滚动容器** ⇒ 切到「认证」「转发」这种短页时，窗口下方一大片空白
+///   （UI 审核 P1-1，已确认：「表单窗口上密下空」）。
+///
+/// ⚠️ **新做法**：
+/// 1. **高度跟着当前页走**（当前页自然高度 + 余量）；
+/// 2. **涨得急、缩得缓**：内容装不下就**立刻**长高（绝不能切掉字段）；
+///    空白超过内容的一半才收（防抖 ⇒ 连点页签不会「抖一下」）;
+/// 3. **用户手动改过尺寸就不再自动调**（`manual` 标志）—— 程序替用户
+///    决定尺寸是很讨厌的（UI 审核验收：「手动改尺寸后切页，尺寸不被覆盖」）;
+/// 4. **限高按显示器算**，不写死。
+pub struct FormFit {
+    win: gtk::Window,
+    nb: gtk::Notebook,
+    /// 内容区的最大高度（按显示器算）。
+    max_h: i32,
+    /// 用户手动改过尺寸 ⇒ 不再自动调。
+    manual: std::cell::Cell<bool>,
+    /// 已排队的重排（连点页签时只做一次）。
+    pending: std::cell::Cell<bool>,
+    /// 我们上次设给窗口的高度（用来认出「用户自己改了」）。
+    applied: std::cell::Cell<i32>,
+}
+
+/// 内容高度**比视口刚好大一点**时的余量（宁可多留一点空白，也不要多一根
+/// 空滚动条 —— GTK 取整会在"刚好等于"时仍挂出滚动条）。
+pub const FORM_FIT_SLACK: i32 = 64;
+
+/// 收高时的门槛：空白比这还多才收（比值用整数算，避免浮点抖动）。
+const FORM_FIT_SHRINK_NUM: i32 = 2;
+const FORM_FIT_SHRINK_DEN: i32 = 3;
+
+impl FormFit {
+    pub fn new(win: gtk::Window, nb: gtk::Notebook, max_h: i32) -> Rc<Self> {
+        Rc::new(Self {
+            win,
+            nb,
+            max_h,
+            manual: std::cell::Cell::new(false),
+            pending: std::cell::Cell::new(false),
+            applied: std::cell::Cell::new(0),
+        })
+    }
+
+    /// 第一次摆窗口（此时还没显示 ⇒ 量不到真实高度 ⇒ 排到空闲时再做）。
+    pub fn apply_initial(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(f) = weak.upgrade() {
+                f.fit();
+            }
+        });
+    }
+
+    /// 切页后重排（**排到空闲时** ⇒ 连点页签不会反复改窗口大小）。
+    pub fn schedule_for(self: &Rc<Self>) {
+        if self.pending.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(f) = weak.upgrade() else { return };
+            f.pending.set(false);
+            f.fit();
+        });
+    }
+
+    /// 当前页的**内容**（不含页签条）有多高。
+    ///
+    /// ⚠️ **量当前页的滚动容器里的内容**，不是量页签容器：
+    ///   GTK4 的 `GtkNotebook` 量的是**最高的那一页**（不是当前可见页）
+    ///   ⇒ 不管切到哪页，量页签容器都一样 ⇒ 高度永远按最高页走。
+    fn current_content_height(&self) -> i32 {
+        let cur = self.nb.current_page().unwrap_or(0);
+        let Some(page) = self.nb.nth_page(Some(cur)) else {
+            return 0;
+        };
+        // 页签容器里的页 = 滚动容器 ⇒ 它的内容才是这一页的正文。
+        let content = page
+            .downcast_ref::<gtk::ScrolledWindow>()
+            .and_then(|s| s.child())
+            .unwrap_or(page.clone());
+        // ⚠️ **按实际宽度量**：页面在滚动区里的宽度 = 视口宽度 ⇒
+        //   不带宽度量出来的自然高度跟实际布局对不上。
+        let width = page.width().max(1);
+        content.measure(gtk::Orientation::Vertical, width).1
+    }
+
+    /// 页签条有多高（页签容器量到的是「页签条 + 页内容」）。
+    fn tabbar_height(&self) -> i32 {
+        let (_, nb_nat, _, _) = self.nb.measure(gtk::Orientation::Vertical, -1);
+        nb_nat.saturating_sub(self.current_content_height()).max(0)
+    }
+
+    /// 真收放。
+    fn fit(&self) {
+        if self.manual.get() {
+            return;
+        }
+        // ⚠️ **认出「用户自己改了窗口大小」**：窗口实际高度跟我们设的不一样
+        //   ⇒ 用户拖过 ⇒ 本次打开不再自动调（别跟用户抢方向盘）。
+        let applied = self.applied.get();
+        if applied > 0 {
+            let actual = self.win.height();
+            if (actual - applied).abs() > 8 {
+                self.manual.set(true);
+                return;
+            }
+        }
+        // ① 当前页内容 + 页签条 + 余量 = 想要的**视口**高度
+        let viewport = (self.current_content_height() + self.tabbar_height() + FORM_FIT_SLACK)
+            .clamp(120, self.max_h);
+        // ② 窗口比视口多出来的那截（动作区 + 勾选框 + 边距）
+        let chrome = (self.win.height() - self.nb.height()).max(0);
+        let want = viewport + chrome;
+        let cur = if applied > 0 { applied } else { self.win.height() };
+        // 涨：立刻涨（字段被切掉比窗口矮更糟）。
+        // 缩：空白超过内容的三分之一才收（防抖，也避免来回抖）。
+        let shrink = cur > want * FORM_FIT_SHRINK_NUM / FORM_FIT_SHRINK_DEN;
+        if want > cur || shrink {
+            self.win.set_default_height(want);
+            self.applied.set(want);
+        }
+    }
+}
+
+/// 给一页的内容套上滚动容器（阶段 172 / UI-04）。
+///
+/// ⚠️ **为什么每页都要自己滚**：GTK4 的 `GtkNotebook` 把**所有页**放进
+///   一个盒子 ⇒ 它的**最小高度 = 最高那页的高度** ⇒ 外面再套滚动容器也
+///   缩不到比最高页更矮 ⇒ 切到短页时窗口还是那么高（UI 审核 P1-1）。
+///   ⇒ 每页自带滚动容器后，页签容器的最小高度只剩页签条那么高
+///   ⇒ 窗口高度就能**跟着当前页**走。
+///
+/// ⚠️ **限高给到滚动容器上**：内容比视口高时它自己滚，不把窗口撑破。
+pub fn scrolled_page(content: &impl IsA<gtk::Widget>, max_h: i32) -> gtk::ScrolledWindow {
+    let sc = gtk::ScrolledWindow::new();
+    sc.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    sc.set_vexpand(true);
+    sc.set_hexpand(true);
+    sc.set_max_content_height(max_h);
+    sc.set_propagate_natural_height(false);
+    sc.set_child(Some(content.as_ref()));
+    sc
+}
+
 
 #[cfg(test)]
 mod tests {

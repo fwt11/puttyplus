@@ -184,10 +184,12 @@ fn main() {
     // 内容放得下 ⇒ 不用滚动条（判据是**调整量**，不是滚动条控件的 visible：
     // GTK4 里那根条子一直"存在"，只是没被画出来）
     {
-        let sw = all_of::<gtk::ScrolledWindow>(&dlg)
-            .into_iter()
-            .next()
-            .expect("对话框里要有滚动容器");
+        let nb = first_of::<gtk::Notebook>(&dlg).expect("页签容器");
+        // ⚠️ 阶段 172：滚动容器变成**每页一个** ⇒ 要看**当前页**那个。
+        let sw = nb
+            .nth_page(Some(nb.current_page().unwrap_or(0)))
+            .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
+            .expect("当前页应当是滚动容器");
         let adj = sw.vadjustment();
         let (upper, page) = (adj.upper(), adj.page_size());
         check!(
@@ -230,6 +232,108 @@ fn main() {
         !all_of::<gtk::ScrolledWindow>(&dlg).is_empty(),
         "没找到 ScrolledWindow"
     );
+
+    // ---------- 1c. 页签切换：高度跟着**当前页**走（阶段 172 / UI-04）----------
+    //
+    // ⚠️ **老行为**：四个页签共用一个由**最高页**决定高度的滚动容器
+    //   ⇒ 切到短页时窗口下方一大片空白（UI 审核 P1-1）。
+    // ⚠️ **新行为**：每页各自套滚动容器 ＋ 高度跟着当前页走。
+    {
+        let nb = first_of::<gtk::Notebook>(&dlg).expect("页签容器");
+        let n_pages = nb.n_pages();
+        let titles: Vec<String> = (0..n_pages)
+            .filter_map(|i| nb.nth_page(Some(i)))
+            .filter_map(|p| nb.tab_label_text(&p))
+            .map(|t| t.to_string())
+            .collect();
+
+        // 每页的正文自然高度（滚动容器里的那个内容盒）
+        let page_scroll: Vec<gtk::ScrolledWindow> = (0..n_pages)
+            .filter_map(|i| nb.nth_page(Some(i)))
+            .filter_map(|p| p.downcast::<gtk::ScrolledWindow>().ok())
+            .collect();
+        let natural: Vec<i32> = page_scroll
+            .iter()
+            .map(|s| {
+                s.child()
+                    .map(|c| c.measure(gtk::Orientation::Vertical, s.width().max(1)).1)
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        // 逐页切过去，量**窗口**的实际高度
+        let mut heights = Vec::new();
+        for i in 0..n_pages {
+            nb.set_current_page(Some(i));
+            pump(600);
+            heights.push(dlg.height());
+        }
+        println!("[实测] 各页正文自然高 = {natural:?}");
+        println!("[实测] 各页窗口高 = {heights:?}（页签 {titles:?}）");
+
+        // ① **高度确实因页而异**（不然还是「按最高页撑满」的老行为）
+        let max_h = heights.iter().copied().max().unwrap_or(0);
+        let min_h = heights.iter().copied().min().unwrap_or(0);
+        check!(
+            "不同页签的窗口高度不一样（不再按最高页撑满）",
+            max_h - min_h >= 40,
+            format!("最高 {max_h}px / 最低 {min_h}px，差 {}px", max_h - min_h)
+        );
+
+        // ② 每页的窗口高度都要**贴着它自己的内容**：
+        //    窗口高 ≈ 正文高 + 页签条 + 余量 64 + 动作区等外壳
+        //    ⇒ 空白不该超过内容太多（审核验收：「不再出现超过内容高度
+        //    两倍的无意义空白」）。
+        //
+        //    ⚠️ **矮屏上正文比可用高度还高** ⇒ 那时窗口被限高、正文滚动
+        //    （这才是对的）⇒ 拿「限高后的正文」来比。
+        let screen_h = gtk::gdk::Display::default()
+            .and_then(|d| {
+                let mons = d.monitors();
+                let first = mons.item(0)?;
+                first.downcast::<gtk::gdk::Monitor>().ok()
+            })
+            .map(|m| m.geometry().height())
+            .unwrap_or(1080);
+        let max_h = (screen_h as i32 - 320).clamp(405, 760);
+        for i in 0..n_pages as usize {
+            let eff = natural[i].min(max_h);
+            let blank = heights[i] - eff;
+            check!(
+                &format!("第 {i} 页（{}）不留大片空白", titles[i]),
+                blank <= eff + 120,
+                format!("窗口 {}px − 正文 {}px = 空白 {blank}px", heights[i], eff)
+            );
+            // 反过来也不能太贴：外壳（动作区 + 页签条 + 余量）得留够。
+            check!(
+                &format!("第 {i} 页（{}）窗口装得下外壳", titles[i]),
+                heights[i] >= eff + 40,
+                format!("窗口 {}px − 正文 {eff}px = {blank}px，外壳被挤没了", heights[i])
+            );
+        }
+
+        // ③ 任何一页下，底部动作按钮都得在窗口里（不被切掉）
+        for i in 0..n_pages {
+            nb.set_current_page(Some(i));
+            pump(400);
+            let area = find_action_area(&dlg).expect("对话框要有动作区");
+            let bottom = area.allocation().y() + area.allocation().height();
+            check!(
+                &format!("第 {i} 页底部动作区在窗口内"),
+                bottom <= dlg.height() + 2,
+                format!("动作区底部 {bottom} > 窗口高 {}", dlg.height())
+            );
+        }
+
+        // ④ 切回第一页，高度要回到第一次的值（不抖、不漂）
+        nb.set_current_page(Some(0));
+        pump(600);
+        check!(
+            "切回第一页，高度回到原值",
+            (dlg.height() - heights[0]).abs() <= 8,
+            format!("第一次 {}px，现在 {}px", heights[0], dlg.height())
+        );
+    }
 
     // ---------- 1b. 勾选决定要不要落盘（动作收敛后的行为）----------
     //

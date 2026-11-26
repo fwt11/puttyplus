@@ -329,15 +329,44 @@ fn build_window() -> gtk::Window {
     nb.set_vexpand(true);
     nb.set_hexpand(true);
     nb.add_css_class("pp-settings-pages");
+    // ⚠️ **限高按「显示器可用高度」算**（阶段 172 / UI-04）。
+    //   ⚠️ GTK4 的 `gdk::Monitor` **没有 workarea** ⇒ 保守留 320px 安全区。
+    let screen_h = gtk::gdk::Display::default()
+        .and_then(|d| {
+            let mons = d.monitors();
+            let first = mons.item(0)?;
+            first.downcast::<gtk::gdk::Monitor>().ok()
+        })
+        .map(|m| m.geometry().height())
+        .unwrap_or(1080);
+    let max_h = (screen_h as i32 - 320).clamp(405, 760);
     for p in Page::all() {
         let body = build_page(p);
         let lbl = gtk::Label::new(Some(p.title()));
         // ⚠️ **页签里的汉字会被压成「…」**：一个汉字占两列，宽度要按
         // 显示列算（见 `panel::subtabs::display_width`），而且要留一点余量。
         lbl.set_width_chars(crate::panel::subtabs::display_width(p.title()) as i32 + 1);
-        nb.append_page(&body, Some(&lbl));
+        // ⚠️ **每页各自套滚动容器**（阶段 172 / UI-04）：
+        //   页签容器的最小高度 = 最高那页 ⇒ 外面套滚动容器也缩不下去
+        //   ⇒ 切到「外观」这种短页时窗口下方一大片空白（UI 审核 P1-1）。
+        nb.append_page(
+            &crate::panel::dialogs::scrolled_page(&body, max_h),
+            Some(&lbl),
+        );
     }
     win.set_child(Some(&nb));
+
+    // ⚠️ **窗口高度跟着当前页走**（阶段 172 / UI-04）：
+    //   「外观」页只有几项设置，不该占着 640px 的窗口（审核 P1-1）。
+    //   ⇒ 按当前页的内容收放；用户手动改过尺寸就不抢方向盘。
+    let fit = crate::panel::dialogs::FormFit::new(win.clone(), nb.clone(), max_h);
+    fit.apply_initial();
+    {
+        let fit = std::rc::Rc::clone(&fit);
+        nb.connect_switch_page(move |_, _page, _| {
+            fit.schedule_for();
+        });
+    }
     win
 }
 

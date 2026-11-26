@@ -1839,10 +1839,38 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
     nb.set_vexpand(true);
     // 「转发」页（阶段 71）：结构化表 + 原始规则折叠区
     let fwd = fwd_page(init);
-    nb.append_page(&root, Some(&gtk::Label::new(Some(tr("常规")))));
-    nb.append_page(&auth.root, Some(&gtk::Label::new(Some(tr("认证")))));
-    nb.append_page(&fwd.root, Some(&gtk::Label::new(Some(tr("转发")))));
-    nb.append_page(&sess_page, Some(&gtk::Label::new(Some(tr("会话")))));
+    // ⚠️ **限高按「显示器可用高度」算**（阶段 91：屏幕够高就一次显示全，
+    //   不放滚动条；矮屏才退回滚动）。
+    //   ⚠️ GTK4 的 `gdk::Monitor` **没有 workarea**（那是 GTK3/X11 的概念）
+    //   ⇒ 拿不到任务栏占掉多少 ⇒ 用一个保守的安全区（320px）兜底。
+    let screen_h = gtk::gdk::Display::default()
+        .and_then(|d| {
+            let mons = d.monitors();
+            let first = mons.item(0)?;
+            first.downcast::<gtk::gdk::Monitor>().ok()
+        })
+        .map(|m| m.geometry().height())
+        .unwrap_or(1080);
+    let max_h = (screen_h as i32 - 320).clamp(405, 760);
+    // ⚠️ **每页各自套滚动容器**（阶段 172 / UI-04）—— 原因见下面的
+    //   「版式」注释：页签容器的最小高度 = 最高那页 ⇒ 外面套滚动容器
+    //   也缩不下去 ⇒ 短页就会留一大片空白。
+    nb.append_page(
+        &crate::panel::dialogs::scrolled_page(&root, max_h),
+        Some(&gtk::Label::new(Some(tr("常规")))),
+    );
+    nb.append_page(
+        &crate::panel::dialogs::scrolled_page(&auth.root, max_h),
+        Some(&gtk::Label::new(Some(tr("认证")))),
+    );
+    nb.append_page(
+        &crate::panel::dialogs::scrolled_page(&fwd.root, max_h),
+        Some(&gtk::Label::new(Some(tr("转发")))),
+    );
+    nb.append_page(
+        &crate::panel::dialogs::scrolled_page(&sess_page, max_h),
+        Some(&gtk::Label::new(Some(tr("会话")))),
+    );
 
     // 显隐：串口隐藏端口/转发，显示「设备路径 + 串口参数」；
     // 非 SSH 时整页「认证」置灰（认证方式/私钥只对 SSH 有意义）
@@ -1878,44 +1906,39 @@ fn entry_edit_dialog<F: FnOnce(Option<(EntryDraft, bool, bool)>) + 'static>(
         });
     }
 
-    // ---- 版式：长表单套滚动容器 + 限高（阶段 73b，审计 P1-11）----
+    // ---- 版式：**每页各自套滚动容器** + 限高（阶段 73b → 阶段 172）----
     //
     // 以前四个页签堆起来自然高度 810px，1366×768 的笔记本上**底部按钮区
-    // 直接出屏**。现在把页签放进滚动容器并限高：内容再长也只占这么多，
-    // 多出来的部分滚动看。
-    let sw = gtk::ScrolledWindow::new();
-    sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    // ⚠️ **限高按屏幕高度自适应**（阶段 91，用户 2026-11-01 报
-    // 「这个对话框可以长一点，把内容显示全，不要用滚动条」）：
-    // 以前固定 405px ⇒「认证」页最后那段说明（凭据库状态）被切掉半截，
-    // 而且**多出来一截滚动条**。现在：屏幕够高就一次显示全（不放滚动条），
-    // 屏幕矮的笔记本才退回滚动。
-    let screen_h = gtk::gdk::Display::default()
-        .and_then(|d| {
-            let mons = d.monitors();
-            let first = mons.item(0)?;
-            first.downcast::<gtk::gdk::Monitor>().ok()
-        })
-        .map(|m| m.geometry().height())
-        .unwrap_or(1080);
-    let max_h = (screen_h as i32 - 320).clamp(405, 640);
-    sw.set_max_content_height(max_h);
-    sw.set_propagate_natural_height(true);
-    // ⚠️ **最小高度给"最高页签的自然高度 + 余量"**（阶段 91，用户
-    // 2026-11-01 报「这个对话框可以长一点，把内容显示全不要用滚动条」）：
-    //   · 以前固定限高 405px ⇒「认证」页最后那段说明（凭据库状态）被切掉
-    //     半截，还多出一截滚动条；
-    //   · **只给自然高度也不行**：内容**刚好等于**视口时 GTK 会因为取整
-    //     仍挂出一根空滚动条 ⇒ 用户看到"明明显示全了却还有滚动条"；
-    //   · **构建期量到的自然高度偏小**（字体是加载完才量的，实测差 20px
-    //     左右）⇒ 余量给 64px，宁可多留一点空白，也不要多一根滚动条。
-    let (_, tallest, _, _) = nb.measure(gtk::Orientation::Vertical, -1);
-    sw.set_min_content_height((tallest + 64).min(max_h));
-    sw.set_vexpand(true);
-    sw.set_child(Some(&nb));
-
+    // 直接出屏** ⇒ 外面套一个滚动容器限高。
+    //
+    // ⚠️ **阶段 172（UI-04）把「一个滚动容器包整个页签容器」改成
+    //   「每页各自套滚动容器」** —— 原因是一个**硬约束**：
+    //
+    //   GTK4 的 `GtkNotebook` 会把**所有页**都放进一个盒子 ⇒
+    //   **它的最小高度 = 最高那一页的高度**（实测：会话页 549px ⇒
+    //   页签容器最小 567px）⇒ 外面那个滚动容器**永远缩不到比最高页更矮**
+    //   ⇒ 切到「常规」这种短页时，窗口还是那么高（UI 审核 P1-1「上密下空」）。
+    //
+    //   ⇒ 改成**每页一个滚动容器**后，页签容器的最小高度只有 85px
+    //   （实测）⇒ 窗口高度就能**跟着当前页**走（见 [`FormFit`]）。
+    //
+    //   附带好处：每页**各自滚**，切页不会把上一页的滚动位置带过去。
+    //
+    // ⚠️ **限高 `max_h` 在上面算好了**（装页签之前就要用）。
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    outer.append(&sw);
+    outer.append(&nb);
+
+    // ⚠️ **高度跟着当前页走**（阶段 172 / UI-04）。
+    //   初次打开按**当前页**决定高度；切页时重新收放（涨得急、缩得缓）；
+    //   用户手动改过尺寸 ⇒ 本次打开不再自动调。
+    let fit = crate::panel::dialogs::FormFit::new(dlg.upcast_ref::<gtk::Window>().clone(), nb.clone(), max_h);
+    fit.apply_initial();
+    {
+        let fit = Rc::clone(&fit);
+        nb.connect_switch_page(move |_, _page, _| {
+            fit.schedule_for();
+        });
+    }
 
     // 「保存到连接列表」勾选：放在动作区正上方 ⇒ 一直看得见，
     // 也就不用四个按钮去表达「保存 / 仅连接 / 保存并连接」三种组合。

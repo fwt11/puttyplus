@@ -119,6 +119,49 @@ fn main() {
         format!("当前页 {:?}", nb.current_page())
     );
 
+    // ---------- 3b. 窗口高度跟着**当前页**走（阶段 172 / UI-04）----------
+    //
+    // ⚠️ **老行为**：六个页签共用一个 640px 高的窗口 ⇒ 「外观」页只有
+    //   几项设置，下方一大片空白（UI 审核 P1-1「上密下空」）。
+    {
+        let win = puttyplus::windows::tool_window(ToolKind::Settings)
+            .expect("首选项窗口应当开着");
+        // 每页正文的自然高度
+        let natural: Vec<i32> = (0..nb.n_pages())
+            .filter_map(|i| nb.nth_page(Some(i)))
+            .filter_map(|p| p.downcast::<gtk::ScrolledWindow>().ok())
+            .map(|s| {
+                s.child()
+                    .map(|c| c.measure(gtk::Orientation::Vertical, s.width().max(1)).1)
+                    .unwrap_or(0)
+            })
+            .collect();
+        let mut heights = Vec::new();
+        for i in 0..nb.n_pages() {
+            nb.set_current_page(Some(i));
+            pump(500);
+            heights.push(win.height());
+        }
+        println!("[实测] 首选项各页正文自然高 = {natural:?}");
+        println!("[实测] 首选项各页窗口高 = {heights:?}");
+        let max_h = heights.iter().copied().max().unwrap_or(0);
+        let min_h = heights.iter().copied().min().unwrap_or(0);
+        check!(
+            "不同页签的窗口高度不一样（不再按最高页撑满）",
+            max_h - min_h >= 40,
+            format!("最高 {max_h}px / 最低 {min_h}px")
+        );
+        for i in 0..nb.n_pages() as usize {
+            let eff = natural[i].min(760);
+            let blank = heights[i] - eff;
+            check!(
+                &format!("第 {i} 页不留大片空白"),
+                blank <= eff + 120,
+                format!("窗口 {}px − 正文 {eff}px = 空白 {blank}px", heights[i])
+            );
+        }
+    }
+
     // ---------- 4. 同类只开一个 ----------
     settingsui::open(Page::Appearance);
     pump(200);
