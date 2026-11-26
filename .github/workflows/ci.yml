@@ -227,7 +227,7 @@ jobs:
             exit 1
           }
 
-      - name: 编译全部 example（145 个冒烟都得能编）
+      - name: 编译全部 example（158 个冒烟都得能编）
         # ⚠️ **为什么单独一步**：单测（`cargo test --lib`）与 `cargo build
         #    --release` **都不编 example** ⇒ 改了公开签名（例如
         #    `panel::on_row_activated` 多了个 `islink`）而漏改某个 example
@@ -237,10 +237,20 @@ jobs:
         #    10 轮**（每次都挂在「GUI 冒烟」这步）才被人看见。
         #    ⇒ 这里把**所有** example 编译一遍（**不只**下面 GUI 冒烟跑的那
         #    5 个）⇒ 签名漂移立刻红，不用等人肉翻日志。
-        #    ⚠️ 用 **check** 而不是 build：119 个 example 各自的 release
+        #    ⚠️ 用 **check** 而不是 build：158 个 example 各自的 release
         #    二进制要链接一遍，慢得没必要 ⇒ 这里只验「能不能编过」。
-        #    （GUI 冒烟那步自己会 release 编译它跑的那 5 个。）
+        #    （GUI 冒烟那步自己会 release 编译它跑的那几个。）
+        #    ⚠️ **check 不产任何二进制**（只做类型检查）⇒ 不会堆积磁盘。
         run: cargo check --locked --examples
+
+      - name: 构建产物卫生检查（防止 example 产物再次堆积）
+        # ⚠️ **为什么要有这一步**（2026-11-26 实测）：裸 `cargo test` 会**编译
+        #    全部 example** ⇒ 本项目 158 个 example，每个都是独立可执行文件
+        #    ⇒ 一轮就是几十 G ⇒ 当时把磁盘写到 99%（只剩 9.5G）差点构建失败。
+        #    ⇒ 本仓库无 `tests/` 目录、无自定义 `[[test]]` 目标 ⇒ 一律 `--lib`。
+        #    ⇒ 这里静态扫**脚本与工作流**（不扫 markdown，AGENTS.md 里满是说明
+        #      文字，扫了全是误报）⇒ 谁再写裸 `cargo test`，CI 立刻红。
+        run: bash tools/disk_hygiene_check.sh --quiet
 
       - name: GUI 冒烟（example 跑在主线程）
         # ⚠️ GTK 的断言只能在这儿测：example 是独立进程 ⇒ gtk::init() 在

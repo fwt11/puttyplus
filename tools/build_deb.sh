@@ -58,8 +58,12 @@ if [ "$do_clean" = 1 ]; then
 fi
 
 if [ "$run_tests" = 1 ]; then
-    say "cargo test（全部单元测试）"
-    cargo test --locked
+    # ⚠️⚠️ **必须带 `--lib`**（2026-11-26 实测）：裸 `cargo test` 会**编译全部
+    # example** ⇒ 158 个 × 每个 293MB ⇒ `target/debug/examples` 堆到 40G。
+    # 本仓库无 `tests/` 目录、无自定义 `[[test]]` 目标 ⇒ `--lib` 就是全量，
+    # 一个测试都不漏。详见 AGENTS.md「构建 / 测试」一节。
+    say "cargo test --lib（全部单元测试）"
+    cargo test --lib --locked
 fi
 
 say "cargo build --release --locked"
@@ -92,3 +96,10 @@ echo "--- 包信息 ---"
 dpkg-deb -I "$deb" | sed -n '1,20p'
 echo "--- 安装 ---"
 echo "  sudo dpkg -i $(basename "$deb")"
+
+# ⚠️ 打包是"阶段性"动作 ⇒ 顺手回收一次构建产物（2026-11-26 磁盘纪律）。
+#    打包过程中 `cargo build --release` 会编出 release 侧的 example 产物
+#    （CI 跑冒烟时编的）⇒ 不清的话会一轮轮堆起来。
+#    clean_build.sh 不碰 target/release/puttyplus 与 release/ ⇒ 交付物安全。
+say "回收构建产物（tools/clean_build.sh）"
+bash tools/clean_build.sh || echo "（清理失败，不影响打包结果）"

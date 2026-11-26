@@ -15,6 +15,50 @@
 > ⚠️ **下面的第二节及以后是 2026-10-27 那轮的历史记录**（阶段 19/20 的收尾），
 > 留着是为了别把当时的坑忘了；**当前状态看第一节**。
 
+## 〇之二之一五十七、最新进展（2026-11-26：项目占了 90G —— 根因是**裸 `cargo test`**，阶段 171）
+
+- **用户这轮一句**：「**我们的项目占了很大的空间，为什么**」⇒ 查下来 **90G**，
+  磁盘 `/home` 只剩 **9.5G（99%）** ⇒ **再编一次 release 就会写满**。
+- **① ⚠ 结论先行**：90G 里 **99.98% 是构建产物**，真源码只有 **20MB**
+  （`src` 5.1M + `docs` 3.5M + `examples` 1.9M + `tools` 1.5M + `debian` 7.3M）。
+  | 目录 | 占用 | 是什么 |
+  |---|---|---|
+  | `target/` | **70G** | 编译产物 |
+  | `.qoder/worktrees/` | **20G** | 5 个 agent worktree（各带一整份 `target/`）⇒ **有未提交改动，本轮不动** |
+  | `.git/` | 66M | 版本库 |
+  | `release/` | 11M | 交付产物 |
+  | **真源码** | **~20M** | — |
+- **② ⭐⭐⭐ 真根因（本轮最重要的发现）**：**裸 `cargo test` 会编译全部 example**
+  ⇒ 本项目 **158 个 example** 每个都是**独立可执行文件** ⇒ 每个 ~293MB
+  ⇒ **一轮就是 46G**。
+  ⇒ **实证**（`/tmp` 里造了个最小 crate 实测）：
+  `cargo test` ⇒ 产出 `examples/foo` + `examples/foo-<hash>`；
+  **`cargo check --examples` 一个二进制都不产**（只做类型检查，19 秒）。
+  ⇒ 本仓库**曾有裸 `cargo test`**（AGENTS.md 的日常命令 + `tools/build_deb.sh`）
+  ⇒ 每天几轮 ⇒ `target/debug/examples` 堆到 **40G**。
+  ⇒ ✅ 已全部改成 `cargo test --lib`（**本仓库无 `tests/` 目录、无自定义
+  `[[test]]` 目标 ⇒ `--lib` 就是全量，一个测试都不漏**）。
+- **③ 产物瘦身**（`Cargo.toml`）：`[profile.dev] debug = 1`（行号表）
+  + `[profile.dev.package."*"] debug = 0`（第三方依赖不带调试信息）
+  ⇒ **实测 293M → 113M（降 61%）**；⚠ 代价：第三方库内部崩溃时栈里只有
+  符号名、没有行号（极少见）。
+- **④ 新增两个脚本**：
+  - **`tools/clean_build.sh`** —— 回收构建产物。
+    `--keep-latest`（保留每个 example 最新一份，还能秒跑）/
+    默认（删掉 `target/*/examples`）/ `--all`（连 incremental 与遗留
+    `target/cargo-home` 一起清）/ `--dry-run`。
+    ⚠ **不碰** `target/release/puttyplus` / `release/` / `target/debug/deps`
+      / `target/debug/build` / `.git` / `.qoder`。
+  - **`tools/disk_hygiene_check.sh`** —— **防复发守卫**：静态扫脚本与 CI 工作流，
+    抓到裸 `cargo test` 就报错（**不扫 markdown**，AGENTS.md 里满是说明文字）。
+    ⇒ 已挂进 `.github/workflows/ci.yml`（`cargo check --examples` 之后那一步）。
+- **⑤ 实测收益**：清理前 `target/` **70G** → 清理后 **11.7G**，**释放 58.3G**；
+  磁盘可用 **9.5G → 73G（99% → 86%）**。
+- **⑥ 验证**：`cargo check --locked --examples` 全绿（158 个）＋
+  `cargo test --lib` 全绿 ＋ `db_ui_smoke` 实跑 **OK**（退出码 0，瘦身后仍正常）。
+- **⑦ ⚠ 顺带修正的文档漂移**：AGENTS.md 一直写「131 个 example」，
+  实际已经 **158 个** ⇒ 体积是按 131 估的，实际更大。
+
 ## 〇之二之一五十一、最新进展（2026-11-24：操作列再瘦身 ＋ 资源列 ＋ 图标打磨，阶段 164）
 
 - **用户这轮三条**：

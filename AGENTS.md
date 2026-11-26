@@ -38,14 +38,16 @@ export ZIG=$HOME/.cache/puttyplus-zig/bin/zig
 只能是 ghostty ⇒ 关掉就编不过）；Linux 上可以（省 Zig）。
 
 ```bash
-cargo build --release && cargo test                # Rust（release 已带 strip/LTO/ring 配置）
-cargo check --examples                       # ⚠️ **131 个冒烟都得能编**（见下；⭐ 19 秒）
+cargo build --release && cargo test --lib        # Rust（release 已带 strip/LTO/ring 配置）
+cargo check --examples                       # ⚠️ **全部冒烟都得能编**（见下；⭐ 19 秒）
 (cd c && make)                                      # C 版（已冻结，只作参照）
 bash tools/compat_check.sh                    # 两版外部行为对照（81 项，需 C 版二进制）
 PP_SSHD='127.0.0.1 2222 <user>' bash tools/compat_check.sh   # 含 selftest 全流程对照
 bash tools/cli_contract_check.sh              # 命令行契约对照黄金基准（73 项，⭐ 不需要 C 版）
 ./target/release/puttyplus --sftp-selftest <host> <port> <user> [pw]   # SFTP 集成自检
 bash tools/build_deb.sh                        # 打 deb 包（产物在仓库根目录）
+bash tools/clean_build.sh                     # 回收构建产物（examples/incremental；见下）
+bash tools/disk_hygiene_check.sh              # 构建产物卫生检查（防裸 cargo test 复发）
 xvfb-run -a cargo run --example db_ui_smoke         # 数据库工作台 GUI 冒烟（不连库）
 xvfb-run -a cargo run --example db_conn_smoke       # 数据库连接树冒烟（多连接/树形/老格式）
 xvfb-run -a cargo run --example db_ui_e2e -- <ssh_host> <ssh_port> <ssh_user> \
@@ -57,7 +59,11 @@ xvfb-run -a cargo run --example db_ui_e2e -- <ssh_host> <ssh_port> <ssh_user> \
 
 ```bash
 cargo build --release && mkdir -p release && cp target/release/puttyplus release/puttyplus
+bash tools/clean_build.sh        # ⭐ 回收构建产物（examples/incremental）—— 磁盘纪律，见下
 ```
+
+⚠️ **清理要在出 release 之后做**（顺序反了会把刚编出来的 example 又删掉）⇒
+`clean_build.sh` **不碰** `target/release/puttyplus` 与 `release/`。
 
 - 产物两处都有：`target/release/puttyplus`（cargo 的原生位置）与
   **仓库根 `release/puttyplus`**（一眼能找到；`.gitignore` 忽略 `/release/`，
@@ -78,22 +84,50 @@ cargo build --release && mkdir -p release && cp target/release/puttyplus release
   example ⇒ **本地全绿、CI 才红**。真踩过：`01efb43`（软链双击跟进去）改了
   那个签名却漏了 `examples/selfheal_smoke.rs` ⇒ CI 从第 50 轮起**连红
   10 轮**才被人看见（2026-11-11）。
-  ⇒ **每个阶段都要跑 `cargo check --examples`**（131 个 example 全查一遍）
+  ⇒ **每个阶段都要跑 `cargo check --examples`**（全部 example 全查一遍）
   ⇒ 签名漂移本地就红。CI 里也是同名一步（`.github/workflows/ci.yml`）。
+- ⭐⭐⭐ **`cargo test`（不带 `--lib`）会编译全部 example** ⇒ 一次就是
+  **40G**（2026-11-26 实测：158 个 example × 每个 293MB ⇒ `target/debug/examples`
+  堆到 40G，磁盘只剩 9.5G 差点写满）。
+  ⇒ **裸 `cargo test` 一律改成 `cargo test --lib`**（本仓库**无 `tests/` 目录、
+  无自定义 `[[test]]` 目标** ⇒ `--lib` 就是全量，不漏任何测试）。
+  ⇒ 本仓库曾经有裸 `cargo test`（AGENTS.md 的日常命令 + `tools/build_deb.sh`）
+  ⇒ 已于 2026-11-26 全部改掉。
+  ⇒ **实测依据**：`cargo test` 会产出 `examples/foo` + `examples/foo-<hash>`；
+  而 `cargo check --examples` **一个二进制都不产**（只做类型检查）。
+  ⇒ 兜底清理：`bash tools/clean_build.sh`（见下）。
+- ⭐⭐⭐ **磁盘纪律（2026-11-26 立规）**：本项目有 **158 个 example**，
+  每个都是**独立可执行文件** ⇒ 调试信息的代价被放大 158 倍。
+  ⇒ **`Cargo.toml` 里 `[profile.dev] debug = 1`（行号表）+ `[profile.dev.package."*"] debug = 0`**
+    （第三方依赖不带调试信息）⇒ 单个产物从 **293MB 降到 113MB**（实测，降 61%）。
+    ⚠️ 代价：第三方库内部崩溃时栈里只有符号名、没有行号（极少见）。
+  ⇒ **`bash tools/clean_build.sh`** 是回收存量的标准动作：
+    | 参数 | 行为 | 适合 |
+    |---|---|---|
+    | （无） | 删掉 `target/*/examples` 目录 | 日常（守门不依赖二进制） |
+    | `--keep-latest` | 只删历史副本，保留每个 example 最新一份 | 还要频繁跑 example |
+    | `--all` | 连 `incremental` 与遗留 `target/cargo-home` 一起清 | 磁盘告急 |
+    | `--dry-run` | 只报要删什么 | 心里没底时先看 |
+    ⇒ **每完成一个阶段跑一次**（在出 release 之后）。
+    ⚠️ **脚本不碰** `target/release/puttyplus` / `release/` / `target/debug/deps`
+      / `target/debug/build` / `.git` / `.qoder`（worktree 里有未提交改动）。
+  ⇒ **实测数据**（2026-11-26，清理前 → 后）：
+    `target/` 70G → 11.7G，**释放 58.3G**；磁盘可用 9.5G → 73G（99% → 86%）。
+    ⇒ 堆积的根子已经拔掉三处：① 裸 `cargo test` ② 完整调试信息 ③ 没人清的缓存。
 - ⭐⭐ **别用 `cargo build --release --examples` 做这件事**（2026-11-14 实测）：
   | 命令 | 耗时 | 说明 |
   |---|---|---|
   | `cargo check --examples` | **19 秒** | ✅ **日常用这个**：只验「能不能编过」，不做 codegen / 链接 |
   | `cargo build --examples`（dev） | 3 分 | 真编 + 真链接（不含 LTO） |
-  | `cargo build --release --examples` | **40 分 27 秒** | ❌ **fat LTO × 131 次链接** |
+  | `cargo build --release --examples` | **40 分 27 秒**（2026-11-14 实测，**当时 131 个**；现在 158 个更慢） | ❌ **fat LTO × N 次链接** |
   ⇒ 慢的根因是 release profile 的 **`lto = "fat"` + `codegen-units = 1`**：
-  每个 example 都要做一次**全程序 LTO 链接** ⇒ 131 次全量 LTO。
+  每个 example 都要做一次**全程序 LTO 链接** ⇒ N 次全量 LTO。
   ⇒ **守门用 `check`**（签名漂移是**类型**问题 ⇒ check 抓得住；
   链接期才暴露的问题在本项目里没出现过）；**要真产物时**再单独 release 编
   （发版前、或者要跑某个 example 时 `cargo run --release --example X`）。
 - ⚠️ **本地按 CI 那套跑 GUI 冒烟时，别乱改 `HOME`**（2026-11-11 踩过）：
   改了 `HOME` ⇒ cargo 找不到 rustup/cargo 的家 ⇒ **换了 rustc** ⇒ 依赖的
-  指纹全变 ⇒ **全量重编**（131 个 example 要 40 分钟，还可能去重新拉依赖）。
+  指纹全变 ⇒ **全量重编**（158 个 example 要 40 分钟以上，还可能去重新拉依赖）。
   ⇒ 跑之前把 `CARGO_HOME` / `RUSTUP_HOME` **显式指回去**：
   `export CARGO_HOME=/home/fwt/.cargo RUSTUP_HOME=/home/fwt/.rustup`。
   ⚠️ **CI 没这个问题**（那边 `RUSTUP_HOME=/opt/rust/rustup`、

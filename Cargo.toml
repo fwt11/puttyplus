@@ -8,6 +8,22 @@ description = "PuTTY 兼容的 SSH 终端 + SFTP 图形客户端（Rust 重构�
 name = "puttyplus"
 path = "src/main.rs"
 
+[profile.dev]
+# ⚠️ 2026-11-26：**158 个 example 每个都是独立可执行文件**（cargo 的
+# `examples/` 约定）⇒ 调试信息的代价被**放大 158 倍**：单个 293MB
+# （`file` 显示 with debug_info, not stripped）× 158 ≈ 46G ⇒
+# 磁盘只剩 9.5G 差点写满。
+# ⇒ `debug = 1` = **行号表**：panic backtrace / `gdb bt` 仍能看到**行号**，
+#   但不带完整 DWARF ⇒ 单个产物降一半以上。
+# ⇒ 守门用 `cargo check --examples`（不产二进制）⇒ 日常根本不需要完整 DWARF。
+debug = 1
+
+[profile.dev.package."*"]
+# 第三方依赖（GTK4 / russh / ghostty-vt / russh-sftp…）**完全不带调试信息**
+# ⇒ 再省一大截（这些库占了每个 example 的大头）。
+# ⚠️ 代价：万一崩在第三方库内部，栈里只有符号名、没有行号 ⇒ 极少见，认了。
+debug = 0
+
 [profile.release]
 # 体积优化：strip 符号 + 全程序 LTO + abort/size 档（Rust 版 SSH/crypto
 # 全静态链接，与 C 版共享库的 115KB 不可直接比，这里尽量压缩差距）

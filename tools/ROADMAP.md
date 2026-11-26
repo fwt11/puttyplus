@@ -6462,6 +6462,55 @@ N 项待保存`，右 = 每页行数下拉（100/200/500/1000）+ 首页 / 上�
 - lib **987 全绿**（+3）；i18n **2158** 条（+5）；`cargo check --examples` 全过；
 - `docker_ui_smoke` **全部通过**（新增 ⑰ 组：三扇窗只出来一扇 ＋ 空日志说清楚）。
 
+## 四之五十二、2026-11-26：阶段 171 —— 磁盘纪律（根因是**裸 `cargo test`**）
+
+### 用户原话
+
+- 「**我们的项目占了很大的空间，为什么**」
+
+### ① 空间账（实测）
+
+- 整个仓库 **90G**，但**真源码只有 20MB** ⇒ 99.98% 是构建产物。
+  | 目录 | 占用 | 是什么 |
+  |---|---|---|
+  | `target/` | **70G** | 编译产物 |
+  | `.qoder/worktrees/` | **20G** | 5 个 agent worktree（各带一整份 `target/`）⇒ **有未提交改动，本轮不动** |
+  | `.git/` | 66M | 版本库 |
+  | `release/` | 11M | 交付产物 |
+  | **真源码** | **~20M** | — |
+- 磁盘 `/home` 只剩 **9.5G（99%）** ⇒ **再编一次 release 就会写满**。
+
+### ② ⭐⭐⭐ 真根因
+
+- **裸 `cargo test` 会编译全部 example** ⇒ 本项目 **158 个 example** 每个都是
+  **独立可执行文件**（cargo 的 `examples/` 约定）⇒ 每个 ~293MB
+  ⇒ **一轮就是 46G** ⇒ 每天几轮 ⇒ `target/debug/examples` 堆到 **40G**。
+- **实证**（`/tmp` 最小 crate 实测）：`cargo test` ⇒ 产出 `examples/foo` +
+  `examples/foo-<hash>`；**`cargo check --examples` 一个二进制都不产**。
+- ⇒ ✅ 全部改成 **`cargo test --lib`**（本仓库无 `tests/` 目录、无自定义
+  `[[test]]` 目标 ⇒ `--lib` 就是全量，一个测试都不漏）。
+
+### ③ 产物瘦身
+
+- `Cargo.toml`：`[profile.dev] debug = 1`（行号表）+
+  `[profile.dev.package."*"] debug = 0`（第三方依赖不带调试信息）
+  ⇒ **实测 293M → 113M（降 61%）**。
+- ⚠ 代价：第三方库内部崩溃时栈里只有符号名、没有行号（极少见）。
+
+### ④ 两个新脚本
+
+- **`tools/clean_build.sh`** —— 回收构建产物（`--keep-latest` / 默认 /
+  `--all` / `--dry-run`）。⚠ 不碰 `target/release/puttyplus`、`release/`、
+  `target/debug/deps`、`target/debug/build`、`.git`、`.qoder`。
+- **`tools/disk_hygiene_check.sh`** —— **防复发守卫**：静态扫脚本与 CI 工作流，
+  抓到裸 `cargo test` 就报错 ⇒ 已挂进 `.github/workflows/ci.yml`。
+
+### ⑤ 收益与验证
+
+- `target/` **70G → 11.7G**，**释放 58.3G**；磁盘可用 **9.5G → 73G（99% → 86%）**。
+- `cargo check --locked --examples` 全绿（158 个）＋ `cargo test --lib` 全绿
+  ＋ `db_ui_smoke` 实跑 OK（退出码 0）。
+
 ## 四之五十一、2026-11-24：阶段 164 —— 操作列再瘦身 ＋ 资源列（CPU / 内存）＋ 图标打磨
 
 ### 用户原话
