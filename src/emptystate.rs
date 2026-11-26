@@ -162,6 +162,23 @@ pub enum DockerErrorKind {
     Other,
 }
 
+/// 快速命令管理器：一条都没有。
+///
+/// ⚠️ **这个空态以前是列表里的一行 Label**（阶段 174 / UI-13）：
+///   GTK4 的 `ListBox` 会把**非 row 的子控件包成一行**（实测）⇒
+///   那行提示**能被方向键选中** ⇒ 用户看着像「空列表里有东西」。
+///   ⇒ 现在它**待在列表外面**，而且主 CTA 直接是「新建第一条」。
+pub fn quick_commands() -> EmptyState {
+    EmptyState::new(
+        tr("还没有快速命令"),
+        tr("把常用的一行命令存成一条，点一下就敲进当前终端。"),
+        Cta {
+            label: tr("新建第一条"),
+            icon: "list-add-symbolic",
+        },
+    )
+}
+
 /// 全应用声明过的空态（单元测试照这份清单断言）。
 pub fn all_empty_states() -> Vec<EmptyState> {
     vec![
@@ -170,6 +187,7 @@ pub fn all_empty_states() -> Vec<EmptyState> {
         queue(),
         notifications(),
         docker_empty(),
+        quick_commands(),
         // ⚠️ **错态也要有解释**（测试钩子照这条断言「解释不许是空的」）
         //   ⇒ 这里给一条真会出现的说明。
         docker_error(DockerErrorKind::Other, "远程执行 docker 命令失败"),

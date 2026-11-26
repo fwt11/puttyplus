@@ -329,6 +329,16 @@ pub fn open_manager(st: &Rc<PanelState>) {
     scroll.set_child(Some(&list));
     root.append(&scroll);
 
+    // ⚠️ **阶段 174 / UI-13：空态**住在列表外面**。
+    //
+    //   以前空态是**列表里的一行 Label** ⇒ GTK4 的 `ListBox` 会把非 row
+    //   的子控件**包成一行**（实测：子控件类型 = GtkListBoxRow）⇒
+    //   那行提示**能被方向键选中** ⇒ 用户看着像「空列表里有东西」。
+    //   ⇒ 现在：列表为空 ⇒ 列表**藏起来**，空态显示在列表**外面**。
+    let empty_state = crate::emptystate::build(&crate::emptystate::quick_commands());
+    empty_state.0.set_visible(false);
+    root.append(&empty_state.0);
+
     let btns = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let mk = |label: &str, tip: &str| {
         let b = gtk::Button::with_label(label);
@@ -347,20 +357,30 @@ pub fn open_manager(st: &Rc<PanelState>) {
 
     // 列表内容（增删改后重画）
     let items: Rc<RefCell<Vec<QuickCmd>>> = Rc::new(RefCell::new(settings::quick_commands()));
+    let selected = move |items: &Rc<RefCell<Vec<QuickCmd>>>, list: &gtk::ListBox| -> Option<usize> {
+        let row = list.selected_row()?;
+        let i = row.index() as usize;
+        // ⚠️ **空态已经不在列表里了**（阶段 174 / UI-13）⇒ 这里不用再
+        //   排除「占位行」⇒ 行号就是条目下标。
+        if i < items.borrow().len() { Some(i) } else { None }
+    };
     let fill = {
         let list = list.clone();
+        let scroll = scroll.clone();
+        let empty_root = empty_state.0.clone();
+        let dlg_weak = dlg.downgrade();
         let items = Rc::clone(&items);
         move || {
+            // ⚠️ **项目硬规矩：刷新要保留用户选中** ⇒ 先记住行号。
+            let keep = list.selected_row().map(|r| r.index() as i32);
             while let Some(c) = list.first_child() {
                 list.remove(&c);
             }
             let v = items.borrow();
-            if v.is_empty() {
-                let l = gtk::Label::new(Some(tr("（空）点「新建」加第一条")));
-                l.add_css_class("dim-label");
-                l.set_margin_top(12);
-                list.append(&l);
-            }
+            // ⚠️ **空 ⇒ 列表藏起来、空态露出来**（空态不是「列表里的一行」）。
+            let is_empty = v.is_empty();
+            scroll.set_visible(!is_empty);
+            empty_root.set_visible(is_empty);
             for c in v.iter() {
                 let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 let title = gtk::Label::new(Some(&format!("[{}] {}", c.group, c.label)));
@@ -374,24 +394,68 @@ pub fn open_manager(st: &Rc<PanelState>) {
                 row.append(&cmd);
                 list.append(row.upcast_ref::<gtk::Widget>());
             }
+            drop(v);
+            // 恢复选中（行号还在就恢复）。
+            if let Some(i) = keep {
+                if let Some(row) = list.row_at_index(i) {
+                    list.select_row(Some(&row));
+                }
+            }
+            // ⚠️ **新建第一条之后**：空态完整移除，**焦点进列表第一项**
+            //   （审核 P2-6 的验收）。
+            if !is_empty && list.selected_row().is_none() {
+                if let Some(row) = list.row_at_index(0) {
+                    list.select_row(Some(&row));
+                }
+                // ⚠️ **窗口还没显示时别抢焦点**（那时候抢了也没用）。
+                if dlg_weak.upgrade().is_some_and(|d| d.is_mapped()) {
+                    list.grab_focus();
+                }
+            }
         }
     };
     fill();
 
-    let selected = move |items: &Rc<RefCell<Vec<QuickCmd>>>, list: &gtk::ListBox| -> Option<usize> {
-        let row = list.selected_row()?;
-        let i = row.index() as usize;
-        // 「（空）」占位行不算条目
-        if i < items.borrow().len() { Some(i) } else { None }
+    // ⚠️ **「编辑」「删除」在没有选中时不可用**（阶段 174 / UI-13），
+    //   而且 tooltip 要**说明为什么**（审核验收：「原因明确」）。
+    let update_btns = {
+        let items = Rc::clone(&items);
+        let list2 = list.clone();
+        let b_edit = b_edit.clone();
+        let b_del = b_del.clone();
+        move || {
+            let has = selected(&items, &list2).is_some();
+            b_edit.set_sensitive(has);
+            b_del.set_sensitive(has);
+            let why = if has {
+                tr("修改选中的命令")
+            } else {
+                tr("先在列表里选中一条命令")
+            };
+            b_edit.set_tooltip_text(Some(why));
+            b_del.set_tooltip_text(Some(if has {
+                tr("删除选中的命令")
+            } else {
+                tr("先在列表里选中一条命令")
+            }));
+        }
     };
-
+    update_btns();
     {
+        // 选中变了 ⇒ 按钮跟着变。
+        let update_btns = update_btns.clone();
+        list.connect_row_selected(move |_, _| update_btns());
+    }
+
+    // ⚠️ **「新建」这一步只有一份**（阶段 174 / UI-13）：工具条那颗
+    //   「新建」按钮 ＋ 空态里的主 CTA 都走它 ⇒ 不会有两套逻辑。
+    let new_one: Rc<dyn Fn()> = {
         let items = Rc::clone(&items);
         let fill = fill.clone();
         // ⚠️ **弱引用**：闭包要是抓住对话框的强引用 ⇒ 窗口和按钮互相引用，
         // 永远回收不掉。
         let dlg_weak = dlg.downgrade();
-        b_new.connect_clicked(move |_| {
+        Rc::new(move || {
             let items = Rc::clone(&items);
             let fill = fill.clone();
             let Some(dlg) = dlg_weak.upgrade() else { return };
@@ -401,7 +465,17 @@ pub fn open_manager(st: &Rc<PanelState>) {
                 settings::set_quick_commands(&v);
                 fill();
             });
-        });
+        })
+    };
+    {
+        let new_one = new_one.clone();
+        b_new.connect_clicked(move |_| new_one());
+    }
+    {
+        // ⚠️ **空态的主 CTA 直接触发「新建」**（审核 P2-6：「主 CTA 直接
+        //   触发『新建』」）⇒ 用户不用先找到工具条那颗按钮。
+        let new_one = new_one.clone();
+        empty_state.1.connect_clicked(move |_| new_one());
     }
     {
         let items = Rc::clone(&items);
@@ -438,6 +512,16 @@ pub fn open_manager(st: &Rc<PanelState>) {
     crate::panel::dialogs::style_dialog(&dlg);
 
     dlg.present();
+    // ⚠️ **窗口显示之后**才把焦点交给列表（显示之前 `grab_focus` 没意义）。
+    //   审核验收：「新建第一条后，空态完整移除，焦点进入列表第一项」。
+    if !items.borrow().is_empty() {
+        if list.selected_row().is_none() {
+            if let Some(row) = list.row_at_index(0) {
+                list.select_row(Some(&row));
+            }
+        }
+        list.grab_focus();
+    }
 }
 
 /// 新建/编辑一条命令。`cur` 为 None 是新建。

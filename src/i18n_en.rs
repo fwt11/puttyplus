@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2192] = [
+pub static EN: [(&str, &str); 2194] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -413,6 +413,7 @@ pub static EN: [(&str, &str); 2192] = [
     ("先在列表里选中一个容器", "Select a container in the list first"),
     ("先在列表里选中一个文件，再点「查看…」", "Select a file in the list, then click “View…”"),
     ("先在列表里选中一个条目，再点「下载…」", "Select an item in the list, then click “Download…”"),
+    ("先在列表里选中一条命令", "Select a command in the list first"),
     ("先在左侧打开一个数据库连接", "Open a database connection on the left first"),
     ("先打开一个容器的日志", "Open a container log first"),
     ("先挑一个类型", "Pick a type first"),
@@ -1105,6 +1106,7 @@ pub static EN: [(&str, &str); 2192] = [
     ("把定义文本复制到剪贴板", "Copy the definition text to the clipboard"),
     ("把容器日志保存到本地文件", "Save the container log to a local file"),
     ("把容器里的文件下载到本地", "Download a file from the container to the local machine"),
+    ("把常用的一行命令存成一条，点一下就敲进当前终端。", "Save a command line you use often; one click types it into the current terminal."),
     ("把当前显示的全部日志复制到剪贴板", "Copy all the logs currently shown to the clipboard"),
     ("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里", "Export the whole table to a local file (CSV / SQL / JSON), or import a local CSV into the table"),
     ("把日志保存到哪个文件", "Save the log to which file"),
@@ -1279,6 +1281,7 @@ pub static EN: [(&str, &str); 2192] = [
     ("新建文件夹", "New folder"),
     ("新建本地目录", "New local directory"),
     ("新建标签", "New tab"),
+    ("新建第一条", "Create the first one"),
     ("新建终端", "New terminal"),
     ("新建表", "New table"),
     ("新建表…", "New table…"),
@@ -2193,7 +2196,6 @@ pub static EN: [(&str, &str); 2192] = [
     ("（没有环境变量）", "(no environment variables)"),
     ("（没有网络信息）", "(no network information)"),
     ("（私钥认证未通过）", "(the private key authentication did not pass)"),
-    ("（空）点「新建」加第一条", "(empty) click \"New\" to add the first one"),
     ("（还有更多）", "(there is more)"),
     ("（还没画图）", "(nothing drawn yet)"),
     ("（还没连上数据库）", "(not connected to a database yet)"),
