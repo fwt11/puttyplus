@@ -2572,7 +2572,7 @@ const WELCOME_MIN_W: i32 = 560;
 ///
 /// ⚠️ 原来 `valign=Center` ⇒ 内容在窗口里上下浮动 ⇒ 窗口一高重心就掉。
 ///   改成靠上 ＋ 固定边距 ⇒ **窗口多高，内容都停在同一处**。
-const WELCOME_TOP_MARGIN: i32 = 36;
+const WELCOME_TOP_MARGIN: i32 = crate::theme::space::XL;
 
 pub fn welcome_page() -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -2621,7 +2621,7 @@ pub fn welcome_page() -> gtk::Widget {
     cap_head.add_css_class("pp-section");
     cap_head.set_halign(gtk::Align::Center);
     box_.append(&cap_head);
-    let caps_row = gtk::Box::new(gtk::Orientation::Horizontal, 26);
+    let caps_row = gtk::Box::new(gtk::Orientation::Horizontal, crate::theme::space::XL);
     caps_row.set_halign(gtk::Align::Center);
     for (icon_name, name, desc) in caps {
         let tile = gtk::Box::new(gtk::Orientation::Horizontal, 10);

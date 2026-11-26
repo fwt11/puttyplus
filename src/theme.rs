@@ -880,7 +880,9 @@ fn system_tokens() -> Option<String> {
          @define-color pp_accent_soft mix(@pp_accent, @pp_bg, 0.86);\n\
          @define-color pp_scroll mix(@pp_fg, @pp_bg, 0.72);\n\
          @define-color pp_chip mix(@pp_fg, @pp_bg, 0.86);\n\
-         @define-color pp_dim_sel @pp_fg;\n"
+         @define-color pp_dim_sel @pp_fg;\n\
+         @define-color pp_input mix(@pp_fg, @pp_bg, 0.94);\n\
+         @define-color pp_selected @pp_accent_soft;\n"
     ))
 }
 
@@ -889,14 +891,14 @@ fn system_tokens() -> Option<String> {
 const FIX: &str = r#"
 list > row:hover, listbox > row:hover { background-color: @pp_hover; }
 list > row:selected, listbox > row:selected {
-  background-color: @pp_accent_soft;
+  background-color: @pp_selected;
   color: @pp_fg;
 }
 list > row:selected label, listbox > row:selected label { color: @pp_fg; }
 list > row:selected .dim-label, listbox > row:selected .dim-label {
   color: @pp_dim_sel;
 }
-treeview.view:selected { background-color: @pp_accent_soft; color: @pp_fg; }
+treeview.view:selected { background-color: @pp_selected; color: @pp_fg; }
 /* 聚焦的那一行：实底 + on_accent 文字（同 BASE 那条）。 */
 treeview.view:selected:focus {
   background-color: @pp_accent;
@@ -996,8 +998,12 @@ const COMPONENTS: &str = r#"
   border-radius: 10px;
   padding: 10px 12px;
 }
-/* 欢迎页的**能力说明**（阶段 175 / UI-09，治 P2-1）。
-   ⚠️ **这一族故意「不像卡片」**：`.pp-card` 有底色 ＋ 边框 ⇒ 一眼看着就是
+/* 表面样块（阶段 175 / UI-08）：把「窗底 / 面板面」画成**看得见**的块。
+   ⚠️ **只给画廊与文档用**（`examples/design_gallery.rs`）——业务页面不要
+     拿它当卡片用（那会造成「同义类」）。 */
+.pp-surface-bg { background-color: @pp_bg; border: 1px solid @pp_border; border-radius: 6px; }
+.pp-surface-panel { background-color: @pp_panel; border: 1px solid @pp_border; border-radius: 6px; }
+/* 欢迎页的**能力说明**（阶段 175 / UI-09，治 P2-1）。   ⚠️ **这一族故意「不像卡片」**：`.pp-card` 有底色 ＋ 边框 ⇒ 一眼看着就是
      能点的（真能点的「最近连接」就是那个样子）⇒ 用户点了没反应 ⇒
      审核 P2-1 说的「看起来能点但点不了」。
    ⇒ 说明区**没有底色、没有边框、没有 hover** ⇒ 一眼看出是「说明」。
@@ -1686,6 +1692,12 @@ entry, spinbutton, textview, .view {
   color: @pp_fg;
   border-color: @pp_border;
 }
+/* ---- 输入面（阶段 175 / UI-08）----
+   ⚠️ **为什么单独一个面**：输入框跟面板**分开** ⇒ 一眼看出「这里能打字」。
+   ⚠️ **只改 entry / spinbutton**：`.view` 是列表、textview 是编辑器 ⇒
+     一起改会把侧栏列表与 SQL 编辑器的底色也换掉（老页面的既得视觉）。
+   ⚠️ **放在上面那条之后**（同优先级 ⇒ 后者赢）。 */
+entry, spinbutton { background-color: @pp_input; }
 treeview.view { background-color: @pp_panel; }
 /* ⚠️ **别给整棵树加 hover 底色**（阶段 93）：`treeview.view:hover` 是
    「指针在树上任意位置」⇒ 鼠标一进列表，**所有行**一起变灰——看着像
@@ -1745,14 +1757,14 @@ list > row, listbox > row { background-color: transparent; }
 list > row label, listbox > row label { color: @pp_fg; }
 list > row:hover, listbox > row:hover { background-color: @pp_hover; }
 list > row:selected, listbox > row:selected {
-  background-color: @pp_accent_soft;
+  background-color: @pp_selected;
   color: @pp_fg;
 }
 list > row:selected label, listbox > row:selected label { color: @pp_fg; }
 list > row:selected .dim-label, listbox > row:selected .dim-label {
   color: @pp_dim_sel;
 }
-treeview.view:selected { background-color: @pp_accent_soft; color: @pp_fg; }
+treeview.view:selected { background-color: @pp_selected; color: @pp_fg; }
 /* 聚焦的那一行（键盘光标行）：**实底 + on_accent 文字**。
    ⚠️ 文字颜色要由**取色的一方**自己算对：文件名的单元格是我们自己画的
    （`panel::namecell`），它得把 `:focus` 状态也算进去，否则会拿
@@ -1869,14 +1881,16 @@ const DARK_CSS: &str = concat!(
 @define-color pp_err     #c74743;
 @define-color pp_err_hover #b7413d;
 @define-color pp_err_active #a93c38;
+@define-color pp_input   #141618;
+@define-color pp_selected #253349;
 "#,
     "BASE_PLACEHOLDER"
 );
 
 const LIGHT_CSS: &str = concat!(
     r#"
-@define-color pp_bg      #f3f4f6;
-@define-color pp_panel   #ffffff;
+@define-color pp_bg      #eceef1;
+@define-color pp_panel   #f7f8fa;
 @define-color pp_card    #ffffff;
 @define-color pp_fg      #1f2328;
 @define-color pp_dim     #5c636a;
@@ -1896,6 +1910,8 @@ const LIGHT_CSS: &str = concat!(
 @define-color pp_err     #c0392b;
 @define-color pp_err_hover #b03526;
 @define-color pp_err_active #a13022;
+@define-color pp_input   #ffffff;
+@define-color pp_selected #dbe8fb;
 "#,
     "BASE_PLACEHOLDER"
 );
@@ -1923,6 +1939,8 @@ const CONTRAST_CSS: &str = concat!(
 @define-color pp_err     #ff5555;
 @define-color pp_err_hover #ff6767;
 @define-color pp_err_active #ff7a7a;
+@define-color pp_input   #000000;
+@define-color pp_selected #0000ff;
 "#,
     "BASE_PLACEHOLDER"
 );
@@ -1944,6 +1962,29 @@ pub fn css_text(t: Theme) -> Option<String> {
             .css()
             .map(|base| format!("{}{}", css_with(base), COMPONENTS)),
     }
+}
+
+/// **间距尺度**（阶段 175 / UI-08，治 P2-2）。
+///
+/// ⚠️ **为什么只有五档**：间距随手写（`margin_top(7)`、`padding(11)`）⇒
+///   同一个界面里 4/7/8/11/12 混着来 ⇒ 看着像不同时期拼的。
+///   ⇒ **全项目只用这五档**（规则写在 `docs/UI_CHECKLIST.md` §9）：
+///   - `XS` 4px：同组元素之间（图标与文字、药丸之间）；
+///   - `S` 8px：控件之间（按钮之间、表单行之间）；
+///   - `M` 12px：小组件之间（列表项之间、卡片内的块）；
+///   - `L` 16px：区块之间（工具栏与内容之间）；
+///   - `XL` 24px：页面级留白（页面外边距、空态与内容的距离）。
+pub mod space {
+    /// 4px —— 同组元素之间。
+    pub const XS: i32 = 4;
+    /// 8px —— 控件之间。
+    pub const S: i32 = 8;
+    /// 12px —— 小组件之间。
+    pub const M: i32 = 12;
+    /// 16px —— 区块之间。
+    pub const L: i32 = 16;
+    /// 24px —— 页面级留白。
+    pub const XL: i32 = 24;
 }
 
 #[cfg(test)]
@@ -2126,8 +2167,10 @@ mod tests {
         // pp_bg/pp_fg 覆盖成对不存在的 @bg/@fg 的引用（解析退化成白色），
         // 结果"深色"主题白底白字。这里钉死：主题块里的定义必须原样生效。
         for (t, bg) in [
+            // ⚠️ 浅色窗底在阶段 175 / UI-08 改成了 `#eceef1`
+            //   （原来 `#f3f4f6` 跟面板挨太近 ⇒ 三层分不开）。
             (Theme::Dark, "#17191c"),
-            (Theme::Light, "#f3f4f6"),
+            (Theme::Light, "#eceef1"),
             (Theme::HighContrast, "#000000"),
         ] {
             let css = css_text(t).unwrap();
@@ -2434,6 +2477,12 @@ mod tests {
     /// 卡片面（`pp_card`）要跟窗底（`pp_bg`）**分得开**——美化·地基批的
     /// 核心就是「暗色三层：窗底 < 面板 < 卡片」。用「对黑底的对比度」
     /// 当亮度次序（比 luma 计算省事，次序等价）。
+    ///
+    /// ⚠️ **阶段 175 / UI-08**：这条从「只有暗色有三层」扩到**浅色也有
+    ///   三层**——浅色原来是 `bg #f3f4f6 / panel #ffffff / card #ffffff`
+    ///   ⇒ **面板与卡片同色**，两层分不开（审核 P2-2：「浅色主题中窗口、
+    ///   面板、卡片表面接近」）⇒ 现在浅色是
+    ///   `bg #eceef1 / panel #f7f8fa / card #ffffff` ⇒ 三层都分得开。
     #[test]
     fn 卡片面比窗底亮一层_暗色三层分得开() {
         let lum = |hex: &str| contrast_ratio(hex, "#000000");
@@ -2447,9 +2496,60 @@ mod tests {
             lum(card) > lum(panel),
             "暗色卡片 {card} 应比面板 {panel} 亮一层"
         );
-        // 浅色：白卡片压浅灰窗底，同样分得开
-        assert!(lum("#ffffff") > lum("#f3f4f6"), "浅色卡片应比窗底亮");
+        // 浅色：窗底 < 面板 < 卡片（阶段 175 / UI-08 补的第三层）
+        let (bg, panel, card) = ("#eceef1", "#f7f8fa", "#ffffff");
+        assert!(
+            lum(panel) > lum(bg),
+            "浅色面板 {panel} 应比窗底 {bg} 亮一层"
+        );
+        assert!(
+            lum(card) > lum(panel),
+            "浅色卡片 {card} 应比面板 {panel} 亮一层"
+        );
         // 高对比没有第三层可分（黑就是黑）——这是设计决定，不断言
+    }
+
+    /// **阶段 175 / UI-08**：三套主题都必须有**同一套**语义令牌。
+    ///
+    /// ⚠️ **为什么要钉死**：表面层级（窗口底 / 面板面 / 卡片面 / 输入面 /
+    ///   边框 / hover / 选中 / 焦点）一旦某个主题**少一个**，那一层就会
+    ///   悄悄退回 Adwaita 默认 ⇒ 看着像"这个主题没调好"。
+    #[test]
+    fn 三套主题的表面令牌都齐() {
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+            let css = css_text(t).expect("非 System 主题都该有 CSS");
+            for frag in [
+                "@define-color pp_bg",
+                "@define-color pp_panel",
+                "@define-color pp_card",
+                "@define-color pp_input",
+                "@define-color pp_border",
+                "@define-color pp_hover",
+                "@define-color pp_selected",
+                "@define-color pp_accent",
+                "@define-color pp_accent_soft",
+            ] {
+                assert!(css.contains(frag), "{t:?} 缺表面令牌「{frag}」");
+            }
+        }
+    }
+
+    /// **阶段 175 / UI-08**：输入面与选中面**真的被用上了**。
+    ///
+    /// ⚠️ **为什么**：加了令牌却没接到 CSS 上 ⇒ 那一层等于没加（看着一样）。
+    #[test]
+    fn 输入面与选中面接到了css上() {
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+            let css = css_text(t).expect("非 System 主题都该有 CSS");
+            assert!(
+                css.contains("background-color: @pp_input;"),
+                "{t:?} 的输入框没接到 pp_input 上"
+            );
+            assert!(
+                css.contains("background-color: @pp_selected;"),
+                "{t:?} 的选中行没接到 pp_selected 上"
+            );
+        }
     }
 
     /// 令牌 v2 的原语类必须每套主题都有（CSS 子串钉死，防止被人删了没察觉）。

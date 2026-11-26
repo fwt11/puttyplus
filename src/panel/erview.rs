@@ -155,9 +155,9 @@ impl ErView {
 
         // ---- 「没有关系」时的说明板（阶段 174 / UI-10）----
         let info = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        info.set_margin_start(8);
-        info.set_margin_end(8);
-        info.set_margin_top(4);
+        info.set_margin_start(crate::theme::space::S);
+        info.set_margin_end(crate::theme::space::S);
+        info.set_margin_top(crate::theme::space::XS);
         let info_title = gtk::Label::new(None);
         info_title.set_xalign(0.0);
         info_title.add_css_class("pp-empty-title");

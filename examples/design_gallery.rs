@@ -198,6 +198,41 @@ fn main() {
 
     // 3) 卡片（暗色三层：窗底 < 面板 < 卡片，看这张卡就知道分层对没对）
     let _ = section(&root, "卡片（暗色下看三层：窗底 / 面板 / 卡片）");
+    // ---- 阶段 175 / UI-08：表面层级 ＋ 输入面 ＋ 选中面 ----
+    //
+    // ⚠️ **为什么加这一块**：以前画廊只有「卡片」，看不到**输入面**与
+    //   **选中面** ⇒ 那两层令牌加了也没人看得见 ⇒ 等于没加。
+    {
+        let row = section(&root, "表面层级（窗底 / 面板 / 卡片 / 输入 / 选中）");
+        // 窗底（不画东西，只是这块区域的底）
+        let bg = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bg.add_css_class("pp-surface-bg");
+        bg.set_size_request(120, 26);
+        row.append(&bg);
+        // 面板面
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        panel.add_css_class("pp-surface-panel");
+        panel.set_size_request(120, 26);
+        row.append(&panel);
+        // 卡片面
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        card.add_css_class("pp-card");
+        card.set_size_request(120, 26);
+        row.append(&card);
+        // 输入面（真输入框 ⇒ 看的就是 `pp_input`）
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some("输入面"));
+        entry.set_size_request(120, -1);
+        row.append(&entry);
+        // 选中面（真选中的一行 ⇒ 看的就是 `pp_selected`）
+        let list = gtk::ListBox::new();
+        let r = gtk::ListBoxRow::new();
+        r.set_child(Some(&gtk::Label::new(Some("选中面"))));
+        list.append(&r);
+        list.select_row(Some(&r));
+        list.set_size_request(120, -1);
+        row.append(&list);
+    }
     let cards = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     cards.set_hexpand(true);
     cards.append(&kv_card(

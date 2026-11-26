@@ -196,7 +196,7 @@ pub fn ensure(st: &Rc<PanelState>) {
     //   （改设置的地方只留一处）。
     let summary = {
         let srow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        srow.set_margin_top(2);
+        srow.set_margin_top(crate::theme::space::XS);
         let mut mk = |text: &str, cls: &str| {
             let l = gtk::Label::new(Some(text));
             l.add_css_class(cls);
