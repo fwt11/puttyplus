@@ -41,6 +41,7 @@ fn main() {
     // ⚠️ 本机**没有通知守护进程** ⇒ 桌面通知发不出去（返回 false），
     // 但历史**照样要记**——这正是通知中心存在的意义。
     let ok = notify::desktop_action(
+        notify::Level::Success,
         "传输完成：3 个文件",
         "已上传 3 个文件",
         "查看明细",
@@ -56,7 +57,14 @@ fn main() {
     println!("[2] 历史里有：{} {}", hist[0].at, hist[0].title);
 
     // ---- ③ 再发一条 ⇒ 新的在前 ----
-    notify::desktop_action("连接失败", "10.0.0.1:22 连不上", "重试", || {}, || {});
+    notify::desktop_action(
+        notify::Level::Error,
+        "连接失败",
+        "10.0.0.1:22 连不上",
+        "重试",
+        || {},
+        || {},
+    );
     let hist = notify::history();
     assert_eq!(hist.len(), 2, "历史条数不对：{hist:?}");
     assert!(

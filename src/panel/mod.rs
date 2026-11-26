@@ -2819,6 +2819,23 @@ fn do_submit(
         .send(WorkerCmd::Transfers { items: specs_w });
 }
 
+/// 重新传输一项（阶段 175 / UI-11）。
+///
+/// ⚠️ **不隐式覆盖**：走的是**既有的** `submit_transfers` ⇒ 冲突预检
+///   照旧会问用户（覆盖 / 跳过 / 逐项）⇒ 不会悄悄把文件盖了。
+/// ⚠️ **不自动重试**：只有用户点了「重新传输」并确认才会走到这里。
+pub fn retry_transfer(st: &Rc<PanelState>, src: &str, dst_dir: &str, upload: bool) {
+    if !st.conn_ok.get() {
+        dialogs::show_error(
+            st.topwin().as_ref(),
+            tr("未连接"),
+            tr("SFTP 尚未连接，无法重新传输。"),
+        );
+        return;
+    }
+    submit_transfers(st, vec![(src.to_string(), dst_dir.to_string(), upload)]);
+}
+
 pub fn start_uploads(st: &Rc<PanelState>, lpaths: Vec<String>) {
     let dst = st.remote_cwd.borrow().clone();
     start_uploads_to(st, lpaths, &dst);

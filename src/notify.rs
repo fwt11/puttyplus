@@ -23,7 +23,7 @@
 //! - 失败项"置顶"用的是排序，不是真的插到最前；模型顺序要真变还得重排
 //!   行，收益不值当
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -91,6 +91,22 @@ impl Batch {
             tr("传输全部跳过")
         } else {
             tr("传输完成")
+        }
+    }
+
+    /// 这一批的**通知级别**（阶段 175 / UI-11）。
+    ///
+    /// ⚠️ **失败 = 错误级**（要人管）⇒ 通知中心里排在最前的那一组。
+    ///   「取消」算警告（用户自己干的，不用紧张）；全跳过算信息。
+    pub fn level(&self) -> Level {
+        if self.failed > 0 {
+            Level::Error
+        } else if self.canceled > 0 {
+            Level::Warn
+        } else if self.skipped > 0 && self.done == 0 {
+            Level::Info
+        } else {
+            Level::Success
         }
     }
 }
@@ -215,6 +231,86 @@ fn notify_proxy() -> Option<gio::DBusProxy> {
 /// 就弹"。失败明细就在那个窗里。
 /* ---------------- 通知中心（阶段 77c-3 / 审计 P1-9） ---------------- */
 
+/// 通知的**级别**（阶段 175 / UI-11，治 P2-4）。
+///
+/// ⚠️ **为什么级别要进数据里**：通知中心以前是一条**平铺的时间列表**
+///   ⇒ 用户得自己一条条读，才知道哪一条要管。
+/// ⇒ 级别进数据 ⇒ 界面能**按级别分组**（要管的最上面），而且用
+///   **文字 ＋ 图标**表达（**不只靠颜色** —— 审核验收明写这条；
+///   色弱用户与灰度打印都看不出来）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    /// 出错了，要人管（排在最前）。
+    Error = 0,
+    /// 有事发生了，但不用马上管。
+    Warn = 1,
+    /// 普通消息。
+    Info = 2,
+    /// 成功了。
+    Success = 3,
+}
+
+impl Level {
+    /// **显示用的文字**（不只靠颜色）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Error => tr("失败"),
+            Level::Warn => tr("警告"),
+            Level::Info => tr("信息"),
+            Level::Success => tr("成功"),
+        }
+    }
+
+    /// 图标名（**Adwaita 里真的存在**的）。
+    ///
+    /// ⚠️ **别用 `emblem-ok-symbolic`**：Adwaita 没有它（只有 Papirus 有）
+    ///   ⇒ GTK 会静默回退成一个默认图标，看着完全不是那个意思
+    ///   （`emptystate.rs` 里记过这个坑）⇒ 成功用 `object-select-symbolic`。
+    pub fn icon(self) -> &'static str {
+        match self {
+            Level::Error => "dialog-error-symbolic",
+            Level::Warn => "dialog-warning-symbolic",
+            Level::Info => "dialog-information-symbolic",
+            Level::Success => "object-select-symbolic",
+        }
+    }
+
+    /// **分组时用的顺序**：要管的最前。
+    pub fn order(self) -> u8 {
+        match self {
+            Level::Error => 0,
+            Level::Warn => 1,
+            Level::Info => 2,
+            Level::Success => 3,
+        }
+    }
+}
+
+/// 通知的**来源**（阶段 175 / UI-11）。
+///
+/// ⚠️ **进程内语义，不落盘**：来源只用来决定「点这条通知能干什么」
+///   （传输类的默认动作 = 打开传输队列）⇒ **不新增持久化的敏感数据**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// 传输（文件上传下载）。
+    Xfer,
+    /// 连接（SSH / 数据库）。
+    Conn,
+    /// 应用其它地方。
+    App,
+}
+
+impl Source {
+    /// 显示用的文字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Xfer => tr("传输"),
+            Source::Conn => tr("连接"),
+            Source::App => tr("应用"),
+        }
+    }
+}
+
 /// 通知中心里的一条记录。
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -224,6 +320,14 @@ pub struct Entry {
     pub title: String,
     /// 正文。
     pub body: String,
+    /// **级别**（阶段 175 / UI-11）：决定它排在哪一组、显示什么标记。
+    pub level: Level,
+    /// **来源**（阶段 175 / UI-11）：决定默认动作。
+    pub source: Source,
+    /// **批次号**（阶段 175 / UI-11）：同一批里的多条通知归在一起。
+    ///
+    /// ⚠️ **0 = 没有批次**（单条通知，不是某一批的一部分）。
+    pub batch: u64,
 }
 
 thread_local! {
@@ -237,8 +341,22 @@ thread_local! {
 /// 历史上限：多了没人看，内存也白占。
 const HISTORY_MAX: usize = 50;
 
-/// 记一条到通知中心。
-fn record(title: &str, body: &str) {
+/// 批次号计数器（每发一批通知 +1）。
+thread_local! {
+    static BATCH_SEQ: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 下一个批次号。
+fn next_batch() -> u64 {
+    BATCH_SEQ.with(|b| {
+        let n = b.get() + 1;
+        b.set(n);
+        n
+    })
+}
+
+/// 记一条到通知中心（**带级别、来源与批次**，阶段 175 / UI-11）。
+fn record_entry(level: Level, source: Source, batch: u64, title: &str, body: &str) {
     let at = glib::DateTime::now_local()
         .ok()
         .and_then(|d| d.format("%H:%M:%S").ok())
@@ -246,7 +364,17 @@ fn record(title: &str, body: &str) {
         .unwrap_or_default();
     HISTORY.with(|h| {
         let mut v = h.borrow_mut();
-        v.insert(0, Entry { at, title: title.to_string(), body: body.to_string() });
+        v.insert(
+            0,
+            Entry {
+                at,
+                title: title.to_string(),
+                body: body.to_string(),
+                level,
+                source,
+                batch,
+            },
+        );
         if v.len() > HISTORY_MAX {
             v.truncate(HISTORY_MAX);
         }
@@ -308,21 +436,60 @@ pub fn open_center(parent: Option<&gtk::Window>) {
             empty.add_css_class("pp-dim");
             list.append(&empty);
         } else {
-            for e in entries {
-                let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-                row.set_margin_top(4);
-                row.set_margin_bottom(6);
-                let t = gtk::Label::new(Some(&format!("{}  {}", e.at, e.title)));
-                t.set_halign(gtk::Align::Start);
-                t.add_css_class("pp-menu-label");
-                row.append(&t);
-                let b = gtk::Label::new(Some(&e.body));
-                b.set_halign(gtk::Align::Start);
-                b.set_wrap(true);
-                b.set_max_width_chars(64);
-                b.add_css_class("pp-dim");
-                row.append(&b);
-                list.append(&row);
+            // ⚠️ **阶段 175 / UI-11：按级别分组**（审核 P2-4：「通知按级别
+            //   与批次分组，用户先看到需要处理的事项」）。
+            //   以前是**平铺的时间列表** ⇒ 用户得一条条读才知道哪条要管。
+            //   ⇒ 分组顺序：**失败 → 警告 → 信息 → 成功**（要管的最前）。
+            //
+            // ⚠️ **级别用「文字 ＋ 图标」表达，不只靠颜色**
+            //   （审核验收明写；色弱用户与灰度打印都看不出来）。
+            let mut groups: Vec<(Level, Vec<&Entry>)> = Vec::new();
+            for lvl in [Level::Error, Level::Warn, Level::Info, Level::Success] {
+                let g: Vec<&Entry> = entries.iter().filter(|e| e.level == lvl).collect();
+                if !g.is_empty() {
+                    groups.push((lvl, g));
+                }
+            }
+            for (lvl, items) in groups {
+                // ---- 分组标题（级别文字 ＋ 图标 ＋ 条数）----
+                let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let hi = gtk::Image::from_icon_name(lvl.icon());
+                hi.set_pixel_size(14);
+                head.append(&hi);
+                let ht = gtk::Label::new(Some(lvl.label()));
+                ht.add_css_class("pp-menu-label");
+                head.append(&ht);
+                let hc = gtk::Label::new(Some(&format!("{n}", n = items.len())));
+                hc.add_css_class("pp-dim");
+                head.append(&hc);
+                list.append(&head);
+
+                for e in items {
+                    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                    row.set_margin_top(4);
+                    row.set_margin_bottom(6);
+                    let t = gtk::Label::new(Some(&format!("{}  {}", e.at, e.title)));
+                    t.set_halign(gtk::Align::Start);
+                    t.add_css_class("pp-menu-label");
+                    row.append(&t);
+                    let b = gtk::Label::new(Some(&e.body));
+                    b.set_halign(gtk::Align::Start);
+                    b.set_wrap(true);
+                    b.set_max_width_chars(64);
+                    b.add_css_class("pp-dim");
+                    row.append(&b);
+                    // ⚠️ **来源 ＋ 批次**（进程内语义，不落盘）：
+                    //   「传输 · 第 3 批」⇒ 同批的几条一眼看得出是一件事。
+                    let meta = gtk::Label::new(Some(&if e.batch > 0 {
+                        format!("{} · 第 {} 批", e.source.label(), e.batch)
+                    } else {
+                        e.source.label().to_string()
+                    }));
+                    meta.set_halign(gtk::Align::Start);
+                    meta.add_css_class("pp-dim");
+                    row.append(&meta);
+                    list.append(&row);
+                }
             }
         }
 
@@ -337,6 +504,7 @@ pub fn open_center(parent: Option<&gtk::Window>) {
 }
 
 pub fn desktop_action(
+    level: Level,
     title: &str,
     body: &str,
     action_label: &str,
@@ -346,7 +514,11 @@ pub fn desktop_action(
     // ⚠️ **先记进通知中心**，再去发桌面通知：没有通知守护进程时桌面
     // 通知根本发不出去（`notify_proxy()` 返回 None），但用户仍然应该
     // 能回看"刚才发生了什么"。
-    record(title, body);
+    //
+    // ⚠️ **阶段 175 / UI-11**：记的时候**带上级别与批次**
+    //   ⇒ 通知中心能按级别分组、同批的归在一起。
+    let batch = next_batch();
+    record_entry(level, Source::Xfer, batch, title, body);
     // ⚠️ **非 Unix 平台没有会话总线** ⇒ D-Bus 那套发不出去，
     // 直接返回 false，让调用方走「状态栏写一句」的兜底
     // （见 `platform::notify::desktop_available`）。
@@ -423,6 +595,7 @@ fn notify_batch(
 ) -> bool {
     // 点通知 → 打开汇总窗（用户**主动点**的，不算"传输完弹窗"）
     desktop_action(
+        b.level(),
         b.title(),
         &notify_body(b),
         tr("查看明细"),

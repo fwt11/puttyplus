@@ -26,6 +26,83 @@ pub const QCOL_ID: i32 = 6;
 pub const QCOL_FAIL: i32 = 7;
 /// **这一行正在传**（上传或下载）⇒ 方向列用 accent 色（随呼吸变亮/变暗）
 pub const QCOL_ACTIVE: i32 = 8;
+/// **状态码列**（阶段 175 / UI-11）：给筛选用的**机器可读**状态。
+///
+/// ⚠️ **为什么不能靠状态列的文字筛**：那一列在失败时放的是**错误原文**
+///   （比如「权限不足」）⇒ 拿文字判断"是不是失败"不可靠 ⇒ 加一列整数
+///   状态码，筛选只认它。
+pub const QCOL_CODE: i32 = 9;
+
+/// 状态码（`QCOL_CODE` 的取值）。
+pub const ST_WAIT: i32 = 0;
+pub const ST_RUN: i32 = 1;
+pub const ST_DONE: i32 = 2;
+pub const ST_SKIP: i32 = 3;
+pub const ST_ERR: i32 = 4;
+pub const ST_CANCEL: i32 = 5;
+
+/// 筛选档位（阶段 175 / UI-11）。
+pub const FILTER_ALL: u8 = 0;
+pub const FILTER_RUNNING: u8 = 1;
+pub const FILTER_FAILED: u8 = 2;
+
+/// 当前筛选档（**进程级**：队列窗口只有一个）。
+thread_local! {
+    static FILTER_MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(FILTER_ALL) };
+}
+
+/// 当前筛选档（读）。
+pub fn filter_mode() -> u8 {
+    FILTER_MODE.with(|c| c.get())
+}
+
+/// 切到某个筛选档（**只改可见性，不动顺序** ⇒ 正在传的行不会被挪走）。
+///
+/// ⚠️ **顺序稳定**：筛选是 `GtkTreeModelFilter` 的可见性 ⇒ 底层模型顺序
+///   一行没动 ⇒ 清除筛选后**原顺序原样回来**（审核验收）。
+pub fn set_filter_mode(st: &Rc<PanelState>, mode: u8) {
+    FILTER_MODE.with(|c| c.set(mode));
+    let slot = st.queue_ui.borrow();
+    let Some(qu) = slot.as_ref() else { return };
+    qu.filter.refilter();
+}
+
+/// 视图里选中的行 → **模型行**（阶段 175 / UI-11）。
+///
+/// ⚠️ **视图显示的是筛选模型**（`GtkTreeModelFilter`）⇒ 视图里的行号与
+///   模型行号**不一定一样** ⇒ 拿视图行号直接去 `model.iter()` 会读到
+///   **别的行**（一筛选就明显）⇒ 一律先换回模型路径。
+fn selected_model_paths(qu: &QueueUi) -> Vec<gtk::TreePath> {
+    let (rows, _) = qu.view.selection().selected_rows();
+    rows.into_iter()
+        .filter_map(|p| qu.filter.convert_path_to_child_path(&p))
+        .collect()
+}
+
+/// 队列顶部的**只读摘要**（阶段 175 / UI-11）。
+///
+/// ⚠️ **只读**：这里**只说清楚**有多少成多少败，不让人改（改设置的地方
+///   只留一处）。
+pub struct QueueSummary {
+    /// 完成。
+    pub done: gtk::Label,
+    /// 失败。
+    pub failed: gtk::Label,
+    /// 跳过。
+    pub skipped: gtk::Label,
+    /// 取消。
+    pub canceled: gtk::Label,
+}
+
+impl QueueSummary {
+    /// 按四个计数刷新文案。
+    pub fn set(&self, done: usize, failed: usize, skipped: usize, canceled: usize) {
+        self.done.set_text(&trf!("完成 {n}", n = done));
+        self.failed.set_text(&trf!("失败 {n}", n = failed));
+        self.skipped.set_text(&trf!("跳过 {n}", n = skipped));
+        self.canceled.set_text(&trf!("取消 {n}", n = canceled));
+    }
+}
 
 /// 一个传输项在 UI 侧的记录。
 pub struct QueueItem {
@@ -41,6 +118,13 @@ pub struct QueueUi {
     pub win: gtk::Window,
     pub view: gtk::TreeView,
     pub model: gtk::ListStore,
+    /// **筛选模型**（阶段 175 / UI-11）：视图显示的是它，不是 `model`。
+    ///
+    /// ⚠️ **为什么**：筛选只改「哪些行可见」，**不动顺序** ⇒ 正在传的
+    ///   行不会被重排（审核验收：「不自动重排用户正在传输的行」）。
+    pub filter: gtk::TreeModelFilter,
+    /// 顶部的只读摘要。
+    pub summary: Option<QueueSummary>,
     /// id → 行引用（模型行删除后自动失效）
     pub rows: RefCell<HashMap<u64, gtk::TreeRowReference>>,
 }
@@ -106,6 +190,73 @@ pub fn ensure(st: &Rc<PanelState>) {
 
     vbox.append(&bbox);
 
+    // ---- 摘要条 ＋ 筛选（阶段 175 / UI-11）----
+    //
+    // ⚠️ **摘要是只读的**：只说清楚「多少成、多少败」，不让人在这儿改
+    //   （改设置的地方只留一处）。
+    let summary = {
+        let srow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        srow.set_margin_top(2);
+        let mut mk = |text: &str, cls: &str| {
+            let l = gtk::Label::new(Some(text));
+            l.add_css_class(cls);
+            l.set_xalign(0.0);
+            srow.append(&l);
+            l
+        };
+        let done = mk(&trf!("完成 {n}", n = 0), "pp-pill-ok");
+        let failed = mk(&trf!("失败 {n}", n = 0), "pp-pill-err");
+        let skipped = mk(&trf!("跳过 {n}", n = 0), "pp-pill-dim");
+        let canceled = mk(&trf!("取消 {n}", n = 0), "pp-pill-dim");
+        let summary = QueueSummary {
+            done,
+            failed,
+            skipped,
+            canceled,
+        };
+        // ---- 筛选：全部 / 进行中 / 失败 ----
+        // ⚠️ **一排 ToggleButton 当分段控件用**（同一个 group ⇒ 互斥）。
+        let frow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        frow.set_halign(gtk::Align::End);
+        frow.set_hexpand(true);
+        let mut group: Option<gtk::ToggleButton> = None;
+        for (i, (label, tip)) in [
+            (tr("全部"), tr("显示所有传输项")),
+            (tr("进行中"), tr("只看还在排队或正在传的")),
+            (tr("失败"), tr("只看失败的")),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let b = gtk::ToggleButton::with_label(label);
+            b.set_tooltip_text(Some(tip));
+            b.add_css_class("flat");
+            if i == 0 {
+                b.set_active(true);
+            }
+            if let Some(g) = &group {
+                b.set_group(Some(g));
+            } else {
+                group = Some(b.clone());
+            }
+            let st2 = Rc::clone(st);
+            let mode = match i {
+                1 => FILTER_RUNNING,
+                2 => FILTER_FAILED,
+                _ => FILTER_ALL,
+            };
+            b.connect_toggled(move |b| {
+                if b.is_active() {
+                    set_filter_mode(&st2, mode);
+                }
+            });
+            frow.append(&b);
+        }
+        srow.append(&frow);
+        vbox.append(&srow);
+        summary
+    };
+
     let model = gtk::ListStore::new(&[
         glib::Type::STRING, // DIR
         glib::Type::STRING, // FILE
@@ -116,9 +267,23 @@ pub fn ensure(st: &Rc<PanelState>) {
         glib::Type::U64,    // ID
         glib::Type::STRING, // 失败态前景色（空 = 用主题默认色）
         glib::Type::BOOL,   // 正在传（方向列用 accent 色 + 呼吸）
+        glib::Type::I32,    // 状态码（筛选用，阶段 175 / UI-11）
     ]);
 
-    let view = gtk::TreeView::with_model(&model);
+    // ⚠️ **阶段 175 / UI-11：筛选模型**。
+    //   用 `GtkTreeModelFilter`（**只改可见性、不动顺序**）⇒ 正在传的
+    //   行不会被重排（审核验收明写这条）；清除筛选后原顺序原样回来。
+    let filter = gtk::TreeModelFilter::new(&model, None);
+    filter.set_visible_func(|m, it| {
+        let code: i32 = m.get(it, QCOL_CODE);
+        match FILTER_MODE.with(|c| c.get()) {
+            FILTER_RUNNING => code == ST_WAIT || code == ST_RUN,
+            FILTER_FAILED => code == ST_ERR,
+            _ => true,
+        }
+    });
+
+    let view = gtk::TreeView::with_model(&filter);
     let cols: [(&str, bool, bool); 5] = [
         (tr("方向"), false, false),
         (tr("文件"), true, false),
@@ -211,6 +376,8 @@ pub fn ensure(st: &Rc<PanelState>) {
         win,
         view,
         model,
+        filter,
+        summary: Some(summary),
         rows: RefCell::new(HashMap::new()),
     }));
 }
@@ -342,6 +509,7 @@ pub fn add_item(st: &Rc<PanelState>, it: &QueueItem) {
             (QCOL_ID as u32, &id),
             (QCOL_FAIL as u32, &""),
             (QCOL_ACTIVE as u32, &false),
+            (QCOL_CODE as u32, &ST_WAIT),
         ],
     );
     let path = qu.model.path(&iter);
@@ -425,6 +593,16 @@ pub fn flush(st: &Rc<PanelState>) {
         // **正在传**（只有真在跑的那些才算；排队等待的不算——否则一长串
         // 等待项都在呼吸，反而看不出"现在在传哪个"）。
         let active = g.state == XferState::Run;
+        // ⚠️ **状态码**（阶段 175 / UI-11）：筛选只认它（状态列在失败时
+        //   放的是**错误原文**，没法拿来判断"是不是失败"）。
+        let code = match g.state {
+            XferState::Wait => ST_WAIT,
+            XferState::Run => ST_RUN,
+            XferState::Done => ST_DONE,
+            XferState::Skip => ST_SKIP,
+            XferState::Err => ST_ERR,
+            XferState::Cancel => ST_CANCEL,
+        };
         qu.model.set(
             &ti,
             &[
@@ -434,6 +612,7 @@ pub fn flush(st: &Rc<PanelState>) {
                 (QCOL_STATE as u32, &state),
                 (QCOL_FAIL as u32, &fail),
                 (QCOL_ACTIVE as u32, &active),
+                (QCOL_CODE as u32, &code),
             ],
         );
 
@@ -491,6 +670,27 @@ pub fn flush(st: &Rc<PanelState>) {
     }
     // ⚠️ **先放掉 `st.items` 的借用**再刷按钮：刷新要读队列算"还在传几个"
     // ⇒ 借用没放掉就是 RefCell 双重借用 panic。
+    //
+    // ⚠️ **摘要条**（阶段 175 / UI-11）：完成 / 失败 / 跳过 / 取消各多少。
+    {
+        let mut done = 0usize;
+        let mut failed = 0usize;
+        let mut skipped = 0usize;
+        let mut canceled = 0usize;
+        for it in items.iter() {
+            let g = it.shared.lock().unwrap();
+            match g.state {
+                XferState::Done => done += 1,
+                XferState::Err => failed += 1,
+                XferState::Skip => skipped += 1,
+                XferState::Cancel => canceled += 1,
+                _ => {}
+            }
+        }
+        if let Some(su) = qu.summary.as_ref() {
+            su.set(done, failed, skipped, canceled);
+        }
+    }
     drop(items);
     refresh_btn(st);
     // ⚠️ **再同步一次动画**：这一轮可能刚给某一行写上终态文案（「完成」）
@@ -503,9 +703,8 @@ fn cancel_selected(st: &Rc<PanelState>) {
     let ids: Vec<u64> = {
         let qu = st.queue_ui.borrow();
         let Some(qu) = qu.as_ref() else { return };
-        let (rows, _) = qu.view.selection().selected_rows();
         let mut ids = Vec::new();
-        for path in rows {
+        for path in selected_model_paths(qu) {
             let Some(ti) = qu.model.iter(&path) else { continue };
             let id: u64 = qu.model.get(&ti, QCOL_ID);
             ids.push(id);
@@ -570,14 +769,144 @@ fn clear_finished(st: &Rc<PanelState>) {
 
 /* ---------------- 右键菜单：取消 / 删除 / 清除已完成 ---------------- */
 
+/// 选中项里**失败的那一条**（id ＋ 错误原文）。
+///
+/// ⚠️ 「查看原因」「复制错误」「重新传输」都只对**失败项**有意义
+///   （审核 P2-4：「失败行提供『查看原因』『复制路径/错误』等低风险动作」）。
+fn selected_failed(st: &Rc<PanelState>) -> Option<(u64, String)> {
+    let qu = st.queue_ui.borrow();
+    let qu = qu.as_ref()?;
+    let mut ids = Vec::new();
+    for path in selected_model_paths(qu) {
+        let Some(ti) = qu.model.iter(&path) else { continue };
+        ids.push(qu.model.get::<u64>(&ti, QCOL_ID));
+    }
+    drop(qu);
+    let items = st.items.borrow();
+    for it in items.iter() {
+        if !ids.contains(&it.id) {
+            continue;
+        }
+        let g = it.shared.lock().unwrap();
+        if g.state == XferState::Err {
+            let msg = g.msg.clone().unwrap_or_else(|| tr("错误").into());
+            return Some((it.id, msg));
+        }
+    }
+    None
+}
+
+/// 「重新传输」能不能用（**能不能用由三件事决定**）。
+///
+/// ⚠️ **审核 P2-4**：「仅在源、目标、连接仍有效时可用」⇒
+///   · 选中的那一项**是失败的**；
+///   · 那一项**还在队列里**（源、目标信息还在 ⇒ 知道该重传什么）；
+///   · **连接还活着**（`conn_ok`）⇒ 否则重传立刻又失败。
+/// ⇒ 不可用时菜单项**灰掉**，并在 tooltip 里**说明为什么**。
+pub fn retry_availability(st: &Rc<PanelState>) -> (bool, String) {
+    if !st.conn_ok.get() {
+        return (
+            false,
+            tr("连接已经断了 —— 重新连上以后才能重新传输").to_string(),
+        );
+    }
+    let qu = st.queue_ui.borrow();
+    let Some(qu) = qu.as_ref() else {
+        return (false, tr("队列还没建起来").to_string());
+    };
+    let mut ids = Vec::new();
+    for path in selected_model_paths(qu) {
+        let Some(ti) = qu.model.iter(&path) else { continue };
+        ids.push(qu.model.get::<u64>(&ti, QCOL_ID));
+    }
+    drop(qu);
+    let items = st.items.borrow();
+    for it in items.iter() {
+        if !ids.contains(&it.id) {
+            continue;
+        }
+        let g = it.shared.lock().unwrap();
+        if g.state != XferState::Err {
+            continue;
+        }
+        if it.kind != XferKind::Transfer {
+            return (
+                false,
+                tr("只有文件传输能重新传（建目录、删除不能重做）").to_string(),
+            );
+        }
+        if it.src.is_empty() || it.dst_dir.is_empty() {
+            return (
+                false,
+                tr("这一项的源或目标已经找不到了 —— 重新选一次文件吧").to_string(),
+            );
+        }
+        return (true, String::new());
+    }
+    (
+        false,
+        tr("选中一个失败的传输项才能重新传输").to_string(),
+    )
+}
+
+/// 重新传输选中的那一项（阶段 175 / UI-11）。
+///
+/// ⚠️ **执行前说明覆盖风险**（审核验收：「重试不会隐式覆盖文件」）：
+///   先弹一个确认框说明「目标文件会被覆盖」⇒ 用户点了才继续。
+/// ⚠️ **不自动重试**：失败了就摆在那儿，用户决定要不要重来 ⇒ 程序**不会**
+///   自己偷偷再传一遍。
+/// ⚠️ 真正提交时走**既有**的 `submit_transfers` ⇒ 冲突预检照旧会问
+///   （覆盖 / 跳过 / 逐项）⇒ 不会悄悄盖掉文件。
+fn retry_selected(st: &Rc<PanelState>) {
+    let (ok, why) = retry_availability(st);
+    if !ok {
+        super::dialogs::info(st.topwin().as_ref(), tr("不能重新传输"), &why);
+        return;
+    }
+    // 找到那一项的源 / 目标 / 方向
+    let Some((id, _)) = selected_failed(st) else { return };
+    let Some((src, dst_dir, upload)) = (
+        {
+            let items = st.items.borrow();
+            let mut found = None;
+            for it in items.iter() {
+                if it.id == id {
+                    found = Some((it.src.clone(), it.dst_dir.clone(), it.upload));
+                    break;
+                }
+            }
+            found
+        }
+    ) else {
+        return;
+    };
+    let st2 = Rc::clone(st);
+    let msg = trf!(
+        "重新传这一项：\n{src} → {dst}\n\n目标位置已经有同名文件的话会被覆盖。确定继续吗？",
+        src = src,
+        dst = dst_dir
+    );
+    super::dialogs::confirm_title(
+        st.topwin().as_ref(),
+        tr("重新传输"),
+        &msg,
+        tr("重新传输"),
+        move |yes| {
+            if !yes {
+                return;
+            }
+            super::retry_transfer(&st2, &src, &dst_dir, upload);
+        },
+    );
+}
+
 /// 选中行里各状态的统计（决定菜单项可用性）。
 fn selected_states(st: &Rc<PanelState>) -> (bool, bool, bool, bool) {
     // (有选中, 有运行中, 有等待中, 有可删除的已结束项)
     let qu = st.queue_ui.borrow();
     let Some(qu) = qu.as_ref() else { return (false, false, false, false) };
-    let (rows, _) = qu.view.selection().selected_rows();
     let mut ids = Vec::new();
-    for path in rows {
+    for path in selected_model_paths(qu) {
         let Some(ti) = qu.model.iter(&path) else { continue };
         ids.push(qu.model.get::<u64>(&ti, QCOL_ID));
     }
@@ -630,6 +959,51 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
     }
     vb.append(&b_remove);
 
+    // ---- 失败项的动作（阶段 175 / UI-11）----
+    //
+    // ⚠️ **都是低风险动作**：「查看原因」「复制错误」只是读。
+    //   「重新传输」是**独立子项**（不是「删除」那种顺手就干的）⇒
+    //   它**单独确认**，而且**不隐式覆盖**（走既有的冲突预检）。
+    let b_reason = crate::menu::item("dialog-information-symbolic", tr("查看原因"), None);
+    {
+        let st2 = Rc::clone(st);
+        let pop2 = pop.clone();
+        b_reason.connect_clicked(move |_| {
+            if let Some((_, msg)) = selected_failed(&st2) {
+                super::dialogs::info(st2.topwin().as_ref(), tr("失败原因"), &msg);
+            }
+            pop2.popdown();
+        });
+    }
+    vb.append(&b_reason);
+
+    let b_copy = crate::menu::item("edit-copy-symbolic", tr("复制错误"), None);
+    {
+        let st2 = Rc::clone(st);
+        let pop2 = pop.clone();
+        b_copy.connect_clicked(move |_| {
+            if let Some((_, msg)) = selected_failed(&st2) {
+                let top = st2.topwin();
+                if let Some(w) = top.as_ref() {
+                    w.clipboard().set_text(&msg);
+                }
+            }
+            pop2.popdown();
+        });
+    }
+    vb.append(&b_copy);
+
+    let b_retry = crate::menu::item("view-refresh-symbolic", tr("重新传输"), None);
+    {
+        let st2 = Rc::clone(st);
+        let pop2 = pop.clone();
+        b_retry.connect_clicked(move |_| {
+            pop2.popdown();
+            retry_selected(&st2);
+        });
+    }
+    vb.append(&b_retry);
+
     vb.append(&crate::menu::sep());
 
     let b_clear = crate::menu::item("edit-clear-all-symbolic", tr("清除已完成"), None);
@@ -649,6 +1023,7 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
     gesture.set_button(3);
     let view2 = view.clone();
     let (cancel_btn, remove_btn) = (b_cancel.clone(), b_remove.clone());
+    let (reason_btn, copy_btn, retry_btn) = (b_reason.clone(), b_copy.clone(), b_retry.clone());
     gesture.connect_pressed(move |g, _n, x, y| {
         if g.current_button() != 3 {
             return;
@@ -668,6 +1043,15 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
         // 等待中的删除 = 标记取消后立即移除行
         remove_btn.set_sensitive(any && !running);
         let _ = finished;
+        // ⚠️ **阶段 175 / UI-11**：失败项的动作 —— 不可用时**灰掉**，
+        //   并在 tooltip 里**说明为什么**（审核验收：「不可用时按钮灰掉
+        //   并说明原因」）。
+        let failed = selected_failed(&st).is_some();
+        reason_btn.set_sensitive(failed);
+        copy_btn.set_sensitive(failed);
+        let (can_retry, why) = retry_availability(&st);
+        retry_btn.set_sensitive(can_retry);
+        retry_btn.set_tooltip_text(Some(&why));
         pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         pop.popup();
     });
@@ -679,9 +1063,8 @@ fn install_context_menu(st: &Rc<PanelState>, view: &gtk::TreeView) {
 fn remove_selected(st: &Rc<PanelState>) {
     let qu = st.queue_ui.borrow();
     let Some(qu) = qu.as_ref() else { return };
-    let (rows, _) = qu.view.selection().selected_rows();
     let mut ids: Vec<u64> = Vec::new();
-    for path in rows {
+    for path in selected_model_paths(qu) {
         let Some(ti) = qu.model.iter(&path) else { continue };
         ids.push(qu.model.get::<u64>(&ti, QCOL_ID));
     }
