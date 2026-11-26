@@ -308,11 +308,27 @@ jobs:
           #     ⇒ 编辑器**必须出现**（用户 2026-11-25 报「编辑器不出现」）
           #     ⇒ 根因是「家格子」指向了**已经收拢的那一格** ⇒ 页挂到了
           #     看不见的地方。⚠️ **不连服务器** ⇒ CI 上跑得动。
+          # ⚠️ **阶段 176 / UI-00 的基线冒烟**（三主题 × 三尺寸）：它把
+          #   **窗口几何 / GTK 健康 / 横向溢出**统一量一遍 ⇒ 以后任何页面
+          #   改动把布局撑破、或引出 GTK critical，**这里先红**。
+          #   ⚠️ 它**不连服务器、不连库** ⇒ CI 上跑得动。
+          #
+          # ⚠️ **阶段 174/175 的新冒烟也在名单里**（都不连远端 ⇒ 快）：
+          #   - `welcome_semantics_smoke`：欢迎页的**说明区不再像按钮** ＋
+          #     内容列限宽 ＋ 垂直重心稳定；
+          #   - `er_state_smoke`：ER 图**无关系时的有意义状态**（三种状态
+          #     标题/解释各不相同 ＋ 主 CTA 有可见结果）；
+          #   - `db_workspace_empty_smoke`：数据库空态**以任务为主** ＋
+          #     未连接时的主 CTA 真的打开当前会话的新建流程；
+          #   - `queue_group_smoke`：通知**按级别分组** ＋ 队列摘要/筛选/
+          #     失败动作（含「重新传输」的可用性）。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
                      docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke \
                      localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke \
-                     editor_home_smoke; do
+                     editor_home_smoke ui_baseline_smoke \
+                     welcome_semantics_smoke er_state_smoke db_workspace_empty_smoke \
+                     queue_group_smoke; do
             echo "::group::$ex"
             # ⚠️⚠️ **先编，再直接跑二进制**（别用 `cargo run`）：2026-11-26 实测
             #    `cargo run` 会把**几百行编译警告**也混进同一个日志 ⇒ 失败时

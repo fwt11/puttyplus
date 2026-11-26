@@ -40,6 +40,7 @@ pub mod terms;
 pub mod theme;
 pub mod topbar;
 pub mod topmenus;
+pub mod uitest;
 pub mod util;
 pub mod vault;
 pub mod vaultui;
