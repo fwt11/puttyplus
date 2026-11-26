@@ -190,17 +190,41 @@ fn main() {
     //
     // 以前 CellRendererPixbuf 的 padding 是 0 ⇒ 图标直接贴在字上。
     // 这里量的是渲染器属性（改回 0 就会挂）。
+    //
+    // ⚠️ **阶段 142 起，纵向 padding 归零**（`src/sidebar.rs:444`）：
+    //    行距交给 **CSS 的 `treeview.view cell { padding }`** 管 ⇒ 改密度
+    //    立即生效（以前这 3px 写死在渲染器上 ⇒ 紧凑档压不动）。
+    // ⇒ 所以这里**不再**断言渲染器的纵向 padding（那条断言是阶段 93 写的，
+    //    阶段 142 改了设计之后它就一直红着、也没人看见）⇒ 改成：
+    //    ① 渲染器纵向**确实是 0**（别有人又写死回去）；
+    //    ② **CSS 里真的有纵向间距**（这才是行距的真正来源）。
     {
         let pad = sb.icon_renderer().padding();
         assert!(
             pad.0 >= 4,
             "图标渲染器的水平内边距太小（图标会贴在字上）：{pad:?}"
         );
-        assert!(
-            pad.1 >= 2,
-            "图标渲染器的垂直内边距太小（行与行贴在一起）：{pad:?}"
+        assert_eq!(
+            pad.1, 0,
+            "图标渲染器的纵向内边距应归零（阶段 142：行距归 CSS 管）：{pad:?}"
         );
-        println!("[5] 图标渲染器内边距 {pad:?}（图标不贴字、行不贴行）");
+        // CSS 那条规则是 `COMPONENTS` 里**所有主题共用**的一段 ⇒ 取哪个主题都一样。
+        let css = puttyplus::theme::css_text(puttyplus::theme::Theme::Dark).unwrap_or_default();
+        let css_v_pad = css
+            .split("treeview.view cell {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .and_then(|body| body.split("padding:").nth(1))
+            .and_then(|v| v.trim().split_whitespace().next())
+            .map(|v| v.trim_end_matches("px").trim().parse::<i32>().unwrap_or(0))
+            .unwrap_or(0);
+        assert!(
+            css_v_pad >= 2,
+            "CSS 里 `treeview.view cell` 的纵向内边距太小（行与行会贴在一起）：{css_v_pad}px"
+        );
+        println!(
+            "[5] 图标渲染器内边距 {pad:?}（图标不贴字）＋ CSS 行距 {css_v_pad}px（行不贴行）"
+        );
     }
 
     for f in [&conn_ini, &recent, &vault] {

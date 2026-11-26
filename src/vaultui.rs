@@ -1012,8 +1012,17 @@ pub fn badge_button() -> gtk::Button {
         // ⚠️ **无障碍标签**：按钮里**没有文字了** ⇒ 读屏软件只会念出
         // 「按钮」⇒ 把状态文字挂成 a11y label（跟图标同一套文案，
         // 不另编一套 ⇒ 不会跟 tooltip 说法打架）。
+        //
+        // ⚠️ **必须走 `a11y::set_label`**（别直接 `update_property`）：
+        //    GTK4 **读不回** accessible label ⇒ 项目用 `pp-a11y-labelled`
+        //    这个 CSS 类当"设过了"的标记（`a11y::has_label` 读它）
+        //    ⇒ 绕过 `set_label` 的话，**冒烟看不见**（`a11y_smoke` 会红）。
         let a11y = trf!("凭据库 {text}", text = text);
-        b.update_property(&[gtk::accessible::Property::Label(&a11y)]);
+        // ⚠️ **要 upcast 成 `gtk::Widget`**：`Button` 本身**不**实现
+        //    `IsA<Accessible>`（那是 Widget 上的接口）⇒ 直接传 `&Button`
+        //    编译不过 ⇒ 先转成 Widget 再给 `set_label`。
+        let bw: &gtk::Widget = b.upcast_ref();
+        crate::a11y::set_label(bw, &a11y);
         // ⚠️ **基础类 `pp-chip` 始终保留**（它带底色、圆角、内边距），
         //    只换"状态类"。把基础类也摘掉的话，标志就变成一串没底色的
         //    白字——那跟没有标志一样。
