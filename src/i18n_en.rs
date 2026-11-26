@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2180] = [
+pub static EN: [(&str, &str); 2187] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -784,6 +784,7 @@ pub static EN: [(&str, &str); 2180] = [
     ("容器文件", "Container files"),
     ("容器日志", "Container logs"),
     ("容器正在运行，不用再启动（先「停止」才能启动）", "The container is already running, no need to start it (stop it first)"),
+    ("容器没在运行 ⇒ 进不去。先把这个容器启动起来（或切到正在运行的容器）再试。", "The container is not running ⇒ cannot enter it. Start the container first (or switch to a running one) and try again."),
     ("容器没有在运行，不用停（先「启动」才能停）", "The container is not running, no need to stop it (start it first)"),
     ("容器终端已经开着（在另一个窗口里）", "The container terminal is already open (in another window)"),
     ("容器终端已退出", "The container terminal has exited"),
@@ -1167,6 +1168,8 @@ pub static EN: [(&str, &str); 2180] = [
     ("撤销 (Ctrl+Z)", "Undo (Ctrl+Z)"),
     ("操作", "Actions"),
     ("操作失败", "The operation failed"),
+    ("操作没完成 ⇒ 详情里是原始报错。", "The operation did not complete ⇒ the original error is in the details."),
+    ("操作超时了 ⇒ 稍后重试；如果一直这样，先看看容器是不是卡住了。", "The operation timed out ⇒ try again in a moment; if it keeps happening, check whether the container is stuck."),
     ("收起对象树：给主区腾出宽度", "Hide the object tree: give the main area more width"),
     ("改主密码", "Change the master password"),
     ("改主密码…", "Change the master password…"),
@@ -1238,6 +1241,7 @@ pub static EN: [(&str, &str); 2180] = [
     ("文件是空的", "The file is empty"),
     ("文件正在写入，请稍候再关闭。", "The file is being written, please wait before closing."),
     ("文件正在读取，请稍候再关闭。", "The file is being read, please wait before closing."),
+    ("文件系统是只读的 ⇒ 改不了。检查容器的挂载与权限；别用「提权重试」硬来。", "The file system is read-only ⇒ nothing can be changed. Check the container's mounts and permissions; do not brute-force it by escalating privileges."),
     ("文件菜单", "File menu"),
     ("文件解析出 {v0} 列 × {v1} 行待导入", "The file was parsed into {v0} columns × {v1} rows to import"),
     ("文件较大，只显示前 {shown}。", "The file is large; only the first {shown} are shown."),
@@ -1383,6 +1387,7 @@ pub static EN: [(&str, &str); 2180] = [
     ("本机没有 tar 命令，解不开：{e}", "No local tar command, cannot unpack: {e}"),
     ("机制", "Mechanism"),
     ("权限", "Permissions"),
+    ("权限不足 ⇒ 读不了这个目录。检查容器里这个文件的属主和权限，或换一个权限更高的账号进容器。", "Permission denied ⇒ cannot read this directory. Check the file's owner and mode inside the container, or connect with an account that has more rights."),
     ("权限：{p}", "Permissions: {p}"),
     ("条件", "Condition"),
     ("条件…", "Condition…"),
@@ -1900,6 +1905,7 @@ pub static EN: [(&str, &str); 2180] = [
     ("跟随终端目录", "Follow the terminal directory"),
     ("跟随终端目录（约 2 秒一次轮询，OSC 7 即时）\n按下 = 开启", "Follow the terminal directory (polled about every 2 seconds, immediately with OSC 7)\nPress = turn on"),
     ("跨服务器传输失败", "The cross-server transfer failed"),
+    ("路径不存在 ⇒ 刷新一下目录再试，或者检查路径拼写（容器里的路径和本地不一样）。", "No such path ⇒ refresh the directory and try again, or check the spelling (paths inside the container differ from local ones)."),
     ("路径包含换行或单引号，改用本机中转", "The path contains a newline or a single quote, using the relay through this machine instead"),
     ("路径包含通配符，改用本机中转", "The path contains a wildcard, using the relay through this machine instead"),
     ("跳到下一次输出或标记（复盘时跳过等待）", "Jump to the next output or marker (skips the waiting while replaying)"),
@@ -2041,6 +2047,7 @@ pub static EN: [(&str, &str); 2180] = [
     ("违反外键约束（引用的行不存在，或还有别的行引用着它）", "Foreign key constraint violated (the referenced row does not exist, or other rows still reference it)"),
     ("违反非空约束（这一列不能为空）", "Not null constraint violated (this column cannot be empty)"),
     ("连一台机器、传个文件、跑个数据库查询 —— 先建一个连接。", "Connect to a machine, transfer a file, run a database query — create a connection first."),
+    ("连不上 Docker 服务 ⇒ 检查这台机器上的 Docker 是否在跑，以及当前账号有没有权限访问它。", "Cannot reach the Docker service ⇒ check whether Docker is running on that machine and whether the current account may access it."),
     ("连不上服务器：地址不通、端口被拒绝，或域名解析不了。", "Cannot reach the server: the address is unreachable, the port was refused, or the hostname cannot be resolved."),
     ("连不上远程的 Docker（服务没起，或当前账号没权限）", "Cannot connect to the remote Docker (the service is down, or the current account has no permission)"),
     ("连到 {meta} —— 点一下就开", "Connect to {meta} — one click opens it"),

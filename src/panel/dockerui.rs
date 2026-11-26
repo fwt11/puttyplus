@@ -591,20 +591,125 @@ fn perm_text(perms: &str) -> String {
     perms.to_string()
 }
 
-/// 文件页的**报错 ⇒ 说人话**（阶段 140）。
+/// 文件页的**错误分类**（阶段 172 / UI-07，治 P1-4）。
 ///
-/// ⚠️ **为什么**：有些容器镜像很精简 ⇒ **没有 `ls`** ⇒ docker 的原话是
-///   `OCI runtime exec failed: … "ls": executable file not found in $PATH`
-///   ⇒ 用户既看不懂「这个容器列不了目录」，也不知道怎么办 ⇒ 这里给**原因
-///   ＋ 两条出路**。
-fn files_err_zh(msg: &str) -> String {
-    if msg.contains("executable file not found") && msg.contains("ls") {
-        return tr(
+/// ⚠️ **为什么要有分类**：Docker / OCI 的报错原文对普通用户是天书
+///   （`permission denied`、`OCI runtime exec failed`……）⇒ 用户既看不懂
+///   **发生了什么**，也不知道**下一步该干什么**。
+///
+/// ⚠️ **两条硬规矩**（审核 P1-4）：
+/// 1. **说人话与保留原文必须同时成立** ⇒ 分类只给界面看，**原文照留**
+///    （详情 / tooltip 里能看到）；
+/// 2. **未知就保守** ⇒ 拿不准就归「未知」，**不瞎猜**是权限还是网络。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilesErrKind {
+    /// 权限不足。
+    Permission,
+    /// 容器没在跑。
+    NotRunning,
+    /// 只读文件系统。
+    ReadOnly,
+    /// 路径不存在。
+    NoSuchPath,
+    /// 容器里缺命令（镜像太精简）。
+    MissingCommand,
+    /// 超时。
+    Timeout,
+    /// 连不上 Docker 守护进程。
+    DaemonUnreachable,
+    /// 认不出来。
+    Unknown,
+}
+
+/// 一条文件页错误：**分类 ＋ 给用户看的话 ＋ 原文**。
+#[derive(Clone, Debug)]
+pub struct FilesErr {
+    pub kind: FilesErrKind,
+    /// 界面上显示的那一句（中文分类 ＋ 下一步建议）。
+    pub brief: String,
+    /// 原始错误（详情里看，别丢）。
+    pub raw: String,
+}
+
+/// 把 Docker / OCI 的报错原文归类。
+///
+/// ⚠️ **归类只看「明确的特征」**（关键词 ＋ 退出码），**不猜**：
+///   认不出来就归 [`FilesErrKind::Unknown`]，界面显示「操作未完成」＋ 原文。
+pub fn classify_files_error(raw: &str) -> FilesErr {
+    let low = raw.to_ascii_lowercase();
+    let kind = if low.contains("permission denied")
+        || low.contains("operation not permitted")
+        || low.contains("not permitted")
+    {
+        FilesErrKind::Permission
+    } else if low.contains("read-only file system")
+        || low.contains("read only file system")
+        || low.contains("readonly file system")
+    {
+        FilesErrKind::ReadOnly
+    } else if low.contains("is not running")
+        || low.contains("container is stopped")
+        || low.contains("is stopped")
+        || low.contains("no such container")
+        || low.contains("container not found")
+    {
+        FilesErrKind::NotRunning
+    } else if low.contains("no such file or directory") {
+        FilesErrKind::NoSuchPath
+    } else if low.contains("executable file not found")
+        || low.contains("command not found")
+        || low.contains("no such file or directory: ls")
+    {
+        FilesErrKind::MissingCommand
+    } else if low.contains("timed out") || low.contains("timeout") || low.contains("deadline exceeded")
+    {
+        FilesErrKind::Timeout
+    } else if low.contains("cannot connect to the docker daemon")
+        || low.contains("docker daemon")
+        || low.contains("error during connect")
+        || low.contains("is the docker daemon running")
+    {
+        FilesErrKind::DaemonUnreachable
+    } else {
+        FilesErrKind::Unknown
+    };
+    let brief = match kind {
+        FilesErrKind::Permission => tr(
+            "权限不足 ⇒ 读不了这个目录。检查容器里这个文件的属主和权限，或换一个权限更高的账号进容器。",
+        ),
+        FilesErrKind::NotRunning => tr(
+            "容器没在运行 ⇒ 进不去。先把这个容器启动起来（或切到正在运行的容器）再试。",
+        ),
+        FilesErrKind::ReadOnly => tr(
+            "文件系统是只读的 ⇒ 改不了。检查容器的挂载与权限；别用「提权重试」硬来。",
+        ),
+        FilesErrKind::NoSuchPath => tr(
+            "路径不存在 ⇒ 刷新一下目录再试，或者检查路径拼写（容器里的路径和本地不一样）。",
+        ),
+        FilesErrKind::MissingCommand => tr(
             "这个容器里没有 ls 命令 ⇒ 列不了目录。换个带 ls 的镜像（常见的都有），或者用「终端」页进容器自己看。",
-        )
-        .to_string();
+        ),
+        FilesErrKind::Timeout => tr(
+            "操作超时了 ⇒ 稍后重试；如果一直这样，先看看容器是不是卡住了。",
+        ),
+        FilesErrKind::DaemonUnreachable => tr(
+            "连不上 Docker 服务 ⇒ 检查这台机器上的 Docker 是否在跑，以及当前账号有没有权限访问它。",
+        ),
+        FilesErrKind::Unknown => tr("操作没完成 ⇒ 详情里是原始报错。"),
+    };
+    FilesErr {
+        kind,
+        brief: brief.to_string(),
+        raw: raw.to_string(),
     }
-    msg.to_string()
+}
+
+/// 文件页的**报错 ⇒ 说人话**（阶段 140 → 阶段 172 / UI-07）。
+///
+/// ⚠️ **原始错误不能丢**（审核 P1-4）：这句只是「给人看的分类」，
+///   原文在详情 / tooltip 里 ⇒ 「说人话」与「保留原文」同时成立。
+fn files_err_zh(msg: &str) -> String {
+    classify_files_error(msg).brief
 }
 
 /// 过滤：全部 / 运行中 / 已停止。
@@ -4280,7 +4385,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                                 if !cur.is_empty() {
                                     u.files.path.set_text(&cur);
                                 }
-                                u.files.status.set_text(&files_err_zh(&msg));
+                                // ⚠️ **阶段 172 / UI-07**：界面上给**中文分类
+                                //   ＋ 下一步建议**，**原文放进 tooltip** ⇒
+                                //   「说人话」与「保留原文」同时成立。
+                                let e = classify_files_error(&msg);
+                                u.files.status.set_text(&e.brief);
+                                u.files.status.set_tooltip_text(Some(e.raw.as_str()));
                             }
                         }
                     }
@@ -9045,20 +9155,97 @@ mod tests {
         assert!(log_end_status(false, 3).contains("3"), "得带退出码");
     }
 
-    /// 文件页的报错 ⇒ **说人话**（阶段 140：容器里没有 `ls`）。
+    /// 文件页的报错 ⇒ **说人话**（阶段 140 → 阶段 172 / UI-07）。
+    ///
+    /// ⚠️ **老断言「别的错原样给」已经过时**：现在**每类错都有中文分类**
+    ///   （审核 P1-4），但**原文必须保留**（在 `raw` 里）。
     #[test]
     fn 文件页报错说人话() {
         // ⚠️ **容器里没有 ls** ⇒ docker 的原话用户看不懂。
         let raw = "OCI runtime exec failed: exec: \"ls\": executable file not found in $PATH";
-        let s = files_err_zh(raw);
-        assert!(s.contains("ls"), "得说清是缺 ls：{s}");
-        assert!(!s.contains("OCI runtime"), "不该再摆 docker 的原话：{s}");
-        // ⚠️ **别的错 ⇒ 原样给**（别把真原因翻译没了）。
-        let other = "permission denied";
-        assert_eq!(files_err_zh(other), other);
-        assert_eq!(files_err_zh(""), "");
+        let e = classify_files_error(raw);
+        assert_eq!(e.kind, FilesErrKind::MissingCommand);
+        assert!(e.brief.contains("ls"), "得说清是缺 ls：{}", e.brief);
+        assert!(!e.brief.contains("OCI runtime"), "不该再摆 docker 的原话：{}", e.brief);
+        // ⚠️ **原文必须一字不丢**（「说人话」与「保留原文」同时成立）。
+        assert_eq!(e.raw, raw);
     }
 
+    /// UI-07：六类常见错误各有**自己的中文提示**，且**互不串味**。
+    #[test]
+    fn 文件页错误分六类() {
+        let cases: &[(&str, FilesErrKind)] = &[
+            (
+                "Error response from daemon: permission denied while trying to open /data",
+                FilesErrKind::Permission,
+            ),
+            (
+                "Error response from daemon: Container abc123 is not running",
+                FilesErrKind::NotRunning,
+            ),
+            (
+                "Error: failed to create task: read-only file system",
+                FilesErrKind::ReadOnly,
+            ),
+            (
+                "ls: cannot access '/nope': No such file or directory",
+                FilesErrKind::NoSuchPath,
+            ),
+            (
+                "OCI runtime exec failed: exec: \"ls\": executable file not found in $PATH",
+                FilesErrKind::MissingCommand,
+            ),
+            (
+                "error during connect: Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+                FilesErrKind::DaemonUnreachable,
+            ),
+            ("context deadline exceeded", FilesErrKind::Timeout),
+        ];
+        let mut briefs = Vec::new();
+        for (raw, want) in cases {
+            let e = classify_files_error(raw);
+            assert_eq!(e.kind, *want, "「{raw}」归错类了");
+            assert!(!e.brief.is_empty(), "「{raw}」没有中文提示");
+            assert_eq!(e.raw.as_str(), *raw, "原文被改了");
+            briefs.push(e.brief);
+        }
+        // ⚠️ **每类的提示都要不一样**（不能都变成同一句「操作失败」）。
+        for i in 0..briefs.len() {
+            for j in i + 1..briefs.len() {
+                assert_ne!(briefs[i], briefs[j], "两类错误的提示撞车了");
+            }
+        }
+    }
+
+    /// ⚠️ **认不出来就保守**（审核 P1-4：「未知错误不瞎猜权限或网络原因」）。
+    #[test]
+    fn 认不出来的错误归未知() {
+        let e = classify_files_error("something totally unexpected happened");
+        assert_eq!(e.kind, FilesErrKind::Unknown);
+        assert!(e.brief.contains("详情"), "未知错误要提示去看详情：{}", e.brief);
+        assert_eq!(e.raw.as_str(), "something totally unexpected happened");
+    }
+
+    /// ⚠️ **Docker 29 的多行报错 ＋ `exit status N` 尾行**也要归对类
+    ///   （审核 P1-4 明确点名了这个真实形态）。
+    #[test]
+    fn 多行报错也归得对() {
+        let raw = "OCI runtime exec failed: exec: \"ls\": executable file not found in $PATH\n\
+                   (standard input): line 1: ls: not found\nexit status 127";
+        let e = classify_files_error(raw);
+        assert_eq!(e.kind, FilesErrKind::MissingCommand);
+        assert_eq!(e.raw.as_str(), raw);
+    }
+
+    /// 空目录是**成功**，不是错误（审核 P1-4：「空目录仍视为成功」）。
+    #[test]
+    fn 空目录不是错误() {
+        // 退出码 0 的 0 行 ⇒ 后端不会报错；这里只是确认分类函数不会把
+        // 「没有条目」这种正常返回当成错误。
+        let e = classify_files_error("");
+        assert_eq!(e.kind, FilesErrKind::Unknown);
+        assert_eq!(e.raw, "");
+    }
 }
 
 
