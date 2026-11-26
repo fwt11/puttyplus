@@ -73,7 +73,19 @@ fn build(st: &Rc<PanelState>) {
     let dlg = gtk::Window::new();
     dlg.set_title(Some(tr("目录镜像（本地 → 远程）")));
     dlg.set_transient_for(top.as_ref());
-    let (mw, mh) = crate::settings::window_size("mirror").unwrap_or((860, 560));
+    let (mw, mh) = crate::settings::window_size("mirror").unwrap_or((960, 560));
+    // ⚠️ **阶段 174 / UI-12：默认宽度 860 → 960**，但**不许出屏**。
+    //   五列（动作/相对路径/大小/两个时间）挤在 860px 里 ⇒ **时间列表头
+    //   被截断**（UI 审核 P2-5）⇒ 适度加宽，而不是让五列互相挤压。
+    let screen_w = gtk::gdk::Display::default()
+        .and_then(|d| {
+            let mons = d.monitors();
+            let first = mons.item(0)?;
+            first.downcast::<gtk::gdk::Monitor>().ok()
+        })
+        .map(|m| m.geometry().width())
+        .unwrap_or(1280);
+    let mw = mw.min((screen_w - 60).max(640));
     dlg.set_default_size(mw, mh);
     dlg.connect_close_request(|d| {
         crate::settings::save_window_size("mirror", d);
@@ -170,11 +182,71 @@ fn build(st: &Rc<PanelState>) {
         gtk::glib::Type::STRING, // 远端时间
     ]);
     let view = gtk::TreeView::with_model(&model);
-    view.append_column(&col(tr("动作"), MCOL_ACT, false));
-    view.append_column(&col(tr("相对路径"), MCOL_REL, true));
-    view.append_column(&col(tr("大小"), MCOL_SIZE, false));
-    view.append_column(&col(tr("本地修改时间"), MCOL_LMTIME, false));
-    view.append_column(&col(tr("远程修改时间"), MCOL_RMTIME, false));
+    // ⚠️ **阶段 174 / UI-12：每一列都要有**语义最小宽度**。
+    //
+    //   以前五列都**没有** min_width ⇒ GTK 按内容分配 ⇒ 内容短的列
+    //   （尤其两个时间列）被压扁 ⇒ **表头被截成「本地修改时…」**
+    //   （UI 审核 P2-5：「时间列表头显示不完整」）。
+    //   ⇒ 给每列一个够放下表头的下限；「相对路径」继续 expand。
+    let c_act = col(tr("动作"), MCOL_ACT, false);
+    c_act.set_min_width(64);
+    let c_rel = col(tr("相对路径"), MCOL_REL, true);
+    c_rel.set_min_width(160);
+    let c_size = col(tr("大小"), MCOL_SIZE, false);
+    c_size.set_min_width(88);
+    let c_lm = col(tr("本地修改时间"), MCOL_LMTIME, false);
+    c_lm.set_min_width(150);
+    let c_rm = col(tr("远程修改时间"), MCOL_RMTIME, false);
+    c_rm.set_min_width(150);
+    view.append_column(&c_act);
+    view.append_column(&c_rel);
+    view.append_column(&c_size);
+    view.append_column(&c_lm);
+    view.append_column(&c_rm);
+    // ⚠️ **tooltip 给出完整信息**（审核 P2-5：「长路径可省略但可查看全文」）：
+    //   列里的文字会被省略号截断（列宽有限）⇒ 悬停时把**整行的完整内容**
+    //   摊开：路径、两个时间。
+    //
+    //   ⚠️ **为什么用「鼠标移动」而不是「tooltip-text」信号**：GTK4 的
+    //   「tooltip-text」信号带 (x, y, keyboard, GtkTooltip)，但 gtk4-rs
+    //   0.11 只绑了一个**没有参数**的 notify 版本 ⇒ 拿不到坐标，也没法
+    //   往 tooltip 里写字 ⇒ 改成「鼠标移动时算好 tooltip 文本，挂在视图上」。
+    {
+        let view2 = view.clone();
+        let model2 = model.clone();
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_motion(move |_, x, y| {
+            let row = view2
+                .path_at_pos(x as i32, y as i32)
+                .and_then(|(p, _, _, _)| p)
+                .and_then(|p| model2.iter(&p));
+            let Some(iter) = row else {
+                view2.set_tooltip_text(None);
+                return;
+            };
+            let rel: String = model2.get(&iter, MCOL_REL);
+            let lm: String = model2.get(&iter, MCOL_LMTIME);
+            let rm: String = model2.get(&iter, MCOL_RMTIME);
+            let mut text = String::new();
+            text.push_str(&tr("相对路径"));
+            text.push_str("：");
+            text.push_str(&rel);
+            if !lm.is_empty() {
+                text.push('\n');
+                text.push_str(&tr("本地修改时间"));
+                text.push('：');
+                text.push_str(&lm);
+            }
+            if !rm.is_empty() {
+                text.push('\n');
+                text.push_str(&tr("远程修改时间"));
+                text.push('：');
+                text.push_str(&rm);
+            }
+            view2.set_tooltip_text(Some(&text));
+        });
+        view.add_controller(motion);
+    }
     let sw = gtk::ScrolledWindow::new();
     sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     sw.set_child(Some(&view));
