@@ -35,6 +35,24 @@ pub struct ErView {
     bg: gtk::DrawingArea,
     /// 状态行（多少张表、多少条关系）。
     pub status: gtk::Label,
+    /// 画布外面的滚动容器（「打开画布」要滚它）。
+    scroll: gtk::ScrolledWindow,
+    /// **「没有关系」时的说明板**（阶段 174 / UI-10，治 P2-3）。
+    ///
+    /// ⚠️ **为什么要有**（UI 审核 P2-3，已确认）：单表或无关系时，用户
+    ///   只看到**一大片空白画布** ⇒ 分不清是「没有关系」还是「图没加载」。
+    ///   ⇒ 画布上方给一块说明：**现在是什么状态 ＋ 下一步能干什么**。
+    ///
+    /// ⚠️ **只是说明，不改画布**：拖动 / 缩放 / 双击看数据都照旧。
+    info: gtk::Box,
+    /// 说明板的标题。
+    info_title: gtk::Label,
+    /// 说明板的解释。
+    info_desc: gtk::Label,
+    /// 主 CTA（**打开画布**）。
+    info_cta: gtk::Button,
+    /// 次 CTA（**查看表数据**，只有单表时才有）。
+    info_cta2: gtk::Button,
     /// 图数据（拖动时也要更新坐标）。
     graph: Rc<RefCell<ErGraph>>,
     /// 缩放倍数。
@@ -134,6 +152,43 @@ impl ErView {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
         root.set_vexpand(true);
         root.append(&bar);
+
+        // ---- 「没有关系」时的说明板（阶段 174 / UI-10）----
+        let info = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        info.set_margin_start(8);
+        info.set_margin_end(8);
+        info.set_margin_top(4);
+        let info_title = gtk::Label::new(None);
+        info_title.set_xalign(0.0);
+        info_title.add_css_class("pp-empty-title");
+        let info_desc = gtk::Label::new(None);
+        info_desc.set_xalign(0.0);
+        info_desc.set_wrap(true);
+        info_desc.add_css_class("pp-empty-sub");
+        info_desc.set_max_width_chars(60);
+        info.append(&info_title);
+        info.append(&info_desc);
+        // ---- 主 CTA ＋ 次 CTA（计划验收：「主 CTA 产生可见结果」）----
+        // ⚠️ **主 CTA 恒为「打开画布」**：审核计划里点名要「明确『打开画布』
+        //   入口」⇒ 说明板说完了，**下一步就是进画布干活**。
+        // ⚠️ **「查看表数据」只在单表时出现**：那才是此时**唯一**能做的
+        //   真动作（双击表框的同一条路径 ⇒ 不新增写库行为）。
+        let info_cta = gtk::Button::with_label(tr("打开画布"));
+        info_cta.add_css_class("pp-empty-btn");
+        info_cta.add_css_class("pp-empty-primary");
+        info_cta.add_css_class("pp-primary");
+        info_cta.set_tooltip_text(Some(tr("滚到画布并把焦点放上去：拖动表框可以挪位置，双击表框看数据")));
+        let info_cta2 = gtk::Button::with_label(tr("查看表数据"));
+        info_cta2.add_css_class("pp-empty-btn");
+        info_cta2.set_tooltip_text(Some(tr("点一下打开这张表的数据页签")));
+        let cta_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        cta_row.append(&info_cta);
+        cta_row.append(&info_cta2);
+        info.append(&cta_row);
+        // ⚠️ **平时藏着**：有关系的时候不需要它（画布本身就是内容）。
+        info.set_visible(false);
+        root.append(&info);
+
         root.append(&scroll);
 
         let view = Rc::new(ErView {
@@ -141,6 +196,12 @@ impl ErView {
             canvas,
             bg,
             status,
+            scroll,
+            info,
+            info_title,
+            info_desc,
+            info_cta,
+            info_cta2,
             graph,
             scale,
             zoom_idx: Cell::new(1),
@@ -177,6 +238,32 @@ impl ErView {
                 }
             });
         }
+        // ---- 说明板上的两个 CTA（阶段 174 / UI-10）----
+        {
+            let view = Rc::clone(&view);
+            let btn = view.info_cta.clone();
+            btn.connect_clicked(move |_| {
+                view.open_canvas();
+            });
+        }
+        {
+            let view = Rc::clone(&view);
+            let btn = view.info_cta2.clone();
+            btn.connect_clicked(move |_| {
+                // ⚠️ **要当前那一张表的名字**：说明板亮着 ⇒ 正好一张表。
+                let name = view
+                    .graph
+                    .borrow()
+                    .tables
+                    .first()
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    return;
+                }
+                view.open_table_by_name(&name);
+            });
+        }
         view
     }
 
@@ -192,6 +279,125 @@ impl ErView {
         *self.graph.borrow_mut() = graph;
         self.rebuild();
         self.status.set_text(&trf!("{n_tables} 张表 · {n_edges} 条关系（拖动表框可以挪位置，双击表框看数据）", n_tables = n_tables, n_edges = n_edges));
+        // ⚠️ **阶段 174 / UI-10**：说明板跟着状态走。
+        self.update_info();
+    }
+
+    /// 说明板：**现在是什么状态 ＋ 下一步能干什么**（阶段 174 / UI-10）。
+    ///
+    /// ⚠️ **三种情况分开说**（审核 P2-3 验收：「三种状态标题与解释不同」）：
+    /// - **没有表**：这个 schema 还是空的；
+    /// - **只有一张表**：有表，但**没有表间关系**可画；
+    /// - **多张表但 0 条关系**：表有了，**外键没认出来**。
+    ///
+    /// ⚠️ **不伪造关系、不自动连表**（审核 UI-10：「不生成假边」）⇒
+    ///   这里只解释，不动图。
+    fn update_info(&self) {
+        let g = self.graph.borrow();
+        let n_tables = g.tables.len();
+        let n_edges = g.edges.len();
+        if n_edges > 0 {
+            // 有关系 ⇒ 画布本身就是内容 ⇒ 说明板收起来。
+            self.info.set_visible(false);
+            return;
+        }
+        let (title, desc) = if n_tables == 0 {
+            (
+                tr("这个 schema 里还没有表").to_string(),
+                tr("先在左边的对象树里建一张表，再回来看关系。").to_string(),
+            )
+        } else if n_tables == 1 {
+            let t = g.tables.first().cloned().unwrap_or_else(|| ermodel::ErTable {
+                schema: String::new(),
+                name: String::new(),
+                columns: Vec::new(),
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+                level: 0,
+            });
+            (
+                trf!("只有一张表（{name}）· 没有表间关系", name = t.name),
+                // ⚠️ **带字段摘要**（审核验收：「单表仍显示真实表名/字段
+                //   摘要」）——光说「一张表」等于什么都没说。
+                trf!(
+                    "{summary}。这张表可以拖动、缩放；双击表框看它的数据。想看关系，先建第二张表并加上外键。",
+                    summary = field_summary(&t)
+                ),
+            )
+        } else {
+            (
+                trf!("{n_tables} 张表，但没有找到表间关系", n_tables = n_tables),
+                tr("如果这些表之间本来有外键，可能是没被认出来；到「结构」页确认一下外键。")
+                    .to_string(),
+            )
+        };
+        // ⚠️ **「查看表数据」只在单表时出现**：那时它才是唯一能做的
+        //   真动作；多表时给「看第一张表」反而误导（用户以为看的是
+        //   有关系的那张）。
+        self.info_cta2.set_visible(n_tables == 1);
+        drop(g);
+        self.info_title.set_text(&title);
+        self.info_desc.set_text(&desc);
+        self.info.set_visible(true);
+    }
+
+    /// 说明板是不是亮着（冒烟 / 测试钩子）。
+    pub fn info_visible_for_test(&self) -> bool {
+        self.info.is_visible()
+    }
+
+    /// 说明板的标题 ＋ 解释（冒烟 / 测试钩子）。
+    pub fn info_texts_for_test(&self) -> (String, String) {
+        (
+            self.info_title.text().to_string(),
+            self.info_desc.text().to_string(),
+        )
+    }
+
+    /// 说明板上两个 CTA 的文字 ＋ 显隐（冒烟 / 测试钩子）。
+    pub fn info_ctas_for_test(&self) -> (String, bool, String, bool) {
+        (
+            self.info_cta.label().unwrap_or_default().to_string(),
+            self.info_cta.is_visible(),
+            self.info_cta2.label().unwrap_or_default().to_string(),
+            self.info_cta2.is_visible(),
+        )
+    }
+
+    /// 主 CTA（「打开画布」，冒烟 / 测试钩子）。
+    pub fn info_cta_for_test(&self) -> gtk::Button {
+        self.info_cta.clone()
+    }
+
+    /// 次 CTA（「查看表数据」，冒烟 / 测试钩子）。
+    pub fn info_cta2_for_test(&self) -> gtk::Button {
+        self.info_cta2.clone()
+    }
+
+    /// 打开画布：滚到画布 ＋ 焦点给它（**点了有看得见的结果**）。
+    ///
+    /// ⚠️ **为什么不是「什么都不做」**：计划验收写着「主 CTA 产生可见
+    ///   结果，不出现『点了没反应』」⇒ 至少要有**焦点**与**滚动位置**
+    ///   的变化，而且状态行要说一句人话。
+    fn open_canvas(&self) {
+        self.scroll.vadjustment().set_value(0.0);
+        self.canvas.set_focusable(true);
+        self.canvas.grab_focus();
+        self.status
+            .set_text(tr("画布已就绪：拖动表框可以挪位置，双击表框看数据"));
+    }
+
+    /// 打开某张表的数据（走**双击表框的同一条路径**）。
+    ///
+    /// ⚠️ **不新增任何数据库写操作**：这个回调在 dbui 里接的是
+    ///   `open_table(..., read_only)` ⇒ 只是开一个数据页签。
+    fn open_table_by_name(&self, name: &str) {
+        let cb = self.on_open.borrow();
+        if let Some(f) = cb.as_ref() {
+            f(name);
+        }
     }
 
     /// 状态行（"正在读…" / 失败原因）。
@@ -388,4 +594,38 @@ impl ErView {
         }
         self.rebuild();
     }
+}
+
+/// 一张表的**字段摘要**（阶段 174 / UI-10）。
+///
+/// ⚠️ **为什么要有**：审核验收写着「单表仍显示真实表名/**字段摘要**」
+///   —— 只说「有一张表」等于什么都没说，用户还是得自己去看画布。
+/// ⚠️ **只列前 4 个**：字段多的表一行写不下 ⇒ 摘要变长句 ⇒ 更难看；
+///   剩下的用「……（共 N 个）」交代。
+fn field_summary(t: &ermodel::ErTable) -> String {
+    if t.columns.is_empty() {
+        return tr("这张表还没有字段").to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for c in t.columns.iter().take(4) {
+        let mut kinds: Vec<&str> = Vec::new();
+        if c.is_pk {
+            kinds.push(tr("主键"));
+        }
+        if c.is_fk {
+            kinds.push(tr("外键"));
+        }
+        let name = &c.name;
+        let ty = &c.data_type;
+        parts.push(if kinds.is_empty() {
+            format!("{name}（{ty}）")
+        } else {
+            format!("{name}（{ty}，{}）", kinds.join("、"))
+        });
+    }
+    let n = t.columns.len();
+    if n > 4 {
+        parts.push(trf!("……（共 {n} 个）", n = n));
+    }
+    trf!("{n} 个字段：{list}", n = n, list = parts.join("、"))
 }
