@@ -445,10 +445,17 @@ fn build(path: &Path, cast: Cast) {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.append(&bar_box);
     root.append(&bar);
-    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-    root.append(&sep);
+    // ⚠️ **两个 Separator，不是同一个挂两次**（阶段 171 / UI-03）。
+    //
+    //   GTK4 里**一个控件只能有一个父级** ⇒ 把同一个 `sep` 第二次
+    //   `append` 上去会触发：
+    //   `gtk_box_append: assertion 'gtk_widget_get_parent (child) == NULL' failed`
+    //   （UI 审核 P1-5，已确认的代码级缺陷 ⇒ 日志被污染、分隔线也不对）。
+    let sep_top = gtk::Separator::new(gtk::Orientation::Horizontal);
+    let sep_bottom = gtk::Separator::new(gtk::Orientation::Horizontal);
+    root.append(&sep_top);
     root.append(term.widget());
-    root.append(&sep);
+    root.append(&sep_bottom);
     root.append(&input_lbl);
 
     let tip = gtk::Label::new(Some(
