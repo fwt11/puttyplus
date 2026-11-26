@@ -160,26 +160,127 @@ fn main() {
     let cfg = root.join("config");
     std::fs::create_dir_all(&cfg).unwrap();
     unsafe {
+        for key in [
+            "PUTTYPLUS_SETTINGS_INI",
+            "PUTTYPLUS_CONN_INI",
+            "PUTTYPLUS_DB_INI",
+            "PUTTYPLUS_HIST_INI",
+            "PUTTYPLUS_COLS_INI",
+            "PUTTYPLUS_RECENT_INI",
+            "PUTTYPLUS_VAULT",
+        ] {
+            std::env::remove_var(key);
+        }
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
     }
 
     gtk::init().expect("gtk init");
+    puttyplus::theme::apply(puttyplus::theme::Theme::Light);
 
     let panel = SftpPanel::new(&ConnOptions::default());
     // ⚠️ **只建界面，不连远端**（`ensure` 不会去连）⇒ CI 上也跑得动。
     dockerui::ensure(&panel.st);
     let page = dockerui::page_for_test(&panel.st).expect("应当有容器页");
 
-    // ⚠️ **页面要真的挂到窗口上**（否则 GTK 不算布局 ⇒ 命中判定测不了，
-    //    而且弹窗没有父窗口 ⇒ 会落在主窗后面）。
+    // 真实主窗几何：侧栏 240px，容器页在 Paned 的剩余宽度里。
+    let tabs = puttyplus::tabs::Tabs::new();
+    let sidebar = puttyplus::sidebar::Sidebar::new(std::rc::Rc::clone(&tabs));
+    sidebar.setup();
+    let sidebar_wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar_wrap.set_size_request(180, -1);
+    sidebar_wrap.append(&sidebar.widget);
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.set_start_child(Some(&sidebar_wrap));
+    paned.set_end_child(Some(&page));
+    paned.set_position(240);
+
     let win = gtk::Window::new();
     win.set_title(Some("容器操作列冒烟"));
-    win.set_default_size(900, 520);
-    win.set_child(Some(&page));
+    win.set_default_size(1200, 780);
+    win.set_child(Some(&paned));
     win.present();
-    pump(200);
+    pump(300);
 
     dockerui::set_rows_for_test(&panel.st, fake_containers());
+    pump(200);
+
+    // ---- ⓪ 真实分配宽度：默认窗口与窄窗口都必须完整显示操作列 ----
+    //
+    // ⚠️ **期望值来自真实几何**，不是拍脑袋：
+    //   1200×780 ⇒ 侧栏 240 + 边框 2 ⇒ 表格 958px ⇒ 「中」档
+    //     （七列里只有 ID 让位，镜像/端口/状态/资源全留）；
+    //   1024×700 ⇒ 表格 782px ⇒ 「窄」档（端口与资源也收起来）。
+    for (width, height, expected) in [
+        (
+            1200,
+            780,
+            vec!["名称", "镜像", "端口（主机:容器）", "状态", "资源（CPU / 内存）", "操作"],
+        ),
+        (1024, 700, vec!["名称", "镜像", "状态", "操作"]),
+    ] {
+        win.set_default_size(width, height);
+        pump(300);
+        let view = dockerui::view_for_test(&panel.st).expect("应当有表格");
+        let titles = dockerui::column_titles_for_test(&panel.st);
+        println!(
+            "[信息] {width}×{height}：窗口={}px，TreeView={}px，档位={:?}，列={titles:?}",
+            win.width(),
+            view.width(),
+            dockerui::column_layout_for_test(&panel.st).0
+        );
+        assert_eq!(
+            titles, expected,
+            "{width}×{height} 的容器表格应按实际分配宽度退让次要列"
+        );
+        let col = view
+            .column((view.n_columns() - 1) as i32)
+            .expect("应当有操作列");
+        let path = row_path(&view, "proj").expect("模型里应当有 proj 行");
+        let area = view.cell_area(Some(&path), Some(&col));
+        let (x0, _) = view.convert_bin_window_to_widget_coords(area.x(), area.y());
+        let n = dockerui::row_action_icons_for_test(&panel.st, "proj").len();
+        let group_w = (puttyplus::panel::actioncell::SLOT_W * n as i32
+            - puttyplus::panel::actioncell::ICON_GAP)
+            .max(puttyplus::panel::actioncell::ICON_SIZE);
+        assert!(
+            x0 >= 0 && x0 + area.width() <= view.width(),
+            "{width}×{height} 操作列跑出视口：x={x0}, w={}, view={}",
+            area.width(),
+            view.width()
+        );
+        assert!(
+            area.width() >= group_w + 16,
+            "{width}×{height} 操作列裁掉图标：列宽 {}，图标组 {group_w}",
+            area.width()
+        );
+        // ⚠️ **不许要横向滚动**（P0-1 验收：「任意宽度下不需要横向滚动才能
+        //   执行启停、重启和查看详情」）⇒ 可见列的最小宽度之和必须塞得下。
+        let min_total: i32 = (0..view.n_columns())
+            .filter_map(|i| view.column(i as i32))
+            .filter(|c| c.is_visible())
+            .map(|c| c.min_width().max(0))
+            .sum();
+        assert!(
+            min_total <= view.width(),
+            "{width}×{height} 可见列最小宽合计 {min_total} 超过表格宽 {} ⇒ 会出横向滚动条",
+            view.width()
+        );
+        println!(
+            "[信息] {width}×{height}：TreeView={}px，最小宽合计={min_total}，操作列={}px，列={titles:?}",
+            view.width(),
+            area.width()
+        );
+        if let Ok(prefix) = std::env::var("PP_DOCKER_SHOT") {
+            let _ = std::process::Command::new("xdotool")
+                .arg("windowraise")
+                .status();
+            let path = format!("{prefix}-{width}.png");
+            let _ = std::process::Command::new("import")
+                .args(["-window", "root", &path])
+                .status();
+        }
+    }
+    win.set_default_size(1200, 780);
     pump(200);
 
     // ---- ① 列：CPU / 内存 / 详情退役了，多了「操作」----

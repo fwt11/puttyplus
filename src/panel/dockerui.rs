@@ -615,6 +615,131 @@ pub enum Filter {
     Stopped,
 }
 
+/// **容器表格的响应式分档**（阶段 171 / UI-02，治 P0-1）。
+///
+/// ⚠️ **为什么要有分档**：默认主窗 1200×780 扣掉侧栏只剩 ~960px，而六列
+///   加上「操作」列的**自然宽度合计 1139px** ⇒ 「操作」列被挤出可视区
+///   ⇒ 启动 / 停止 / 重启 / 详情 这些**核心操作用户根本看不见**
+///   （UI 审核 P0-1：已确认）。
+///
+/// ⚠️ **分档不只看「显不显示」，还要看「最小宽度」**：
+///   GTK4 的 TreeView 宽度下限 = **可见列的 min_width 之和** ⇒ 只藏列、
+///   不降 min_width 的话，表格**根本缩不下去** ⇒ 分档永远换不到
+///   （这正是第一版实现的坑：`1024×700` 那一档永远进不去）。
+///   ⇒ 每一档都自带一套「更紧的 min_width」。
+///
+/// ⚠️ **退让顺序是按信息量排的**：
+///   名称 / 状态 / 操作 **永远保留**（操作是核心动作，名称与状态是识别依据）；
+///   ID 最先让位（本来就只显示前 8 位，完整值在详情弹窗里）；
+///   然后是端口、资源；镜像比名称更早让位（窄屏优先看名字）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnDensity {
+    /// 七列全留（内容区 ≥ 1170px）。
+    Wide,
+    /// 收起「ID」——其余全留（内容区 ≥ 940px）。
+    Medium,
+    /// 再收起「端口」「资源」（内容区 ≥ 530px）。
+    Narrow,
+    /// 只留「名称」「状态」（再窄就只剩这个了）。
+    Compact,
+}
+
+impl ColumnDensity {
+    /// 这一档的**稳定区间**：宽度落在区间里就**不换档**（滞回，防抖）。
+    ///
+    /// ⚠️ **四段必须无缝拼满**：否则会出现「落在缝里 ⇒ 反复横跳」。
+    fn stable_band(self) -> (i32, i32) {
+        match self {
+            Self::Wide => (1170, i32::MAX),
+            Self::Medium => (940, 1169),
+            Self::Narrow => (530, 939),
+            Self::Compact => (0, 529),
+        }
+    }
+
+    /// 按**实际分配宽度**选档（进入阈值）。
+    ///
+    /// ⚠️ **阈值必须比这一档的最小宽度总和高**：否则表格会被 min_width
+    ///   撑住、永远量不到那个宽度（见 struct 注释）。
+    fn for_width(width: i32) -> Self {
+        if width >= 1170 {
+            Self::Wide
+        } else if width >= 940 {
+            Self::Medium
+        } else if width >= 530 {
+            Self::Narrow
+        } else {
+            Self::Compact
+        }
+    }
+
+    /// 带滞回的换档：先看当前档的稳定区间，不在区间里才按进入阈值重选。
+    fn for_resize(self, width: i32) -> Self {
+        let (lo, hi) = self.stable_band();
+        if width >= lo && width <= hi {
+            self
+        } else {
+            Self::for_width(width)
+        }
+    }
+
+    /// 这一档里某一列的 `(是否展开, 最小宽度)`；`None` = 这一列不显示。
+    ///
+    /// ⚠️ **展开列的分布也是分档的一部分**（UI 审核验收：「宽窗口不出现
+    ///   大片空谷」）：只留两三列却都展开 ⇒ 富余全堆到一两列上 ⇒ 空谷。
+    ///   ⇒ 窄档让**名称**也参与展开（名字是最容易长的那列）。
+    fn column_spec(self, model_col: usize) -> Option<(bool, i32)> {
+        match self {
+            Self::Wide => Some(match model_col {
+                COL_NAME => (false, 200),
+                COL_ID => (false, 84),
+                COL_IMAGE => (true, 240),
+                COL_PORTS => (true, 180),
+                COL_STATE => (true, 125),
+                COL_RES => (true, 190),
+                _ => return None,
+            }),
+            Self::Medium => Some(match model_col {
+                COL_NAME => (false, 175),
+                COL_IMAGE => (true, 200),
+                COL_PORTS => (true, 140),
+                COL_STATE => (true, 110),
+                COL_RES => (true, 165),
+                _ => return None,
+            }),
+            Self::Narrow => Some(match model_col {
+                COL_NAME => (true, 135),
+                COL_IMAGE => (true, 150),
+                COL_STATE => (true, 100),
+                _ => return None,
+            }),
+            Self::Compact => Some(match model_col {
+                COL_NAME => (true, 115),
+                COL_STATE => (true, 95),
+                _ => return None,
+            }),
+        }
+    }
+}
+
+fn apply_column_density(ui: &DockerUi, density: ColumnDensity) {
+    for (model_col, col) in &ui.data_cols {
+        match density.column_spec(*model_col) {
+            Some((expand, min_w)) => {
+                col.set_visible(true);
+                col.set_expand(expand);
+                // ⚠️ **必须一起降 min_width**：否则表格缩不到下一档去
+                //   （TreeView 的宽度下限 = 可见列 min_width 之和）。
+                col.set_min_width(min_w);
+            }
+            None => {
+                col.set_visible(false);
+            }
+        }
+    }
+    ui.column_density.set(density);
+}
+
 /// 自动刷新的间隔（秒）——跟 dbx 一致。
 const AUTO_REFRESH_SECS: u32 = 7;
 
@@ -716,6 +841,20 @@ pub struct DockerUi {
     /// ⚠️ **为什么留着句柄**：命中判定要认出「点的是不是这一列」
     ///   （`path_at_pos` 会把列一起返回 ⇒ 拿它跟这一列比）。
     action_col: gtk::TreeViewColumn,
+    /// 数据列句柄：响应式退让只改可见性，不重建模型或列。
+    data_cols: Vec<(usize, gtk::TreeViewColumn)>,
+    column_density: Cell<ColumnDensity>,
+    column_layout_pending: Cell<bool>,
+    column_resize_active: Cell<bool>,
+    /// **视口宽度的来源**（响应式分档按它换档）。
+    ///
+    /// ⚠️ **为什么不能靠 `notify::width`**（阶段 171 实测）：
+    ///   GTK4 **不会**在控件重新分配时发 `notify::width` —— 窗口从 1200
+    ///   缩到 900，`notify::width` **一次都不触发** ⇒ 响应式列永远不重排
+    ///   （第一版实现就栽在这：窗口变窄了，操作列还是被挤在外面）。
+    ///   ⇒ 改看 **ScrolledWindow 的 `hadjustment.page-size`**（= 视口宽度）
+    ///   —— 实测每次变宽变窄都会触发。
+    viewport_adj: gtk::Adjustment,
     /// **详情区的内容盒**（容器详情 ＋ compose 项目详情）。
     ///
     /// ⚠️ **阶段 155**：它住在**弹窗**里（不是页面下半区）⇒ 建弹窗时要把它
@@ -2597,6 +2736,42 @@ fn state_pill_text(state: &str, label: &str, duration: Option<docker::DockerDura
     }
 }
 
+/// 表格**实际可用**的宽度（响应式分档的判据）。
+///
+/// ⚠️ **优先用视口宽度**（`hadjustment.page-size`）：它就是**用户能看到的
+///   那部分**；`view.width()` 在表格被最小宽度撑住时会偏大。
+///   视口宽度拿不到时（比如还没布局）才退回 `view.width()`。
+fn available_width(ui: &DockerUi) -> i32 {
+    let page = ui.viewport_adj.page_size();
+    if page > 0.0 {
+        page.round() as i32
+    } else {
+        ui.view.width()
+    }
+}
+
+/// 按 TreeView 的**实际分配宽度**重排列；拖动列宽或菜单开着时先不排。
+fn schedule_column_layout(ui: &Rc<DockerUi>) {
+    if ui.column_layout_pending.replace(true) {
+        return;
+    }
+    let weak = Rc::downgrade(ui);
+    glib::idle_add_local_once(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.column_layout_pending.set(false);
+        let menu_open = ui
+            .row_menu
+            .borrow()
+            .as_ref()
+            .is_some_and(|menu| menu.is_visible());
+        if ui.column_resize_active.get() || menu_open {
+            return;
+        }
+        let density = ui.column_density.get().for_resize(available_width(&ui));
+        apply_column_density(&ui, density);
+    });
+}
+
 /// 建界面（**只建一次**；挂在 [`PanelState::docker_ui`] 上）。
 fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ---- 工具条 ----
@@ -2742,6 +2917,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     let action_renderer = crate::panel::actioncell::ActionCellRenderer::new();
     // ⚠️ **操作列的句柄要留在外面**（命中判定要认出「点的是不是这一列」）。
     let action_col = gtk::TreeViewColumn::new();
+    let mut data_cols = Vec::new();
     {
         // ⚠️ **模型列号 ≠ 视图列下标**（阶段 155）：CPU / 内存 / 详情三列
         //    退役了 ⇒ 视图下标跟模型列号**不再相等** ⇒ 这里**必须带模型列号**
@@ -2933,6 +3109,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             //   `docker ps` 原来的顺序，不擅自改用户的视图。
             col.set_sort_column_id(model_col as i32);
             view.append_column(&col);
+            data_cols.push((model_col, col));
         }
         // ---- **「操作」列**（阶段 155）----
         //
@@ -3631,6 +3808,11 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         name_renderer,
         last_action_click: Cell::new(None),
         action_col: action_col.clone(),
+        data_cols,
+        column_density: Cell::new(ColumnDensity::Wide),
+        column_layout_pending: Cell::new(false),
+        column_resize_active: Cell::new(false),
+        viewport_adj: scroll.hadjustment(),
         detail_box: detail_box.clone(),
         logs_box: logs_box.clone(),
         files_box: files_box.clone(),
@@ -3762,6 +3944,49 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         restoring: Cell::new(false),
         last_action: RefCell::new(String::new()),
     });
+
+    {
+        // ⚠️ **视口宽度变了就重排列**（阶段 171）。
+        //
+        //   **为什么听 `hadjustment.page-size` 而不是 `notify::width`**：
+        //   GTK4 **不会**在重新分配时发 `notify::width`（实测：窗口
+        //   1200 → 900 一次都不触发）⇒ 靠它做响应式 = 永远不重排。
+        //   `hadjustment.page-size` 才是**视口宽度**，每次变宽变窄都触发。
+        let weak = Rc::downgrade(&ui);
+        ui.viewport_adj.connect_notify_local(Some("page-size"), move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                schedule_column_layout(&ui);
+            }
+        });
+        // ⚠️ **保险丝**：万一某些布局下视口宽度不变、但表格本身被重新分配
+        //   （例如列显隐引起的内容变化），也顺手重排一次。
+        let weak = Rc::downgrade(&ui);
+        ui.view.connect_notify_local(Some("width"), move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                schedule_column_layout(&ui);
+            }
+        });
+
+        let legacy = gtk::EventControllerLegacy::new();
+        legacy.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(&ui);
+        legacy.connect_event(move |_, event| {
+            let Some(ui) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            match event.event_type() {
+                gtk::gdk::EventType::ButtonPress => ui.column_resize_active.set(true),
+                gtk::gdk::EventType::ButtonRelease => {
+                    ui.column_resize_active.set(false);
+                    schedule_column_layout(&ui);
+                }
+                _ => {}
+            }
+            glib::Propagation::Proceed
+        });
+        ui.view.add_controller(legacy);
+    }
+    schedule_column_layout(&ui);
 
     // ---- 阶段 120：镜像的**操作条**接线 ----
     {
@@ -4863,6 +5088,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         // ⚠️ **GTK4 没有 `connect_button_press_event`**（那是 GTK3 的写法）
         //   ⇒ 右键要用 `GestureClick`（`set_button(3)`）。
         let pop = crate::menu::popover(&view);
+        let menu_layout_ui = Rc::downgrade(&ui);
         // 右键 ⇒ 挪光标 ＋ 按这一行的类型重建菜单 ＋ 弹出来。
         {
             let view2 = view.clone();
@@ -4894,6 +5120,11 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             });
             view.add_controller(click);
         }
+        pop.connect_hide(move |_| {
+            if let Some(ui) = menu_layout_ui.upgrade() {
+                schedule_column_layout(&ui);
+            }
+        });
         *ui.row_menu.borrow_mut() = Some(pop);
     }
     // ---- **键盘**（↑↓ 选行 / Enter 进 shell / Del 停止 / `/` 搜）----
@@ -6676,17 +6907,40 @@ pub fn name_renderer_for_test(st: &Rc<PanelState>) -> Option<gtk::CellRendererTe
         .and_then(|u| u.name_renderer.clone())
 }
 
-/// 测试钩子：表格的**列标题**（阶段 155：用来验「CPU / 内存 / 详情」退役了）。
+/// 测试钩子：表格的**当前可见列标题**（窄窗口下次要列会让位）。
 pub fn column_titles_for_test(st: &Rc<PanelState>) -> Vec<String> {
     let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return Vec::new() };
     let mut out = Vec::new();
     for i in 0..ui.view.n_columns() {
         if let Some(c) = ui.view.column(i as i32) {
-            out.push(c.title().to_string());
+            if c.is_visible() {
+                out.push(c.title().to_string());
+            }
         }
     }
     out
+}
+
+/// 测试钩子：当前响应式档位与布局暂停状态。
+pub fn column_layout_for_test(st: &Rc<PanelState>) -> (&'static str, bool) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return ("none", false) };
+    let name = match ui.column_density.get() {
+        ColumnDensity::Wide => "wide",
+        ColumnDensity::Medium => "medium",
+        ColumnDensity::Narrow => "narrow",
+        ColumnDensity::Compact => "compact",
+    };
+    (
+        name,
+        ui.column_resize_active.get()
+            || ui
+                .row_menu
+                .borrow()
+                .as_ref()
+                .is_some_and(|menu| menu.is_visible()),
+    )
 }
 
 /// 测试钩子：最近一次取到的容器。
@@ -7878,6 +8132,113 @@ pub fn cursor_name_for_test(st: &Rc<PanelState>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分档阈值：跟 [`ColumnDensity::for_width`] 的进入阈值一致。
+    ///
+    /// ⚠️ **默认主窗 1200×780 扣掉侧栏 230 ⇒ 内容区约 960px**
+    ///   ⇒ 落在「中」档（七列里的 ID 让位，其余全留）。
+    #[test]
+    fn 容器列按实际宽度分档() {
+        assert_eq!(ColumnDensity::for_width(1200), ColumnDensity::Wide);
+        assert_eq!(ColumnDensity::for_width(960), ColumnDensity::Medium);
+        assert_eq!(ColumnDensity::for_width(800), ColumnDensity::Narrow);
+        assert_eq!(ColumnDensity::for_width(500), ColumnDensity::Compact);
+        assert_eq!(ColumnDensity::Wide.for_resize(1200), ColumnDensity::Wide);
+        assert_eq!(ColumnDensity::Wide.for_resize(1169), ColumnDensity::Medium);
+        assert_eq!(ColumnDensity::Medium.for_resize(960), ColumnDensity::Medium);
+        assert_eq!(ColumnDensity::Medium.for_resize(939), ColumnDensity::Narrow);
+        assert_eq!(ColumnDensity::Narrow.for_resize(800), ColumnDensity::Narrow);
+        assert_eq!(ColumnDensity::Narrow.for_resize(529), ColumnDensity::Compact);
+    }
+
+    #[test]
+    fn 列档位切换有双向滞回() {
+        // 往下：掉出稳定区才换档，换完就稳住。
+        assert_eq!(ColumnDensity::Wide.for_resize(1180), ColumnDensity::Wide);
+        assert_eq!(ColumnDensity::Medium.for_resize(950), ColumnDensity::Medium);
+        assert_eq!(ColumnDensity::Narrow.for_resize(600), ColumnDensity::Narrow);
+        assert_eq!(ColumnDensity::Compact.for_resize(400), ColumnDensity::Compact);
+        // 往上：多给一点才升档（防抖）。
+        assert_eq!(ColumnDensity::Medium.for_resize(1160), ColumnDensity::Medium);
+        assert_eq!(ColumnDensity::Medium.for_resize(1170), ColumnDensity::Wide);
+        assert_eq!(ColumnDensity::Narrow.for_resize(930), ColumnDensity::Narrow);
+        assert_eq!(ColumnDensity::Narrow.for_resize(940), ColumnDensity::Medium);
+        assert_eq!(ColumnDensity::Compact.for_resize(520), ColumnDensity::Compact);
+        assert_eq!(ColumnDensity::Compact.for_resize(530), ColumnDensity::Narrow);
+    }
+
+    /// ⚠️ **这一条是 P0-1 的命门**：分档要成立，两个不等式都得满足。
+    ///
+    /// ① **够得着**：每一档的「可见列最小宽度之和」必须 ≤ 它的进入阈值
+    ///    —— 否则表格被 min_width 撑住、分配宽度永远达不到阈值 ⇒
+    ///    **这一档根本进不去**。
+    /// ② **缩得下去**：表格被撑到本档的最小宽度时，那个宽度必须能落到
+    ///    **更窄的一档** —— 否则就卡死在宽档、再也退不了。
+    ///
+    /// （第一版实现就栽在 ①：只藏列、不降 min_width ⇒ `1024×700` 那一档
+    ///  进不去 ⇒ 操作列仍然被挤出可视区。）
+    #[test]
+    fn 分档的最小宽度既够得着也缩得下去() {
+        let action_min = crate::panel::actioncell::SLOT_W * 4 + 24;
+        let total = |d: ColumnDensity| -> i32 {
+            [
+                COL_NAME,
+                COL_ID,
+                COL_IMAGE,
+                COL_PORTS,
+                COL_STATE,
+                COL_RES,
+            ]
+            .iter()
+            .filter_map(|c| d.column_spec(*c))
+            .map(|(_, w)| w)
+            .sum::<i32>()
+                + action_min
+        };
+        // ① 够得着：阈值就是进入这一档所需的最小视口宽度。
+        for (d, threshold) in [
+            (ColumnDensity::Wide, 1170),
+            (ColumnDensity::Medium, 940),
+            (ColumnDensity::Narrow, 530),
+            // 极窄档没有自己的下界（它是「再窄就只能是它」）
+            (ColumnDensity::Compact, 530),
+        ] {
+            assert!(
+                total(d) <= threshold,
+                "{d:?} 的最小宽度合计 {} 超过进入阈值 {threshold} ⇒ 这一档进不去",
+                total(d)
+            );
+        }
+        // ② 缩得下去：撑到本档最小宽度时，必须能落到更窄（或就是本）的一档。
+        for d in [
+            ColumnDensity::Wide,
+            ColumnDensity::Medium,
+            ColumnDensity::Narrow,
+            ColumnDensity::Compact,
+        ] {
+            let t = total(d);
+            let next = ColumnDensity::for_width(t);
+            assert!(
+                total(next) <= t,
+                "{d:?} 撑到最小宽度 {t} 后落到 {next:?}，而后者要 {} ⇒ 缩不下去",
+                total(next)
+            );
+        }
+    }
+
+    /// 核心三列（名称 / 状态 / 操作）**任何一档都不能丢**。
+    #[test]
+    fn 核心列任何一档都保留() {
+        for density in [
+            ColumnDensity::Wide,
+            ColumnDensity::Medium,
+            ColumnDensity::Narrow,
+            ColumnDensity::Compact,
+        ] {
+            assert!(density.column_spec(COL_NAME).is_some(), "{density:?} 丢了名称列");
+            assert!(density.column_spec(COL_STATE).is_some(), "{density:?} 丢了状态列");
+        }
+    }
 
     /// 错误分类：三种「第一分钟错误」要**长得不一样**（阶段 135 加了顺序断言）。
     ///
