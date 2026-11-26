@@ -1248,6 +1248,14 @@ button.pp-empty-primary { margin-top: 6px; }
   border-right: 1px solid @pp_border; background-color: @pp_bg;
 }
 .pp-sidebar treeview.view { background-color: transparent; }
+/* ⚠️ 阶段 177：**侧边栏外壳**（主窗口左栏 = 页签 [连接 | 文件]）。
+   - 页签栏要跟里面的内容**对齐**：内容（`.pp-sidebar`）自己带 8/4/8/6 的
+     margin ⇒ 页签栏不给 margin 就会贴边、内容缩进 ⇒ 看着像两层不对齐；
+   - Notebook 的 stack 默认是 `@pp_panel`（`notebook > stack` 那条规则）
+     ⇒ 侧边栏里会多出一块**比窗口深的底色** ⇒ 压回 `@pp_bg`，
+     跟 `.pp-sidebar` 一样（阶段 93 的决定：整条侧栏一个底色）。 */
+.pp-sidebar-host > notebook > header { margin: 8px 6px 0 6px; }
+.pp-sidebar-host > notebook > stack { background-color: @pp_bg; }
 /* 分屏：活动面板描边（outline 不吃布局，不会把终端挤动） */
 .pp-pane-active { outline: 1px solid alpha(@pp_accent, 0.55); outline-offset: -1px; }
 /* 面板之间的分割线：2px 细线（悬停高亮，仍可拖动调宽窄） */

@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use puttyplus::{
     about, appicon, args, backend, bridge, connmgr, density, keyui, menu, notify, panel, platform,
-    replayui, settings, settingsui, sidebar, shortcuts, shortcutsui, tabs, term, theme, topbar,
-    topmenus, util, vault, vaultui,
+    replayui, settings, settingsui, sidebar, sidebarhost, shortcuts, shortcutsui, tabs, term,
+    theme, topbar, topmenus, util, vault, vaultui,
 };
 use topmenus::{MenuEntry, TOP_MENUS};
 
@@ -148,11 +148,18 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
     let sb = sidebar::Sidebar::new(Rc::clone(&tabs));
     sb.setup();
 
+    // ⚠️ **阶段 177**：左栏外面再套一层**侧边栏外壳**（页签 [连接 | 文件]）。
+    //
+    // ⚠️ **为什么现在只有「连接」页有内容**：「文件」页先放占位 ——
+    //   文件面板搬进来是**阶段 178**（要改 `host_file_panel` 的宿主）。
+    //   本阶段**只加外壳、不改行为** ⇒ 出问题能直接回退这一个提交。
+    let host = sidebarhost::SidebarHost::new(&sb);
+
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     let sb_wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
     // 只给一个最小宽度；实际宽度由分割位置（可拖、可记忆）决定
     sb_wrap.set_size_request(180, -1);
-    sb_wrap.append(&sb.widget);
+    sb_wrap.append(&host.root);
     paned.set_start_child(Some(&sb_wrap));
     paned.set_end_child(Some(&tabs.notebook));
     paned.set_position(settings::sidebar_width());
@@ -207,7 +214,10 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
             while let Some(c) = sb_wrap2.first_child() {
                 sb_wrap2.remove(&c);
             }
-            sb_wrap2.append(&sb_new.widget);
+            // ⚠️ **阶段 177**：外壳**也要重建**——页签标题（「连接」「文件」）
+            //   也得换语言 ⇒ 不能只换里面的侧栏。
+            let host_new = sidebarhost::SidebarHost::new(&sb_new);
+            sb_wrap2.append(&host_new.root);
             // 顶栏 + 菜单栏（菜单文案也是新的语言）
             let title = gtk::Label::new(Some(APP_TITLE));
             title.add_css_class("pp-app-title");
