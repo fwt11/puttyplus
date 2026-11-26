@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2187] = [
+pub static EN: [(&str, &str); 2192] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -73,6 +73,7 @@ pub static EN: [(&str, &str); 2187] = [
     ("SFTP 文件", "SFTP files"),
     ("SFTP 连接 {v0}@{v1}:{v2} 需要密码：\n{err}", "The SFTP connection {v0}@{v1}:{v2} needs a password:\n{err}"),
     ("SFTP 连接失败", "SFTP connection failed"),
+    ("SFTP 连接失败详情", "SFTP connection failure details"),
     ("SFTP 连接已断开。", "The SFTP connection was closed."),
     ("SFTP 连接已断开，修改没有写回远程。\n可以先把内容复制出来，重连后再粘贴保存。", "The SFTP connection was closed, the changes were not written back to the remote.\nYou can copy the content out first and paste it back after reconnecting."),
     ("SFTP 通道初始化失败: {e}（服务器可能未启用 SFTP）", "Failed to initialise the SFTP channel: {e} (the server may not have SFTP enabled)"),
@@ -630,6 +631,7 @@ pub static EN: [(&str, &str); 2187] = [
     ("历史：看跑过的 SQL（双击一条把它填回编辑器）", "History: the SQL that has been run (double-click one to put it back into the editor)"),
     ("压缩留白，同屏显示更多文件行", "Compact spacing, fit more file rows on screen"),
     ("原始值", "Original value"),
+    ("原始错误：", "Original error:"),
     ("去掉这个条件", "Remove this condition"),
     ("去设置…", "Go to settings…"),
     ("参数没填全", "Not all parameters are filled in"),
@@ -1623,6 +1625,7 @@ pub static EN: [(&str, &str); 2187] = [
     ("直连：在源服务器上执行 scp，把文件直接送到目标（需要源能登录目标）。\n本机中转：读源服务器、写目标服务器，不依赖服务器上的 scp/ssh。", "Direct: scp runs on the source server and sends the files straight to the target (the source has to be able to log in to the target).\nRelay through this machine: read from the source server, write to the target server, without needing scp/ssh on the servers."),
     ("相对路径", "Relative path"),
     ("看不了目录", "Cannot view a folder"),
+    ("看失败详情", "Show failure details"),
     ("看容器的日志", "View the container logs"),
     ("看容器里的文件", "View the files inside the container"),
     ("看跑过的 SQL，双击一条把它填回编辑器", "The SQL that has been run — double-click one to put it back into the editor"),
@@ -2064,6 +2067,7 @@ pub static EN: [(&str, &str); 2187] = [
     ("连接已断开", "The connection was closed"),
     ("连接已断开或已重建", "The connection was closed or rebuilt"),
     ("连接已断开，正在重新连接…", "The connection was closed; reconnecting…"),
+    ("连接已断开：服务器关掉了会话，或者网络断了。", "The connection dropped: the server closed the session, or the network went down."),
     ("连接用哪把私钥、认证方式选哪种，在连接编辑器的「认证」页里设；凭据库管的是「记住的密码」要不要加密存着。", "Which private key a connection uses and which authentication method it allows are set on the \"Authentication\" page of the connection editor; the credential vault is about whether the \"remembered passwords\" are stored encrypted."),
     ("连接页左边文件面板的宽度", "The width of the file panel on the left of the connection page"),
     ("退出", "Quit"),
@@ -2120,6 +2124,7 @@ pub static EN: [(&str, &str); 2187] = [
     ("重新排布（表多了不好看了就点它）", "Re-layout (click it when there are too many tables to look at)"),
     ("重新读取", "Read again"),
     ("重新读取这个目录", "Re-read this directory"),
+    ("重新连接", "Reconnect"),
     ("重新连接 SFTP", "Reconnect SFTP"),
     ("重新连接终端", "Reconnect the terminal"),
     ("重置", "Reset"),

@@ -125,6 +125,19 @@ pub struct Pane {
     pub drop_row: Cell<Option<usize>>,
     /// 远程状态行（仅远程面板）
     pub status_lbl: gtk::Label,
+    /// **失败时的「重试」按钮**（阶段 173 / UI-05；仅远程面板）。
+    ///
+    /// ⚠️ **为什么要有它**（UI 审核 P1-2）：错误弹窗关掉以后，面板上只剩
+    ///   一个红色状态词 ⇒ 用户既不知道**为什么失败**，也不知道**下一步
+    ///   点哪儿** ⇒ 这颗按钮就是那个「下一步」。
+    ///
+    /// ⚠️ **平时是藏着的**：只有真的有失败态时才显示（`set_visible`）。
+    pub retry_btn: gtk::Button,
+    /// **失败时的「详情」按钮**（阶段 173 / UI-05；仅远程面板）。
+    ///
+    /// 干什么用：把**原始错误**摊开给用户看（能复制走查问题）——
+    /// 状态行上只有一句中文分类，细节在这里。
+    pub details_btn: gtk::Button,
     /// 可开关列（列显隐设置）；本地无权限列
     pub col_size: gtk::TreeViewColumn,
     pub col_mtime: gtk::TreeViewColumn,
@@ -998,6 +1011,11 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
     //（原来是 `set_margin_*` 写死的 ⇒ 切密度时工具条不变）。
     toolbar.add_css_class("pp-pane-toolbar");
     let status_lbl = gtk::Label::new(None);
+    // ⚠️ **失败时的「重试」按钮**（阶段 173 / UI-05）：远程面板才有
+    //   （本地面板没有连接可重试）⇒ 本地面板用一颗**不显示**的占位。
+    let retry_btn = gtk::Button::new();
+    // ⚠️ **失败时的「详情」按钮**（阶段 173 / UI-05）：摊开原始错误。
+    let details_btn = gtk::Button::new();
 
     fn icon_btn(icon: &str, tooltip: &str) -> gtk::Button {
         let b = gtk::Button::new();
@@ -1062,6 +1080,45 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
         status_lbl.set_hexpand(true);
         status_lbl.set_xalign(0.0);
         header.append(&status_lbl);
+        // ⚠️ **失败时的「重试」**（阶段 173 / UI-05）：平时藏着，
+        //   失败时才冒出来 ⇒ 用户关掉错误弹窗后仍有下一步可点。
+        let rimg = gtk::Image::from_icon_name("view-refresh-symbolic");
+        rimg.set_pixel_size(16);
+        retry_btn.set_child(Some(&rimg));
+        retry_btn.set_tooltip_text(Some(tr("重新连接")));
+        // 纯图标按钮 ⇒ 可访问名称跟着 tooltip 走
+        crate::a11y::watch_tooltip(&retry_btn);
+        retry_btn.add_css_class("flat");
+        retry_btn.set_visible(false);
+        header.append(&retry_btn);
+        // ⚠️ **走既有的幂等重连入口**（阶段 173 / UI-05）⇒ 不会跟自愈
+        //   重连撞车、也不会把原操作发两遍。
+        {
+            let st = Rc::clone(st);
+            retry_btn.connect_clicked(move |_| {
+                // ⚠️ **已经在连了就别再发起一次**（UI-05 的风险条目：
+                //   「内联重试与 pending_retry / retry_ops 重复」）。
+                if st.connecting.get() {
+                    return;
+                }
+                super::on_reconnect(&st);
+            });
+        }
+        // 「详情」：把**原始错误**摊开（能复制走查问题）。
+        let dimg = gtk::Image::from_icon_name("dialog-information-symbolic");
+        dimg.set_pixel_size(16);
+        details_btn.set_child(Some(&dimg));
+        details_btn.set_tooltip_text(Some(tr("看失败详情")));
+        crate::a11y::watch_tooltip(&details_btn);
+        details_btn.add_css_class("flat");
+        details_btn.set_visible(false);
+        header.append(&details_btn);
+        {
+            let st = Rc::clone(st);
+            details_btn.connect_clicked(move |_| {
+                super::show_failure_details(&st);
+            });
+        }
     } else {
         let hint = gtk::Label::new(Some(tr("本机文件")));
         hint.add_css_class("dim-label");
@@ -1481,6 +1538,8 @@ pub fn build_pane(st: &Rc<PanelState>, remote: bool) -> Rc<Pane> {
         filter_timer: RefCell::new(None),
         drop_row: Cell::new(None),
         status_lbl,
+        retry_btn,
+        details_btn,
         col_size: cols.size,
         col_mtime: cols.mtime,
         col_perm: cols.perm,

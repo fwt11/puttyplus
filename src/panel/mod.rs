@@ -184,6 +184,15 @@ pub struct PanelState {
     pub rreconnect: RefCell<Option<gtk::Button>>,
     pub follow_btn: RefCell<Option<gtk::ToggleButton>>,
 
+    /// **远端面板的持久失败态**（阶段 173 / UI-05，治 P1-2）。
+    ///
+    /// ⚠️ **为什么要有它**（UI 审核 P1-2，已确认）：错误弹窗**关掉以后**，
+    ///   面板上只剩一个红色状态词 ⇒ 用户不知道是**认证、网络还是超时**，
+    ///   也不知道**下一步点哪儿** ⇒ 弹窗可以关，但**恢复入口不能一起消失**。
+    ///
+    /// ⚠️ **原文必须留着**（详情里看得到）⇒ 这里同时存分类与原文。
+    pub sftp_fail: RefCell<Option<SftpFailure>>,
+
     /* 终端目录跟随 */
     pub follow: Cell<bool>,
     pub follow_pending: Cell<bool>,
@@ -460,6 +469,7 @@ impl SftpPanel {
             remote_list_pending: Cell::new(false),
             rreconnect: RefCell::new(None),
             follow_btn: RefCell::new(None),
+            sftp_fail: RefCell::new(None),
             follow: Cell::new(true),
             follow_pending: Cell::new(false),
             term_spawn_wall: Cell::new(0),
@@ -997,8 +1007,120 @@ pub fn shutdown(st: &Rc<PanelState>) {
 
 /* ---------------- 状态显示 ---------------- */
 
+/// **远端面板的持久失败态**（阶段 173 / UI-05，治 P1-2）。
+///
+/// ⚠️ **弹窗可以关，恢复入口不能一起消失**：关掉错误弹窗以后，
+///   面板上仍然留着「为什么失败」 ＋ 一颗「重试」。
+#[derive(Clone, Debug)]
+pub struct SftpFailure {
+    /// 分类（复用 [`crate::sshfail::Kind`]，不另造一套关键词表）。
+    pub kind: crate::sshfail::Kind,
+    /// 给用户看的一句（分类原因）。
+    pub brief: String,
+    /// 原始错误（详情里看，别丢）。
+    pub raw: String,
+}
+
 fn set_remote_status(st: &Rc<PanelState>, level: State, text: &str) {
     set_remote_status_tip(st, level, text, text);
+}
+
+/// **记一次失败**（阶段 173 / UI-05）。
+///
+/// ⚠️ **分类复用 [`crate::sshfail`]** ⇒ 不复制关键词表。
+/// ⚠️ **原文留在 tooltip 里** ⇒ 「说人话」与「保留原文」同时成立。
+fn set_remote_failure(st: &Rc<PanelState>, kind: crate::sshfail::Kind, raw: &str) {
+    let brief = crate::sshfail::hint(kind).to_string();
+    set_remote_failure_with(st, kind, brief, raw);
+}
+
+/// **记一次失败**（自带一句说明）。
+///
+/// ⚠️ 有些失败**不是 ssh 报错**（例如「连接已断开」：服务端把会话关了，
+///   或者网络断了）⇒ 硬套 sshfail 的分类会说错话 ⇒ 这时自己给一句。
+fn set_remote_failure_with(
+    st: &Rc<PanelState>,
+    kind: crate::sshfail::Kind,
+    brief: String,
+    raw: &str,
+) {
+    *st.sftp_fail.borrow_mut() = Some(SftpFailure {
+        kind,
+        brief: brief.clone(),
+        raw: raw.to_string(),
+    });
+    // 状态行：一句分类原因（**不弹窗** ⇒ 弹窗关了也不丢）。
+    set_remote_status_tip(st, State::Err, &brief, raw);
+    // 面板里那颗「重试」亮出来（恢复入口）。
+    render_failure_actions(st);
+}
+
+/// **失败态清掉**（重连成功 ⇒ 错态消失）。
+fn clear_remote_failure(st: &Rc<PanelState>) {
+    *st.sftp_fail.borrow_mut() = None;
+    render_failure_actions(st);
+}
+
+/// 面板里的「重试」按钮：**有失败态才显示**；正在重连时禁用。
+///
+/// ⚠️ **只调既有的幂等入口**（[`on_reconnect`]）⇒ 不会跟自愈重连
+///   撞车、也不会把原操作发两遍（审核 UI-05 的风险条目）。
+fn render_failure_actions(st: &Rc<PanelState>) {
+    let pane = st.pane(true);
+    let has_fail = st.sftp_fail.borrow().is_some();
+    let recovering = st.connecting.get();
+    pane.retry_btn.set_visible(has_fail);
+    pane.retry_btn.set_sensitive(has_fail && !recovering);
+    pane.details_btn.set_visible(has_fail);
+    let tip = if recovering {
+        tr("正在重新连接…")
+    } else {
+        tr("重新连接")
+    };
+    pane.retry_btn.set_tooltip_text(Some(tip));
+}
+
+/// 当前失败态（冒烟 / 测试钩子）。
+pub fn sftp_failure_for_test(st: &Rc<PanelState>) -> Option<(String, String)> {
+    st.sftp_fail
+        .borrow()
+        .as_ref()
+        .map(|f| (f.brief.clone(), f.raw.clone()))
+}
+
+/// 面板里的「重试」按钮是不是亮着（冒烟 / 测试钩子）。
+pub fn sftp_retry_visible_for_test(st: &Rc<PanelState>) -> bool {
+    st.pane(true).retry_btn.is_visible()
+}
+
+/// 面板里的「重试」按钮**能不能点**（恢复中就该点不了；冒烟 / 测试钩子）。
+pub fn sftp_retry_sensitive_for_test(st: &Rc<PanelState>) -> bool {
+    st.pane(true).retry_btn.is_sensitive()
+}
+
+/// 面板里的「详情」按钮是不是亮着（冒烟 / 测试钩子）。
+pub fn sftp_details_visible_for_test(st: &Rc<PanelState>) -> bool {
+    st.pane(true).details_btn.is_visible()
+}
+
+/// **看失败详情**（阶段 173 / UI-05）。
+///
+/// ⚠️ **原因与原文要分开**（审核 UI-05：「明确区分『原因』和『原始错误』」）
+///   ⇒ 上半是中文分类，下半是原文（能复制走查问题）。
+pub fn show_failure_details(st: &Rc<PanelState>) {
+    let Some(f) = st.sftp_fail.borrow().clone() else {
+        return;
+    };
+    let mut text = f.brief.clone();
+    let raw = f.raw.trim();
+    if !raw.is_empty() && raw != f.brief {
+        text.push('\n');
+        text.push('\n');
+        text.push_str(tr("原始错误："));
+        text.push('\n');
+        text.push_str(raw);
+    }
+    dialogs::show_error(st.topwin().as_ref(), tr("SFTP 连接失败详情"), &text);
 }
 
 /// 状态栏 + 独立 tooltip（转发明细较长，tooltip 放完整信息）。
@@ -1540,7 +1662,15 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             if let Some(b) = st.rreconnect.borrow().as_ref() {
                 b.set_sensitive(true);
             }
-            set_remote_status(st, State::Err, tr("连接已断开"));
+            // ⚠️ **阶段 173 / UI-05**：断线也**记成持久失败态** ⇒
+            //   用户关掉任何弹窗以后，面板上仍然看得见「为什么」，
+            //   而且有颗「重试」可以点。
+            set_remote_failure_with(
+                st,
+                crate::sshfail::Kind::Unknown,
+                tr("连接已断开：服务器关掉了会话，或者网络断了。").to_string(),
+                tr("连接已断开"),
+            );
         }
         PanelEvent::Connected(Ok(cwd)) => {
             // 重连会 abort 旧传输调度器，先把旧队列里未完成的项标成取消
@@ -1553,6 +1683,9 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             *st.remote_home.borrow_mut() = Some(cwd.clone());
             set_connected_status(st, &cwd);
             set_remote_sensitive(st, true);
+            // ⚠️ **阶段 173 / UI-05**：连上了 ⇒ **失败态清掉**
+            //   （错态不许留着过期原因）。
+            clear_remote_failure(st);
             // ⚠️ **阶段 99：先重试"因为断线失败的那条操作"**——
             // 用户原话：「重连一次……否则就继续执行原来的操作」。
             //  重试本身就是"继续原操作"（比如点开的那个目录）⇒ 不用再走
@@ -1590,6 +1723,10 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
             if let Some(b) = st.rreconnect.borrow().as_ref() {
                 b.set_sensitive(true);
             }
+            // ⚠️ **阶段 173 / UI-05**：**先**把失败态记下来（分类 ＋ 原文）
+            //   ⇒ 后面不管是「问密码」还是「弹错误框」，面板上都已经留着
+            //   **为什么失败** ＋ 一颗「重试」⇒ 弹窗关了也不丢下一步。
+            set_remote_failure(st, crate::sshfail::classify(&err), &err);
 
             let have_pw = st.pw.borrow().is_some() || st.opts.password.is_some();
             let have_key = st
@@ -1652,7 +1789,10 @@ pub fn handle_event(st: &Rc<PanelState>, ev: PanelEvent) {
                 );
                 return;
             }
-            set_remote_status(&st, State::Err, tr("未连接"));
+            // ⚠️ **阶段 173 / UI-05**：首次连不上 ⇒ 失败态**上面已经记好了**
+            //   （分类 ＋ 原文）⇒ 用户关掉下面的弹窗以后，面板上仍然
+            //   看得见「为什么失败」，而且有颗「重试」可以点。
+            //
             // ⚠️ 复查 R1 / §4.2「错误恢复不闭环」：以前这个框只有一颗
             // 「关闭」⇒ 用户关掉弹窗只能干瞪眼，而「连接 → 重新连接 SFTP」
             // 就在两步之外，弹窗却不说。⇒ 给一颗**当场重试**的按钮。
@@ -2418,6 +2558,9 @@ pub fn on_reconnect(st: &Rc<PanelState>) {
         b.set_sensitive(false);
     }
     st.connecting.set(true);
+    // ⚠️ **阶段 173 / UI-05**：正在恢复 ⇒ 面板里那颗「重试」禁用
+    //   （免得用户连点、发起第二套并发重连）。
+    render_failure_actions(st);
     set_remote_status(
         st,
         State::Warn,
