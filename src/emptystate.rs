@@ -179,6 +179,72 @@ pub fn quick_commands() -> EmptyState {
     )
 }
 
+/// 数据库工作台：**当前会话里还没有数据库连接**（阶段 175 / UI-06）。
+///
+/// ⚠️ **为什么不再摆品牌区**（审核 P1-3）：原来未连接时摆的是**大号应用
+///   图标 ＋ 产品名 ＋ 「数据库工作台」**⇒ 占满视觉中心，用户看到的是
+///   「品牌」不是「现在该干什么」⇒ 空态应当**以任务为主**。
+///
+/// ⚠️ **主 CTA 走既有流程**：`newmenu::run_in_session(…, "new_db")`
+///   —— 不在这里复制一份建连接的逻辑（审核验收：「不在测试中复制一份
+///   逻辑」）。
+///
+/// ⚠️ **次 CTA 只在选过连接时才有**：「重新连接」要有连接可重连；
+///   一次都没选过时摆它 = 摆一个点了没反应的按钮。
+pub fn db_not_connected(has_profile: bool) -> EmptyState {
+    let s = EmptyState::new(
+        tr("还没有数据库连接"),
+        tr("当前会话里还没有数据库连接。建一个就能查表、跑 SQL、导入导出。"),
+        Cta {
+            label: tr("新建数据库连接…"),
+            icon: "drive-harddisk-symbolic",
+        },
+    );
+    if has_profile {
+        s.with_secondary(Cta {
+            label: tr("重新连接"),
+            icon: "view-refresh-symbolic",
+        })
+    } else {
+        s
+    }
+}
+
+/// 数据库工作台：**连过了，但没连上**（阶段 175 / UI-06）。
+///
+/// ⚠️ **为什么单独一种**（审核验收：「不把『没连接』『连接失败』『没有表』
+///   混为一谈」）：选过连接却连不上 ⇒ 用户要的是**重试**，不是「新建」。
+pub fn db_failed() -> EmptyState {
+    EmptyState::new(
+        tr("数据库连接没有连上"),
+        tr("刚才那条连接没能建立。点「重新连接」再试一次，或者换一个连接。"),
+        Cta {
+            label: tr("重新连接"),
+            icon: "view-refresh-symbolic",
+        },
+    )
+    .with_secondary(Cta {
+        label: tr("新建数据库连接…"),
+        icon: "drive-harddisk-symbolic",
+    })
+}
+
+/// 数据库工作台：**连上了，但这个库还没有对象**（阶段 175 / UI-06）。
+///
+/// ⚠️ 三个动作（浏览对象 / 写一条查询 / 执行历史）都是**真动作**，
+///   界面上还是那三个行按钮（见 `dbui::refresh_empty`）⇒ 这里登记它们
+///   是为了**统一清点**：标题、解释、CTA 不许是空的。
+pub fn db_connected() -> EmptyState {
+    EmptyState::new(
+        tr("当前库还没有对象"),
+        tr("左边的对象树里看表、视图、函数；也可以直接写一条 SQL 跑起来。"),
+        Cta {
+            label: tr("浏览对象"),
+            icon: "view-list-symbolic",
+        },
+    )
+}
+
 /// 全应用声明过的空态（单元测试照这份清单断言）。
 pub fn all_empty_states() -> Vec<EmptyState> {
     vec![
@@ -188,6 +254,12 @@ pub fn all_empty_states() -> Vec<EmptyState> {
         notifications(),
         docker_empty(),
         quick_commands(),
+        // ⚠️ **数据库工作台的三种状态**（阶段 175 / UI-06）：「没连接」
+        //   「连失败」「连上了但没对象」**不许混为一谈**。
+        db_not_connected(false),
+        db_not_connected(true),
+        db_failed(),
+        db_connected(),
         // ⚠️ **错态也要有解释**（测试钩子照这条断言「解释不许是空的」）
         //   ⇒ 这里给一条真会出现的说明。
         docker_error(DockerErrorKind::Other, "远程执行 docker 命令失败"),
@@ -215,6 +287,12 @@ pub struct DynamicEmptyState {
     pub root: gtk::Box,
     /// 主 CTA（调用方接点击回调）。
     pub primary: gtk::Button,
+    /// **次 CTA**（阶段 175 / UI-06：数据库空态要「重新连接」这个次入口）。
+    ///
+    /// ⚠️ 以前次 CTA 的按钮**建完就扔了**（`build_dynamic` 里 append 完
+    ///   就没人能拿到它）⇒ 调用方没法给它接回调 ⇒ 只能做「只有主 CTA」
+    ///   的空态。
+    pub secondary: Option<gtk::Button>,
     /// 标题。
     pub title: gtk::Label,
     /// 解释。
@@ -252,14 +330,17 @@ pub fn build_dynamic(s: &EmptyState) -> DynamicEmptyState {
     row.set_halign(gtk::Align::Center);
     let primary = cta_button(&s.primary, true);
     row.append(&primary);
-    if let Some(c) = &s.secondary {
-        row.append(&cta_button(c, false));
-    }
+    let secondary = s.secondary.as_ref().map(|c| {
+        let b = cta_button(c, false);
+        row.append(&b);
+        b
+    });
     box_.append(&row);
 
     DynamicEmptyState {
         root: box_,
         primary,
+        secondary,
         title,
         desc,
     }

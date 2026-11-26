@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2209] = [
+pub static EN: [(&str, &str); 2217] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -332,6 +332,7 @@ pub static EN: [(&str, &str); 2209] = [
     ("主机密钥校验失败（该密钥已被标记吊销）。\n若确定环境安全，可删除 ~/.ssh/known_hosts 中相关条目后重试。", "Host key verification failed (the key has been revoked).\nIf you are sure the environment is safe, delete the relevant entry from ~/.ssh/known_hosts and try again."),
     ("主目录", "Home directory"),
     ("主键", "Primary key"),
+    ("也可以在左侧的连接管理器里选一条已有的数据库连接", "You can also pick an existing database connection in the connection manager on the left"),
     ("事件", "Event"),
     ("亮色底，白天/投影", "Light background, daytime/projector"),
     ("仅 SSH 协议支持文件传输", "File transfer is only supported over SSH"),
@@ -545,6 +546,7 @@ pub static EN: [(&str, &str); 2209] = [
     ("列详情", "Column details"),
     ("列详情…", "Column details…"),
     ("列（每行一个：名称 类型）", "Column (one per line: name type)"),
+    ("刚才那条连接没能建立。点「重新连接」再试一次，或者换一个连接。", "That connection could not be established. Click \"Reconnect\" to try again, or pick another connection."),
     ("创建", "Create"),
     ("创建 ConPTY 失败", "Failed to create the ConPTY"),
     ("创建 PTY 失败：{e}", "Failed to create the PTY: {e}"),
@@ -879,6 +881,7 @@ pub static EN: [(&str, &str); 2209] = [
     ("左右拆分格子", "Split the cell horizontally"),
     ("左边对象树里还没有表。\n先展开一个模式，选中要导入的表再来。", "There are no tables in the object tree on the left yet.\nExpand a schema, select the table to import and come back."),
     ("左边对象树里还没有表。\n先展开一个模式，选中要导出的表再来。", "There are no tables in the object tree on the left yet.\nExpand a schema, select the table to export and come back."),
+    ("左边的对象树里看表、视图、函数；也可以直接写一条 SQL 跑起来。", "Browse tables, views and functions in the object tree on the left; or write a SQL statement and run it right away."),
     ("差异", "Difference"),
     ("已保存", "Saved"),
     ("已修改 {n} 行，点「保存修改」才写库", "{n} rows modified — they are written to the database only when you click \"Save changes\""),
@@ -1006,8 +1009,10 @@ pub static EN: [(&str, &str); 2209] = [
     ("当前主密码", "Current master password"),
     ("当前会话的状态", "State of the current session"),
     ("当前会话的转发规则", "Forwarding rules of the current session"),
+    ("当前会话里还没有数据库连接。建一个就能查表、跑 SQL、导入导出。", "There is no database connection in this session yet. Create one to browse tables, run SQL, and import or export data."),
     ("当前值", "Current value"),
     ("当前列表里没有规则。\n点「保存」等于把连接「{name}」里已存的转发规则「清空」\n（下次连接不再自动带上）。\n要清空吗？\n如果你是想保存规则：先在上面的列表里添加规则，\n列表有内容了再保存。", "There are no rules in the current list.\nPressing \"Save\" clears the forwarding rules already stored for connection \"{name}\"\n(they will not be carried over on the next connection).\nClear them?\nIf you meant to save rules: add them to the list above first,\nand save once the list has something in it."),
+    ("当前库还没有对象", "This database has no objects yet"),
     ("当前日期", "Current date"),
     ("当前时间", "Current time"),
     ("当前没有会话，先新建一个连接", "There is no session yet, create a connection first"),
@@ -1238,6 +1243,7 @@ pub static EN: [(&str, &str); 2209] = [
     ("数据库连接已断开", "The database connection was closed"),
     ("数据库连接已断开，正在重新连接…", "The database connection was lost; reconnecting…"),
     ("数据库连接已断开，重连后仍然失败", "The database connection was lost and the reconnect failed as well"),
+    ("数据库连接没有连上", "The database connection could not be established"),
     ("数据库通道只支持 SSH 会话：当前协议没有可复用的 SSH 连接。", "The database channel only works over an SSH session: the current protocol has no reusable SSH connection."),
     ("数据库需要密码", "The database needs a password"),
     ("数据库页独占宽度", "The database page takes the full width"),
@@ -1963,6 +1969,7 @@ pub static EN: [(&str, &str); 2209] = [
     ("还没有传输", "No transfers yet"),
     ("还没有密钥", "No keys yet"),
     ("还没有快速命令", "No quick commands yet"),
+    ("还没有数据库连接", "No database connection yet"),
     ("还没有结果", "There is no result yet"),
     ("还没有连接", "No connections yet"),
     ("还没有连接记录 —— 从左侧建一个连接", "There are no connection records yet — create a connection on the left"),
@@ -2069,6 +2076,7 @@ pub static EN: [(&str, &str); 2209] = [
     ("违反非空约束（这一列不能为空）", "Not null constraint violated (this column cannot be empty)"),
     ("连一台机器、传个文件、跑个数据库查询 —— 先建一个连接。", "Connect to a machine, transfer a file, run a database query — create a connection first."),
     ("连不上 Docker 服务 ⇒ 检查这台机器上的 Docker 是否在跑，以及当前账号有没有权限访问它。", "Cannot reach the Docker service ⇒ check whether Docker is running on that machine and whether the current account may access it."),
+    ("连不上时看下面的状态行，那里写着具体原因", "If it cannot connect, the status line below says why"),
     ("连不上服务器：地址不通、端口被拒绝，或域名解析不了。", "Cannot reach the server: the address is unreachable, the port was refused, or the hostname cannot be resolved."),
     ("连不上远程的 Docker（服务没起，或当前账号没权限）", "Cannot connect to the remote Docker (the service is down, or the current account has no permission)"),
     ("连到 {meta} —— 点一下就开", "Connect to {meta} — one click opens it"),
