@@ -2561,10 +2561,38 @@ impl Tabs {
 ///
 /// 原来只有三行居中文字，看着像"页面没加载完"；这里给一个明确的主行动
 /// （新建连接）和一个次行动（快捷键），并把常用键位做成两列速查表。
+/// 欢迎页内容列的**最小宽**（阶段 175 / UI-09）。
+///
+/// ⚠️ **为什么是「最小宽」而不是「最大宽」**：GTK4 没有可靠的 max-width
+///   （`ScrolledWindow.max-content-width` 实测不生效）⇒ 上限只能靠
+///   「每一块内容自己的宽度上限」⇒ 这里给的是**下限**：窄面板里内容
+///   不至于塌成一团字。
+const WELCOME_MIN_W: i32 = 560;
+/// 欢迎页内容列的**上边距**（阶段 175 / UI-09）。
+///
+/// ⚠️ 原来 `valign=Center` ⇒ 内容在窗口里上下浮动 ⇒ 窗口一高重心就掉。
+///   改成靠上 ＋ 固定边距 ⇒ **窗口多高，内容都停在同一处**。
+const WELCOME_TOP_MARGIN: i32 = 36;
+
 pub fn welcome_page() -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    box_.set_valign(gtk::Align::Center);
+    // ⚠️ **阶段 175 / UI-09（治 P2-1）**：内容列的**宽度上限**与**垂直节奏**。
+    //
+    // ⚠️ **GTK4 没有可靠的「最大宽度」**（实测，`tools` 里那轮探针）：
+    //   `ScrolledWindow.max-content-width` **不生效**（内容自然宽 1600 时
+    //   实测仍分到 1600；`propagate-natural-width` 与策略组合都一样）⇒
+    //   只能靠「**最小宽 ＋ 内容自身的自然宽上限**」⇒
+    //   - 下面每一块的内容宽度都**有上限**（能力块 176×3＋间距、最近连接
+    //     三列网格、卡片文字 `max_width_chars` 封顶）⇒ 内容列**不会无限拉大**；
+    //   - 再给内容列一个**最小宽**（窄面板里不至于塌成一团字）。
     box_.set_halign(gtk::Align::Center);
+    box_.set_hexpand(false);
+    box_.set_size_request(WELCOME_MIN_W, -1);
+    // ⚠️ **垂直方向改成「靠上」**：原来 `valign=Center` ⇒ 内容在窗口里
+    //   **上下浮动**（窗口一高，重心就往下掉）⇒ 审核验收要的「重心稳定」
+    //   做不到 ⇒ 固定上边距，窗口多高都停在同一处。
+    box_.set_valign(gtk::Align::Start);
+    box_.set_margin_top(WELCOME_TOP_MARGIN);
 
     // ⚠️ 阶段 80（审计 P2-9）：原来这儿摆着 **88px 大图标 + 一行大字
     // 「PuTTYPlus」**——可品牌在**顶栏**和**标签页**已经各出现一次，
@@ -2575,39 +2603,46 @@ pub fn welcome_page() -> gtk::Widget {
     // 的副标题 ⇒ 一眼知道这是干什么的、也知道自己该点哪儿。
     let recents = crate::recent::load();
 
-    // ---- 能力卡（阶段 131）：定位句从一行字升级成三张卡 ----
+    // ---- 能力区（阶段 175 / UI-09：明确是**说明**，不是入口）----
     //
-    // ⚠️ **这三张卡不是按钮**：2026-11-02 用户删掉了欢迎页的「新建连接」
-    //    大按钮（理由：和侧栏空态 CTA 重复 ⇒ 同一个入口不能摆三份）⇒
-    //    这里只**说明**这个应用能干什么，入口仍在侧栏的「＋」。
-    //    是 Box 不是 Button ⇒ 没有 hover、没有点击语义 ⇒ 不会出现
-    //    "看着能点、点了没反应"。
+    // ⚠️ **原来这三张是 `.pp-card`**（有底色 ＋ 边框）⇒ 一看着就是能点的
+    //   ⇒ 用户点了没反应 ⇒ 审核 P2-1：「能力区要么明确是说明，要么成为
+    //   真实动作；不能『看起来能点但点不了』」。
+    // ⇒ 改成 **`.pp-cap`**（**没有底色、没有边框、没有 hover**）＋ 上面加
+    //   一行小标题「这个应用能干什么」⇒ 一眼看出这是**说明**。
+    // ⚠️ **不新增第二套「新建连接」流程**（用户 2026-11-02 的硬决定）：
+    //   入口仍然只有侧栏那一个 ⇒ 能力区只负责说明。
     let caps: [(&str, &str, &str); 3] = [
         ("utilities-terminal-symbolic", tr("SSH 终端"), tr("远程命令行与分屏")),
         ("folder-remote-symbolic", tr("SFTP 文件"), tr("上传下载与编辑")),
         ("drive-harddisk-symbolic", tr("数据库工作台"), tr("查询与导入导出")),
     ];
-    let caps_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let cap_head = gtk::Label::new(Some(tr("这个应用能干什么")));
+    cap_head.add_css_class("pp-section");
+    cap_head.set_halign(gtk::Align::Center);
+    box_.append(&cap_head);
+    let caps_row = gtk::Box::new(gtk::Orientation::Horizontal, 26);
     caps_row.set_halign(gtk::Align::Center);
     for (icon_name, name, desc) in caps {
         let tile = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        tile.add_css_class("pp-card");
-        // ⚠️ **三张卡等宽**（AGENTS.md 阶段 96 的教训：一排卡片宽窄不一
+        tile.add_css_class("pp-cap");
+        // ⚠️ **三块等宽**（AGENTS.md 阶段 96 的教训：一排块宽窄不一
         //    = 参差的锯齿 = "看着丑"的主因）⇒ 统一给最小宽。
         tile.set_size_request(176, -1);
         let icon = gtk::Image::from_icon_name(icon_name);
         icon.set_pixel_size(24);
         icon.set_valign(gtk::Align::Center);
+        icon.add_css_class("pp-cap-icon");
         tile.append(&icon);
         let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);
         let nl = gtk::Label::new(Some(name));
         nl.set_xalign(0.0);
-        nl.add_css_class("pp-card-title");
+        nl.add_css_class("pp-cap-title");
         texts.append(&nl);
         let dl = gtk::Label::new(Some(desc));
         dl.set_xalign(0.0);
         dl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        dl.add_css_class("pp-card-sub");
+        dl.add_css_class("pp-cap-sub");
         texts.append(&dl);
         tile.append(&texts);
         caps_row.append(&tile);
@@ -2715,7 +2750,16 @@ pub fn welcome_page() -> gtk::Widget {
     }
     box_.append(&keys_row);
 
-    box_.upcast()
+    // ⚠️ **套一层滚动容器**（阶段 175 / UI-09）：内容改成靠上以后，
+    //   **窗口矮的时候下面会被裁掉**（快捷键那行看不见了）⇒ 套滚动容器，
+    //   矮窗口里能滚，宽窗口里不出现滚动条。
+    // ⚠️ 横向也用 Automatic：窄面板里内容比视口宽 ⇒ 出横向滚动条，
+    //   **别把内容直接裁掉**。
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&box_));
+    scroll.upcast()
 }
 
 /// 欢迎页的**最近连接卡片**：图标 + 名字 + `user@host:port` + 右侧箭头。

@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2208] = [
+pub static EN: [(&str, &str); 2209] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1997,6 +1997,7 @@ pub static EN: [(&str, &str); 2208] = [
     ("这个容器里没有 ls 命令 ⇒ 列不了目录。换个带 ls 的镜像（常见的都有），或者用「终端」页进容器自己看。", "This container has no ls command, so its directory cannot be listed. Use an image that ships ls (most do), or open the \"Terminal\" page and look inside the container yourself."),
     ("这个容器里没有 {sh}（可以换一个：{list}）", "This container has no {sh} (you can pick another one: {list})"),
     ("这个容器里没有可用的 shell（试过 {list}）", "This container has no usable shell (tried {list})"),
+    ("这个应用能干什么", "What this app can do"),
     ("这个文件可以编辑", "This file can be edited"),
     ("这个文件在本机上", "This file is on this computer"),
     ("这个文件在远程服务器上", "This file is on the remote server"),

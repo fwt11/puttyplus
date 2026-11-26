@@ -996,6 +996,16 @@ const COMPONENTS: &str = r#"
   border-radius: 10px;
   padding: 10px 12px;
 }
+/* 欢迎页的**能力说明**（阶段 175 / UI-09，治 P2-1）。
+   ⚠️ **这一族故意「不像卡片」**：`.pp-card` 有底色 ＋ 边框 ⇒ 一眼看着就是
+     能点的（真能点的「最近连接」就是那个样子）⇒ 用户点了没反应 ⇒
+     审核 P2-1 说的「看起来能点但点不了」。
+   ⇒ 说明区**没有底色、没有边框、没有 hover** ⇒ 一眼看出是「说明」。
+   ⚠️ 真能点的东西另有其类（`button.pp-recent-card`，带 hover ＋ focus 环）。 */
+.pp-cap { padding: 0; }
+.pp-cap-icon { color: @pp_accent; }
+.pp-cap-title { font-weight: 600; color: @pp_fg; }
+.pp-cap-sub { font-size: 10.5pt; color: @pp_dim; }
 /* 状态药丸：底色 = 状态色往**面板色**混 0.84（与 Rust 侧 pill_bg_hex 同一
    口径——药丸多落在面板底上；徽章那族用的是窗底，不混着用）。
    文字用 @pp_fg ⇒ 对比度由 fg 守住，WCAG 单测钉着。圆点由渲染器自画
