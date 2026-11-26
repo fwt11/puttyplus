@@ -15,6 +15,49 @@
 > ⚠️ **下面的第二节及以后是 2026-10-27 那轮的历史记录**（阶段 19/20 的收尾），
 > 留着是为了别把当时的坑忘了；**当前状态看第一节**。
 
+## 〇之二之一五十八、最新进展（2026-11-27：UI 审核 → **15 项**改造全做完，阶段 170–176）
+
+- **用户这轮一句**：「**继续，做完所有的就推送关机**」⇒ 输入是两份文档：
+  `docs/UI_REVIEW_2026-11-26-全界面.md`（审核）＋
+  `docs/UI_IMPROVEMENT_PLAN_2026-11-26.md`（改造计划，**已在库里**）。
+- **做了什么**：审核里的 **P0 全关 / P1 全关 / P2 全做**，共 **15 项**
+  （UI-00 ～ UI-14）＋ 1 个计划外真缺陷（`build_ddl` 的主键约束名）。
+  ⇒ **阶段 170–176**（每项一个中文提交，含根因与实测数字）。
+  ⇒ 收口文档：`docs/UI_IMPROVEMENT_2026-11-26-收口.md`
+  （逐项前后对照 ＋ **未解决差异清单 7 条** ＋ 总验收清单 ＋ 复现步骤）。
+- **⚠️ 本轮新踩的坑（都是「实测过、别再试」的）**：
+  - **`TreeModel` 的迭代接口在 GTK 4.10 起全部废弃**
+    （`iter_first` / `iter_n_children` / `iter_next`…）⇒ 但 **`ListStore`
+    不是 `ListModel`** ⇒ `n_items()` 会撞 `ListModelExt` 的同名方法 ⇒
+    **编不过** ⇒ 数行只能用 `iter_n_children(None)` ＋ 局部 `#[allow(deprecated)]`
+    （全项目都在用这套，别为消一条警告去动全项目）。
+  - **`gdk4 0.11.5` 没有 `Display::scale_factor()` / `primary_monitor()`**
+    （只有 `monitors()`）⇒ 缩放要用 **`Widget::scale_factor()`**。
+  - **`GtkTreeModelFilter` 的 path 是「视图行号」，不是「模型行号」**
+    ⇒ 选中项换算必须走 **`convert_path_to_child_path()`** ⇒ 否则筛选后
+    「选中的那一行」会错位。
+  - **性能断言必须读**源码里的真常量**（如 `panel::XFER_ANIM_MS`、
+    `panel::dockerui::AUTO_REFRESH_SECS`）⇒ 在测试里自己写死同一个数
+    ⇒ **那条断言永远不会红** ⇒ 等于没有。⇒ 且**阈值要宽**（只防数量级
+    退化），卡零点几毫秒只会让 CI 误报。
+  - **`GtkWindow::grab_focus()` 要求控件已经在 toplevel 里** ⇒ 焦点类断言
+    必须把视图挂进真窗口。
+  - **已有父节点的控件不能再塞进 `gtk_window_set_child`** ⇒ GTK 会打断言
+    ⇒ 基线冒烟里数据库工作台只能「**只建不摆**」。
+  - **Adwaita 没有 `emblem-ok-symbolic`** ⇒ 成功级图标用
+    `object-select-symbolic`。
+  - **`glib::log_set_writer_func` 的回调必须 `Send + Sync`** ⇒ 用
+    `Arc<Mutex<Vec<String>>>` 收集；取字段用 `field.value_str()`。
+  - **GTK4 的 CSS 确实没有 `max-width`**、`ScrolledWindow.max-content-width`
+    **不生效**（再次实测确认）⇒ 限宽只能靠**内容自己收窄**。
+- **当前状态**：`main` 已与 `origin/main` **同步**（本轮 19 个提交已推）；
+  产物在 **`release/puttyplus`**（11M）＋ `target/release/puttyplus`；
+  单测 **1007 全绿**、`cargo check --examples` 全绿、
+  **16 个 GUI 冒烟**全绿、`tools/cli_contract_check.sh` **73/73**、
+  `tools/win_cross_check.sh` **零错误**。
+  ⇒ **下一轮从收口文档 §3 的 7 条未解决差异开始**（第 7 条 = Windows 侧
+  人工复验）。
+
 ## 〇之二之一五十七、最新进展（2026-11-26：项目占了 90G —— 根因是**裸 `cargo test`**，阶段 171）
 
 - **用户这轮一句**：「**我们的项目占了很大的空间，为什么**」⇒ 查下来 **90G**，
