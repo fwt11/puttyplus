@@ -372,6 +372,21 @@ fn install_alive_hook(tp: &TermPane, st: &Rc<panel::PanelState>) {
     tp.set_alive_hook(move |alive| {
         if let Some(st) = stw.upgrade() {
             panel::note_term_alive(&st, alive);
+            // ⚠️⚠️ **终端的会话真的起来了 ⇒ 这时才救 SFTP**
+            //   （用户 2026-11-27：「有时候连接断开，然后我点击重连终端，会报
+            //   sftp 连接失败，是否因为 sftp 连接太早，他应该等到 term 连接完
+            //   再连？」——**正是如此**）。
+            //
+            //   **为什么**：进程内 SSH 下，终端与文件面板**共用同一条连接**
+            //   （连接中枢）⇒ 终端刚开始重连时，那条共享连接**还没换掉**
+            //   ⇒ 这时候去连 SFTP ⇒ 拿到的可能是**那条将死的连接**
+            //   ⇒ 开通道失败 ⇒ 弹「SFTP 连接失败」。
+            //
+            //   ⇒ 等终端的会话**真的起来**（进程内：通道建好；spawn：子进程
+            //   起来）⇒ 共享连接已经是新的 ⇒ 这时救 SFTP 才稳。
+            if alive {
+                panel::note_term_session_ready(&st);
+            }
         }
     });
 }
@@ -398,7 +413,11 @@ fn install_reconnect_hook(tp: &TermPane, st: &Rc<panel::PanelState>) {
             // 按 pts + 启动时间匹配）⇒ 重连后必须更新成**新的**那个时刻，
             // 否则它还拿旧时刻去比 ⇒ 找错 shell ⇒ 面板的目录乱跳。
             panel::set_term_spawn(&st, spawn_at);
-            panel::reconnect_sftp_if_dead(&st);
+            // ⚠️⚠️ **这里只记一笔「终端正在重连」**（2026-11-27 用户报：
+            //   「点击重连终端，会报 sftp 连接失败」）：此刻终端**才刚开始**
+            //   重连，共享连接还没换掉 ⇒ SFTP 会抢到那条将死的连接。
+            //   ⇒ 改成等终端的会话**真的起来**再救（见 `install_alive_hook`）。
+            panel::note_term_reconnecting(&st);
         }
     });
 }
@@ -1724,23 +1743,18 @@ impl Tabs {
         for p in panes {
             p.reconnect_term();
         }
-        // **顺带把断了的文件面板也救回来**（2026-11-05，用户原话：
-        // 「重连终端后，sftp仍然没有重连」）。
+        // ⚠️ **断了的文件面板由「终端会话就绪」统一救**（2026-11-05 用户原话：
+        // 「重连终端后，sftp仍然没有重连」⇒ 这个需求仍然要满足）。
         //
-        // 终端和 SFTP 是**两条独立的连接**——终端那条断了，SFTP 那条可能还活着
-        // （那就别动它：重建连接会把正在跑的传输打断），也可能一起断了
-        // （服务端把会话关了的时候就是这样）⇒ 只在**它确实断了**的时候重连。
+        // ⚠️⚠️ **但**不要**在这里**发起 SFTP 重连（2026-11-27 用户报：
+        //   「点击重连终端，会报 sftp 连接失败」）：此刻终端才**刚开始**重连，
+        //   共享连接（进程内 SSH 下终端与 SFTP 共用那条）**还没换掉**
+        //   ⇒ SFTP 会抢到那条将死的连接 ⇒ 开通道失败 ⇒ 报「SFTP 连接失败」。
+        //   ⇒ 改成等终端的会话**真的起来**再救（见 `install_alive_hook`）。
         //
-        // ⚠️ 终端**自己**的重连按钮 / 「会话已结束」条走的是 `install_reconnect_hook`
-        // 装的钩子 ⇒ 那里也会顺带救 SFTP。这里再调一次是**幂等**的
-        // （`reconnect_sftp_if_dead` 里 `connecting` 挡着，不会连两次）。
-        let st = {
-            let tabs = self.tabs.borrow();
-            tabs.get(i).map(|t| t.panel_st.clone())
-        };
-        if let Some(st) = st {
-            panel::reconnect_sftp_if_dead(&st);
-        }
+        // ⚠️ 终端**自己**的重连按钮 / 「会话已结束」条走的是
+        //   `install_reconnect_hook` 装的钩子 ⇒ 那里也一样不救 ⇒ 由
+        //   **会话就绪**统一触发 ⇒ 两条路径口径一致。
     }
 
     /// 重建某个标签的**终端子页签**（阶段 25）。

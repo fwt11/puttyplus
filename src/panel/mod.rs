@@ -78,6 +78,18 @@ pub struct PanelState {
     /// 会话期保存的密码（来自 -pw 或用户输入），释放时抹零
     pub pw: RefCell<Option<Zeroizing<String>>>,
     pub conn_ok: Cell<bool>,
+    /// **SFTP 救回的「欠条」**（等终端会话就绪再兑现）。
+    ///
+    /// ⚠️ **干什么用**（用户 2026-11-27：「有时候连接断开，然后我点击重连
+    ///   终端，会报 sftp 连接失败，是否因为 sftp 连接太早，他应该等到
+    ///   term 连接完再连？」——**正是如此**）：
+    ///   进程内 SSH 下，终端与文件面板**共用同一条连接**（连接中枢）⇒
+    ///   终端刚开始重连时，那条连接**还没换掉**（也可能正被判死）⇒
+    ///   这时去连 SFTP ⇒ 抢到的可能是**那条将死的连接** ⇒ 开通道失败
+    ///   ⇒ 弹「SFTP 连接失败」。
+    ///   ⇒ 记一张欠条 ⇒ 等终端的会话**真的起来**再兑现（见
+    ///   [`note_term_session_ready`]）。
+    pub sftp_rescue: Cell<SftpRescue>,
     /// **会话是不是已经死了**（worker 与 UI 共享，阶段 99）。
     ///
     /// ⚠️ **为什么共享**：SFTP 失败有两种——「连接断了」（**能自愈**：重连
@@ -413,6 +425,7 @@ impl SftpPanel {
         let st = Rc::new(PanelState {
             pw: RefCell::new(opts.password.clone()),
             conn_ok: Cell::new(false),
+            sftp_rescue: Cell::new(SftpRescue::None),
             conn_dead: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_retry: RefCell::new(None),
             retry_ops: RefCell::new(HashMap::new()),
@@ -729,15 +742,81 @@ fn run_pending_retry(st: &Rc<PanelState>) -> bool {
     true
 }
 
-/// SFTP 断了就重连一次（"重连终端时顺带救回 SFTP"用）。
+/// **SFTP 救回的「欠条」**（纯枚举，好测）。
+///
+/// ⚠️ **为什么是「欠条」而不是「闸门」**（用户 2026-11-27：「点击重连终端，
+///   会报 sftp 连接失败，是否因为 sftp 连接太早，他应该等到 term 连接完再
+///   连？」——**正是如此**）：
+/// - **闸门**（"终端在重连 ⇒ 一律不许救"）看着简单，但**终端那次重连要是
+///   失败了**（密码变了、网络还没恢复）⇒ 闸门**永远关着** ⇒ SFTP 再也
+///   不会自动救 ⇒ 用户还得手动点「重新建立 SFTP 连接」。
+/// - **欠条**（"记一笔 ⇒ 等会话真的起来再兑现"）不会卡死：欠条一直留着，
+///   下一次会话起来就兑现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SftpRescue {
+    /// **不欠**（常态：初次连接、终端一直在跑）。
+    #[default]
+    None,
+    /// **欠一次**：终端重连过 ⇒ 等它的会话**真的起来**再救 SFTP。
+    Pending,
+}
+
+/// 兑现欠条：返回「**现在该救 SFTP 了吗**」（**纯函数**，好测）。
+///
+/// ⚠️ **只有真的欠了才救**（`None` ⇒ false）：初次连接时 SFTP **自己**会
+///   连 ⇒ 这里再救一次就是**连两次**（白费一次握手，还可能与正在连的
+///   那次打架）。
+pub fn take_sftp_rescue_due(state: &mut SftpRescue) -> bool {
+    match *state {
+        SftpRescue::Pending => {
+            *state = SftpRescue::None;
+            true
+        }
+        SftpRescue::None => false,
+    }
+}
+
+/// SFTP 断了就重连一次（"终端会话就绪时顺带救回 SFTP"用）。
 ///
 /// ⚠️ **幂等**：已经在连了就不重复发起（`connecting` 挡着）。
+///
+/// ⚠️⚠️ **只由「终端会话就绪」触发**（用户 2026-11-27：「点击重连终端，会报
+///   sftp 连接失败，是否因为 sftp 连接太早，他应该等到 term 连接完再连？」）：
+///   进程内 SSH 下终端与文件面板**共用同一条连接** ⇒ 终端刚开始重连时，
+///   那条连接**还没换掉** ⇒ 这时去连 SFTP ⇒ 抢到的可能是**那条将死的
+///   连接** ⇒ 开通道失败 ⇒ 弹「SFTP 连接失败」。
+///   ⇒ 等终端的会话**真的起来**（共享连接已经是新的）再救 ⇒ 才稳。
 pub fn reconnect_sftp_if_dead(st: &Rc<PanelState>) {
     if st.connecting.get() {
         return;
     }
     if failure_is_conn_dead(st) {
         on_reconnect(st);
+    }
+}
+
+/// 终端**开始重连**了 ⇒ **记一张欠条**（等会话就绪再救 SFTP）。
+///
+/// ⚠️ **干什么用**：见 [`SftpRescue`] 的注释（用户 2026-11-27 报的
+///   「重连终端 ⇒ SFTP 连接失败」）。
+pub fn note_term_reconnecting(st: &Rc<PanelState>) {
+    st.sftp_rescue.set(SftpRescue::Pending);
+}
+
+/// 终端的会话**真的起来了** ⇒ 兑现欠条（顺手把断了的 SFTP 救回来）。
+///
+/// ⚠️ **为什么在这儿救、而不是「终端开始重连时」救**：那时共享连接还没
+///   换掉 ⇒ SFTP 会抢到将死的那条（用户 2026-11-27 报的「SFTP 连接失败」）。
+///   ⇒ 等会话真的起来（共享连接已经是新的）再救 ⇒ 才稳。
+///
+/// ⚠️ **不是重连就不救**：第一次连接时 SFTP 自己会连 ⇒ 这里再救一次就是
+///   **连两次**（白费一次握手，还可能与正在连的那次打架）。
+pub fn note_term_session_ready(st: &Rc<PanelState>) {
+    let mut s = st.sftp_rescue.get();
+    let due = take_sftp_rescue_due(&mut s);
+    st.sftp_rescue.set(s);
+    if due {
+        reconnect_sftp_if_dead(st);
     }
 }
 
@@ -3055,7 +3134,10 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_running, percent_decode, retry_op_matches, usable_local_dir, RetryOp};
+    use super::{
+        count_running, percent_decode, retry_op_matches, take_sftp_rescue_due, usable_local_dir,
+        RetryOp, SftpRescue,
+    };
     use crate::panel::worker::SimpleOp;
 
     #[test]
@@ -3172,5 +3254,59 @@ mod tests {
                 .unwrap(),
             "传输中 2 个"
         );
+    }
+
+    /// **重连终端 ⇒ SFTP 要等终端会话就绪才能救**（用户 2026-11-27）。
+    ///
+    /// ⚠️ **用户的原话**：「有时候连接断开，然后我点击重连接term，会报
+    ///   sftp连接失败，是否因为sftp连接太早，他应该等到term连接完再连？」
+    ///   ——**正是如此**：进程内 SSH 下终端与文件面板**共用同一条连接**
+    ///   ⇒ 终端刚开始重连时，那条连接**还没换掉** ⇒ SFTP 抢到的可能是
+    ///   **那条将死的连接** ⇒ 开通道失败 ⇒ 弹「SFTP 连接失败」。
+    ///
+    /// ⇒ 钉住三件事：
+    /// ① **初次连接不救**（那时 SFTP 自己会连 ⇒ 再救一次就是连两次）；
+    /// ② **重连了 ⇒ 会话就绪才救**（这才是修掉那个报错的关节）；
+    /// ③ **欠条只兑现一次**（兑现完就回到「不欠」⇒ 不会连着救两次）。
+    #[test]
+    fn 重连终端要等会话就绪才救sftp() {
+        // ---- ① 初次连接：终端会话就绪**不**触发救 SFTP ----
+        let mut s = SftpRescue::None;
+        assert!(
+            !take_sftp_rescue_due(&mut s),
+            "初次连接不该救 SFTP（它自己会连 ⇒ 救一次就是连两次）"
+        );
+        assert_eq!(s, SftpRescue::None, "没欠就不该动欠条");
+
+        // ---- ② 终端开始重连 ⇒ 记一张欠条 ----
+        s = SftpRescue::Pending;
+
+        // ---- ③ 会话就绪 ⇒ 该救了（且欠条被兑现掉）----
+        assert!(
+            take_sftp_rescue_due(&mut s),
+            "终端会话都起来了还没救 SFTP ⇒ 面板会一直停在「已断开」"
+        );
+        assert_eq!(s, SftpRescue::None, "兑现完就该回到「不欠」");
+
+        // ---- ④ 再来一次「会话就绪」⇒ **不再**救（否则连着救两次）----
+        assert!(
+            !take_sftp_rescue_due(&mut s),
+            "欠条兑现过一次了 ⇒ 不能再触发第二次"
+        );
+    }
+
+    /// **终端那次重连失败了 ⇒ 欠条不能作废**（否则 SFTP 再也不会自动救）。
+    ///
+    /// ⚠️ **为什么单测这条**（用户 2026-11-27 的坑）：最早想的是「终端在
+    ///   重连 ⇒ 一律不许救」的**闸门** ⇒ 终端重连失败 ⇒ 闸门永远关着 ⇒
+    ///   SFTP 永远不会被自动救 ⇒ 用户还得手动点「重新建立 SFTP 连接」。
+    ///   ⇒ 欠条只在**会话真的起来**时才兑现 ⇒ 失败就留着 ⇒ 下次再来。
+    #[test]
+    fn 重连失败也不作废欠条() {
+        let mut s = SftpRescue::Pending;
+        // ⚠️ 这里模拟「终端重连失败」：会话就绪**没有**发生 ⇒ 欠条没被动过。
+        assert_eq!(s, SftpRescue::Pending, "欠条被提前兑现/作废了");
+        // ⇒ 用户再点一次「重连终端」⇒ 会话起来 ⇒ 兑现。
+        assert!(take_sftp_rescue_due(&mut s));
     }
 }

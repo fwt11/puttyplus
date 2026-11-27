@@ -69,6 +69,38 @@ mod lint_tests {
         }
     }
 
+    /// 取源码里某个函数的**函数体**（按大括号配对）。
+    ///
+    /// ⚠️ **为什么要它**：有些约定**在运行期看不见**（调用顺序、谁在哪
+    ///   一步调了什么）⇒ 只能读源码钉住（与
+    ///   [`页签可重排要在挂页之后`] 同一路子）。
+    ///
+    /// ⚠️ **大括号配对**：函数体里的 `{` `}` 必须成对 ⇒ 注释里若写了
+    ///   大括号会算错（所以这两个被读的函数里注释不写大括号）。
+    fn fn_body(src: &str, sig: &str) -> String {
+        let Some(start) = src.find(sig) else {
+            return String::new();
+        };
+        let Some(open) = src[start..].find('{') else {
+            return String::new();
+        };
+        let body_start = start + open;
+        let mut depth = 0i32;
+        for (i, c) in src[body_start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return src[body_start..body_start + i + 1].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        String::new()
+    }
+
     /// 扫一个文件里的**用户可见字符串字面量**（跳过注释）。
     ///
     /// ⚠️ **必须处理跨行字符串**：界面上的 tooltip 大多是
@@ -425,6 +457,28 @@ mod lint_tests {
     ///   ⇒ 只能钉「谁在哪一步调了什么」（与上面的
     ///   [`页签可重排要在挂页之后`] 同一路子）。
     #[test]
+    fn 救sftp要等终端会话就绪() {
+        let p = src_dir().join("tabs.rs");
+        let src = std::fs::read_to_string(&p).expect("读 tabs.rs");
+        let reconnect_hook = fn_body(&src, "fn install_reconnect_hook");
+        assert!(
+            !reconnect_hook.contains("reconnect_sftp_if_dead"),
+            "重连钩子里不许当场救 SFTP\
+             ⇒ 那一刻共享连接还没换好 ⇒ SFTP 会抢到那条将死的连接\
+             ⇒ 弹「SFTP 连接失败」（用户 2026-11-27）"
+        );
+        assert!(
+            reconnect_hook.contains("note_term_reconnecting"),
+            "重连钩子应当记一笔「终端正在重连」"
+        );
+        let alive_hook = fn_body(&src, "fn install_alive_hook");
+        assert!(
+            alive_hook.contains("note_term_session_ready"),
+            "会话「真的起来」的钩子里才救 SFTP\
+             ⇒ 用户 2026-11-27：「sftp 连接太早 ⇒ 报 SFTP 连接失败」"
+        );
+    }
+
     /// ⚠️ **回归钉**：凭据库状态标志**只许建一处**（阶段 92）。
     ///
     /// 用户 2026-11-01 报「界面上有两处『凭证库 已锁定』是否重复」——
