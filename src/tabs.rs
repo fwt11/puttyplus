@@ -628,11 +628,25 @@ pub struct Tabs {
     /// 得先有那条 SSH 会话。用户在连接管理器里双击一个数据库连接时，
     /// 会话还没连上——连上之后再把工作台开出来。
     pending_db: RefCell<Option<(String, String)>>,
-    /// **侧边栏外壳**（阶段 178）：文件面板的新宿主。
+    /// **侧边栏「文件」页的槽位控件**（阶段 178）。
     ///
-    /// ⚠️ **弱引用**（AGENTS.md 引用环红线）：`Tabs` → `SidebarHost` →
-    ///   `Sidebar` → `Rc<Tabs>` ⇒ 抓强引用就是环 ⇒ 窗口永远释放不掉。
-    sidebar_host: RefCell<Option<std::rc::Weak<crate::sidebarhost::SidebarHost>>>,
+    /// ⚠️ **为什么是槽位的弱引用、不是 `SidebarHost` 的弱引用**
+    ///   （2026-11-27 用户报的真 bug：终端连上了，文件页还是「还没有连接」）：
+    ///
+    ///   `build_main_window()` 返回的是 `(tabs, win)` ⇒ 里面的
+    ///   `Rc<SidebarHost>` 是**局部变量** ⇒ **函数一返回就被 drop**
+    ///   ⇒ 存 `Weak<SidebarHost>` ⇒ **永远 upgrade 不到**
+    ///   ⇒ `sync_sidebar_files()` 每次都提前 return
+    ///   ⇒ **文件面板永远挂不进侧边栏**（侧边栏本身看着正常 ——
+    ///   控件树自己活着 ⇒ 只有"同步"这一环断了 ⇒ 肉眼极难发现）。
+    ///
+    ///   ⇒ 改成存**槽位控件**的 `glib::WeakRef` ⇒ 只要控件还在树上
+    ///   （它确实在：侧边栏那一页里）就 upgrade 得到
+    ///   ⇒ 与外壳结构体的生死**无关**。
+    ///
+    /// ⚠️ **弱引用 ⇒ 不构成引用环**（AGENTS.md 引用环红线）：槽位控件的
+    ///   树里没有 `Rc<Tabs>` ⇒ `Tabs → 槽位` 不是环。
+    sidebar_refs: RefCell<Option<crate::sidebarhost::SidebarRefs>>,
     /// 自弱引用（阶段 63：统一关闭流程要 `'static` 的回调）。
     ///
     /// **为什么不能抓强引用**：关闭确认的回调是 `'static` 的闭包，抓强引用
@@ -681,7 +695,7 @@ impl Tabs {
                 broadcast: Cell::new(false),
                 pages_hook: RefCell::new(None),
                 pending_db: RefCell::new(None),
-                sidebar_host: RefCell::new(None),
+                sidebar_refs: RefCell::new(None),
                 me: me.clone(),
             }
         });
@@ -704,9 +718,17 @@ impl Tabs {
     //   就成了 `Rc<Tabs> → 闭包 → Rc<Tabs>` 的环。
     {
         let tw = Rc::downgrade(&tabs);
-        tabs.notebook.connect_switch_page(move |_nb, _page, _num| {
+        tabs.notebook.connect_switch_page(move |_nb, page, _num| {
             let Some(t) = tw.upgrade() else { return };
-            t.sync_sidebar_files();
+            // ⚠️⚠️ **必须用信号给的 `page`（新页的控件）**，
+            //   **不能**读 `notebook.current_page()`：
+            //
+            //   GTK4 的 `switch-page` 是**在 `current_page()` 更新之前**发的
+            //   （实测：`set_current_page(2)` ⇒ 信号里 `current_page()` 还是
+            //   旧值 0；删页时甚至是 `None`）⇒ 读它会拿到**上一个**连接
+            //   ⇒ **侧边栏的文件面板串台**（用户 2026-11-27 报：两个连接
+            //   的面板互换了）。
+            t.sync_sidebar_files_for(page);
         });
     }
 
@@ -726,7 +748,10 @@ impl Tabs {
     /// ⚠️ **只存弱引用**（引用环红线）：`Tabs` → `SidebarHost` → `Sidebar`
     ///   → `Rc<Tabs>` ⇒ 抓强引用就是环 ⇒ 窗口永远释放不掉。
     pub fn set_sidebar_host(&self, host: &Rc<crate::sidebarhost::SidebarHost>) {
-        *self.sidebar_host.borrow_mut() = Some(Rc::downgrade(host));
+        // ⚠️ **只存控件的弱引用**（不存 `Rc<SidebarHost>`）——
+        //   原因见字段 `sidebar_refs` 的注释：外壳结构体在
+        //   `build_main_window()` 返回时就被 drop 了。
+        *self.sidebar_refs.borrow_mut() = Some(crate::sidebarhost::SidebarRefs::of(host));
         self.sync_sidebar_files();
     }
 
@@ -738,28 +763,76 @@ impl Tabs {
     ///
     /// ⚠️ **欢迎页没有文件面板** ⇒ 显示占位（「还没有连接」）。
     pub fn sync_sidebar_files(&self) {
-        let Some(host) = self
-            .sidebar_host
-            .borrow()
-            .as_ref()
-            .and_then(|w| w.upgrade())
-        else {
+        // ⚠️ **只认控件**（不认外壳结构体）—— 见字段 `sidebar_refs`
+        //   的注释：外壳那个 `Rc` 在真 app 里**当场就被 drop 了**。
+        let Some(slot) = self.sidebar_slot() else {
             return;
         };
-        let Some(idx) = self.current_index() else {
+        // ⚠️ **这里读 `current_page()` 是安全的**：不在信号里 ⇒ GTK 已经
+        //   更新好了（信号里才没更新，见 `connect_switch_page` 那段注释）。
+        let page = self
+            .notebook
+            .current_page()
+            .and_then(|n| self.notebook.nth_page(Some(n)));
+        let Some(page) = page else {
             // 欢迎页 / 一个连接都没开 ⇒ 没有文件面板 ⇒ 占位。
-            host.show_files(None);
+            crate::sidebarhost::show_files_in(&slot, None);
+            return;
+        };
+        self.sync_sidebar_files_for(&page);
+    }
+
+    /// **把某个连接页的文件面板挂到侧边栏**（按**页面控件**认连接）。
+    ///
+    /// ⚠️ **为什么按页面控件认、不按下标**（2026-11-27 用户报的真 bug）：
+    ///   - GTK4 的 `switch-page` 在 `current_page()` **更新之前**发
+    ///     ⇒ 读 `current_page()` 会拿到**上一个**连接 ⇒ **面板串台**；
+    ///   - 关连接时 `self.tabs` **先**被 shorten、后 `notebook.remove_page`
+    ///     ⇒ 那一刻「页号 ↔ `self.tabs` 下标」也对不上。
+    ///   ⇒ **按页面控件认** ⇒ 两个问题一起绕开（也不用管欢迎页的偏移）。
+    pub fn sync_sidebar_files_for(&self, page: &gtk::Widget) {
+        let Some(slot) = self.sidebar_slot() else {
             return;
         };
         let st = {
             let tabs = self.tabs.borrow();
-            let Some(t) = tabs.get(idx) else {
-                host.show_files(None);
-                return;
-            };
-            t.panel_st.clone()
+            tabs.iter()
+                .find(|t| t.page == *page)
+                .map(|t| t.panel_st.clone())
         };
-        host.show_files(Some(st.root.upcast_ref::<gtk::Widget>()));
+        match st {
+            Some(st) => {
+                crate::sidebarhost::show_files_in(&slot, Some(st.root.upcast_ref::<gtk::Widget>()))
+            }
+            // 欢迎页 / 那一页还没登记 ⇒ 没有文件面板 ⇒ 占位。
+            None => crate::sidebarhost::show_files_in(&slot, None),
+        }
+    }
+
+    /// 侧边栏的「文件」页槽位（**弱引用** ⇒ 拿不到就当没有侧边栏）。
+    fn sidebar_slot(&self) -> Option<gtk::Box> {
+        self.sidebar_refs
+            .borrow()
+            .as_ref()
+            .and_then(|r| r.slot.upgrade())
+    }
+
+    /// **把侧边栏切到「文件」页**（用户 2026-11-27）：
+    /// 「双击某个连接，打开了终端，**同步的文件面板也应该显示**，
+    ///  而不应该还是显示连接管理器」⇒ 开连接时切过去。
+    pub fn show_sidebar_files_page(&self) {
+        let Some(nb) = self
+            .sidebar_refs
+            .borrow()
+            .as_ref()
+            .and_then(|r| r.nb.upgrade())
+        else {
+            return;
+        };
+        if nb.n_pages() == 0 {
+            return;
+        }
+        nb.set_current_page(Some(crate::sidebarhost::PAGE_FILES as u32));
     }
 
     fn notify_pages(&self) {
@@ -1119,6 +1192,11 @@ impl Tabs {
         // （`next_page()` 也会触发 `switch-page` 钩子 ⇒ 那里也会同步一次；
         //   这里再显式同步一次 ⇒ 不依赖钩子的触发时机。）
         self.sync_sidebar_files();
+        // ⚠️ **用户 2026-11-27**：「双击某个连接，打开了终端，**同步的文件
+        //   面板也应该显示**，而不应该还是显示连接管理器」⇒ 开连接时把
+        //   侧边栏切到「文件」页（否则用户点完连接，右边开了终端，
+        //   左边还是那张连接列表 ⇒ 看着像"没反应"）。
+        self.show_sidebar_files_page();
         tp.terminal().grab_focus();
         // 广播开着时新开的终端也要能收/发按键
         self.sync_broadcast();
@@ -1475,15 +1553,18 @@ impl Tabs {
     ///
     /// 返回是否真切过去了。
     pub fn show_file_panel(&self, _page: &gtk::Widget) -> bool {
-        let Some(host) = self
-            .sidebar_host
+        let Some(nb) = self
+            .sidebar_refs
             .borrow()
             .as_ref()
-            .and_then(|w| w.upgrade())
+            .and_then(|r| r.nb.upgrade())
         else {
             return false;
         };
-        host.switch_to(crate::sidebarhost::PAGE_FILES);
+        if nb.n_pages() == 0 {
+            return false;
+        }
+        nb.set_current_page(Some(crate::sidebarhost::PAGE_FILES as u32));
         true
     }
 
@@ -1492,15 +1573,16 @@ impl Tabs {
     /// ⚠️ **阶段 178 改了语义**：文件面板一直都在侧边栏里 ⇒
     ///   「看不见」= 侧边栏正显示着**「连接」**页签。
     pub fn sidebar_files_hidden(&self) -> bool {
-        let Some(host) = self
-            .sidebar_host
+        let Some(nb) = self
+            .sidebar_refs
             .borrow()
             .as_ref()
-            .and_then(|w| w.upgrade())
+            .and_then(|r| r.nb.upgrade())
         else {
             return false;
         };
-        host.current_page() != crate::sidebarhost::PAGE_FILES
+        nb.current_page().map(|p| p as i32).unwrap_or(crate::sidebarhost::PAGE_CONN)
+            != crate::sidebarhost::PAGE_FILES
     }
 
     /// 在**某个标签**里新开一个终端页签，并让它 `cd` 到指定目录。
@@ -2119,6 +2201,29 @@ impl Tabs {
     pub fn current_page_widget(&self) -> Option<gtk::Widget> {
         let cur = self.notebook.current_page()?;
         self.notebook.nth_page(Some(cur))
+    }
+
+    /// **按会话名**找到某个连接页的页面控件（冒烟用）。
+    ///
+    /// ⚠️ **为什么需要**：冒烟要**切回**某一条连接 ⇒ 得先拿到它的页面
+    ///   控件 ⇒ 而 GTK4 的 `switch-page` 信号里给的正是**页面控件**
+    ///   ⇒ 切页与认连接都用同一个"页面控件"口径 ⇒ 不会错位。
+    pub fn page_widget_of_session(&self, session_name: &str) -> Option<gtk::Widget> {
+        self.tabs
+            .borrow()
+            .iter()
+            .find(|t| {
+                t.panel_st.opts.session_name.as_deref() == Some(session_name)
+                    || t.panel_st.opts.title.as_deref() == Some(session_name)
+            })
+            .map(|t| t.page.clone())
+    }
+
+    /// **切到某个连接页**（冒烟用）。
+    pub fn switch_to_page(&self, page: &gtk::Widget) {
+        if let Some(n) = self.notebook.page_num(page) {
+            self.notebook.set_current_page(Some(n));
+        }
     }
 
     /// 当前业务标签的面板状态（欢迎页 None）。

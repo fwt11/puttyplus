@@ -40,12 +40,12 @@ pub struct SidebarHost {
     pub root: gtk::Box,
     /// 页签容器（两页：连接 / 文件）。
     pub nb: gtk::Notebook,
-    /// 「文件」页的**页面内容**（占位 ＋ 面板槽位）。
+    /// 「文件」页的**页面内容**（里面就一个槽位）。
     pub files_page: gtk::Box,
     /// 「文件」页的槽位——文件面板（`PanelState::root`）塞这里。
+    ///
+    /// ⚠️ **槽位里永远只有一个孩子**：要么是文件面板，要么是占位标签。
     pub files_slot: gtk::Box,
-    /// 占位（还没有任何连接时显示）。
-    files_placeholder: gtk::Label,
     /// 两个页签的标题标签（冒烟要读文字 ⇒ 存着，别去控件树里翻）。
     pub conn_label: gtk::Label,
     pub files_label: gtk::Label,
@@ -55,6 +55,88 @@ pub struct SidebarHost {
 pub const PAGE_CONN: i32 = 0;
 /// 「文件」页在 Notebook 里的页号。
 pub const PAGE_FILES: i32 = 1;
+
+/// 「文件」页的槽位里**放什么**。
+///
+/// - `Some(w)`：把 `w`（一条会话的文件面板）挂进槽位；
+/// - `None`：没有连接 ⇒ 显示占位（「还没有连接」）。
+///
+/// ⚠️ **为什么是自由函数、不是 `SidebarHost` 的方法**（2026-11-27 修的真 bug）：
+///    `Tabs` 要在**切连接标签**时挂文件面板 ⇒ 它得拿到槽位；
+///    但它**不能**持有 `Rc<SidebarHost>` ——
+///    `build_main_window()` 返回 `(tabs, win)` 时那个 `Rc` **当场被 drop**
+///    ⇒ 存 `Weak<SidebarHost>` 就**永远 upgrade 不到**
+///    ⇒ 文件面板永远挂不进侧边栏（用户 2026-11-27 截图报的现象：
+///    终端连上了，文件页还是「还没有连接」）。
+///    ⇒ 改成只依赖**槽位控件** ⇒ 与外壳结构体的生死**无关**。
+///
+/// ⚠️ **GTK4：一个 widget 只能有一个父级** ⇒ 挂之前**必须**把它从旧
+///   父级上摘下来（否则 GTK 会报断言 / 直接抢走）。
+///   ⇒ 切换连接时就是靠这一步把 A 的面板换成 B 的。
+pub fn show_files_in(slot: &gtk::Box, w: Option<&gtk::Widget>) {
+    // 先把槽位里现在挂着的**摘掉**（文件面板只有一个 ⇒ 换人时先腾位）。
+    let mut c = slot.first_child();
+    while let Some(ch) = c {
+        let next = ch.next_sibling();
+        slot.remove(&ch);
+        c = next;
+    }
+    match w {
+        Some(w) => {
+            if let Some(p) = w.parent() {
+                p.unparent();
+            }
+            slot.append(w);
+        }
+        None => {
+            // ⚠️ **占位每次现建**：槽位里只留一个孩子 ⇒ 不需要"藏起来
+            //   再显示出来"那套 ⇒ 也就不必把占位当成一个**字段**存着
+            //   （存着它就等于把外壳结构体的生死绑到同步逻辑上）。
+            let l = gtk::Label::new(Some(tr("还没有连接")));
+            l.add_css_class("pp-hint");
+            l.set_halign(gtk::Align::Center);
+            l.set_valign(gtk::Align::Center);
+            l.set_vexpand(true);
+            slot.append(&l);
+        }
+    }
+}
+
+/// 槽位里现在挂着的是不是这个 widget（冒烟用）。
+pub fn files_shows(slot: &gtk::Box, w: &gtk::Widget) -> bool {
+    slot
+        .first_child()
+        .map(|c| c == *w.upcast_ref::<gtk::Widget>())
+        .unwrap_or(false)
+}
+
+/// 侧边栏外壳的**两个关键控件**的弱引用。
+///
+/// ⚠️ **为什么是弱引用、而且是「控件」而不是「外壳结构体」**：
+///    `build_main_window()` 返回 `(tabs, win)` ⇒ 里面的
+///    `Rc<SidebarHost>` **当场被 drop** ⇒ 拿它的弱引用**永远 upgrade 不到**
+///    ⇒ 文件面板永远挂不进侧边栏（2026-11-27 用户报的真 bug）。
+///    ⇒ 只依赖**控件** ⇒ 控件在树上就够用 ⇒ 与结构体生死无关。
+///
+/// ⚠️ **弱引用 ⇒ 不构成引用环**（AGENTS.md 引用环红线）：这些控件的树里
+///   没有 `Rc<Tabs>` ⇒ `Tabs → 控件` 不是环。
+pub struct SidebarRefs {
+    /// 页签容器（切页、看当前页）。
+    pub nb: glib::WeakRef<gtk::Notebook>,
+    /// 「文件」页的槽位（挂文件面板）。
+    pub slot: glib::WeakRef<gtk::Box>,
+}
+
+impl SidebarRefs {
+    /// 从外壳里取这两个控件的弱引用。
+    pub fn of(host: &Rc<SidebarHost>) -> SidebarRefs {
+        let mut nb: glib::WeakRef<gtk::Notebook> = glib::WeakRef::new();
+        nb.set(Some(&host.nb));
+        let mut slot: glib::WeakRef<gtk::Box> = glib::WeakRef::new();
+        slot.set(Some(&host.files_slot));
+        SidebarRefs { nb, slot }
+    }
+}
 
 impl SidebarHost {
     /// 建外壳：把现有的侧栏（`sb.widget`）放进「连接」页。
@@ -75,20 +157,10 @@ impl SidebarHost {
         let l_conn = gtk::Label::new(Some(tr("连接")));
         nb.append_page(&sb.widget, Some(&l_conn));
 
-        // ---- 「文件」页：先放占位（阶段 178 起换成真的文件面板）----
-        //
-        // ⚠️ **页面内容 = [占位, 面板槽位]** 两个控件：
-        //   占位是「还没有连接」时的提示；槽位是文件面板的家。
-        //   ⇒ 有了面板就把占位**藏起来**（不删）⇒ 切回「没有连接」时
-        //   还能再显示出来。
+        // ---- 「文件」页：槽位（现在放占位，有了连接放文件面板）----
         let files_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let files_placeholder = gtk::Label::new(Some(tr("还没有连接")));
-        files_placeholder.add_css_class("pp-hint");
-        files_placeholder.set_halign(gtk::Align::Center);
-        files_placeholder.set_valign(gtk::Align::Center);
-        files_placeholder.set_vexpand(true);
-        files_page.append(&files_placeholder);
         let files_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        show_files_in(&files_slot, None);
         files_page.append(&files_slot);
         let l_files = gtk::Label::new(Some(tr("文件")));
         nb.append_page(&files_page, Some(&l_files));
@@ -100,48 +172,19 @@ impl SidebarHost {
             nb,
             files_page,
             files_slot,
-            files_placeholder,
             conn_label: l_conn,
             files_label: l_files,
         })
     }
 
-    /// 「文件」页显示**哪个**文件面板。
-    ///
-    /// - `Some(w)`：把 `w`（一条会话的文件面板）挂进槽位；
-    /// - `None`：没有连接 ⇒ 显示占位。
-    ///
-    /// ⚠️ **GTK4：一个 widget 只能有一个父级** ⇒ 挂之前**必须**把它从旧
-    ///   父级上摘下来（否则 GTK 会报断言 / 直接抢走）。
-    ///   ⇒ 切换连接时就是靠这一步把 A 的面板换成 B 的。
+    /// 「文件」页显示**哪个**文件面板（见 [`show_files_in`]）。
     pub fn show_files(&self, w: Option<&gtk::Widget>) {
-        // 先把槽位里现在挂着的**摘掉**（文件面板只有一个 ⇒ 换人时先腾位）。
-        let mut c = self.files_slot.first_child();
-        while let Some(ch) = c {
-            let next = ch.next_sibling();
-            self.files_slot.remove(&ch);
-            c = next;
-        }
-        match w {
-            Some(w) => {
-                if let Some(p) = w.parent() {
-                    p.unparent();
-                }
-                self.files_slot.append(w);
-                self.files_placeholder.set_visible(false);
-            }
-            None => {
-                self.files_placeholder.set_visible(true);
-            }
-        }
+        show_files_in(&self.files_slot, w);
     }
 
     /// 「文件」页现在挂着的是不是这个 widget（冒烟用）。
     pub fn files_shows(&self, w: &gtk::Widget) -> bool {
-        self.files_slot
-            .first_child()
-            .map(|c| c == *w.upcast_ref::<gtk::Widget>())
-            .unwrap_or(false)
+        files_shows(&self.files_slot, w)
     }
 
     /// 切到指定页（`PAGE_CONN` / `PAGE_FILES`）。
