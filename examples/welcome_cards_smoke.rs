@@ -200,10 +200,68 @@ fn main() {
         format!("{wt:?}")
     );
 
-    // ---------- 6. 截图 ----------
+    // ---------- 6. 条数跟着设置走（用户 2026-11-27）----------
+    //
+    // ⚠️ **这里守着「自动调整」**：原来欢迎页**写死只摆 6 张**卡片 ⇒ 用户
+    //   在设置里把「最近连接条数」改成 10 / 20 也不生效（页面还是 6 张，
+    //   看着空）⇒ 用户报「当用户选择的显示的最近连接数量不同，它应该要
+    //   能自动调整」。
     {
+        // 写 8 条（**比旧的硬编码 6 多**）
+        let ini = gtk::glib::KeyFile::new();
+        for i in 0..8 {
+            ini.set_string(
+                "recent",
+                &i.to_string(),
+                &format!("机{i}\u{1f}10.0.0.{}\u{1f}22\u{1f}ops", i + 1),
+            );
+        }
+        ini.save_to_file(&recent).unwrap();
+
+        let w8 = puttyplus::tabs::welcome_page();
+        let cards8 = all_with_class::<gtk::Button>(&w8, "pp-recent-card");
+        println!("卡片数（8 条记录）：{}", cards8.len());
+        check!(
+            "写 8 条记录 ⇒ 摆 **8 张**卡片（不再被硬编码的 6 截断）",
+            cards8.len() == 8,
+            format!("{} 张", cards8.len())
+        );
+
+        // 改设置 ⇒ 卡片数跟着变
+        puttyplus::settings::set_recent_max(3);
+        let w3 = puttyplus::tabs::welcome_page();
+        let cards3 = all_with_class::<gtk::Button>(&w3, "pp-recent-card");
+        println!("卡片数（设置改成 3 条）：{}", cards3.len());
+        check!(
+            "把「最近连接条数」改成 3 ⇒ 欢迎页只摆 **3 张**",
+            cards3.len() == 3,
+            format!("{} 张", cards3.len())
+        );
+
+        // ⚠️ **列数也跟着条数走**（3 条一行放得下 ⇒ 3 列）
+        let cols3 = puttyplus::tabs::welcome_grid_cols(cards3.len());
+        check!(
+            "3 条记录 ⇒ 网格排 **3 列**（一行放得下）",
+            cols3 == 3,
+            format!("{cols3} 列")
+        );
+        let cols8 = puttyplus::tabs::welcome_grid_cols(cards8.len());
+        check!(
+            "8 条记录 ⇒ 网格排 **3 列**（3+3+2，比一列挤在一起强）",
+            cols8 == 3,
+            format!("{cols8} 列")
+        );
+
+        puttyplus::settings::set_recent_max(10);
+    }
+
+    // ---------- 7. 截图 ----------
+    {
+        // ⚠️ **重摆一次**：上面那轮把条数改来改去 ⇒ 用最新的配置（8 条记录
+        //   ＋ 上限 10）重新建页 ⇒ 截图才是用户真正会看到的样子。
+        let welcome = puttyplus::tabs::welcome_page();
         let win = gtk::Window::new();
-        win.set_title(Some("欢迎页 — 阶段 91"));
+        win.set_title(Some("欢迎页 — 阶段 184"));
         win.set_default_size(1100, 620);
         win.set_child(Some(&welcome));
         win.present();

@@ -1018,6 +1018,10 @@ fn advanced_page(root: &gtk::Box) {
             let Some(id) = c.active_id() else { return };
             let Ok(n) = id.parse::<usize>() else { return };
             crate::settings::set_recent_max(n);
+            // ⚠️ **欢迎页上的卡片数跟着变**（用户 2026-11-27：「当用户选择的
+            //   显示的最近连接数量不同，它应该要能自动调整」）⇒ 正在显示的
+            //   欢迎页当场重摆（不用关掉所有连接再重开才看得到）。
+            crate::tabs::refresh_welcome_pages();
         });
 
         // ---- 命令行启动的连接要不要记 ----
@@ -1058,6 +1062,9 @@ fn advanced_page(root: &gtk::Box) {
                 |ok| {
                     if ok {
                         crate::recent::clear();
+                        // ⚠️ **欢迎页也跟着重摆**（记录没了 ⇒ 「最近连接」
+                        //   那一块要消失）——同上面改条数一个道理。
+                        crate::tabs::refresh_welcome_pages();
                     }
                 },
             );

@@ -222,17 +222,59 @@ fn main() {
             w_wide > 0 && w_wide <= 900,
             format!("内容列宽 = {w_wide}")
         );
+        win.close();
+        pump(200);
 
-        // ---------- ④ 垂直重心稳定 ----------
-        let y_wide = cap_parent.as_ref().map(|w| w.allocation().y()).unwrap_or(-1);
-        win.set_default_size(1920, 1100);
-        pump(500);
-        let y_tall = cap_parent.as_ref().map(|w| w.allocation().y()).unwrap_or(-1);
-        println!("[实测] 窗口 900 高 ⇒ 内容列 y = {y_wide}；1100 高 ⇒ y = {y_tall}");
+        // ---------- ④ 垂直居中（上下留白均衡）----------
+        //
+        // ⚠️ **这条改写了阶段 175 的「重心稳定」**：那时要的是"窗口加高
+        //   200px，内容列的 **y 不变**"（内容贴顶）—— 但那**正是**用户
+        //   2026-11-27 报的现象：「上面太挤，下面太空」（用户截图：860 高的
+        //   窗口里内容只占上面 380px，下面 480px 全空）⇒ 改成**垂直居中**：
+        //   内容列要**跟着窗口一起往下移**，上下留白一样多。
+        //
+        // ⚠️⚠️ **必须用两个不同高度的窗口来量**（2026-11-27 实测）：Xvfb 里
+        //   **没有窗口管理器** ⇒ 已经显示出来的窗口 `set_default_size` 不会
+        //   真的改变大小 ⇒ 老写法「同一个窗口改高度」量到的其实是**同一个
+        //   高度** ⇒ 那条「重心稳定」断言是**空转的**（恒真，挡不住任何
+        //   回归）⇒ 这里改成"开两个窗口分别量"。
+        let measure = |h: i32| -> (i32, i32, i32) {
+            // ⚠️ **每个窗口要自己的页面**：一个 widget 只能有一个父级。
+            let page = puttyplus::tabs::welcome_page();
+            let w = gtk::Window::new();
+            w.set_default_size(1920, h);
+            w.set_child(Some(&page));
+            w.present();
+            pump(500);
+            let cp = tiles_parent(&page);
+            let r = cp
+                .map(|w| {
+                    let a = w.allocation();
+                    // ⚠️ **上下留白怎么量**：内容列的 `y` 是**相对父级**
+                    //   （Viewport）的 ⇒ 上留白 = y；下留白 = 视口高 - y - 高。
+                    let vp = w.parent().map(|p| p.allocation().height()).unwrap_or(0);
+                    (a.y(), a.height(), vp)
+                })
+                .unwrap_or((0, 0, 0));
+            w.close();
+            pump(200);
+            r
+        };
+        let (y900, h900, vp900) = measure(900);
+        let (y1100, h1100, vp1100) = measure(1100);
+        let gap_top = y900;
+        let gap_bottom = vp900.saturating_sub(y900 + h900);
+        println!("[实测] 900 高窗口 ⇒ 内容列 y={y900} h={h900} 视口高={vp900}（上留白 {gap_top} / 下留白 {gap_bottom}）");
         check!(
-            "窗口加高 200px，**内容列的 y 不变**（重心稳定，不上下浮）",
-            y_wide >= 0 && y_wide == y_tall,
-            format!("900 高 y = {y_wide} / 1100 高 y = {y_tall}")
+            "内容列**垂直居中**（上留白 ≈ 下留白，不再「上面挤、下面空」）",
+            gap_top > 0 && (gap_top as i32 - gap_bottom as i32).abs() <= 48,
+            format!("上留白 {gap_top} / 下留白 {gap_bottom}")
+        );
+        println!("[实测] 1100 高窗口 ⇒ 内容列 y={y1100} h={h1100} 视口高={vp1100}");
+        check!(
+            "窗口更高 ⇒ 内容列**跟着往下移**（垂直居中；旧规则是\"不动\"）",
+            y1100 > y900,
+            format!("900 高 y = {y900} / 1100 高 y = {y1100}")
         );
         win.close();
         pump(200);

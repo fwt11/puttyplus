@@ -835,6 +835,30 @@ impl Tabs {
         nb.set_current_page(Some(crate::sidebarhost::PAGE_FILES as u32));
     }
 
+    /// **重建欢迎页**（设置里改了「最近连接条数」⇒ 内容要跟着变）。
+    ///
+    /// ⚠️ **为什么要重建**（用户 2026-11-27：「当用户选择的显示的最近连接
+    ///   数量不同，它应该要能自动调整」）：欢迎页上摆的卡片数是建页那一刻
+    ///   定的 ⇒ 用户在首选项里把条数改了，页面还是老的 ⇒ 得**重摆一次**。
+    ///   `welcome_page()` 是纯函数（只读配置、不改状态）⇒ 重建没有副作用。
+    ///
+    /// ⚠️ **只在欢迎页还在的时候重建**：一有连接，欢迎页就被摘掉了
+    ///   （`welcome_attached` = false）⇒ 这时重建等于凭空多出一页。
+    pub fn refresh_welcome_page(&self) {
+        if !self.welcome_attached.get() {
+            return;
+        }
+        let label = gtk::Label::new(Some(tr("欢迎")));
+        let page = welcome_page();
+        // ⚠️ **欢迎页永远在第 0 页**（开首个连接时摘掉、关最后一条时插回 0）
+        //   ⇒ 先摘旧的、再插新的。
+        //
+        // ⚠️ **笔记本被清空时 GTK 不发 `switch-page`**（实测）⇒ 这里不会
+        //   触发侧边栏的同步钩子 ⇒ 不影响侧边栏。
+        self.notebook.remove_page(Some(0));
+        self.notebook.insert_page(&page, Some(&label), Some(0));
+    }
+
     fn notify_pages(&self) {
         if let Some(f) = self.pages_hook.borrow().as_ref() {
             f(!self.tabs.borrow().is_empty());
@@ -2627,9 +2651,38 @@ impl Tabs {
 const WELCOME_MIN_W: i32 = 560;
 /// 欢迎页内容列的**上边距**（阶段 175 / UI-09）。
 ///
-/// ⚠️ 原来 `valign=Center` ⇒ 内容在窗口里上下浮动 ⇒ 窗口一高重心就掉。
-///   改成靠上 ＋ 固定边距 ⇒ **窗口多高，内容都停在同一处**。
+/// ⚠️ 阶段 175 这里是"靠上对齐 ＋ 固定边距"（当时要的是"重心稳定"）；
+///   2026-11-27 用户改成**垂直居中**（"上面太挤，下面太空"）⇒ 边距只剩
+///   "内容比视口高时顶上的留白"这一个作用（见 `welcome_page`）。
 const WELCOME_TOP_MARGIN: i32 = crate::theme::space::XL;
+
+/// 最近连接卡片的**列数**（纯函数，不碰 GTK ⇒ 有单测）。
+///
+/// ⚠️ **为什么要有它**（用户 2026-11-27：「当用户选择的显示的最近连接数量
+///   不同，它应该要能自动调整」）：设置里能改「最近连接条数」
+///   （3 / 5 / 10 / 20 / 不限）⇒ 欢迎页上卡片**行数**会变 ⇒ 列数也得
+///   跟着变，否则末行要么空一大片、要么挤成一列。
+///
+/// **规则**：
+/// - 0 条 ⇒ 0 列（不摆网格）；
+/// - 1~3 条 ⇒ 各占一列（一行放得下）；
+/// - 4 条 ⇒ 2×2（方阵）；
+/// - 更多 ⇒ **三列**。
+///
+/// ⚠️ **为什么上限是 3 而不是 4**（2026-11-27 截图实测）：一张卡片要显示
+///   完整的 `user@host:port`（≈250px）⇒ 4 列要 **≈1000px**；用户窗口的
+///   内容区只有 **≈800px**（1225 宽的窗口 − 425 宽的侧边栏）⇒ 4 列会被
+///   GTK 压扁 ⇒ 地址截成「root@182.92.244.1…」（**信息丢了**）。
+///   3 列（≈750px）才放得下 ⇒ 地址完整。
+///   ⇒ 末行不满时**居中**（见 `welcome_page`）⇒ 不会孤零零挂一张。
+pub fn welcome_grid_cols(n: usize) -> i32 {
+    match n {
+        0 => 0,
+        1..=3 => n as i32,
+        4 => 2,
+        _ => 3,
+    }
+}
 
 pub fn welcome_page() -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -2645,10 +2698,25 @@ pub fn welcome_page() -> gtk::Widget {
     box_.set_halign(gtk::Align::Center);
     box_.set_hexpand(false);
     box_.set_size_request(WELCOME_MIN_W, -1);
-    // ⚠️ **垂直方向改成「靠上」**：原来 `valign=Center` ⇒ 内容在窗口里
-    //   **上下浮动**（窗口一高，重心就往下掉）⇒ 审核验收要的「重心稳定」
-    //   做不到 ⇒ 固定上边距，窗口多高都停在同一处。
-    box_.set_valign(gtk::Align::Start);
+    // ⚠️ **垂直居中**（2026-11-27 用户报：「这界面，上面太挤，下面太空」）：
+    //   原来 `valign=Start` ＋ 固定上边距 ⇒ 内容全堆在顶部，窗口一高
+    //   下面就是一大片空白（用户截图：1225×860 的窗口里，内容只占上面
+    //   380px，下面 480px 全空 ⇒ 看着像"倒出来的一半"）。
+    //   ⇒ 改成**居中** ⇒ 上下留白均衡，页面像个"开始页"。
+    //
+    // ⚠️ **实测（GTK4 探针，2026-11-27）**：
+    //   - ScrolledWindow 的**直接子控件**由 Viewport 按 valign 摆 ⇒
+    //     `Center` 生效（860 高的视口、42 高的内容 ⇒ y=409，正好居中）；
+    //   - ⚠️ **外面再套一层 GtkBox 就不生效**（GtkBox 不看子控件的 valign
+    //     ⇒ 实测 y=0）⇒ 内容列必须**直接**挂在 ScrolledWindow 下；
+    //   - 内容比视口高时**仍然能滚**（实测 upper=840 / page_size=400）
+    //     ⇒ 矮窗口里不会丢内容。
+    //
+    // ⚠️ **这推翻了阶段 175 的「重心稳定」**（那时是 `valign=Start`）：
+    //   审核要的是"窗口多高内容都停在同一处"，用户 2026-11-27 明确说
+    //   那样看着"上面太挤、下面太空" ⇒ **以用户为准** ⇒ 守门断言也改了
+    //   （见 `examples/welcome_semantics_smoke.rs`）。
+    box_.set_valign(gtk::Align::Center);
     box_.set_margin_top(WELCOME_TOP_MARGIN);
 
     // ⚠️ 阶段 80（审计 P2-9）：原来这儿摆着 **88px 大图标 + 一行大字
@@ -2680,6 +2748,9 @@ pub fn welcome_page() -> gtk::Widget {
     box_.append(&cap_head);
     let caps_row = gtk::Box::new(gtk::Orientation::Horizontal, crate::theme::space::XL);
     caps_row.set_halign(gtk::Align::Center);
+    // ⚠️ **垂直节奏放宽**（2026-11-27 用户报「上面太挤」）：
+    //   各块之间的间距都比原来大一档 ⇒ 内容不再"堆"在一起。
+    caps_row.set_margin_top(10);
     for (icon_name, name, desc) in caps {
         let tile = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         tile.add_css_class("pp-cap");
@@ -2704,7 +2775,7 @@ pub fn welcome_page() -> gtk::Widget {
         tile.append(&texts);
         caps_row.append(&tile);
     }
-    caps_row.set_margin_bottom(6);
+    caps_row.set_margin_bottom(16);
     box_.append(&caps_row);
 
     let sub = gtk::Label::new(Some(if recents.is_empty() {
@@ -2713,7 +2784,7 @@ pub fn welcome_page() -> gtk::Widget {
         tr("选一个最近连接就能开工")
     }));
     sub.add_css_class("dim-label");
-    sub.set_margin_bottom(18);
+    sub.set_margin_bottom(30);
     box_.append(&sub);
 
     // ---- 最近连接：做成**卡片**（阶段 91）----
@@ -2740,11 +2811,28 @@ pub fn welcome_page() -> gtk::Widget {
         grid.set_column_spacing(10);
         grid.set_row_spacing(10);
         grid.set_halign(gtk::Align::Center);
-        grid.set_margin_top(4);
+        grid.set_margin_top(6);
         let entries = crate::connmgr::load_all();
-        for (i, r) in recents.iter().take(6).enumerate() {
+        // ⚠️ **条数跟着设置走**（用户 2026-11-27：「当用户选择的显示的最近
+        //   连接数量不同，它应该要能自动调整」）：
+        //   原来这里写死 `.take(6)` ⇒ 用户把「最近连接条数」设成 10 / 20，
+        //   欢迎页**还是只摆 6 张** ⇒ 页面看着空 ⇒ 等于设置没生效。
+        //   `recent::load()` 已经按设置截断过了 ⇒ 这里直接**全摆**。
+        //
+        // ⚠️ **列数也跟着条数走**：条数变了，网格的形状也得变 ⇒ 末行才
+        //   不会空一大片（规则见 `welcome_grid_cols`，有单测）。
+        let cols = welcome_grid_cols(recents.len()).max(1) as usize;
+        let n = recents.len();
+        for (i, r) in recents.iter().enumerate() {
             let card = recent_card(r, &entries);
-            grid.attach(&card, (i % 3) as i32, (i / 3) as i32, 1, 1);
+            let row = i / cols;
+            let col_in_row = i % cols;
+            // ⚠️ **末行不满 ⇒ 往中间挪**（2026-11-27）：10 条按 4 列摆
+            //   ⇒ 末行只有 2 张 ⇒ 贴着左边看着像"缺了两张" ⇒ 把它挪到
+            //   中间两列（列宽一致时就是正中间）。
+            let k = (n - row * cols).min(cols);
+            let offset = (cols - k) / 2;
+            grid.attach(&card, (col_in_row + offset) as i32, row as i32, 1, 1);
         }
         box_.append(&grid);
     } else {
@@ -2781,7 +2869,7 @@ pub fn welcome_page() -> gtk::Widget {
     };
     let keys_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     keys_row.set_halign(gtk::Align::Center);
-    keys_row.set_margin_top(22);
+    keys_row.set_margin_top(38);
     let mk_kbd = |k: &str| {
         let l = gtk::Label::new(Some(k));
         l.add_css_class("pp-kbd");
@@ -3168,6 +3256,27 @@ pub fn live_sessions() -> Vec<(String, Rc<panel::PanelState>)> {
     out
 }
 
+/// **所有窗口**的欢迎页都重建一遍。
+///
+/// ⚠️ **干什么用**（用户 2026-11-27：「当用户选择的显示的最近连接数量不同，
+///   它应该要能自动调整」）：用户在首选项里改「最近连接条数」⇒ 正在显示的
+///   欢迎页得**当场重摆**（不然要等关掉所有连接再重开才看得到）。
+///
+/// ⚠️ **多窗口**：欢迎页每个窗口各有一份 ⇒ 逐个窗口重建。
+pub fn refresh_welcome_pages() {
+    ALL_TABS.with(|v| {
+        let list: Vec<std::rc::Weak<Tabs>> = v.borrow().clone();
+        let mut keep = Vec::new();
+        for w in list {
+            // 窗口已经关了 → 弱引用升不上去 → 顺手把这行扔掉
+            let Some(t) = w.upgrade() else { continue };
+            keep.push(w.clone());
+            t.refresh_welcome_page();
+        }
+        *v.borrow_mut() = keep;
+    });
+}
+
 impl Tabs {
     fn index_of(&self, page: &gtk::Widget) -> Option<usize> {
         self.tabs.borrow().iter().position(|t| t.page == *page)
@@ -3190,7 +3299,7 @@ impl Tabs {
 
 #[cfg(test)]
 mod tests {
-    use super::cwd_cmd;
+    use super::{cwd_cmd, welcome_grid_cols};
 
     /// 「在此处打开终端」喂给 pty 的初始命令。
     ///
@@ -3208,6 +3317,36 @@ mod tests {
     fn cwd_cmd_quotes_path() {
         assert_eq!(cwd_cmd("/a b"), "cd '/a b'\n");
         assert_eq!(cwd_cmd("/it's"), "cd '/it'\\''s'\n");
+    }
+
+    /// 最近连接卡片的列数（用户 2026-11-27：「当用户选择的显示的最近连接
+    /// 数量不同，它应该要能自动调整」）。
+    ///
+    /// ⚠️ **守的是两件事**：① 条数多时列数要**跟着涨**（不然挤成一列）；
+    ///   ② 列数**封顶 4**（再宽就得横向滚了）。
+    #[test]
+    fn welcome_grid_cols_adapts_to_count() {
+        assert_eq!(welcome_grid_cols(0), 0, "没记录 ⇒ 不摆网格");
+        assert_eq!(welcome_grid_cols(1), 1);
+        assert_eq!(welcome_grid_cols(2), 2);
+        assert_eq!(welcome_grid_cols(3), 3, "三条一行放得下");
+        assert_eq!(welcome_grid_cols(4), 2, "四条排 2×2（不空一行）");
+        assert_eq!(welcome_grid_cols(5), 3);
+        assert_eq!(welcome_grid_cols(6), 3, "六条 3×2");
+        assert_eq!(welcome_grid_cols(7), 3, "七条 3+3+1（末行居中，不落单）");
+        assert_eq!(welcome_grid_cols(9), 3, "九条 3×3");
+        assert_eq!(welcome_grid_cols(10), 3, "十条 3+3+3+1（末行居中）");
+        assert_eq!(welcome_grid_cols(20), 3, "二十条也是三列（4 列放不下）");
+        // ⚠️ **上限 3**：4 列 ≈ 1000px，用户的窗口内容区只有 ≈800px
+        //   ⇒ 放不下 ⇒ 地址会被截断（2026-11-27 截图实测）。
+        assert!(welcome_grid_cols(100) <= 3);
+        // ⚠️ **列数不能超过条数**（一条记录时不能摆成 3 列）。
+        for n in 1..=12 {
+            assert!(
+                welcome_grid_cols(n) as usize <= n,
+                "{n} 条 ⇒ 列数不能超过条数"
+            );
+        }
     }
 }
 
