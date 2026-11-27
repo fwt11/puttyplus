@@ -214,6 +214,27 @@ pub fn path_basename(path: &str) -> &str {
     }
 }
 
+/// 规范化 **POSIX 绝对路径**（消掉 `.` 与 `..`）。
+///
+/// ⚠️ **为什么要有**（2026-11-27 容器符号链接）：链接目标常是**相对**的
+///   （`../lib/x.so`）⇒ 跟到哪儿去要先把路径规整 ⇒ 不然拼出来的路径
+///   带着 `..` ⇒ 再拼目录就乱了。
+///
+/// ⚠️ **只认绝对路径**（远端路径都是绝对的）：`..` 顶到根就留在根。
+pub fn path_normalize(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
 /// 把 SFTP 返回的任意字节序列变成可显示的 String：
 /// 合法 UTF-8 原样保留，否则把非 ASCII / 控制字节替换为 '?'。
 pub fn utf8_sanitize(bytes: &[u8]) -> String {
@@ -527,5 +548,22 @@ mod tests {
             .unwrap()
             .timestamp();
         assert_eq!(mtime_str(old), "2021-12-31 23:59");
+    }
+
+    /// **路径规整**（消掉 `.` 与 `..`）—— 容器符号链接的相对目标要用。
+    ///
+    /// ⚠️ **为什么要有**（2026-11-27）：`ls -l` 给的链接目标常是**相对**的
+    ///   （`../lib/x.so`）⇒ 跟到哪儿去要先把路径规整 ⇒ 不然拼出来的路径
+    ///   带着 `..` ⇒ 再拼目录就乱了。
+    #[test]
+    fn 路径规整能消掉点和点点() {
+        assert_eq!(super::path_normalize("/a/b/../c"), "/a/c");
+        assert_eq!(super::path_normalize("/a/./b/"), "/a/b");
+        // ⚠️ **`..` 顶到根就留在根**（不能跑到根外面去）。
+        assert_eq!(super::path_normalize("/../x"), "/x");
+        assert_eq!(super::path_normalize("/.."), "/");
+        assert_eq!(super::path_normalize("/"), "/");
+        // ⚠️ **连续两个 `..`** ⇒ 逐级往上退。
+        assert_eq!(super::path_normalize("/a/b/../../c"), "/c");
     }
 }

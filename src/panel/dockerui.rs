@@ -542,14 +542,25 @@ const FC_NAME: usize = 1;
 const FC_SIZE: usize = 2;
 /// 权限（**通用写法**，不翻译 —— 见 [`perm_text`]）。
 const FC_PERM: usize = 3;
+/// **修改时间**（用户 2026-11-27：「容器文件管理中没有显示修改时间」）。
+const FC_MTIME: usize = 4;
+/// **符号链接指向哪里**（用户 2026-11-27：「最好能显示符号链接指向的文件」）。
+const FC_LINK: usize = 5;
 /// 类型**文字**（「目录」/「文件」/「链接」）。
 ///
 /// ⚠️ **界面上不显示**（图标已经表达了）⇒ 留着给 **tooltip** 和测试用。
-const FC_TYPE: usize = 4;
+const FC_TYPE: usize = 6;
 /// 类型**键**（`"dir"` / `"file"` / …；**界面上不显示**）。
-const FC_KIND: usize = 5;
+const FC_KIND: usize = 7;
 /// 文件表的列数。
-const FC_N_COLS: usize = 6;
+const FC_N_COLS: usize = 8;
+
+/// **跟随符号链接时最多追几层**（链接套链接）。
+///
+/// ⚠️ **为什么要限层**：两个链接**互相指**（`a -> b`、`b -> a`）时，
+///   不限层就会**一直追下去**（永远追不到头）⇒ 界面上看着像卡死了。
+///   ⇒ 追够 [`LINK_FOLLOW_MAX`] 层就放弃（报「链接指向的文件不存在」）。
+const LINK_FOLLOW_MAX: usize = 8;
 
 /// 纯图标按钮（**文字挪进 tooltip**）。
 ///
@@ -1299,6 +1310,19 @@ enum Msg {
     /// **查看文件**的内容回来了（阶段 116）。
     FileView {
         path: String,
+        r: Result<String, String>,
+    },
+    /// **跟随符号链接**：问出**目标**是目录还是文件了（用户 2026-11-27）。
+    ///
+    /// ⚠️ 带上**目标绝对路径**与**容器名** ⇒ 拿到结果就知道该干什么
+    ///   （目标是目录 ⇒ 进去；是文件 ⇒ 看内容）。
+    LinkKind {
+        container: String,
+        /// **链接目标的绝对路径**（不是链接自己）。
+        path: String,
+        /// **链接自己**（出错时要说清楚是哪个链接坏了）。
+        link: String,
+        /// Ok = 类型键（`"dir"` / `"file"` …）。
         r: Result<String, String>,
     },
     /// **镜像操作**的进度 / 结果（阶段 120）。
@@ -4457,6 +4481,33 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                             }
                         }
                     },
+                    Msg::LinkKind {
+                        container,
+                        path,
+                        link,
+                        r,
+                    } => match r {
+                        Ok(kind) => {
+                            let Some(st) = stw.upgrade() else { continue };
+                            // ⚠️ **目标是目录 ⇒ 进去；是文件 ⇒ 看内容**
+                            //   （用户 2026-11-27：「双击符号链接不能跟随」）。
+                            if kind == "dir" {
+                                files_goto(&st, &u, &container, &path);
+                            } else {
+                                files_view(&st, &u, &container, &path);
+                            }
+                        }
+                        Err(msg) => {
+                            if let Some(st) = stw.upgrade() {
+                                let parent = host_window(&u, &st);
+                                crate::panel::dialogs::show_error(
+                                    parent.as_ref(),
+                                    &tr("打开符号链接失败"),
+                                    &trf!("{link}：{msg}", link = link, msg = msg),
+                                );
+                            }
+                        }
+                    },
                     Msg::Detail { name, r } => {
                         // ⚠️ **只认当前选中的那个**：用户连着点了两个容器 ⇒
                         //    先回来的那个可能已经过时了 ⇒ 丢掉。
@@ -4697,6 +4748,16 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 files_goto(&st, &u, &container, &remote);
             } else if kind == "file" {
                 files_view(&st, &u, &container, &remote);
+            } else if kind == "link" {
+                // ⚠️ **符号链接要跟随**（用户 2026-11-27：「双击符号链接不能
+                //   跟随。最好能显示符号链接指向的文件」）⇒ 问一次目标的类型
+                //   ⇒ 目标是目录就进去、是文件就看内容。
+                let target = files_row_link(&u, path);
+                if target.is_empty() {
+                    return;
+                }
+                let abs = files_link_target_abs(&u, &name, &target);
+                files_follow_link(&st, &u, &container, &remote, &abs);
             }
         });
         // **悬停 ⇒ tooltip 里写清「这是什么」**（阶段 140）。
@@ -4722,6 +4783,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         let kind: String = model.get(&it, FC_TYPE as i32);
                         let size: String = model.get(&it, FC_SIZE as i32);
                         let perm: String = model.get(&it, FC_PERM as i32);
+                        let mtime: String = model.get(&it, FC_MTIME as i32);
+                        let link: String = model.get(&it, FC_LINK as i32);
                         let mut lines = vec![name];
                         if !kind.is_empty() {
                             lines.push(trf!("类型：{v0}", v0 = kind));
@@ -4731,6 +4794,15 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                         }
                         if !perm.is_empty() {
                             lines.push(trf!("权限：{p}", p = perm));
+                        }
+                        // ⚠️ **修改时间**（用户 2026-11-27）⇒ tooltip 里也写
+                        //   一份（列窄了会被截断 ⇒ 这里给全的）。
+                        if !mtime.is_empty() {
+                            lines.push(trf!("修改时间：{m}", m = mtime));
+                        }
+                        // ⚠️ **符号链接指向**（用户 2026-11-27）。
+                        if !link.is_empty() {
+                            lines.push(trf!("指向：{l}", l = link));
                         }
                         tooltip.set_text(Some(&lines.join("\n")));
                         return true;
@@ -6861,9 +6933,51 @@ fn open_compose_file(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
             .set_text(tr("这个 compose 项目没有记录配置文件路径，没法编辑"));
         return;
     };
-    ui.status
-        .set_text(&trf!("正在打开 {p}…", p = path));
-    open_compose_path(st, &path, &sum.dir);
+    open_compose_file_at(st, ui, &path, &sum.dir);
+}
+
+/// 「编辑 compose 文件」的**真动作**（状态栏 + 打开编辑器）。
+///
+/// ⚠️ **状态栏开完就清**（用户 2026-11-27：「状态栏会显示『正在打开 xxx
+///   文件』，然后打开了编辑器，但是编辑器关掉之后，状态栏的文字还在，
+///   这不合理，应该是编辑器只要打开，状态栏文字就可以消失了」）。
+fn open_compose_file_at(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    path: &str,
+    work_dir: &str,
+) -> String {
+    open_compose_file_at_with(st, ui, path, work_dir, open_compose_path)
+}
+
+/// 同 [`open_compose_file_at`]，但**「打开编辑器」那一步可以换掉**。
+///
+/// ⚠️ **为什么留这个口子**（冒烟要能进 CI）：
+///   「打开编辑器」那步在**没连上服务器**时会弹一个**模态**错误框 ⇒ 冒烟
+///   会卡在那儿等人点 ⇒ CI 上没法跑。
+///   ⇒ 把那一步做成**可注入**的 ⇒ 冒烟注入一个「什么都不干」的开法 ⇒
+///   验的**仍然是真函数**里「写状态 → 开 → 清状态」这三步（不是把逻辑
+///   抄一份到测试里）。
+///
+/// ⚠️ **返回刚才写的那句**（"正在打开 …"）⇒ 冒烟能证明「**确实写过**
+///   又**确实清掉了**」（不然「从一开始就是空的」也会让断言变绿）。
+fn open_compose_file_at_with(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    path: &str,
+    work_dir: &str,
+    mut opener: impl FnMut(&Rc<PanelState>, &str, &str),
+) -> String {
+    let msg = trf!("正在打开 {p}…", p = path);
+    // ⚠️ **写进「容器」分段的状态**（底部那行只显示当前分段的）⇒ 用
+    //   `set_segment_status`（它顺手把分段里的那份也记上）⇒ 切分段回来
+    //   不会又冒出这句过期的话。
+    ui.set_segment_status(SEG_CONTAINERS, &msg);
+    opener(st, path, work_dir);
+    // ⚠️ **编辑器已经打开了** ⇒ 这句「正在打开…」就是过期信息了 ⇒ 清掉
+    //   （空标签 GTK 会自己收起来 ⇒ 状态栏不会留一条空白行）。
+    ui.set_segment_status(SEG_CONTAINERS, "");
+    msg
 }
 
 /// 打开一个 compose 配置文件（阶段 138）。
@@ -9389,6 +9503,35 @@ fn files_table() -> (gtk::TreeStore, gtk::TreeView) {
     }
     view.append_column(&col_perm);
 
+    // ---- 修改时间（用户 2026-11-27：「容器文件管理中没有显示修改时间」）----
+    //
+    // ⚠️ **口径跟文件面板一样**（`util::mtime_str`）：今天只写时间、今年
+    //   写「月-日 时:分」、别的年写全 ⇒ 列窄一点也放得下。
+    let col_mtime = gtk::TreeViewColumn::new();
+    col_mtime.set_title(tr("修改时间"));
+    col_mtime.set_resizable(true);
+    col_mtime.set_min_width(120);
+    {
+        let r = gtk::CellRendererText::new();
+        r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        col_mtime.pack_start(&r, false);
+        col_mtime.add_attribute(&r, "text", FC_MTIME as i32);
+    }
+    view.append_column(&col_mtime);
+
+    // ---- 符号链接指向（用户 2026-11-27：「最好能显示符号链接指向的文件」）----
+    let col_link = gtk::TreeViewColumn::new();
+    col_link.set_title(tr("指向"));
+    col_link.set_resizable(true);
+    col_link.set_min_width(140);
+    {
+        let r = gtk::CellRendererText::new();
+        r.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        col_link.pack_start(&r, false);
+        col_link.add_attribute(&r, "text", FC_LINK as i32);
+    }
+    view.append_column(&col_link);
+
     (store, view)
 }
 
@@ -9770,6 +9913,8 @@ fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
                 (FC_NAME as u32, &".."),
                 (FC_SIZE as u32, &tr("—")),
                 (FC_PERM as u32, &""),
+                (FC_MTIME as u32, &""),
+                (FC_LINK as u32, &""),
                 (FC_TYPE as u32, &tr("上级目录")),
                 // ⚠️ **类型键是 "up"**（不是 "dir"）⇒ 双击时走「回上一级」
                 //   而不是「进这个叫 `..` 的目录」（那会拼出 `/media/..`）。
@@ -9791,6 +9936,16 @@ fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
         let perms = perm_text(&f.perms);
         let key = file_kind_key(f.kind).to_string();
         let icon = file_icon(f.kind).to_string();
+        // ⚠️ **修改时间**（用户 2026-11-27）⇒ 跟文件面板同一口径
+        //   （`util::mtime_str`）；解析不出来 ⇒ 空（别显示 1970）。
+        let mtime = if f.mtime > 0 {
+            crate::util::mtime_str(f.mtime)
+        } else {
+            String::new()
+        };
+        // ⚠️ **符号链接指向**（用户 2026-11-27：「最好能显示符号链接指向的
+        //   文件」）⇒ 不是链接就空着。
+        let link = f.link_target.clone().unwrap_or_default();
         let row = ui.files.store.append(None);
         ui.files.store.set(
             &row,
@@ -9799,6 +9954,8 @@ fn apply_files(ui: &Rc<DockerUi>, v: &[docker::ContainerFile]) {
                 (FC_NAME as u32, &name),
                 (FC_SIZE as u32, &size),
                 (FC_PERM as u32, &perms),
+                (FC_MTIME as u32, &mtime),
+                (FC_LINK as u32, &link),
                 (FC_TYPE as u32, &kind_label),
                 (FC_KIND as u32, &key),
             ],
@@ -9834,6 +9991,112 @@ fn files_row_at(ui: &Rc<DockerUi>, path: &gtk::TreePath) -> Option<(String, Stri
         return None;
     }
     Some((name, kind))
+}
+
+/// 那一行的**符号链接目标**（不是链接 ⇒ 空串）。
+///
+/// ⚠️ **用户 2026-11-27**：「最好能显示符号链接指向的文件」⇒ 目标存进
+///   表里（[`FC_LINK`]）⇒ 双击跟随时从这里取。
+fn files_row_link(ui: &Rc<DockerUi>, path: &gtk::TreePath) -> String {
+    let model = ui.files.store.clone();
+    let Some(iter) = model.iter(path) else {
+        return String::new();
+    };
+    model.get(&iter, FC_LINK as i32)
+}
+
+/// 符号链接的**目标绝对路径**。
+///
+/// ⚠️ **相对目标按「链接所在目录」解**（POSIX 语义）：`ls -l` 给的目标是
+///   `../lib/x.so` 这种相对写法 ⇒ 相对**链接自己**的目录，不是相对当前
+///   工作目录 ⇒ 不规整就会跳错地方。
+fn files_link_target_abs(ui: &Rc<DockerUi>, link_name: &str, target: &str) -> String {
+    files_link_target_abs_from(&files_remote_path(ui, link_name), target)
+}
+
+/// 同上，但**基准路径**直接给（追链接链时用：下一段的基准是**上一段的目标**）。
+fn files_link_target_abs_from(base_path: &str, target: &str) -> String {
+    if target.starts_with('/') {
+        return crate::util::path_normalize(target);
+    }
+    // ⚠️ **相对目标按「链接自己所在目录」解**（不是当前工作目录）。
+    let link_dir = crate::util::path_parent(base_path);
+    crate::util::path_normalize(&crate::util::path_join(&link_dir, target))
+}
+
+/// **跟随符号链接**（用户 2026-11-27：「双击符号链接不能跟随」）。
+///
+/// ⚠️ **为什么要多问一次**：目录列表里的 `ls -l` 给的是**链接自己**的类型
+///   （`l`）⇒ 不知道目标是目录还是文件 ⇒ 对**目标路径**再问一次。
+///
+/// ⚠️ **为什么要追链**（链接套链接）：目标本身可能**还是**一个链接 ⇒
+///   那次问回来的类型还是 `link` ⇒ 得**再追一层**（最多追
+///   [`LINK_FOLLOW_MAX`] 层 ⇒ 防止两个链接互相指形成死循环）。
+fn files_follow_link(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    container: &str,
+    link_path: &str,
+    target_abs: &str,
+) {
+    let opts = st.opts.clone();
+    let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
+    let container = container.to_string();
+    let link_path = link_path.to_string();
+    let target_abs = target_abs.to_string();
+    let tx = ui.tx.clone();
+    let rt = crate::backend::hub::runtime();
+    rt.spawn(async move {
+        let (r, final_path) = match shared_session(&opts, pw).await {
+            Ok(session) => {
+                // ⚠️ **追链**：每追一层，基准路径就换成**上一段的目标**
+                //   （相对目标要相对**它自己所在的那个目录**解）。
+                let mut cur = target_abs.clone();
+                let mut out: Result<String, String> = Err(String::new());
+                for _ in 0..LINK_FOLLOW_MAX {
+                    // ⚠️ **每层的基准都是「当前这一段」**（`cur`）。
+                    let cmd = docker::stat_kind_cmd(&container, &cur);
+                    let res = match docker::run_cmd(&session, &cmd).await {
+                        // ⚠️ `ls -ld` 的输出与 `ls -l` 同格式 ⇒ 借 `parse_ls` 解析。
+                        Ok((0, text)) => docker::parse_ls(&text).into_iter().next(),
+                        Ok((_, text)) => {
+                            out = Err(docker::classify_ls_failure(&text));
+                            break;
+                        }
+                        Err(e) => {
+                            out = Err(e.0);
+                            break;
+                        }
+                    };
+                    let Some(f) = res else {
+                        out = Err(crate::i18n::tr("链接指向的文件不存在").to_string());
+                        break;
+                    };
+                    let key = file_kind_key(f.kind);
+                    if key != "link" {
+                        out = Ok(key.to_string());
+                        break;
+                    }
+                    // ⚠️ **还是链接 ⇒ 再追一层**。
+                    let Some(next) = f.link_target.clone() else {
+                        out = Err(crate::i18n::tr("链接指向的文件不存在").to_string());
+                        break;
+                    };
+                    cur = files_link_target_abs_from(&cur, &next);
+                }
+                (out, cur)
+            }
+            Err(e) => (Err(e), target_abs.clone()),
+        };
+        let _ = tx.send_blocking(Msg::LinkKind {
+            container,
+            // ⚠️ **发的是「追完链之后的最终路径」**（链式链接时 ≠ 原来的
+            //   目标）⇒ 进去/打开的才是**真正要去的那个东西**。
+            path: final_path,
+            link: link_path,
+            r,
+        });
+    });
 }
 
 /// 选中条目的**远程绝对路径**。
@@ -10240,7 +10503,8 @@ pub fn files_toolbar_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {
 /// 测试钩子：文件表**每一列的标题 ＋ 是否可见**（阶段 140）。
 ///
 /// 干什么用：冒烟要钉住「**没有「类型」列**了」（图标已经表达了 ⇒ 省宽度）。
-pub fn files_cols_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {    let slot = st.docker_ui.borrow();
+pub fn files_cols_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {
+    let slot = st.docker_ui.borrow();
     let Some(ui) = slot.as_ref() else { return Vec::new() };
     ui.files
         .view
@@ -10253,6 +10517,61 @@ pub fn files_cols_for_test(st: &Rc<PanelState>) -> Vec<(String, bool)> {    let 
             )
         })
         .collect()
+}
+
+/// 测试钩子：文件表的**修改时间 ＋ 符号链接指向**（每行）。
+///
+/// ⚠️ **干什么用**（用户 2026-11-27）：「容器文件管理中没有显示修改时间」
+///   ＋「最好能显示符号链接指向的文件」⇒ 冒烟要能读到这两列的内容。
+///
+/// 返回 `(名字, 修改时间, 指向)`。
+pub fn files_mtime_link_for_test(st: &Rc<PanelState>) -> Vec<(String, String, String)> {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    let model = ui.files.store.clone();
+    if let Some(mut iter) = model.iter_first() {
+        loop {
+            let g = |c: usize| -> String { model.get(&iter, c as i32) };
+            out.push((g(FC_NAME), g(FC_MTIME), g(FC_LINK)));
+            if !model.iter_next(&mut iter) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 测试钩子：**compose 状态栏**的当前文字。
+pub fn compose_status_for_test(st: &Rc<PanelState>) -> String {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().map(|u| u.status.text().to_string()).unwrap_or_default()
+}
+
+/// 测试钩子：走一遍「编辑 compose 文件」的**真动作**（状态栏 + 打开编辑器）。
+///
+/// ⚠️ **返回 `(写进去的那句, 打开期间状态栏里真的看到的那句)`** ⇒ 冒烟能
+///   同时证明「**确实写过**」「**写进去时用户真的看得到**」「**确实清掉
+///   了**」（三样缺一，那条「编辑器一打开状态栏就该清空」就没被守住）。
+///
+/// ⚠️ **「打开编辑器」那步注入成「什么都不干」**：没连服务器时真开会弹
+///   **模态**错误框 ⇒ 冒烟卡住 ⇒ CI 上跑不了（见
+///   [`open_compose_file_at_with`]）。
+pub fn open_compose_file_at_for_test(
+    st: &Rc<PanelState>,
+    path: &str,
+    work_dir: &str,
+) -> (String, String) {
+    let slot = st.docker_ui.borrow();
+    let Some(ui) = slot.as_ref().cloned() else {
+        return (String::new(), String::new());
+    };
+    // ⚠️ **在「打开」那一步偷看一眼状态栏** ⇒ 证明它**真的显示过**。
+    let mut seen = String::new();
+    let written = open_compose_file_at_with(st, &ui, path, work_dir, |_, _, _| {
+        seen = ui.status.text().to_string();
+    });
+    (written, seen)
 }
 
 /// 测试钩子：文件页**当前目录**。

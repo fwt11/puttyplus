@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2237] = [
+pub static EN: [(&str, &str); 2243] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -152,6 +152,7 @@ pub static EN: [(&str, &str); 2237] = [
     ("{first} 等 {n} 项", "{first} and {n} more"),
     ("{kind}：{src} → {dst}（{rw}）", "{kind}: {src} → {dst} ({rw})"),
     ("{k}：{v}", "{k}: {v}"),
+    ("{link}：{msg}", "{link}: {msg}"),
     ("{meta}\n已连接", "{meta}\nConnected"),
     ("{n_tables} 张表 · {n_edges} 条关系（拖动表框可以挪位置，双击表框看数据）", "{n_tables} tables · {n_edges} relations (drag a table box to move it, double-click it to see the data)"),
     ("{n_tables} 张表，但没有找到表间关系", "{n_tables} tables, but no relationships between them were found"),
@@ -401,6 +402,7 @@ pub static EN: [(&str, &str); 2237] = [
     ("信息", "Info"),
     ("修改时间", "Modified time"),
     ("修改时间：{mtime}", "Modified: {mtime}"),
+    ("修改时间：{m}", "Modified: {m}"),
     ("修改选中的命令", "Edit the selected command"),
     ("值", "Value"),
     ("值太长，超出了列的类型长度", "The value is too long for the column type"),
@@ -1082,6 +1084,7 @@ pub static EN: [(&str, &str); 2237] = [
     ("打开目录 {path} 失败: {e}", "Failed to open the directory {path}: {e}"),
     ("打开私钥管理器…", "Open the private key manager…"),
     ("打开端口转发", "Open the port forwarding"),
+    ("打开符号链接失败", "Failed to open the symbolic link"),
     ("打开远程文件 {path} 失败: {e}", "Failed to open the remote file {path}: {e}"),
     ("打开远程文件 {rpath} 失败: {e}", "Failed to open the remote file {rpath}: {e}"),
     ("打开首选项中心的「传输」页", "Open the \"Transfer\" page of the preferences"),
@@ -1154,6 +1157,8 @@ pub static EN: [(&str, &str); 2237] = [
     ("拖进来的东西里没有可上传的本地文件", "None of the dropped items is a local file that can be uploaded"),
     ("拿不到进程属性列表的大小", "Could not get the size of the process attribute list"),
     ("挂载", "Mounts"),
+    ("指向", "Points to"),
+    ("指向：{l}", "Points to: {l}"),
     ("按 compose 文件重新创建并启动这个项目", "Recreate and start this project from the compose file"),
     ("按 compose 文件重新创建并启动这个项目（docker compose up -d --force-recreate）", "Recreate and start this project from its compose file (docker compose up -d --force-recreate)"),
     ("按 compose 文件重新创建并启动这个项目（docker compose up）", "Recreate and start this project from its compose file (docker compose up)"),
@@ -2180,6 +2185,7 @@ pub static EN: [(&str, &str); 2237] = [
     ("重试", "Retry"),
     ("重载", "Reload"),
     ("重连", "Reconnect"),
+    ("链接指向的文件不存在", "The file the link points to does not exist"),
     ("销毁", "Destroy"),
     ("销毁这个 compose 项目（容器和网络会被删除）", "Destroy this compose project (containers and networks are removed)"),
     ("锁定", "Lock"),

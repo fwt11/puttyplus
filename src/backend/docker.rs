@@ -2044,6 +2044,30 @@ pub fn read_file_cmd(container: &str, path: &str) -> String {
     )
 }
 
+/// 查一个路径**解引用之后**是什么类型（**跟随符号链接**用）。
+///
+/// ⚠️ **为什么要单独一条命令**（用户 2026-11-27：「双击符号链接不能跟随」）：
+///   目录列表里的 `ls -l` 给的是**链接自己**的类型（`l`）⇒ 光看它没法
+///   知道目标是**目录**还是**文件** ⇒ 双击时得再问一次。
+///
+/// ⚠️ **为什么不用 `ls -L`（--dereference）**（2026-11-27 实测）：
+///   GNU coreutils 8.32 上 `ls -Ld <路径>` **只打印路径名**（长格式被
+///   `-d` 吃掉了 ⇒ 输出 `/etc` 而不是权限行）⇒ 解析不出类型。
+///   而 `ls -lL <路径>`（不带 `-d`）会**列出目录内容**（目标是目录时）
+///   ⇒ 也不是我们要的。
+///   ⇒ **老老实实对「解析出来的目标路径」跑 `ls -ld`**（目标是真路径时
+///   它给的就是目标的类型）⇒ 链接链（一串链接套链接）由调用方**再追几层**。
+///
+/// ⚠️ **输出与 `ls -l` 同格式** ⇒ 直接用 [`parse_ls`] 解析（拿第一个条目
+///   的类型）。
+pub fn stat_kind_cmd(container: &str, path: &str) -> String {
+    format!(
+        "docker exec {c} ls -ld -- {p} 2>&1",
+        c = crate::backend::checksum::sh_quote(container),
+        p = crate::backend::checksum::sh_quote(path),
+    )
+}
+
 /// **上传**的命令（本地 → 容器）：**`docker cp` 的归档流模式**。
 ///
 /// ⚠️ **`docker cp - 容器:目录`** ⇒ **从 stdin 读 tar 归档** ⇒ 落到那个
@@ -2117,6 +2141,17 @@ pub struct ContainerFile {
     pub kind: FileKind,
     /// 权限串（如 `drwxr-xr-x`）。
     pub perms: String,
+    /// **修改时间**（Unix 秒；0 = 解析不出来 / 服务器没给）。
+    ///
+    /// ⚠️ **从 `ls -l` 的日期字段解析**（见 [`ls_date_to_ts`]）—— 容器里
+    ///   没有 SFTP 的 `attr` 可用 ⇒ 只能从 `ls` 的输出里刨。
+    pub mtime: i64,
+    /// **符号链接指向哪里**（`None` = 不是链接）。
+    ///
+    /// ⚠️ **为什么要留着**（用户 2026-11-27）：`ls -l` 给的是
+    ///   `名字 -> 目标` ⇒ 以前把 `-> 目标` 直接扔了 ⇒ 界面上**看不出**
+    ///   这条链接指向哪里 ⇒ 用户要求「显示符号链接指向的文件」。
+    pub link_target: Option<String>,
 }
 
 impl ContainerFile {
@@ -2170,10 +2205,16 @@ pub fn parse_ls(out: &str) -> Vec<ContainerFile> {
             Err(_) => continue,
         };
         // ⚠️ **名字**：第 9 段起全部（含空格）⇒ 再去掉 ` -> 目标`。
+        //
+        // ⚠️ **链接目标要留着**（用户 2026-11-27：「最好能显示符号链接指向的
+        //   文件」）⇒ `名字 -> 目标` 拆成两半。
         let name_all = f[8..].join(" ");
-        let name = match name_all.find(" -> ") {
-            Some(i) => name_all[..i].to_string(),
-            None => name_all,
+        let (name, link_target) = match name_all.find(" -> ") {
+            Some(i) => (
+                name_all[..i].to_string(),
+                Some(name_all[i + 4..].trim().to_string()),
+            ),
+            None => (name_all, None),
         };
         let name = name.trim_matches('"').to_string();
         // ⚠️ **只留最后一段**（basename，阶段 159）：`ls` 给的**未必是文件名**
@@ -2184,14 +2225,70 @@ pub fn parse_ls(out: &str) -> Vec<ContainerFile> {
         if name.is_empty() || name == "." || name == ".." {
             continue;
         }
+        // ⚠️ **修改时间**（用户 2026-11-27：「容器文件管理中没有显示修改时间」）
+        //   ⇒ `ls -l` 的第 6/7/8 段就是日期 ⇒ 刨出来。
+        let mtime = ls_date_to_ts(f[5], f[6], f[7]).unwrap_or(0);
         v.push(ContainerFile {
             name,
             size,
             kind,
             perms: perms.to_string(),
+            mtime,
+            link_target,
         });
     }
     v
+}
+
+/// `ls -l` 的日期三段 ⇒ **Unix 时间戳**（**纯函数**，好测）。
+///
+/// ⚠️ **`ls -l` 的两种日期格式**：
+/// - 近半年的文件：`Nov 15 19:33`（**月 日 时:分**，没有年份）；
+/// - 更早的文件：`Nov 15  2024`（**月 日 年**）。
+///
+/// ⇒ 第三段里**带冒号**就是「时:分」，否则是「年」。
+///
+/// ⚠️ **时区**：这是**容器里**的本地时间 ⇒ 这里按**本机**时区理解
+///   （可能有小时级偏差）—— 但比**没有这一列**强得多。
+///
+/// ⚠️ **月份名**：正常是英文缩写（`Nov`）；有些实现带点（`Nov.`）⇒ 只看
+///   **前三个字母**；也认数字月份（`11`）。
+pub fn ls_date_to_ts(mon: &str, day: &str, third: &str) -> Option<i64> {
+    use chrono::{Datelike, TimeZone};
+    let mon = mon.trim().trim_end_matches('.');
+    let month: u32 = match mon.to_ascii_lowercase().as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => mon.parse().ok()?,
+    };
+    let day: u32 = day.trim().parse().ok()?;
+    let (year, hour, minute) = if third.contains(':') {
+        // 「Nov 15 19:33」⇒ 没有年份 ⇒ 按**今年**算
+        let mut it = third.trim().split(':');
+        let h: u32 = it.next()?.trim().parse().ok()?;
+        let m: u32 = it.next()?.trim().parse().ok()?;
+        (chrono::Local::now().year(), h, m)
+    } else {
+        // 「Nov 15 2024」⇒ 只有日期 ⇒ 时间取 00:00
+        (third.trim().parse().ok()?, 0, 0)
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    chrono::Local
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .map(|d| d.timestamp())
 }
 
 /// `ls` 失败 ⇒ **说清楚是「目录」的问题**（不是 docker 没装）。
@@ -3556,6 +3653,85 @@ drwxr-xr-x 2 root root  4096 Nov 15 19:30 conf.d\n";
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].name, "link.txt");
         assert_eq!(v[0].kind, super::FileKind::Link);
+    }
+
+    /// **修改时间要能从 `ls -l` 里刨出来**（用户 2026-11-27：「容器文件管理中
+    /// 没有显示修改时间」）。
+    ///
+    /// ⚠️ **两种日期格式都要认**：
+    /// - 近半年的文件：`Nov 15 19:33`（**月 日 时:分**，没有年份）；
+    /// - 更早的文件：`Nov 15  2024`（**月 日 年**）。
+    #[test]
+    fn 修改时间能解析出来() {
+        use chrono::{Datelike, TimeZone, Timelike};
+        let out = "total 8\n\
+-rw-r--r-- 1 root root  1234 Nov 15 19:33 config.yaml\n\
+drwxr-xr-x 2 root root  4096 Nov 15  2024 conf.d\n";
+        let v = super::parse_ls(out);
+        assert_eq!(v.len(), 2);
+        assert!(v[0].mtime > 0, "近半年的文件没解析出修改时间：{:?}", v[0]);
+        assert!(v[1].mtime > 0, "更早的文件没解析出修改时间：{:?}", v[1]);
+        // ⚠️ **两个日期不一样** ⇒ 不能都退化成同一个值（比如 0）。
+        assert_ne!(v[0].mtime, v[1].mtime, "两个文件的修改时间不该一样");
+        // 「时:分」那个 ⇒ 换算回来应该是 19:33 那一刻。
+        let ts = v[0].mtime;
+        let dt = chrono::Local.timestamp_opt(ts, 0).unwrap();
+        assert_eq!(dt.hour(), 19, "小时没对上");
+        assert_eq!(dt.minute(), 33, "分钟没对上");
+        assert_eq!(dt.month(), 11, "月份没对上");
+        assert_eq!(dt.day(), 15, "日期没对上");
+    }
+
+    /// **符号链接的「指向」要留着**（用户 2026-11-27：「最好能显示符号链接
+    /// 指向的文件」）。
+    ///
+    /// ⚠️ **名字与指向要分开**：`link.txt -> /etc/real.txt` ⇒ 名字是
+    ///   `link.txt`，指向是 `/etc/real.txt`。
+    #[test]
+    fn 符号链接的指向也解析出来() {
+        let out = "lrwxrwxrwx 1 root root    7 Nov 15 19:33 link.txt -> /etc/real.txt\n";
+        let v = super::parse_ls(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "link.txt");
+        assert_eq!(
+            v[0].link_target.as_deref(),
+            Some("/etc/real.txt"),
+            "符号链接的指向没解析出来：{:?}",
+            v[0]
+        );
+        // ⚠️ **普通文件没有指向**（不能是 Some("")）。
+        let out2 = "-rw-r--r-- 1 root root  1234 Nov 15 19:33 config.yaml\n";
+        let v2 = super::parse_ls(out2);
+        assert_eq!(v2[0].link_target, None, "普通文件不该有指向");
+    }
+
+    /// **`ls -l` 的日期三段 ⇒ 时间戳**（**纯函数**）。
+    #[test]
+    fn ls日期能换算成时间戳() {
+        use chrono::{Datelike, TimeZone, Timelike};
+        // 「月 日 年」⇒ 时间取 00:00。
+        let ts = super::ls_date_to_ts("Nov", "15", "2024").expect("老格式该认");
+        let dt = chrono::Local.timestamp_opt(ts, 0).unwrap();
+        assert_eq!(dt.year(), 2024);
+        assert_eq!(dt.month(), 11);
+        assert_eq!(dt.day(), 15);
+        assert_eq!(dt.hour(), 0);
+
+        // 「月 日 时:分」⇒ 年份取**今年**。
+        let ts2 = super::ls_date_to_ts("Nov", "15", "19:33").expect("新格式该认");
+        let dt2 = chrono::Local.timestamp_opt(ts2, 0).unwrap();
+        assert_eq!(dt2.year(), chrono::Local::now().year());
+        assert_eq!(dt2.hour(), 19);
+        assert_eq!(dt2.minute(), 33);
+
+        // ⚠️ **月份缩写带点**（有些实现是 `Nov.`）⇒ 只看前三个字母。
+        assert!(super::ls_date_to_ts("Nov.", "15", "2024").is_some());
+        // ⚠️ **认数字月份**。
+        assert!(super::ls_date_to_ts("11", "15", "2024").is_some());
+        // ⚠️ **垃圾输入 ⇒ None**（不能瞎猜一个时间）。
+        assert!(super::ls_date_to_ts("Xxx", "15", "2024").is_none());
+        assert!(super::ls_date_to_ts("Nov", "99", "2024").is_none());
+        assert!(super::ls_date_to_ts("Nov", "15", "不是时间").is_none());
     }
 
     #[test]

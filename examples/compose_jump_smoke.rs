@@ -131,6 +131,43 @@ fn main() {
         format!("留下了：{:?}", panel.st.pending_select.borrow())
     );
 
+    // ---- ④ 「编辑 compose 文件」的状态栏：编辑器一打开就该清掉 ----
+    //
+    // ⚠️ **用户 2026-11-27 原话**：「状态栏会显示『正在打开xxx文件』，然后
+    //   打开了编辑器，但是编辑器关掉之后，状态栏的文字还在，这不合理，
+    //   应该是编辑器只要打开，状态栏文字就可以消失了。」
+    //
+    // ⚠️ **A 组就能跑**（不连服务器）：「打开编辑器」那一步在冒烟里注入成
+    //   「什么都不干」（真开会弹**模态**错误框 ⇒ 冒烟卡住）⇒ 验的仍然是
+    //   **真函数**里「写状态 → 开 → 清状态」这三步。
+    dockerui::ensure(&panel.st);
+    // ⚠️ **必须切到「容器」分段**：底部那行只显示**当前分段**的状态。
+    dockerui::seg_show_for_test(&panel.st, dockerui::SEG_CONTAINERS);
+    pump(200);
+    let (written, seen) = dockerui::open_compose_file_at_for_test(
+        &panel.st,
+        "/srv/app/docker-compose.yml",
+        "/srv/app",
+    );
+    check!(
+        "④ 「正在打开…」那句**确实写**了",
+        written.contains("正在打开"),
+        format!("写的是 {written:?}")
+    );
+    check!(
+        "④ 写进去的时候状态栏里**真的看得到**（不是写了个寂寞）",
+        seen.contains("正在打开"),
+        format!("打开那一刻状态栏是 {seen:?}")
+    );
+    check!(
+        "④ 编辑器一打开，状态栏就**清空**了",
+        dockerui::compose_status_for_test(&panel.st).is_empty(),
+        format!(
+            "状态栏还留着 {:?}",
+            dockerui::compose_status_for_test(&panel.st)
+        )
+    );
+
     // ================= B 组：连本机测试 sshd =================
     let home = std::env::var("HOME").unwrap_or_default();
     let port: i32 = std::env::var("PP_SSH_PORT")
