@@ -1187,11 +1187,23 @@ impl Tabs {
             term::attach_split_menu(&tp, &page);
         }
 
-        self.notebook.next_page();
+        // ⚠️⚠️ **不能用 `notebook.next_page()`**（2026-11-27 用户报的真 bug）：
+        //   `next_page()` 选的是「**当前页的下一页**」，而新页是
+        //   **追加到末尾**的 ⇒ 只有当前页恰好是「倒数第二页」时才对得上。
+        //   用户切回旧连接后再开新连接 ⇒ 选到的是**别的连接** ⇒
+        //   侧边栏挂上**别的连接**的文件面板（用户原话：「我新开一个连接，
+        //   文件面板总是先显示上一个连接的内容，然后才切过去」）。
+        //
+        //   ⇒ 改成**显式**按页面控件取页号 ⇒ 选中的永远是**刚开的这条**。
+        if let Some(n) = self.notebook.page_num(&page_w) {
+            self.notebook.set_current_page(Some(n));
+        }
         // ⚠️ **阶段 178**：侧边栏的「文件」页挂上**这条**连接的文件面板。
-        // （`next_page()` 也会触发 `switch-page` 钩子 ⇒ 那里也会同步一次；
-        //   这里再显式同步一次 ⇒ 不依赖钩子的触发时机。）
-        self.sync_sidebar_files();
+        //
+        // ⚠️ **按页面控件挂**（不读 `current_page()`）：上面那次切页也会触发
+        //   `switch-page` 钩子（那里已经同步过一次）⇒ 这里再**显式**同步一次
+        //   ⇒ 既不依赖钩子的触发时机，也就不会挂错连接。
+        self.sync_sidebar_files_for(&page_w);
         // ⚠️ **用户 2026-11-27**：「双击某个连接，打开了终端，**同步的文件
         //   面板也应该显示**，而不应该还是显示连接管理器」⇒ 开连接时把
         //   侧边栏切到「文件」页（否则用户点完连接，右边开了终端，
@@ -1899,6 +1911,13 @@ impl Tabs {
                 .insert_page(&welcome_page(), Some(&label), Some(0));
             self.welcome_attached.set(true);
         }
+        // ⚠️ **侧边栏的「文件」页也得跟着清**（2026-11-27 用户报的真 bug）：
+        //   关掉**最后一条**连接 ⇒ 笔记本被清空 ⇒ GTK **不发** `switch-page`
+        //   ⇒ 钩子里的同步不会跑 ⇒ 侧边栏会**留着那条已关闭连接的面板**
+        //   （面板的 worker 都已经停了 ⇒ 用户看到的是一个死面板）。
+        //   ⇒ 这里**无条件**再同步一次：还有连接 ⇒ 挂当前那条；
+        //   一条都没了 ⇒ 槽位回到占位（「还没有连接」）。
+        self.sync_sidebar_files();
         // 终端 ssh 子进程随 PTY 关闭退出（与 C 版一致）
         self.sync_broadcast();
         self.notify_pages();

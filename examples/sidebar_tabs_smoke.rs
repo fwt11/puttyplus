@@ -249,6 +249,97 @@ fn main() {
         format!("current_page = {:?}", nb.current_page())
     );
 
+    // ---- ⑦d 开新连接 ⇒ 侧边栏挂的是**新连接**的面板（不是上一条）----
+    //
+    // ⚠️⚠️ **用户 2026-11-27 报的真 bug**：「我新开一个连接，文件面板总是先显示
+    //   上一个连接的内容，然后才切过去，这不好 … 不要显示别的文件面板」。
+    //
+    //   **根因**：`Tabs::open()` 用 `notebook.next_page()` 选页 ⇒ 它选的是
+    //   「**当前页的下一页**」，而新页是**追加到末尾**的 ⇒ 只有当前页恰好是
+    //   「倒数第二页」时才对得上。这里 ⑦b 刚把当前页切回**第一条**连接 ⇒
+    //   `next_page()` 选到的是**第二条**连接 ⇒ 侧边栏挂上**别的连接**的面板。
+    //
+    //   **修法**：显式 `set_current_page(page_num(新页))` ⇒ 选中的永远是
+    //   刚开的那条；侧边栏再按**页面控件**显式挂一次。
+    //
+    // ⚠️ **断言怎么写才不会"自己骗自己"**：`current_panel_state()` 读的就是
+    //   当前页 ⇒ **不能**用它去取"新连接的面板"（bug 在时它取到的正是
+    //   **错的那条** ⇒ 断言会假绿）⇒ 这里分两步：
+    //   ① 先断言**当前页的会话名**就是新连接；
+    //   ② 再用 `find_session(会话键)`（按名字认，**与当前页无关**）
+    //      取新连接的面板，断言侧边栏挂的就是它。
+    let cur = tabs.current_panel_state().expect("应当有当前面板");
+    check!(
+        "开新连接 ⇒ **当前页就是刚开的那条**（不是别的连接）",
+        cur.opts.session_name.as_deref() == Some("第三个会话"),
+        format!("当前页的会话是 {:?}", cur.opts.session_name)
+    );
+    let st3 = tabs
+        .find_session(&puttyplus::backend::dbstore::session_key(&opts3))
+        .expect("应当能按会话键找到第三条连接");
+    check!(
+        "开新连接 ⇒ 侧边栏「文件」页挂的是**新连接**的面板",
+        sidebarhost::files_shows(&files_slot, st3.root.upcast_ref::<gtk::Widget>()),
+        "侧边栏挂的不是新连接的面板".to_string()
+    );
+    check!(
+        "开新连接 ⇒ 侧边栏**没有**残留上一条连接的面板",
+        !sidebarhost::files_shows(&files_slot, st2.root.upcast_ref::<gtk::Widget>()),
+        "上一条连接的面板还挂在侧边栏里".to_string()
+    );
+
+    // ---- ⑦e 慢网速 ⇒ 侧边栏显示**新连接自己**的「正在连接…」加载态 ----
+    //
+    // ⚠️ **用户 2026-11-27**：「如果网速慢，你可以显示加载中，不要显示别的
+    //   文件面板」⇒ 断言两件事：
+    //   ① 侧边栏挂的是**新连接**的面板（不是别的连接的文件列表）；
+    //   ② 这个面板自己**显示加载态**（「正在连接 …」）⇒ 用户看得见在加载。
+    //
+    // ⚠️ **怎么造一个"连得上但不说话"的服务器**（让状态**确定**地停在
+    //   「正在连接」而不是秒失败）：本地监听一个端口，接受连接后
+    //   **什么都不做** ⇒ SSH 握手永远等不到 banner。
+    let hang_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 监听端口");
+        let port = l.local_addr().expect("local_addr").port();
+        std::thread::spawn(move || {
+            // 攥着连接不吭声 ⇒ 客户端一直等在握手里
+            for s in l.incoming() {
+                if let Ok(s) = s {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    drop(s);
+                }
+            }
+        });
+        port
+    };
+    let opts4 = ConnOptions {
+        host: "127.0.0.1".into(),
+        port: hang_port as i32,
+        session_name: Some("慢速会话".into()),
+        ..opts.clone()
+    };
+    tabs.open(&opts4);
+    uitest::pump(300);
+    let st4 = tabs
+        .find_session(&puttyplus::backend::dbstore::session_key(&opts4))
+        .expect("应当能按会话键找到慢速会话");
+    check!(
+        "慢网速 ⇒ 侧边栏挂的是**新连接自己**的面板",
+        sidebarhost::files_shows(&files_slot, st4.root.upcast_ref::<gtk::Widget>()),
+        "侧边栏挂的不是新连接的面板".to_string()
+    );
+    let status4 = st4.pane(true).status_lbl.text().to_string();
+    check!(
+        "慢网速 ⇒ 面板状态行显示「正在连接」（= 加载中）",
+        status4.contains("正在连接"),
+        format!("状态行是「{status4}」")
+    );
+    check!(
+        "慢网速 ⇒ 侧边栏**没有**残留上一条连接的面板",
+        !sidebarhost::files_shows(&files_slot, st3.root.upcast_ref::<gtk::Widget>()),
+        "上一条连接的面板还挂在侧边栏里".to_string()
+    );
+
     // ---- ⑧ 「显示文件面板」菜单项 ⇒ 切到侧边栏的「文件」页 ----
     nb.set_current_page(Some(PAGE_CONN as u32));
     uitest::pump(50);
@@ -263,6 +354,31 @@ fn main() {
         "「显示文件面板」把侧边栏切到**文件页**",
         nb.current_page() == Some(PAGE_FILES as u32),
         format!("current_page = {:?}", nb.current_page())
+    );
+
+    // ---- ⑨ 关掉**最后一条**连接 ⇒ 侧边栏回到占位（不留死面板）----
+    //
+    // ⚠️ **为什么单独守这一条**：笔记本被清空时 GTK **不发** `switch-page`
+    //   ⇒ 钩子里的同步不会跑 ⇒ 侧边栏会**留着已关闭连接的面板**
+    //   （面板的 worker 都停了 ⇒ 用户看到的是一个死面板）。
+    for name in ["慢速会话", "第三个会话", "第二个会话", "第一个会话"] {
+        if let Some(p) = tabs.page_widget_of_session(name) {
+            tabs.close_page_forced(&p);
+            uitest::pump(120);
+        }
+    }
+    check!(
+        "关掉最后一条连接 ⇒ 侧边栏**不再挂着**任何连接的面板",
+        !sidebarhost::files_shows(&files_slot, st.root.upcast_ref::<gtk::Widget>())
+            && !sidebarhost::files_shows(&files_slot, st2.root.upcast_ref::<gtk::Widget>())
+            && !sidebarhost::files_shows(&files_slot, st3.root.upcast_ref::<gtk::Widget>())
+            && !sidebarhost::files_shows(&files_slot, st4.root.upcast_ref::<gtk::Widget>()),
+        "还有已关闭连接的面板挂在侧边栏里".to_string()
+    );
+    check!(
+        "关掉最后一条连接 ⇒ 侧边栏回到「还没有连接」占位",
+        files_slot.first_child().is_some(),
+        "槽位是空的".to_string()
     );
 
     if fails.is_empty() {
