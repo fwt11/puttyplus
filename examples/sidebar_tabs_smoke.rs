@@ -18,6 +18,7 @@
 use std::rc::Rc;
 
 use gtk::prelude::*;
+use puttyplus::args::ConnOptions;
 use puttyplus::sidebar::Sidebar;
 use puttyplus::sidebarhost::{SidebarHost, PAGE_CONN, PAGE_FILES};
 use puttyplus::tabs::Tabs;
@@ -49,6 +50,8 @@ fn main() {
     let sb = Sidebar::new(Rc::clone(&tabs));
     sb.setup();
     let host = SidebarHost::new(&sb);
+    // ⚠️ **阶段 178**：把侧边栏交给 `Tabs` ⇒ 它才知道「文件」页该挂谁。
+    tabs.set_sidebar_host(&host);
 
     // ---- ① 页签恰好两个，标题对 ----
     let titles = host.page_titles();
@@ -76,7 +79,7 @@ fn main() {
     );
 
     // ---- ③ 「文件」页是**独立的一页**（切过去看到的不是连接树）----
-    let files_page_kids = host.nb.page_num(&host.files_slot);
+    let files_page_kids = host.nb.page_num(&host.files_page);
     check!(
         "「文件」页是**单独的一页**",
         files_page_kids == Some(1),
@@ -125,6 +128,64 @@ fn main() {
         "展开后**回到上次看的页签**",
         host.current_page() == before,
         format!("展开后 current_page = {}（折叠前 {before}）", host.current_page())
+    );
+
+    // ---- ⑥ 文件面板进侧边栏（阶段 178）----
+    //
+    // ⚠️ **连不上也行的连接参数**：这里只关心「面板挂在哪儿」，
+    //   不关心连上没连上（127.0.0.1:9 没人监听 ⇒ 面板会显示连接失败）。
+    let opts = ConnOptions {
+        proto: "ssh".into(),
+        host: "127.0.0.1".into(),
+        port: 9,
+        user: "nobody".into(),
+        ..Default::default()
+    };
+    tabs.open(&opts);
+    uitest::pump(300);
+    let st = tabs.current_panel_state().expect("应当有当前面板");
+    check!(
+        "「文件」页里是**当前连接的文件面板**",
+        host.files_shows(st.root.upcast_ref::<gtk::Widget>()),
+        "「文件」页里挂的不是当前面板的文件面板".to_string()
+    );
+
+    // ---- ⑦ 切连接 ⇒「文件」页**跟着换人** ----
+    //
+    // ⚠️ **为什么**：文件面板是**每会话一个**（worker 绑在那条会话上）
+    //   ⇒ 侧边栏只有一格 ⇒ 切连接时必须换。
+    let opts2 = ConnOptions {
+        session_name: Some("第二个会话".into()),
+        ..opts.clone()
+    };
+    tabs.open(&opts2);
+    uitest::pump(300);
+    let st2 = tabs.current_panel_state().expect("应当有当前面板");
+    check!(
+        "切到第二条连接 ⇒「文件」页换成**它**的面板",
+        host.files_shows(st2.root.upcast_ref::<gtk::Widget>()),
+        "「文件」页没跟着换".to_string()
+    );
+    check!(
+        "上一条连接的面板**被换下**了（不是两份叠在一起）",
+        !host.files_shows(st.root.upcast_ref::<gtk::Widget>()),
+        "旧面板还挂在侧边栏里".to_string()
+    );
+
+    // ---- ⑧ 「显示文件面板」菜单项 ⇒ 切到侧边栏的「文件」页 ----
+    host.switch_to(PAGE_CONN);
+    uitest::pump(50);
+    assert!(
+        puttyplus::tabs::file_panel_hidden(),
+        "侧边栏停在「连接」页 ⇒ 「显示文件面板」应当可用"
+    );
+    let page = tabs.current_page_widget().expect("应当有当前页");
+    tabs.show_file_panel(&page);
+    uitest::pump(80);
+    check!(
+        "「显示文件面板」把侧边栏切到**文件页**",
+        host.current_page() == PAGE_FILES,
+        format!("current_page = {}", host.current_page())
     );
 
     if fails.is_empty() {

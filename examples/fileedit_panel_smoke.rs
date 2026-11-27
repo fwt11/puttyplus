@@ -335,26 +335,41 @@ fn main() {
     let win = gtk::Window::new();
     win.set_title(Some("fileedit panel smoke"));
     win.set_default_size(1200, 800);
-    win.set_child(Some(&tabs.notebook));
+    // ⚠️ **阶段 178**：文件面板住在**侧边栏**里 ⇒ 窗口里必须有侧边栏，
+    //    否则文件面板**连父级都没有**（下面的断言就会误报）。
+    let sb = puttyplus::sidebar::Sidebar::new(std::rc::Rc::clone(&tabs));
+    sb.setup();
+    let host = puttyplus::sidebarhost::SidebarHost::new(&sb);
+    tabs.set_sidebar_host(&host);
+    // ⚠️ **阶段 178**：文件面板在侧边栏的「文件」页 ⇒ 那一页**没显示**时
+    //    面板就没被映射（`is_mapped()` 假）⇒ 先切到「文件」页。
+    host.switch_to(puttyplus::sidebarhost::PAGE_FILES);
+    let outer = gtk::Paned::new(gtk::Orientation::Horizontal);
+    outer.set_start_child(Some(&host.root));
+    outer.set_end_child(Some(&tabs.notebook));
+    win.set_child(Some(&outer));
     win.present();
     pump(600);
     let st = tabs.current_panel_state().expect("应有当前面板");
     let sub = st.sub_tabs().expect("应有子标签容器");
 
-    // ---- 1) 布局：文件面板**独立成格**（阶段 146）＋ 终端格子 ----
+    // ---- 1) 布局：文件面板**在侧边栏里**（阶段 178）＋ 终端格子 ----
     assert_eq!(sub.current_kind(), PageKind::Terminal, "第一页应当是终端");
-    assert!(st.root.is_mapped(), "终端页时文件面板应当显示在屏幕上");
+    assert!(st.root.is_mapped(), "文件面板应当显示在屏幕上");
     let _file_host = host_of(&st);
-    // ⚠️ **阶段 146**：文件面板的宽度 = **格子树根分割条**的位置。
+    // ⚠️ **阶段 178**：文件面板**不在格子树里**了 ⇒ 格子树**只有一格**
+    //    （终端占满整页宽）⇒ 树根**没有分割条**。
     let tree = tabs
         .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
         .expect("应当有格子树");
-    let root_paned = tree.root_paned().expect("两个格子 ⇒ 树根是分割条");
     assert_eq!(
-        root_paned.position(),
-        340,
-        "文件格子的宽度不对：{}",
-        root_paned.position()
+        tree.cell_count(),
+        1,
+        "阶段 178：文件面板搬去侧边栏 ⇒ 格子树里只剩终端那一格"
+    );
+    assert!(
+        tree.root_paned().is_none(),
+        "只有一格 ⇒ 不该有根分割条"
     );
     // 阶段 108：终端子页的内容**就是终端列**（竖向 Paned）
     let term_col = sub
@@ -363,7 +378,7 @@ fn main() {
         .expect("阶段 108：终端子页右半应当是终端列（竖向 Paned）");
     let pages_before = sub.page_count();
     println!(
-        "[1] 布局：文件面板 {w}px｜终端列（竖向）✓",
+        "[1] 布局：文件面板在侧边栏（{w}px）｜终端占满整页宽｜终端列（竖向）✓",
         w = st.root.width()
     );
 
@@ -491,15 +506,15 @@ fn main() {
         st.root.parent().is_some(),
         "文件面板被连带销毁了（编辑器挪来挪去不该动它）"
     );
+    // ⚠️ **阶段 178**：文件面板**不在格子树里**了 ⇒ 只需确认它**还活着**
+    //    （父级还在 ⇒ 没被连带销毁）。
     let file_cell_tree = tabs
         .cell_tree_for(&tabs.current_page_widget().expect("应当有当前页"))
         .expect("应当有格子树");
-    let file_cell = file_cell_tree
-        .cell_of_page(st.file_page_id.get())
-        .expect("文件面板那一页应当还在某个格子里");
-    assert!(
-        file_cell_tree.cell(file_cell).is_some(),
-        "文件面板那一页应当还在树上"
+    assert_eq!(
+        file_cell_tree.cell_count(),
+        1,
+        "阶段 178：编辑器挪来挪去也不该多出格子"
     );
     assert_eq!(
         sub.nb.current_page(),
@@ -643,15 +658,19 @@ fn main() {
             let p = head
                 .compute_point(&win, &gtk::graphene::Point::new(6.0, 6.0))
                 .expect("要能算出页签头的位置");
-            // 终点：**文件面板那一格**的页签栏（窗口左上方那条）。
-            let file_cell_id = tree2
-                .cell_of_page(st.file_page_id.get())
-                .expect("文件面板那一页应当还在某个格子里");
-            let file_cell = tree2.cell(file_cell_id).expect("文件面板那一格");
-            let file_nb = file_cell.tabs.nb.clone();
+            // 终点：**新拆出来的那一格**的页签栏。
+            // ⚠️ **阶段 178**：文件面板那一格**没了**（它在侧边栏里）⇒
+            //    拖放目标改成「**先拆一格**出来当落点」——这样仍然验的是
+            //    「真搬走了」（落到**另一格**），而不是原地不动。
+            let cur_cell = tree2.current_cell();
+            let new_cell = tree2
+                .split_cell(cur_cell, puttyplus::layout::dnd::SplitZone::Right)
+                .expect("应当能拆出一格当拖放落点");
+            pump(300);
+            let file_nb = tree2.cell(new_cell).expect("新拆出来的那一格").tabs.nb.clone();
             let q = file_nb
                 .compute_point(&win, &gtk::graphene::Point::new(40.0, 6.0))
-                .expect("要能算出文件面板那格页签栏的位置");
+                .expect("要能算出那一格页签栏的位置");
             let (ox, oy) = window_origin("fileedit panel smoke");
             let from = (ox + p.x() as i32, oy + p.y() as i32);
             let to = (ox + q.x() as i32, oy + q.y() as i32);
@@ -663,13 +682,13 @@ fn main() {
             }
             let _ = h.join();
             pump(800);
-            // ⚠️ **断言「真搬走了」**：编辑器现在在**文件面板那一格**里。
+            // ⚠️ **断言「真搬走了」**：编辑器现在在**新拆出来的那一格**里。
             let now_cell = tree2
                 .cell_of_page(did)
                 .expect("编辑器应当还在某个格子里");
             assert_eq!(
-                now_cell, file_cell_id,
-                "真拖拽没把编辑器搬到文件面板那一格（拖放管线没通）"
+                now_cell, new_cell,
+                "真拖拽没把编辑器搬到新拆出来的那一格（拖放管线没通）"
             );
             assert_ne!(now_cell, term_cell, "编辑器还在原来那一格");
             println!("[8] 真拖拽成功：编辑器搬到了文件面板那一格 ✓");

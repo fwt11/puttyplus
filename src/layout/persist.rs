@@ -334,6 +334,56 @@ pub fn ensure_kinds(layout: &LayoutNode, kinds: &[SlotKind]) -> LayoutNode {
     out
 }
 
+/// 把布局里的「文件」叶子**摘掉**（阶段 178）。
+///
+/// **为什么需要**：文件面板搬去**主窗口左栏的侧边栏**了 ⇒ 格子树里
+/// 不再有「文件」那一格 ⇒ 但**老用户存下来的布局里还有它**
+/// （阶段 146 写进去的）⇒ 还原时那一格**没有内容可放** ⇒ 必须摘掉。
+///
+/// ⚠️ **老布局的兼容**：`SlotKind::Files` 的枚举与 `from_str` **保留**
+///   （老文件里存着 `"files"`）⇒ 只是**不再生成、也不再还原**。
+///
+/// - 叶子里的 `Files` **去掉**；
+/// - 去掉之后**空了的叶子** ⇒ 整格作废；
+/// - 一边空了 ⇒ **塌陷**成另一边（少一格 ⇒ 不留空格子）。
+///
+/// 全部摘完 ⇒ 返回 `None`（调用方退回默认布局）。
+pub fn strip_files(layout: &LayoutNode) -> Option<LayoutNode> {
+    match layout {
+        LayoutNode::Leaf { tabs } => {
+            // ⚠️ **只有「本来含 Files」的那种叶子**才作废。
+            //    ⚠️ **别把「本来就是空的叶子」也删了**！空叶子是
+            //    「拆出来但没放东西的那一格」⇒ 还原时它要变成**提示页**
+            //    （用户 2026-11-22 的体验：那一格提示一下，而不是白屏）。
+            let had_files = tabs.contains(&SlotKind::Files);
+            let kept: Vec<SlotKind> = tabs
+                .iter()
+                .copied()
+                .filter(|k| *k != SlotKind::Files)
+                .collect();
+            if kept.is_empty() && had_files {
+                None
+            } else {
+                Some(LayoutNode::Leaf { tabs: kept })
+            }
+        }
+        LayoutNode::Split { stacked, a, b } => {
+            let a2 = strip_files(a);
+            let b2 = strip_files(b);
+            match (a2, b2) {
+                (Some(x), Some(y)) => Some(LayoutNode::Split {
+                    stacked: *stacked,
+                    a: Box::new(x),
+                    b: Box::new(y),
+                }),
+                (Some(x), None) => Some(x),
+                (None, Some(y)) => Some(y),
+                (None, None) => None,
+            }
+        }
+    }
+}
+
 /// 按布局给每一格**分配角色**。
 ///
 /// ⚠️ **一个格子只能有一个容器** ⇒ 终端与文件面板**挤在同一格**时，

@@ -119,8 +119,6 @@ pub enum PageKind {
     Db,
     /// **容器页**（阶段 109）。
     Docker,
-    /// **文件面板页**（阶段 146：文件面板独立成格之后，它是一格里的**一页**）。
-    Files,
     /// **编辑器页**（阶段 149：编辑器也是格子里的**一页**）。
     ///
     /// ⚠️ **为什么单列一个种类**：编辑器**不在 `pages` 列表里**（它在
@@ -136,7 +134,6 @@ impl PageKind {
             PageKind::Terminal => PageKindTag::Terminal,
             PageKind::Db => PageKindTag::Db,
             PageKind::Docker => PageKindTag::Docker,
-            PageKind::Files => PageKindTag::Files,
             PageKind::Editor => PageKindTag::Editor,
             PageKind::Other => PageKindTag::Other,
         }
@@ -150,7 +147,6 @@ impl PageKind {
             PageKindTag::Terminal => PageKind::Terminal,
             PageKindTag::Db => PageKind::Db,
             PageKindTag::Docker => PageKind::Docker,
-            PageKindTag::Files => PageKind::Files,
             PageKindTag::Editor => PageKind::Editor,
             PageKindTag::Other => PageKind::Other,
         }

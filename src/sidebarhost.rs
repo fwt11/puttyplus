@@ -40,8 +40,12 @@ pub struct SidebarHost {
     pub root: gtk::Box,
     /// 页签容器（两页：连接 / 文件）。
     pub nb: gtk::Notebook,
+    /// 「文件」页的**页面内容**（占位 ＋ 面板槽位）。
+    pub files_page: gtk::Box,
     /// 「文件」页的槽位——文件面板（`PanelState::root`）塞这里。
     pub files_slot: gtk::Box,
+    /// 占位（还没有任何连接时显示）。
+    files_placeholder: gtk::Label,
     /// 两个页签的标题标签（冒烟要读文字 ⇒ 存着，别去控件树里翻）。
     pub conn_label: gtk::Label,
     pub files_label: gtk::Label,
@@ -72,25 +76,72 @@ impl SidebarHost {
         nb.append_page(&sb.widget, Some(&l_conn));
 
         // ---- 「文件」页：先放占位（阶段 178 起换成真的文件面板）----
+        //
+        // ⚠️ **页面内容 = [占位, 面板槽位]** 两个控件：
+        //   占位是「还没有连接」时的提示；槽位是文件面板的家。
+        //   ⇒ 有了面板就把占位**藏起来**（不删）⇒ 切回「没有连接」时
+        //   还能再显示出来。
+        let files_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let files_placeholder = gtk::Label::new(Some(tr("还没有连接")));
+        files_placeholder.add_css_class("pp-hint");
+        files_placeholder.set_halign(gtk::Align::Center);
+        files_placeholder.set_valign(gtk::Align::Center);
+        files_placeholder.set_vexpand(true);
+        files_page.append(&files_placeholder);
         let files_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let placeholder = gtk::Label::new(Some(tr("还没有连接")));
-        placeholder.add_css_class("pp-hint");
-        placeholder.set_halign(gtk::Align::Center);
-        placeholder.set_valign(gtk::Align::Center);
-        placeholder.set_vexpand(true);
-        files_slot.append(&placeholder);
+        files_page.append(&files_slot);
         let l_files = gtk::Label::new(Some(tr("文件")));
-        nb.append_page(&files_slot, Some(&l_files));
+        nb.append_page(&files_page, Some(&l_files));
 
         root.append(&nb);
 
         Rc::new(SidebarHost {
             root,
             nb,
+            files_page,
             files_slot,
+            files_placeholder,
             conn_label: l_conn,
             files_label: l_files,
         })
+    }
+
+    /// 「文件」页显示**哪个**文件面板。
+    ///
+    /// - `Some(w)`：把 `w`（一条会话的文件面板）挂进槽位；
+    /// - `None`：没有连接 ⇒ 显示占位。
+    ///
+    /// ⚠️ **GTK4：一个 widget 只能有一个父级** ⇒ 挂之前**必须**把它从旧
+    ///   父级上摘下来（否则 GTK 会报断言 / 直接抢走）。
+    ///   ⇒ 切换连接时就是靠这一步把 A 的面板换成 B 的。
+    pub fn show_files(&self, w: Option<&gtk::Widget>) {
+        // 先把槽位里现在挂着的**摘掉**（文件面板只有一个 ⇒ 换人时先腾位）。
+        let mut c = self.files_slot.first_child();
+        while let Some(ch) = c {
+            let next = ch.next_sibling();
+            self.files_slot.remove(&ch);
+            c = next;
+        }
+        match w {
+            Some(w) => {
+                if let Some(p) = w.parent() {
+                    p.unparent();
+                }
+                self.files_slot.append(w);
+                self.files_placeholder.set_visible(false);
+            }
+            None => {
+                self.files_placeholder.set_visible(true);
+            }
+        }
+    }
+
+    /// 「文件」页现在挂着的是不是这个 widget（冒烟用）。
+    pub fn files_shows(&self, w: &gtk::Widget) -> bool {
+        self.files_slot
+            .first_child()
+            .map(|c| c == *w.upcast_ref::<gtk::Widget>())
+            .unwrap_or(false)
     }
 
     /// 切到指定页（`PAGE_CONN` / `PAGE_FILES`）。

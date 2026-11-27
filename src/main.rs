@@ -154,6 +154,9 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
     //   文件面板搬进来是**阶段 178**（要改 `host_file_panel` 的宿主）。
     //   本阶段**只加外壳、不改行为** ⇒ 出问题能直接回退这一个提交。
     let host = sidebarhost::SidebarHost::new(&sb);
+    // ⚠️ **阶段 178**：把侧边栏交给 `Tabs` ⇒ 文件面板的新宿主是它
+    //   （切连接标签时 `Tabs` 会把侧边栏的「文件」页换成人）。
+    tabs.set_sidebar_host(&host);
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     let sb_wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);

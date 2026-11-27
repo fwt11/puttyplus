@@ -1,11 +1,13 @@
-//! 阶段 146 冒烟：**文件面板独立成格**（默认布局：文件在左、终端在右）。
+//! 阶段 178 冒烟：**文件面板搬去侧边栏** ＋ 跨格搬页签仍正常。
 //!
-//! **为什么这个阶段要冒烟**：文件面板是**会话级的一个 widget**，以前住在
-//! 「文件面板｜终端列」那个 Paned 的左半 ⇒ 切终端页签时它要**搬家**（会闪）。
-//! 阶段 146 把它变成**自己一格** ⇒ 搬家这件事彻底没了 ⇒ 但也带来新风险：
-//! ① 面板会不会"人间蒸发"（搬家后宿主没跟着换）；
-//! ② 旧格子会不会留下一个空壳；
-//! ③ **终端分屏树会不会被拆散**。
+//! **为什么这个阶段要冒烟**：
+//! ① 文件面板**不再是格子树里的页**了 ⇒ 格子树默认**只有一格**（终端）
+//!    ⇒ 终端占满整页宽；
+//! ② 格子**还能拆**、页签**还能跨格搬**（阶段 145/146 的能力不能被带坏）；
+//! ③ **终端分屏树不能被拆散**（`term_container` 那层 Paned 是分屏的地基）。
+//!
+//! ⚠️ **阶段 146 的版本测的是「文件面板自己一格」** ⇒ 那个能力**作废**
+//!   了（文件面板搬去主窗口左栏的侧边栏）⇒ 本冒烟改成测**新形态**。
 //!
 //! 用法（无桌面时用 xvfb-run）：
 //!   xvfb-run -a cargo run --example layout_panel_move_smoke
@@ -58,9 +60,21 @@ fn check(app: &gtk::Application) {
         .default_width(1200)
         .default_height(800)
         .build();
-    win.set_child(Some(&tabs.notebook));
+    
     win.present();
     pump(600);
+
+    // ⚠️ **阶段 178**：文件面板住在**侧边栏**里 ⇒ 窗口里必须有侧边栏，
+    //    否则文件面板**连父级都没有**（下面的断言就会误报）。
+    let sb = puttyplus::sidebar::Sidebar::new(std::rc::Rc::clone(&tabs));
+    sb.setup();
+    let host = puttyplus::sidebarhost::SidebarHost::new(&sb);
+    tabs.set_sidebar_host(&host);
+    let outer = gtk::Paned::new(gtk::Orientation::Horizontal);
+    outer.set_start_child(Some(&host.root));
+    outer.set_end_child(Some(&tabs.notebook));
+
+    win.set_child(Some(&outer));
 
     let st = tabs.current_panel_state().expect("应有当前面板");
     let page = tabs.current_page_widget().expect("应当有当前页");
@@ -68,66 +82,37 @@ fn check(app: &gtk::Application) {
         .cell_tree_for(&page)
         .expect("连接页应当有格子树");
 
-    // ---- 1. 默认布局 = 两个格子（文件格子 | 终端格子）----
-    assert_eq!(tree.cell_count(), 2, "默认应当是 2 个格子（文件 | 终端）");
+    // ---- 1. 默认布局 = **一个格子**（只有终端）----
+    //
+    // ⚠️ **阶段 178**：文件面板搬去**主窗口左栏的侧边栏**了 ⇒ 格子树里
+    //    **不再有**「文件」那一格 ⇒ 默认就是单格（终端占满整页宽）。
+    assert_eq!(tree.cell_count(), 1, "默认应当是 **1 个格子**（只有终端）");
     let ids = tree.ids();
-    let file_cell = ids[0];
-    let term_cell = ids[1];
-    let file_pid = st.file_page_id.get();
-    assert_ne!(file_pid, 0, "应当记着文件面板那一页的 id");
-    assert_eq!(
-        tree.cell_of_page(file_pid),
-        Some(file_cell),
-        "文件面板那一页应当在**左边**那个格子里"
-    );
-    assert_eq!(page_count(&tree, file_cell), 1, "文件格子应当只有文件面板一页");
-    // ⚠️ **文件面板真的在屏幕上**（不是"在树上但看不见"）。
+    let term_cell = ids[0];
+    assert_eq!(page_count(&tree, term_cell), 1, "那一格应当只有终端页");
+    println!("[1] 默认布局 = 1 个格子（文件面板不在格子树里）✔");
+
+    // ---- 2. 文件面板**不在**格子树里（它在侧边栏）----
+    //
+    // ⚠️ **怎么验"不在"**：文件面板是 `st.root` ⇒ 它**不该**是任何一格的
+    //    页 ⇒ 那一格只有终端页（上面已断言）⇒ 且它**有父级**（在界面上）。
     assert!(
         st.root.parent().is_some(),
-        "文件面板应当挂在一个格子里"
+        "文件面板应当还挂在界面上（在侧边栏里）"
     );
-    println!("[1] 默认布局 = 2 个格子（文件在左、终端在右）✔");
+    println!("[2] 文件面板在界面上，但不在格子树里 ✔");
 
-    // ---- 2. 宽度：文件格子的宽度 = 树根分割条的位置 ----
-    let root_paned = tree.root_paned().expect("两个格子 ⇒ 树根是分割条");
-    assert!(
-        root_paned.position() > 0,
-        "文件格子应当有宽度（分割条位置 = {}）",
-        root_paned.position()
-    );
-    println!(
-        "[2] 文件格子的宽度 = 树根分割条位置（{}px）✔",
-        root_paned.position()
-    );
-
-    // ---- 3. 把文件面板那一页**搬到终端格子** ----
-    assert!(
-        tree.move_page_into(file_pid, term_cell, None),
-        "文件面板那一页应当能搬进终端格子"
-    );
+    // ---- 3. 格子**还能拆**（阶段 145 的能力没被带坏）----
+    let cell2 = tree
+        .split_cell(term_cell, puttyplus::layout::dnd::SplitZone::Right)
+        .expect("应当能拆出第二格");
     pump(200);
-    assert_eq!(
-        tree.cell_of_page(file_pid),
-        Some(term_cell),
-        "文件面板应当已经在终端格子里"
-    );
-    // ⚠️ **旧格子收拢**（空了 ⇒ 自动关闭）。
+    assert_eq!(tree.cell_count(), 2, "拆完应当是两个格子");
     assert!(
-        tree.cell(file_cell).is_none(),
-        "旧的文件格子空了 ⇒ 应当自动收拢"
+        tree.cell(cell2).is_some(),
+        "新拆出来的那一格应当在树上"
     );
-    assert_eq!(tree.cell_count(), 1, "应当只剩一个格子");
-    // ⚠️ **面板没"人间蒸发"**：宿主跟着换了。
-    let host = st.file_host.borrow().clone();
-    assert!(
-        host.is_some(),
-        "搬家之后 `PanelState.file_host` 应当跟着换（否则面板会人间蒸发）"
-    );
-    assert!(
-        st.root.parent().is_some(),
-        "搬家之后文件面板应当还在界面上"
-    );
-    println!("[3] 文件面板搬到别的格子：面板仍在、旧格子收拢、file_host 跟着换 ✔");
+    println!("[3] 格子还能拆 ✔");
 
     // ---- 4. **终端分屏树不受影响** ----
     // 终端格子里的终端页还在、内容还是那个竖向 Paned（上＝终端、下＝编辑区）。
@@ -153,7 +138,7 @@ fn check(app: &gtk::Application) {
         term_col.end_child().is_none(),
         "编辑区退役了 ⇒ 终端列不该再有下半"
     );
-    println!("[4] 终端分屏树不受影响（终端列上半＝终端容器，下半空着）✔");
+    println!("[5] 终端分屏树不受影响（终端列上半＝终端容器，下半空着）✔");
 
     println!("layout_panel_move_smoke: OK");
 }

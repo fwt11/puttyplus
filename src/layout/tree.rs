@@ -349,7 +349,6 @@ fn snapshot_of(
                             crate::panel::subtabs::PageKind::Terminal => SlotKind::Terminal,
                             crate::panel::subtabs::PageKind::Db => SlotKind::Db,
                             crate::panel::subtabs::PageKind::Docker => SlotKind::Docker,
-                            crate::panel::subtabs::PageKind::Files => SlotKind::Files,
                             crate::panel::subtabs::PageKind::Editor => SlotKind::Editor,
                             crate::panel::subtabs::PageKind::Other => SlotKind::Other,
                         })

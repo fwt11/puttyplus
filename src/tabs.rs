@@ -187,27 +187,6 @@ fn install_cell_new_hook(
     });
 }
 
-/// 盯着「文件面板那一页搬去哪儿了」（阶段 146：`file_host` 要跟着换）。
-///
-/// ⚠️ **为什么每个格子都要挂一遍**：文件面板可能被拖到**任何**一个格子里
-///    ⇒ 谁接到它，谁就得更新 `PanelState.file_host`。
-///
-/// ⚠️ **页签 id 从 `PanelState` 现读**（不是闭包里存一份）：阶段 146b
-///    里用户把「文件」页签关掉之后会**重建**（id 变）⇒ 存一份就认不出了。
-///
-/// ⚠️ **闭包只抓弱引用**（AGENTS.md 引用环红线）。
-fn watch_file_host(sub: &Rc<panel::subtabs::SubTabs>, st: &Rc<panel::PanelState>) {
-    let stw = Rc::downgrade(st);
-    let nb = sub.nb.clone();
-    sub.set_moved_hook(move |pid| {
-        let Some(st) = stw.upgrade() else { return };
-        if st.file_page_id.get() == pid {
-            // ⚠️ **宿主换了**：这一格子的 notebook 现在装着文件面板。
-            *st.file_host.borrow_mut() = Some(nb.clone().upcast());
-        }
-    });
-}
-
 /* ---------------- 阶段 147：布局的存与还原 ---------------- */
 
 /// **默认布局**（阶段 147）：文件在左、终端在右。
@@ -216,14 +195,11 @@ fn watch_file_host(sub: &Rc<panel::subtabs::SubTabs>, st: &Rc<panel::PanelState>
 ///    两个格子并排（右边是主角：终端）。
 fn default_layout() -> crate::layout::persist::LayoutNode {
     use crate::layout::persist::{LayoutNode, SlotKind};
-    LayoutNode::Split {
-        stacked: false,
-        a: Box::new(LayoutNode::Leaf {
-            tabs: vec![SlotKind::Files],
-        }),
-        b: Box::new(LayoutNode::Leaf {
-            tabs: vec![SlotKind::Terminal],
-        }),
+    // ⚠️ **阶段 178**：默认 = **单格**（终端）。
+    //    文件面板搬进**主窗口左栏的侧边栏**了（不再占连接页的宽度）
+    //    ⇒ 终端格子直接占满整页宽。
+    LayoutNode::Leaf {
+        tabs: vec![SlotKind::Terminal],
     }
 }
 
@@ -236,50 +212,28 @@ fn default_layout() -> crate::layout::persist::LayoutNode {
 fn plan_restore(
     layout: &crate::layout::persist::LayoutNode,
     term_sub: Rc<panel::subtabs::SubTabs>,
-    file_sub: Rc<panel::subtabs::SubTabs>,
 ) -> (
     crate::layout::persist::LayoutNode,
     Vec<Rc<panel::subtabs::SubTabs>>,
 ) {
     use crate::layout::persist::{assign_roles, ensure_kinds, LeafRole, SlotKind};
-    // ① 缺哪边补哪边（终端与文件面板是**活的** ⇒ 得有格子放）。
-    //
-    // ⚠️ **只有文件容器里真有那一页才补**：用户把「文件」那个页签关掉
-    //    之后就不该凭空多出一个空格子。
+    // ① 缺哪边补哪边（终端是**活的** ⇒ 得有格子放）。
     let mut need = vec![SlotKind::Terminal];
-    // ⚠️ **阶段 149：只认「文件面板那一页」**——编辑器也是一页（它也在
-    //    notebook 里）⇒ 用 `page_ids()` 会把「编辑器在文件面板格子里」
-    //    误判成「文件容器里有页」⇒ 凭空多出一个空格子。
-    if !file_sub.page_ids_of_kind(panel::subtabs::PageKind::Files).is_empty() {
-        need.push(SlotKind::Files);
-    }
     let layout = ensure_kinds(layout, &need);
     // ② 每一格扮演什么角色。
     let roles = assign_roles(&layout);
-    // ③ **文件面板并进终端那一格**（原来同一格既有终端又有文件面板）。
-    //
-    // ⚠️ **页签 id 不变**（`insert_page` 沿用原 id）⇒ 上层按 id 记的
-    //    东西不会失配 ⇒ 文件面板还是认得出是它。
-    if roles.merge_files_into_terminal {
-        // ⚠️ **只取文件面板那一页**（阶段 149：编辑器也是一页 ⇒ 别取错）。
-        if let Some(fid) = file_sub
-            .page_ids_of_kind(panel::subtabs::PageKind::Files)
-            .first()
-            .copied()
-        {
-            if let Some(data) = file_sub.take_page(fid) {
-                term_sub.insert_page(data, None);
-            }
-        }
-    }
-    // ④ 按角色配容器。
+    // ③ 按角色配容器。
     let slots = layout.slots();
     let mut out = Vec::with_capacity(slots.len());
     for (i, kinds) in slots.iter().enumerate() {
         let c = match roles.roles[i] {
             LeafRole::Terminal => term_sub.clone(),
-            LeafRole::Files => file_sub.clone(),
             LeafRole::Placeholder => placeholder_container(kinds),
+            // ⚠️ **阶段 178**：`LeafRole::Files` **不再产生** —— 文件面板
+            //    已经搬去侧边栏了 ⇒ 老布局里的「文件」那一格在
+            //    `strip_files()` 里就被摘掉了 ⇒ 这里不该走到。
+            //    万一走到了（老布局没被剥干净），给提示页 ⇒ **绝不白屏**。
+            _ => placeholder_container(kinds),
         };
         out.push(c);
     }
@@ -356,7 +310,6 @@ fn placeholder_kind(k: crate::layout::persist::SlotKind) -> panel::subtabs::Page
     use crate::layout::persist::SlotKind;
     match k {
         SlotKind::Terminal => panel::subtabs::PageKind::Terminal,
-        SlotKind::Files => panel::subtabs::PageKind::Files,
         SlotKind::Db => panel::subtabs::PageKind::Db,
         SlotKind::Docker => panel::subtabs::PageKind::Docker,
         _ => panel::subtabs::PageKind::Other,
@@ -675,6 +628,11 @@ pub struct Tabs {
     /// 得先有那条 SSH 会话。用户在连接管理器里双击一个数据库连接时，
     /// 会话还没连上——连上之后再把工作台开出来。
     pending_db: RefCell<Option<(String, String)>>,
+    /// **侧边栏外壳**（阶段 178）：文件面板的新宿主。
+    ///
+    /// ⚠️ **弱引用**（AGENTS.md 引用环红线）：`Tabs` → `SidebarHost` →
+    ///   `Sidebar` → `Rc<Tabs>` ⇒ 抓强引用就是环 ⇒ 窗口永远释放不掉。
+    sidebar_host: RefCell<Option<std::rc::Weak<crate::sidebarhost::SidebarHost>>>,
     /// 自弱引用（阶段 63：统一关闭流程要 `'static` 的回调）。
     ///
     /// **为什么不能抓强引用**：关闭确认的回调是 `'static` 的闭包，抓强引用
@@ -723,6 +681,7 @@ impl Tabs {
                 broadcast: Cell::new(false),
                 pages_hook: RefCell::new(None),
                 pending_db: RefCell::new(None),
+                sidebar_host: RefCell::new(None),
                 me: me.clone(),
             }
         });
@@ -735,7 +694,23 @@ impl Tabs {
         // 标签栏不再放「+」：顶栏的全局主按钮就是"新建连接"，
         // 同屏只保留一个带文字的入口，标签栏保持干净。
 
-        TABS.with(|w| *w.borrow_mut() = Some(Rc::clone(&tabs)));
+        // 标签栏不再放「+」：顶栏的全局主按钮就是"新建连接"，
+    // 同屏只保留一个带文字的入口，标签栏保持干净。
+
+    // ⚠️ **阶段 178**：切连接标签 ⇒ 侧边栏的「文件」页**换人**
+    // （文件面板是每会话一个 ⇒ 当前连接变了，挂在侧边栏的那个也得换）。
+    //
+    // ⚠️ **抓弱引用**（引用环红线）：闭包是 `'static` 的 ⇒ 抓强引用
+    //   就成了 `Rc<Tabs> → 闭包 → Rc<Tabs>` 的环。
+    {
+        let tw = Rc::downgrade(&tabs);
+        tabs.notebook.connect_switch_page(move |_nb, _page, _num| {
+            let Some(t) = tw.upgrade() else { return };
+            t.sync_sidebar_files();
+        });
+    }
+
+    TABS.with(|w| *w.borrow_mut() = Some(Rc::clone(&tabs)));
         // 注册进全局表：连接管理器对话框要知道别的窗口里哪些连接是活的
         ALL_TABS.with(|v| v.borrow_mut().push(Rc::downgrade(&tabs)));
         tabs
@@ -744,6 +719,47 @@ impl Tabs {
     /// 注册"是否有业务标签"的监听（顶栏主按钮的显隐）。
     pub fn set_pages_hook<F: Fn(bool) + 'static>(&self, f: F) {
         *self.pages_hook.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// **把侧边栏交给 `Tabs`**（阶段 178）：文件面板的新宿主。
+    ///
+    /// ⚠️ **只存弱引用**（引用环红线）：`Tabs` → `SidebarHost` → `Sidebar`
+    ///   → `Rc<Tabs>` ⇒ 抓强引用就是环 ⇒ 窗口永远释放不掉。
+    pub fn set_sidebar_host(&self, host: &Rc<crate::sidebarhost::SidebarHost>) {
+        *self.sidebar_host.borrow_mut() = Some(Rc::downgrade(host));
+        self.sync_sidebar_files();
+    }
+
+    /// **把当前连接的文件面板挂到侧边栏**（阶段 178）。
+    ///
+    /// ⚠️ **为什么跟着"当前连接"走**：文件面板是**每会话一个**
+    ///   （`PanelState.root`，worker 绑在这条会话上）⇒ 侧边栏只有一格
+    ///   ⇒ 切连接时得**换人**（把上一条的面板摘下来、挂上这一条的）。
+    ///
+    /// ⚠️ **欢迎页没有文件面板** ⇒ 显示占位（「还没有连接」）。
+    pub fn sync_sidebar_files(&self) {
+        let Some(host) = self
+            .sidebar_host
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+        else {
+            return;
+        };
+        let Some(idx) = self.current_index() else {
+            // 欢迎页 / 一个连接都没开 ⇒ 没有文件面板 ⇒ 占位。
+            host.show_files(None);
+            return;
+        };
+        let st = {
+            let tabs = self.tabs.borrow();
+            let Some(t) = tabs.get(idx) else {
+                host.show_files(None);
+                return;
+            };
+            t.panel_st.clone()
+        };
+        host.show_files(Some(st.root.upcast_ref::<gtk::Widget>()));
     }
 
     fn notify_pages(&self) {
@@ -870,32 +886,31 @@ impl Tabs {
         //
         // 连接页控件 = **子标签区的外层容器**（notebook + 尾部的「+」按钮），
         // 不是裸的 notebook —— 「+」要落在子标签栏那一行的最右端。
-        // ---- 阶段 146/147：文件面板独立成格 ＋ 还原上次的布局 ----
+        // ---- 阶段 177/178：文件面板**搬去侧边栏** ＋ 还原上次的布局 ----
         //
-        // 文件面板那一页的内容就是文件面板自己的根控件。
-        let file_sub = panel::subtabs::SubTabs::new();
-        let file_pid = file_sub.add_page_icon_kind(
-            Some("folder-symbolic"),
-            tr("文件"),
-            panel::subtabs::PageKind::Files,
-            sp.st.root.clone().upcast(),
-            None,
-        );
-        sp.st.file_page_id.set(file_pid);
-        // ⚠️ **阶段 146b：容器留一份在 `PanelState` 里**——用户把「文件」
-        //    页签关掉之后那一格会收拢 ⇒ 容器就没人引用了 ⇒ 想「再显示文件
-        //    面板」时连容器都没了 ⇒ 留在这儿备用。
-        *sp.st.file_sub.borrow_mut() = Some(file_sub.clone());
+        // ⚠️ **阶段 177→178 的关键变化**：文件面板**不再**是格子树里的
+        //    一页 ⇒ 它住进**主窗口左栏的侧边栏**（「文件」页签）。
+        //
+        // ⚠️ **为什么不能"两边都留一份"**（计划里原以为可以做个过渡态）：
+        //    文件面板是**一个 widget**（`PanelState.root`）⇒ GTK4 **一个
+        //    widget 只能有一个父级** ⇒ 同时挂在格子树和侧边栏上 ⇒ GTK 直接
+        //    报断言（`gtk_box_append: assertion 'child->parent == NULL'`）。
+        //    ⇒ 必须**一并**从格子树摘出去。
+        //
         // ---- 阶段 147：按**上次存下来的布局**建树 ----
         //
-        // ⚠️ **没有存过 / 存坏了 ⇒ 用默认布局**（文件在左、终端在右）
+        // ⚠️ **没有存过 / 存坏了 ⇒ 用默认布局**（单格：终端）
         //    ⇒ **绝不白屏**。
         let saved = crate::layout::persist::load(&opts.session_key())
             .and_then(|j| crate::layout::persist::LayoutNode::from_json(&j));
-        let layout = saved.unwrap_or_else(default_layout);
-        // 给每一格配容器：终端格子用**主容器**，文件格子用**文件容器**，
-        // 其余的格子给一个**提示页**（不假装恢复了内容）。
-        let (layout, leaf_tabs) = plan_restore(&layout, sub.clone(), file_sub.clone());
+        // ⚠️ **老布局里可能有「文件」那一格**（阶段 146 存进去的）⇒
+        //    文件面板搬走之后那一格**没有内容可放** ⇒ 把它**摘掉**。
+        let layout = saved
+            .and_then(|l| crate::layout::persist::strip_files(&l))
+            .unwrap_or_else(default_layout);
+        // 给每一格配容器：终端格子用**主容器**，其余的格子给一个**提示页**
+        // （不假装恢复了内容）。
+        let (layout, leaf_tabs) = plan_restore(&layout, sub.clone());
         let cell_tree = match crate::layout::tree::CellTree::from_layout(&layout, leaf_tabs.clone())
         {
             Some(t) => t,
@@ -950,63 +965,22 @@ impl Tabs {
             for id in cell_tree.ids() {
                 let Some(c) = cell_tree.cell(id) else { continue };
                 install_cell_new_hook(&c.tabs, t.clone(), pg3.clone(), &st2);
-                watch_file_host(&c.tabs, &st2);
             }
             // 以后**新拆出来**的格子也一样要装（钩子是闭包，搬不过去）。
             let t3 = t.clone();
             cell_tree.set_new_cell_hook(move |_id, cell_sub| {
                 install_cell_new_hook(&cell_sub, t3.clone(), pg3.clone(), &st2);
-                // 新格子也可能成为文件面板的新家 ⇒ 一样要盯着。
-                watch_file_host(&cell_sub, &st2);
             });
         }
-        // ⚠️ **宿主**：文件面板现在住在**某个格子**的 notebook 里。
-        //    （它可能被拖到别的格子 ⇒ `moved_hook` 会跟着换。）
-        {
-            let host = cell_tree
-                .cell_of_page(file_pid)
-                .and_then(|id| cell_tree.cell(id))
-                .map(|c| c.tabs.nb.clone().upcast::<gtk::Widget>());
-            if let Some(h) = host {
-                *sp.st.file_host.borrow_mut() = Some(h);
-            }
-        }
-        // 宽度：文件格子的宽度 = **树根分割条**的位置。
+        // ⚠️ **阶段 178：文件面板不在格子树里了** ⇒ 下面三块全删：
+        //   ① 「宿主 = 某个格子的 notebook」——文件面板住在**侧边栏**；
+        //   ② 「文件格子的宽度 = 根分割条位置」——格子树里**没有文件格**了
+        //      ⇒ 宽度归**主窗口左栏**管（阶段 180 把它并进 `sidebar_width`）；
+        //   ③ 「拖分割条 ⇒ 记住 `file_w`」——同上。
         //
-        // ⚠️ **阶段 150：这一步现在由「重画完了」的钩子统一做**——
-        //    拖放 / 拆分之后格子树会**重画** ⇒ 所有 Paned 都换了新的 ⇒
-        //    根分割条的位置掉回 GTK 默认值（**第一个子控件的自然宽度**）
-        //    ⇒ 文件面板一下子变得很宽（用户 2026-11-22 报的）。
-        //    ⇒ 宽度复位 ＋ **宽度上限的监听重挂**都得跟着重画走。
-        {
-            let stw = Rc::downgrade(&sp.st);
-            let treew = Rc::downgrade(&cell_tree);
-            cell_tree.set_rebuilt_hook(move || {
-                let (Some(st), Some(tree)) = (stw.upgrade(), treew.upgrade()) else {
-                    return;
-                };
-                let Some(p) = tree.root_paned() else { return };
-                // 宽度按**记忆值**复位。
-                p.set_position(st.file_w.get());
-                // 文件列表的宽度上限：终端才是主角（最多 38% 或 520px）。
-                // ⚠️ **必须每次重画都重挂**：监听挂在 Paned 上 ⇒ Paned 换了
-                //    就没了 ⇒ 不重挂 ⇒ 文件面板失去上限 ⇒ 变得很宽。
-                crate::settings::clamp_paned_start(
-                    &p,
-                    crate::settings::SFTP_PANE_MAX_FRAC,
-                    crate::settings::SFTP_PANE_MAX_PX,
-                );
-            });
-        }
-        // 拖分割条 ⇒ 记住宽度（**弱引用**：AGENTS.md 引用环红线）。
-        {
-            let stw = Rc::downgrade(&sp.st);
-            cell_tree.set_root_pos_hook(move |pos| {
-                if let Some(st) = stw.upgrade() {
-                    st.file_w.set(pos);
-                }
-            });
-        }
+        // ⚠️ **重画钩子还要留着**（阶段 145/146）：格子树重画时布局要复位。
+        //    但**宽度复位**的那部分随文件格一起退场 ⇒ 钩子只留"重画"本身。
+
         // ⚠️ **初次也要复位一次**（钩子刚装上，之前的建树没走过它）。
         cell_tree.apply_rebuilt();
         page.set_hexpand(true);
@@ -1144,6 +1118,10 @@ impl Tabs {
         }
 
         self.notebook.next_page();
+        // ⚠️ **阶段 178**：侧边栏的「文件」页挂上**这条**连接的文件面板。
+        // （`next_page()` 也会触发 `switch-page` 钩子 ⇒ 那里也会同步一次；
+        //   这里再显式同步一次 ⇒ 不依赖钩子的触发时机。）
+        self.sync_sidebar_files();
         tp.terminal().grab_focus();
         // 广播开着时新开的终端也要能收/发按键
         self.sync_broadcast();
@@ -1492,78 +1470,40 @@ impl Tabs {
         tree.close_cell(tree.current_cell());
     }
 
-    /// **把文件面板接回来**（阶段 146b：用户 2026-11-22 提的）。
+    /// **把文件面板接回来**（阶段 178：改成「切到侧边栏的文件页」）。
     ///
-    /// ⚠️ **为什么需要**：用户可以**手动关掉「文件」那个页签** ⇒ 关掉之后
-    ///    那一格空了 ⇒ 收拢 ⇒ 文件面板**就没了** ⇒ **没有再打开的入口**
-    ///    ⇒ 只能重连一次会话才能看到。
-    ///    ⇒ 「视图」菜单里加一项「显示文件面板」。
+    /// ⚠️ **语义变了**：文件面板不再住在格子树里 ⇒ 它**一直都在**
+    ///   （侧边栏的「文件」页签）⇒ 这一项现在做的是
+    ///   **「把侧边栏切到『文件』页」**（用户要去那儿才看得见文件）。
     ///
-    /// 返回是否真接上了。
-    pub fn show_file_panel(&self, page: &gtk::Widget) -> bool {
-        let (tree, st) = {
-            let tabs = self.tabs.borrow();
-            let Some(t) = tabs.iter().find(|t| t.page == *page) else {
-                return false;
-            };
-            (t.cell_tree.clone(), t.panel_st.clone())
-        };
-        // ① 文件容器（格子收拢之后没人引用了 ⇒ 存在 `PanelState` 里备用）。
-        let file_sub = {
-            let mut slot = st.file_sub.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(panel::subtabs::SubTabs::new());
-            }
-            slot.clone().expect("刚放进去的")
-        };
-        // ② 那一页还在吗？（被关掉了就要**重建**：文件面板本体还在
-        //    `PanelState.root` 里 ⇒ 重新挂一页就行）。
-        if !file_sub.has(st.file_page_id.get()) {
-            let pid = file_sub.add_page_icon_kind(
-                Some("folder-symbolic"),
-                tr("文件"),
-                panel::subtabs::PageKind::Files,
-                st.root.clone().upcast(),
-                None,
-            );
-            st.file_page_id.set(pid);
-        }
-        // ③ 容器已经在树里 ⇒ 面板本来就在界面上 ⇒ 不用动。
-        if tree.cell_of_container(&file_sub).is_some() {
-            return true;
-        }
-        // ④ 接回来：**自己一格**（放在当前格子左边 ⇒ 与默认布局一致）。
-        let cur = tree.current_cell();
-        let Some(id) = tree.attach_cell(file_sub.clone(), cur, crate::layout::dnd::SplitZone::Left)
+    /// 返回是否真切过去了。
+    pub fn show_file_panel(&self, _page: &gtk::Widget) -> bool {
+        let Some(host) = self
+            .sidebar_host
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade())
         else {
             return false;
         };
-        // ⑤ 宿主 = 那个新格子的 notebook（那一页本来就在里面 ⇒ 搬家钩子
-        //    不会叫 ⇒ 这里自己设）。
-        if let Some(c) = tree.cell(id) {
-            *st.file_host.borrow_mut() = Some(c.tabs.nb.clone().upcast());
-        }
+        host.switch_to(crate::sidebarhost::PAGE_FILES);
         true
     }
 
-    /// 文件面板现在**看不见**吗（阶段 146b：菜单项据此置灰）。
-    fn file_panel_hidden_for(&self, page: &gtk::Widget) -> bool {
-        let (tree, st) = {
-            let tabs = self.tabs.borrow();
-            let Some(t) = tabs.iter().find(|t| t.page == *page) else {
-                return false;
-            };
-            (t.cell_tree.clone(), t.panel_st.clone())
-        };
-        let Some(file_sub) = st.file_sub.borrow().clone() else {
+    /// 侧边栏现在**没显示**文件面板吗（菜单项据此置灰）。
+    ///
+    /// ⚠️ **阶段 178 改了语义**：文件面板一直都在侧边栏里 ⇒
+    ///   「看不见」= 侧边栏正显示着**「连接」**页签。
+    pub fn sidebar_files_hidden(&self) -> bool {
+        let Some(host) = self
+            .sidebar_host
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+        else {
             return false;
         };
-        // 容器不在树里 ⇒ 整个文件面板不在界面上。
-        if tree.cell_of_container(&file_sub).is_none() {
-            return true;
-        }
-        // 容器在，但那一页被关掉了 ⇒ 也不在。
-        !file_sub.has(st.file_page_id.get())
+        host.current_page() != crate::sidebarhost::PAGE_FILES
     }
 
     /// 在**某个标签**里新开一个终端页签，并让它 `cd` 到指定目录。
@@ -2857,15 +2797,16 @@ pub fn show_file_panel(page: &gtk::Widget) {
     }
 }
 
-/// 文件面板现在**看不见**吗（阶段 146b：菜单项据此置灰）。
+/// 文件面板现在**看不见**吗（菜单项据此置灰）。
+///
+/// ⚠️ **阶段 178 改了语义**：文件面板不再住在格子树里 ⇒ 它**一直都在**
+///   （侧边栏的「文件」页签）⇒ 「看不见」现在指的是**侧边栏正显示着
+///   「连接」页签**（用户要去那儿才看得见文件）。
 pub fn file_panel_hidden() -> bool {
     let Some(t) = TABS.with(|w| w.borrow().clone()) else {
         return false;
     };
-    let Some(page) = t.current_page_widget() else {
-        return false;
-    };
-    t.file_panel_hidden_for(&page)
+    t.sidebar_files_hidden()
 }
 
 /// 从指定面板分（右键菜单：右键哪块分哪块）。
