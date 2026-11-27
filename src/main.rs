@@ -166,8 +166,13 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
     paned.set_start_child(Some(&sb_wrap));
     paned.set_end_child(Some(&tabs.notebook));
     paned.set_position(settings::sidebar_width());
-    // 会话列表的宽度上限：给终端留出大部分窗口
-    settings::clamp_paned_start(&paned, 0.28, 320);
+    // ⚠️ **阶段 180**：侧边栏现在装**连接 ＋ 文件** ⇒ 上限放宽
+    //   （38% → 45%、绝对上限 520px）⇒ 1200 宽的窗口里终端仍有 ≈680px。
+    settings::clamp_paned_start(
+        &paned,
+        settings::SIDEBAR_MAX_FRAC,
+        settings::SIDEBAR_MAX_PX,
+    );
     win.set_child(Some(&paned));
 
     // 侧边栏显隐开关（顶栏按钮 + Ctrl+Shift+B；状态持久化）
@@ -221,6 +226,10 @@ fn build_main_window(app: &gtk::Application) -> (Rc<tabs::Tabs>, gtk::Applicatio
             //   也得换语言 ⇒ 不能只换里面的侧栏。
             let host_new = sidebarhost::SidebarHost::new(&sb_new);
             sb_wrap2.append(&host_new.root);
+            // ⚠️ **阶段 180**：外壳重建 ⇒ 旧的「文件」页**连同里面的文件面板
+            //   一起没了** ⇒ 得把**新外壳**交给 `Tabs` 并让它**重新挂一次**
+            //   （文件面板本体在 `PanelState.root` 里 ⇒ 没被销毁，只是换了家）。
+            tabs2.set_sidebar_host(&host_new);
             // 顶栏 + 菜单栏（菜单文案也是新的语言）
             let title = gtk::Label::new(Some(APP_TITLE));
             title.add_css_class("pp-app-title");

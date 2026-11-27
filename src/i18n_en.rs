@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2236] = [
+pub static EN: [(&str, &str); 2237] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -385,6 +385,7 @@ pub static EN: [(&str, &str); 2236] = [
     ("例程", "Routine"),
     ("侧栏", "Sidebar"),
     ("侧栏宽度", "Sidebar width"),
+    ("侧边栏（连接 ＋ 文件）那一列的宽度", "Width of the sidebar column (connections + files)"),
     ("保存", "Save"),
     ("保存修改：把字段表的改动写进库", "Save changes: write the field table edits into the database"),
     ("保存修改：提交事务（任何一条失败就整体回滚）", "Save changes: commit the transaction (if any statement fails, everything is rolled back)"),
@@ -1983,7 +1984,7 @@ pub static EN: [(&str, &str); 2236] = [
     ("还没有快速命令", "No quick commands yet"),
     ("还没有数据库连接", "No database connection yet"),
     ("还没有结果", "There is no result yet"),
-    ("还没有连接", "No connections yet"),
+    ("还没有连接", "No connection yet"),
     ("还没有连接记录 —— 从左侧建一个连接", "There are no connection records yet — create a connection on the left"),
     ("还没有选中数据库连接：先在会话树 / 连接管理器里加一个（右键会话树 →「新建数据库连接…」）", "No database connection is selected yet: add one in the session tree / connection manager (right-click the session tree → \"New database connection…\")"),
     ("还没有通知", "No notifications yet"),

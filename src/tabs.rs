@@ -856,11 +856,8 @@ impl Tabs {
         term_col.set_start_child(Some(term_wrap.upcast_ref::<gtk::Widget>()));
         term_col.set_hexpand(true);
         term_col.set_vexpand(true);
-        // 面板宽度：用上次会话记忆（默认 340：280 时工具栏 + 路径框挤在一起，
-        // 路径永远只显示后半截）
-        let pos = crate::settings::sftp_pane_pos();
-        let init_w = if pos > 120 { pos } else { 340 };
-        sp.st.file_w.set(init_w);
+        // ⚠️ **阶段 178**：文件面板的宽度**归侧边栏管**了（它在侧边栏的
+        //    「文件」页里）⇒ 这里不再有「文件格宽度」要复位。
         // ⚠️ **阶段 151：编辑区不再住进终端列**（编辑器恒为格子里的页签 ⇒
         //    「停靠区」没人用 ⇒ 白占终端列的下半 ⇒ 用户 2026-11-22 问的
         //    「中间那一块是什么」就是这个）。
@@ -1787,12 +1784,8 @@ impl Tabs {
             &tabs[idx].cell_tree.snapshot().to_json(),
         );
         let tab = tabs.remove(idx);
-        // 记住用户拖拽的面板宽度
-        //
-        // ⚠️ 阶段 97：取 `st.file_w`（跨宿主同步的那个值），**不是**
-        // `tab.paned.position()`——文件面板会跟着当前终端页签搬家，
-        // `tab.paned` 未必是它现在的宿主（position 可能是 0）。
-        crate::settings::set_sftp_pane_pos(tab.panel_st.file_w.get());
+        // ⚠️ **阶段 178**：**不再**记「文件面板宽度」——文件面板住在
+        //    **侧边栏**里 ⇒ 宽度由**侧边栏**那份记忆管（`sidebar_width`）。
         // 记住两侧文件列表的列宽（隐藏的列不记）
         for remote in [true, false] {
             let pane = tab.panel_st.pane(remote);

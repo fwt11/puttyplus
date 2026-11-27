@@ -14,7 +14,8 @@
 //! 2. 切到 DB 页 ⇒ **子标签栏位置一模一样**（核心：不再跳位），
 //!    DB 页占满整个连接页，文件面板此刻不可见（它在终端页里），宽度没丢；
 //! 3. 切回终端页 ⇒ 文件面板又回来了；
-//! 4. **搬家**：用「+」新建一个终端页签 ⇒ 切过去 ⇒ 文件面板跟着过去；
+//! 4. **不搬家**：用「+」新建一个终端页签 ⇒ 切过去 ⇒ 文件面板**原地不动**
+//!    （阶段 178：它在侧边栏里，跟终端页签彻底无关）；
 //!    切回来 ⇒ 又跟着回来（宽度始终一致）；
 //! 5. **寄存/恢复**：关掉主终端页签 ⇒ 文件面板没被销毁；
 //!    点「重新连接终端」重建 ⇒ 文件面板回到新终端页旁边；
@@ -38,6 +39,16 @@ impl Drop for IniGuard {
 }
 
 /// 两个 Paned 是不是同一个（GTK 控件按 GObject 指针比）。
+/// 两个「父级」是不是同一个（阶段 178：文件面板的父级是**侧边栏的槽位**，
+/// 不再是 Paned ⇒ 比的是 `Option<&Widget>`）。
+fn same_opt(a: &Option<gtk::Widget>, b: &Option<gtk::Widget>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => *x == *y,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn same(a: &gtk::Paned, b: &gtk::Paned) -> bool {
     // ⚠️ 用 `==`（gtk::Widget 的 PartialEq 比的是 GObject 指针），
     // 别用 `std::ptr::eq` 比 upcast 出来的引用——那比的是引用本身的地址。
@@ -88,7 +99,18 @@ fn main() {
     let win = gtk::Window::new();
     win.set_title(Some("db wide smoke"));
     win.set_default_size(1200, 800);
-    win.set_child(Some(&tabs.notebook));
+    // ⚠️ **阶段 178**：文件面板住在**侧边栏**里 ⇒ 窗口里必须有侧边栏。
+    let sb = puttyplus::sidebar::Sidebar::new(std::rc::Rc::clone(&tabs));
+    sb.setup();
+    let host = puttyplus::sidebarhost::SidebarHost::new(&sb);
+    tabs.set_sidebar_host(&host);
+    host.switch_to(puttyplus::sidebarhost::PAGE_FILES);
+    let outer = gtk::Paned::new(gtk::Orientation::Horizontal);
+    outer.set_start_child(Some(&host.root));
+    outer.set_end_child(Some(&tabs.notebook));
+    // ⚠️ 主窗口那一栏的宽度 = 侧边栏宽度（真实界面里也是这个值）。
+    outer.set_position(puttyplus::settings::sidebar_width());
+    win.set_child(Some(&outer));
     win.present();
     pump(600);
 
@@ -96,23 +118,23 @@ fn main() {
     let sub = st.sub_tabs().expect("应有子标签容器");
     let page = tabs.current_page_widget().expect("应有当前页");
 
-    // ---- 1) 终端页：文件面板可见、占着宽度；记下子标签栏的位置 ----
+    // ---- 1) 终端页：记下子标签栏的位置 ----
     assert_eq!(sub.current_kind(), PageKind::Terminal, "第一页应当是终端");
-    // ⚠️ 用 `is_mapped()`（"真的在屏幕上"）而不是 `is_visible()`：
-    // GtkNotebook 内部是个 GtkStack，切页时**不**改子页的 visible 标志，
-    // 只是不把它映射到屏幕上 ⇒ `is_visible()` 仍然是 true。
-    assert!(st.root.is_mapped(), "终端页时文件面板应当显示在屏幕上");
+    // ⚠️ **阶段 178**：文件面板**不在连接页里**了（它在**侧边栏**里）⇒
+    //   用 `is_mapped()` 验它「真的在屏幕上」时，得先切到侧边栏的文件页。
+    assert!(st.root.is_mapped(), "文件面板应当显示在屏幕上（它在侧边栏里）");
     let sftp_w_term = st.root.width();
     assert!(
         sftp_w_term > 100,
-        "终端页时文件面板宽度只有 {sftp_w_term}px（它应当占着位置）"
+        "文件面板宽度只有 {sftp_w_term}px（它应当占着位置）"
     );
     // ⚠️ **核心量的位置**：子标签栏（notebook）在连接页里的左边界。
     // 以前连接页是「文件面板｜子标签区」的 Paned ⇒ 切到数据库页文件面板
     // 一藏，子标签栏的左边界就从 340 跳到 0 ⇒ 页签头整体位移。
+    // ⇒ 阶段 178 之后文件面板**根本不在连接页里** ⇒ 跳位**不可能发生**。
     let x_term = sub.nb.allocation().x();
     let w_term = sub.nb.allocation().width();
-    println!("[1] 终端页：文件面板 {sftp_w_term}px，子标签栏 x={x_term} 宽 {w_term}px ✓");
+    println!("[1] 终端页：文件面板 {sftp_w_term}px（侧边栏里），子标签栏 x={x_term} 宽 {w_term}px ✓");
 
     // ---- 2) 打开 DB 页 ⇒ 子标签栏**不许动** ----
     puttyplus::panel::on_open_db_page(&st);
@@ -142,22 +164,11 @@ fn main() {
         db_page_w * 100 >= page_w * 90,
         "DB 页没占满连接页：{db_page_w} vs {page_w}（文件面板还在跟它抢宽度？）"
     );
-    // 文件面板此刻不在屏幕上（它在终端子页里，而终端子页没显示）
+    // ⚠️ **阶段 178**：文件面板在**侧边栏**里 ⇒ 切到 DB 页**不影响**它
+    //   （它压根不在连接页里）⇒ 它照样显示着。
     assert!(
-        !st.root.is_mapped(),
-        "DB 页激活时文件面板不该露出来（它在终端页里）"
-    );
-    // 宽度没丢：终端子页的 Paned 位置还是 340
-    let term_paned = st
-        .root
-        .parent()
-        .and_downcast::<gtk::Paned>()
-        .expect("文件面板的父容器应当是终端子页的 Paned");
-    assert_eq!(
-        term_paned.position(),
-        340,
-        "终端子页里文件面板的宽度变了：{}",
-        term_paned.position()
+        st.root.is_mapped(),
+        "文件面板在侧边栏里 ⇒ 切到 DB 页也不该被藏起来"
     );
     println!("[2] DB 页：子标签栏 x 仍是 {x_db}（不跳位 ✓），DB 页 {db_page_w}px 占满连接页 ✓");
 
@@ -174,61 +185,39 @@ fn main() {
     );
     sub.switch_to(primary_term_id);
     pump(400);
-    assert!(
-        st.root.is_mapped(),
-        "切回终端页后文件面板必须回来（不能把用户永久关在门外）"
-    );
-    assert!(st.root.width() > 100, "切回终端页后文件面板应当占着宽度");
+    assert!(st.root.width() > 100, "文件面板应当占着宽度");
     assert_eq!(
         sub.nb.allocation().x(),
         x_term,
         "切回终端页后子标签栏的位置又变了"
     );
-    println!("[3] 切回终端页：文件面板又可见了（{}px），子标签栏 x 仍是 {x_term} ✓", st.root.width());
+    println!("[3] 切回终端页：文件面板还在（{}px），子标签栏 x 仍是 {x_term} ✓", st.root.width());
 
-    // ---- 4) 搬家：文件面板跟着当前终端页签走 ----
+    // ---- 4) 新建终端页签 ⇒ **文件面板不受影响**（它在侧边栏里）----
+    //
+    // ⚠️ **阶段 178 改了这件事**：以前文件面板**跟着当前终端页签搬家**
+    //   （在终端子页的 Paned 左半）⇒ 切页签它就搬 ⇒ 阶段 97 的「子标签栏
+    //   跳位」就是这么来的。
+    //   ⇒ 现在它在**侧边栏**里 ⇒ **跟终端页签彻底无关** ⇒ 切页签时它
+    //   **原地不动**（这才是"不跳位"的根治）。
     {
-        let old_host = st
-            .root
-            .parent()
-            .and_downcast::<gtk::Paned>()
-            .expect("文件面板现在的宿主");
+        let before = st.root.parent();
         // 「+」→ 新建终端 ⇒ 会切到那个新页签
         tabs.new_term_page(&page);
         pump(500);
-        let new_host = st
-            .root
-            .parent()
-            .and_downcast::<gtk::Paned>()
-            .expect("文件面板应当还挂在某个 Paned 里");
         assert!(
-            !same(&old_host, &new_host),
-            "切到新终端页签后文件面板没跟过去（还是待在旧页签里）"
+            same_opt(&before, &st.root.parent()),
+            "切到新终端页签后文件面板**不该搬家**（它在侧边栏里）"
         );
-        assert_eq!(
-            new_host.position(),
-            340,
-            "搬家之后宽度应当按记忆值复位：{}",
-            new_host.position()
-        );
-        assert!(
-            old_host.start_child().is_none(),
-            "旧页签的左格应当已经空了（文件面板搬走了）"
-        );
-        // 切回第一个终端页签 ⇒ 文件面板又搬回来
+        assert!(st.root.is_mapped(), "切页签后文件面板应当还在屏幕上");
+        // 切回第一个终端页签 ⇒ 文件面板依然原地不动
         sub.switch_to(primary_term_id);
         pump(400);
-        let back = st
-            .root
-            .parent()
-            .and_downcast::<gtk::Paned>()
-            .expect("文件面板应当还挂在某个 Paned 里");
         assert!(
-            same(&old_host, &back),
-            "切回原来的终端页签后文件面板没搬回来"
+            same_opt(&before, &st.root.parent()),
+            "切回原来的终端页签后文件面板也不该搬家"
         );
-        assert_eq!(back.position(), 340, "搬回来以后宽度变了");
-        println!("[4] 搬家：文件面板跟着终端页签走（宽度始终 340px）✓");
+        println!("[4] 切终端页签：文件面板**原地不动**（它在侧边栏里）✓");
     }
 
     // ---- 5) 关掉主终端页签 ⇒ 文件面板不丢；重建 ⇒ 搬回来 ----
@@ -243,25 +232,18 @@ fn main() {
             st.root.parent().is_some(),
             "文件面板被销毁了（关个终端页签不该把文件面板弄没）"
         );
-        // 点「重新连接终端」⇒ 重建终端页 ⇒ 文件面板回到新页旁边
+        // 点「重新连接终端」⇒ 重建终端页 ⇒ 文件面板**在侧边栏里，不受影响**
         tabs.reconnect_term_page(&page);
         pump(800);
-        let host = st
-            .root
-            .parent()
-            .and_downcast::<gtk::Paned>()
-            .expect("重建后文件面板应当重新挂进终端页的 Paned");
-        assert_eq!(
-            host.position(),
-            340,
-            "重建后文件面板宽度应当还是记忆值：{}",
-            host.position()
-        );
         assert!(
             st.root.is_mapped(),
-            "重建后文件面板应当重新露出来"
+            "重建后文件面板应当还在侧边栏里显示着"
         );
-        println!("[5] 关掉终端页签 → 文件面板没丢；重建终端 → 又回来了 ✓");
+        assert!(
+            st.root.parent().is_some(),
+            "重建后文件面板不该被销毁"
+        );
+        println!("[5] 关掉终端页签 → 文件面板没丢；重建终端 → 还在侧边栏里 ✓");
     }
 
     // ---- 6) 对象树可折叠 ----

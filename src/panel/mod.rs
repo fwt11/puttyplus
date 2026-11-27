@@ -78,14 +78,6 @@ pub struct PanelState {
     /// 会话期保存的密码（来自 -pw 或用户输入），释放时抹零
     pub pw: RefCell<Option<Zeroizing<String>>>,
     pub conn_ok: Cell<bool>,
-    /// **文件面板的宽度**（阶段 97）。
-    ///
-    /// 文件面板是**会话级的一个 widget**，但它的**宿主 Paned 跟着当前终端
-    /// 页签走**（切到别的终端页签就把它搬过去）⇒ 宽度得**跨宿主同步**，
-    /// 存在这儿，搬家时按它复位。
-    ///
-    /// 持久化仍走 `settings::sftp_pane_pos`（关连接标签时写盘）。
-    pub file_w: Cell<i32>,
     /// **会话是不是已经死了**（worker 与 UI 共享，阶段 99）。
     ///
     /// ⚠️ **为什么共享**：SFTP 失败有两种——「连接断了」（**能自愈**：重连
@@ -421,7 +413,6 @@ impl SftpPanel {
         let st = Rc::new(PanelState {
             pw: RefCell::new(opts.password.clone()),
             conn_ok: Cell::new(false),
-            file_w: Cell::new(340),
             conn_dead: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_retry: RefCell::new(None),
             retry_ops: RefCell::new(HashMap::new()),

@@ -208,12 +208,6 @@ pub const SETTINGS: &[SettingItem] = &[
         from: "拖侧栏边缘",
     },
     SettingItem {
-        id: "sftp_pane_pos",
-        label: "文件面板宽度",
-        page: Page::Advanced,
-        from: "拖终端页中间的分割条",
-    },
-    SettingItem {
         id: "columns",
         label: "文件列表列显示",
         page: Page::Advanced,
@@ -924,31 +918,21 @@ fn shortcuts_page(root: &gtk::Box) {
 /// 高级页：布局尺寸 / 列显示 / 镜像规则。
 fn advanced_page(root: &gtk::Box) {
     /* ---- 侧栏宽度 ---- */
+    //
+    // ⚠️ **阶段 178/180：这一栏现在是「连接 ＋ 文件」的合栏**
+    //   （文件面板搬进侧边栏的「文件」页签了）⇒ 文案与范围一起改：
+    //   范围收到 **420**（`set_sidebar_width` 的钳制），
+    //   提示改成「侧边栏（连接 ＋ 文件）那一列的宽度」。
     {
         let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         bbox.append(&gtk::Label::new(Some(tr("侧栏宽度"))));
-        let spin = gtk::SpinButton::with_range(160.0, 520.0, 10.0);
+        let spin = gtk::SpinButton::with_range(160.0, 420.0, 10.0);
         spin.set_value(f64::from(crate::settings::sidebar_width()));
-        spin.set_tooltip_text(Some(tr("会话列表那一列的宽度")));
+        spin.set_tooltip_text(Some(tr("侧边栏（连接 ＋ 文件）那一列的宽度")));
         bbox.append(&spin);
         root.append(&bbox);
         spin.connect_value_changed(|s| {
             crate::settings::set_sidebar_width(s.value() as i32);
-        });
-    }
-
-    /* ---- 文件面板宽度 ---- */
-    {
-        let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        bbox.append(&gtk::Label::new(Some(tr("文件面板宽度"))));
-        let spin = gtk::SpinButton::with_range(180.0, 900.0, 10.0);
-        let cur = crate::settings::sftp_pane_pos();
-        spin.set_value(if cur > 120 { f64::from(cur) } else { 340.0 });
-        spin.set_tooltip_text(Some(tr("终端页左边文件面板的宽度")));
-        bbox.append(&spin);
-        root.append(&bbox);
-        spin.connect_value_changed(|s| {
-            crate::settings::set_sftp_pane_pos(s.value() as i32);
         });
     }
 
