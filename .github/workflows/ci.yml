@@ -327,13 +327,17 @@ jobs:
           #     动画帧间隔有下限 ＋ Docker 自动刷新间隔 ≥ 5 秒。
           #     ⚠️ 它**读源码里的真常量**（`XFER_ANIM_MS` /
           #     `AUTO_REFRESH_SECS`）⇒ 改坏就会红（不是自己跟自己比）。
+          #   - `sidebar_tabs_smoke`：**侧边栏外壳**（阶段 177–180）⇒ 页签
+          #     恰好两个（连接 / 文件）＋ 连接树还在 ＋ **文件面板挂在侧边栏**
+          #     ＋ 切连接标签**跟着换人** ＋ 折叠后整栏收起、展开回上次页签。
+          #     ⚠️ 它**不连服务器**（面板只挂不连）⇒ CI 上跑得动。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
                      docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke \
                      localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke \
                      editor_home_smoke ui_baseline_smoke \
                      welcome_semantics_smoke er_state_smoke db_workspace_empty_smoke \
-                     queue_group_smoke perf_regress_smoke; do
+                     queue_group_smoke perf_regress_smoke sidebar_tabs_smoke; do
             echo "::group::$ex"
             # ⚠️⚠️ **先编，再直接跑二进制**（别用 `cargo run`）：2026-11-26 实测
             #    `cargo run` 会把**几百行编译警告**也混进同一个日志 ⇒ 失败时
