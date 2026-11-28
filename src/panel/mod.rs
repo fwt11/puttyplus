@@ -17,6 +17,8 @@ pub mod erview;
 pub mod dbtree;
 pub mod dbui;
 pub mod dockerui;
+/// **「上传内容」选择窗**（阶段 192：自绘的「选文件或目录」窗口）。
+pub mod dockerupload;
 pub mod closeguard;
 pub mod clipfiles;
 pub mod dialogs;

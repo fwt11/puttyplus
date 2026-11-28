@@ -1004,6 +1004,16 @@ pub struct DockerUi {
     file_view_window: RefCell<Option<gtk::Window>>,
     /// 「查看文件」窗里的**正文控件**（同上，量高度用）。
     file_view_text: RefCell<Option<gtk::TextView>>,
+    /// **「上传内容」选择窗**（阶段 192：自绘的「选文件或目录」窗口）。
+    ///
+    /// ⚠️ **为什么自己画**：GTK4 原生的文件选择器做不到「一个对话框里
+    ///   **既选文件又选目录**」（`Open` 只能选文件、`SelectFolder` 只能选
+    ///   目录）⇒ 用户 2026-11-28 提的「选文件或目录，确定，然后上传」只能
+    ///   自己画（见 [`crate::panel::dockerupload`]）。
+    ///
+    /// ⚠️ **为什么存着**：这扇窗**复用**（每次点「上传」都新建 ⇒ 窗口会堆
+    ///   一排）；冒烟也要靠它断言「窗口里列出了哪些条目」。
+    upload_pick: RefCell<Option<crate::panel::dockerupload::Picker>>,
     /// 详情弹窗里的**「关闭」按钮**（阶段 156：容器详情 / 项目详情各一个）。
     ///
     /// ⚠️ **为什么内容里必须有它**（用户 2026-11-23 报的「弹出对话框没法
@@ -3664,7 +3674,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     // ⚠️⚠️ **阶段 191：工具条只留三颗**（用户 2026-11-28：「这个按钮不需要
     //   这么多，**刷新，上传，下载**就够了」）：
     //   - 刷新 ⇒ 重新读一遍这个目录；
-    //   - 上传 ⇒ 把本地文件传上去；
+    //   - 上传 ⇒ 把本地**文件或目录**传上去（阶段 192：一颗按钮，自绘的
+    //     「上传内容」窗口里勾选，见 `panel::dockerupload`）；
     //   - 下载 ⇒ 把容器里的文件取下来。
     //   ⇒ **去掉的两颗**：
     //   - 「查看内容」⇒ **双击那一行照样能看**（`connect_row_activated` ⇒
@@ -3672,7 +3683,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     //   - 「上传整个目录」⇒ 与**主文件面板同一口径**（那边也只有一颗
     //     「上传」）⇒ 容器这边也只留一颗。
     let f_refresh = icon_btn("view-refresh-symbolic", tr("重新读取这个目录"));
-    let f_upload = icon_btn("send-to-symbolic", tr("把本地文件上传到容器当前目录"));
+    let f_upload = icon_btn("send-to-symbolic", tr("把本地的文件或目录上传到容器当前目录"));
     let f_download = icon_btn("folder-download-symbolic", tr("把容器里的文件下载到本地"));
 
     let f_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
@@ -3955,6 +3966,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         files_window: RefCell::new(None),
         file_view_window: RefCell::new(None),
         file_view_text: RefCell::new(None),
+        upload_pick: RefCell::new(None),
         // ⚠️ **阶段 191：内容里没有「关闭」按钮了**（用窗口自己的 X）⇒
         //   这张表永远是空的（留着是为了让冒烟能钉住"别再加回来"）。
         detail_close_btns: RefCell::new(Vec::new()),
@@ -4844,8 +4856,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                 files_goto(&st, &u, &container, &p);
             });
         }
-        // **「上传文件…」/「上传目录…」**
-        // ⚠️ **阶段 191：只剩「上传文件」这一种**（见上面的工具条说明）。
+        // **「上传…」**（阶段 192：自绘的「选文件或目录」窗口）
+        //
+        // ⚠️ 用户 2026-11-28：「**上传这个目录和上传文件不能用同一个按钮吗？
+        //   选择文件或目录，确定，然后上传？**」
+        // ⇒ 一颗按钮 ⇒ 弹出自绘的窗口（文件与目录都列出来让人勾选）
+        //   ⇒ 详见 `panel::dockerupload` 的说明（GTK 原生选择器做不到）。
         {
             let btn = f_upload;
             let stw = Rc::downgrade(st);
@@ -4863,62 +4879,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     );
                     return;
                 }
-                let top = host_window(&u, &st);
-                // ⚠️ **阶段 191：只剩「上传文件」**（工具条上三颗：刷新/上传/下载）
-                //   ⇒ 选择器固定成「选文件」（以前还有一颗「上传整个目录」）。
-                let mut b = gtk::FileChooserNative::builder()
-                    .modal(true)
-                    .title(tr("选要上传的文件"))
-                    .action(gtk::FileChooserAction::Open)
-                    .accept_label(tr("上传"))
-                    .cancel_label(tr("取消"));
-                if let Some(p) = top.as_ref() {
-                    b = b.transient_for(p);
-                }
-                let ch = b.build();
-                let st2 = Rc::clone(&st);
-                let u2 = Rc::clone(&u);
-                let container2 = container.clone();
-                // ⚠️ **弹窗的 transient parent**（UI 审查 D20）⇒ 传进闭包。
-                let parent2 = top.clone();
-                ch.connect_response(move |c, r| {
-                    if r == gtk::ResponseType::Accept {
-                        if let Some(f) = c.file() {
-                            if let Some(p) = f.path() {
-                                let local = p.clone();
-                                let st3 = Rc::clone(&st2);
-                                let u3 = Rc::clone(&u2);
-                                let cname = container2.clone();
-                                let remote_dir = u2.files_path.borrow().clone();
-                                let fname = local
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                // ⚠️ **上传是写操作** ⇒ 二次确认（默认焦点在「取消」）。
-                                let msg = trf!(
-                                    "确定要把「{n}」上传到容器「{c}」的 {d} 吗？",
-                                    n = fname,
-                                    c = cname,
-                                    d = remote_dir
-                                );
-                                crate::panel::dialogs::confirm_title(
-                                    parent2.as_ref(),
-                                    tr("请确认"),
-                                    &msg,
-                                    tr("上传"),
-                                    move |ok| {
-                                        if !ok {
-                                            return;
-                                        }
-                                        files_upload(&st3, &u3, &cname, &local);
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    c.destroy();
-                });
-                ch.show();
+                open_upload_picker(&st, &u);
             });
         }
         // **「下载…」**
@@ -10116,14 +10077,76 @@ fn files_list(st: &Rc<PanelState>, ui: &Rc<DockerUi>, container: &str, path: &st
     });
 }
 
-/// **上传**（后台 ⇒ 进度 / 结果回主线程）。
-fn files_upload(
+/// **打开「上传内容」选择窗**（阶段 192）。
+///
+/// ⚠️ **为什么复用同一扇窗**：每次点「上传」都新建 ⇒ 窗口会堆一排
+///   （容器页本来就有好几扇窗了）⇒ 建一次、之后只 `open()`。
+///
+/// ⚠️ **为什么要二次确认**：上传是**写操作**（往容器里塞东西）⇒ 确认框
+///   说清「传几个、传到哪个容器、传到哪里」，默认焦点在「取消」。
+fn open_upload_picker(st: &Rc<PanelState>, ui: &Rc<DockerUi>) {
+    let parent = host_window(ui, st);
+    let mut slot = ui.upload_pick.borrow_mut();
+    if slot.is_none() {
+        let stw = Rc::downgrade(st);
+        let uw = Rc::downgrade(ui);
+        let on_pick: Rc<dyn Fn(Vec<std::path::PathBuf>)> = Rc::new(move |picked| {
+            let Some(u) = uw.upgrade() else { return };
+            let Some(st) = stw.upgrade() else { return };
+            let container = u.selected.borrow().clone();
+            if container.is_empty() {
+                return;
+            }
+            let remote_dir = u.files_path.borrow().clone();
+            let n = picked.len();
+            let msg = trf!(
+                "确定要把 {n} 个条目上传到容器「{c}」的 {d} 吗？",
+                n = n,
+                c = container,
+                d = remote_dir
+            );
+            let parent2 = host_window(&u, &st);
+            crate::panel::dialogs::confirm_title(
+                parent2.as_ref(),
+                tr("请确认"),
+                &msg,
+                tr("上传"),
+                move |ok| {
+                    if !ok {
+                        return;
+                    }
+                    files_upload_many(&st, &u, &container, picked);
+                },
+            );
+        });
+        *slot = Some(crate::panel::dockerupload::build_picker(
+            parent.as_ref(),
+            &crate::platform::paths::home(),
+            on_pick,
+        ));
+    }
+    if let Some(p) = slot.as_ref() {
+        p.open();
+    }
+}
+
+/// **上传一批**（后台 ⇒ 进度 / 结果回主线程）。
+///
+/// ⚠️ **为什么是「一批」**：阶段 192 的选择窗一次能勾**多个**条目（文件与
+///   目录混着）⇒ 后端一次只能传一个 ⇒ 得**依次**传（传完一个传下一个）。
+///
+/// ⚠️ **目录也走这条路**：后端 `docker::upload_from` 走 `tar` 归档流 ⇒
+///   目录会整包上去（不需要另外写一套递归逻辑）。
+fn files_upload_many(
     st: &Rc<PanelState>,
     ui: &Rc<DockerUi>,
     container: &str,
-    local: &std::path::Path,
+    locals: Vec<std::path::PathBuf>,
 ) {
     if ui.files_xfer.get() {
+        return;
+    }
+    if locals.is_empty() {
         return;
     }
     let remote_dir = ui.files_path.borrow().clone();
@@ -10131,44 +10154,71 @@ fn files_upload(
         return;
     }
     ui.files_xfer.set(true);
+    let total = locals.len();
     ui.files.xfer_status.set_text(&tr("正在上传…"));
     let opts = st.opts.clone();
     let pw = st.pw.borrow().as_ref().map(|p| p.to_string());
     let container = container.to_string();
-    let local = local.to_path_buf();
     let tx = ui.tx.clone();
     let rt = crate::backend::hub::runtime();
     rt.spawn(async move {
         let r = match shared_session(&opts, pw).await {
             Ok(session) => {
-                let tx2 = tx.clone();
-                // ⚠️ **进度限流 100ms**（每 32KB 一块 ⇒ 不限流会把消息
-                //   通道塞爆 ⇒ 主线程被拖死）。
-                let last = std::sync::Mutex::new(std::time::Instant::now());
-                let prog: docker::XferProgress = std::sync::Arc::new(move |n: u64| {
-                    {
-                        let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
-                        if g.elapsed() < std::time::Duration::from_millis(100) {
-                            return;
+                let mut done = 0usize;
+                let mut err: Option<String> = None;
+                for (i, local) in locals.iter().enumerate() {
+                    let tx2 = tx.clone();
+                    // ⚠️ **进度限流 100ms**（每 32KB 一块 ⇒ 不限流会把消息
+                    //   通道塞爆 ⇒ 主线程被拖死）。
+                    let last = std::sync::Mutex::new(std::time::Instant::now());
+                    let prog: docker::XferProgress = std::sync::Arc::new(move |n: u64| {
+                        {
+                            let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+                            if g.elapsed() < std::time::Duration::from_millis(100) {
+                                return;
+                            }
+                            *g = std::time::Instant::now();
                         }
-                        *g = std::time::Instant::now();
-                    }
-                    let _ = tx2.send_blocking(Msg::FileProgress {
-                        msg: trf!("正在上传… 已传 {n} 字节", n = n),
+                        let _ = tx2.send_blocking(Msg::FileProgress {
+                            msg: trf!(
+                                "正在上传… 第 {i}/{total} 个，已传 {n} 字节",
+                                i = i + 1,
+                                total = total,
+                                n = n
+                            ),
+                        });
                     });
-                });
-                docker::upload_from(&session, &container, &local, &remote_dir, &prog)
-                    .await
-                    .map_err(|e| e.0)
+                    match docker::upload_from(&session, &container, local, &remote_dir, &prog).await {
+                        Ok(()) => done += 1,
+                        Err(e) => {
+                            err = Some(e.0);
+                            break;
+                        }
+                    }
+                }
+                match err {
+                    None => Ok(done),
+                    Some(e) => Err(e),
+                }
             }
             Err(e) => Err(e),
         };
         let msg = match r {
-            Ok(()) => tr("上传完成").to_string(),
+            Ok(n) => trf!("上传完成：{n} 个条目", n = n),
             Err(e) => e,
         };
         let _ = tx.send_blocking(Msg::FileXferDone { msg });
     });
+}
+
+/// **上传**（后台 ⇒ 进度 / 结果回主线程）。
+fn files_upload(
+    st: &Rc<PanelState>,
+    ui: &Rc<DockerUi>,
+    container: &str,
+    local: &std::path::Path,
+) {
+    files_upload_many(st, ui, container, vec![local.to_path_buf()]);
 }
 
 /// **下载**（后台 ⇒ 进度 / 结果回主线程）。
@@ -10556,6 +10606,84 @@ pub fn files_upload_for_test(st: &Rc<PanelState>, local: &std::path::Path) {
         return;
     }
     files_upload(st, ui, &container, local);
+}
+
+/* ---------------- 「上传内容」选择窗的钩子（阶段 192） ---------------- */
+
+/// 测试钩子：**点一下**文件页工具条上的那颗按钮（按 tooltip 认）。
+///
+/// ⚠️ 走的是**按钮自己的点击处理** ⇒ 跟用户真点一下是同一条路。
+///
+/// ⚠️ **为什么先把按钮 clone 出来**：点击会回调进 `open_upload_picker` ⇒
+///   那儿要 `borrow_mut` 别的字段 ⇒ 手里**不能**还攥着 `docker_ui` 的借。
+pub fn files_toolbar_click_for_test(st: &Rc<PanelState>, tip: &str) -> bool {
+    let btn = {
+        let slot = st.docker_ui.borrow();
+        let Some(ui) = slot.as_ref() else { return false };
+        ui.files
+            .btns
+            .iter()
+            .find(|b| b.tooltip_text().as_deref() == Some(tip))
+            .cloned()
+    };
+    match btn {
+        Some(b) => {
+            b.emit_clicked();
+            true
+        }
+        None => false,
+    }
+}
+
+/// 测试钩子：把「上传内容」选择窗**取出来**（**先 clone 再放掉借**）。
+fn upload_pick_for_test(st: &Rc<PanelState>) -> Option<crate::panel::dockerupload::Picker> {
+    let slot = st.docker_ui.borrow();
+    slot.as_ref().and_then(|u| u.upload_pick.borrow().clone())
+}
+
+/// 测试钩子：「上传内容」选择窗**开着**吗。
+pub fn upload_pick_open_for_test(st: &Rc<PanelState>) -> bool {
+    upload_pick_for_test(st)
+        .map(|p| p.win.is_visible())
+        .unwrap_or(false)
+}
+
+/// 测试钩子：选择窗里**列出来的条目名**（按列表顺序）。
+pub fn upload_pick_entries_for_test(st: &Rc<PanelState>) -> Vec<String> {
+    upload_pick_for_test(st).map(|p| p.entry_names()).unwrap_or_default()
+}
+
+/// 测试钩子：**真点**第 `idx` 行的勾选框（`true` = 勾上）。
+pub fn upload_pick_check_for_test(st: &Rc<PanelState>, idx: usize, on: bool) -> bool {
+    upload_pick_for_test(st)
+        .map(|p| p.check_row(idx, on))
+        .unwrap_or(false)
+}
+
+/// 测试钩子：「上传」按钮**能点**吗（**一个都没勾** ⇒ 灰着）。
+pub fn upload_pick_upload_sensitive_for_test(st: &Rc<PanelState>) -> bool {
+    upload_pick_for_test(st).map(|p| p.upload_sensitive()).unwrap_or(false)
+}
+
+/// 测试钩子：**真点**「上传」（⇒ 走二次确认 ⇒ 真上传）。
+pub fn upload_pick_submit_for_test(st: &Rc<PanelState>) {
+    if let Some(p) = upload_pick_for_test(st) {
+        p.click_upload();
+    }
+}
+
+/// 测试钩子：把「上传内容」选择窗**停到某个本地目录**。
+///
+/// ⚠️ **为什么需要它**：「浏览…」是**原生**文件对话框 ⇒ 自动化点不了
+///   ⇒ 冒烟靠这个钩子把窗口停到临时目录（产品路径不受影响）。
+pub fn upload_pick_set_dir_for_test(st: &Rc<PanelState>, dir: &std::path::Path) -> bool {
+    match upload_pick_for_test(st) {
+        Some(p) => {
+            p.set_dir(dir);
+            true
+        }
+        None => false,
+    }
 }
 
 /// 测试钩子：**下载**一个远程条目（阶段 116；冒烟用真下载）。

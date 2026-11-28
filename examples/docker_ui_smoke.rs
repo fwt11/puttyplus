@@ -2434,6 +2434,117 @@ fn main() {
                 format!("下载回来的={got:?} 原件={content:?}")
             );
 
+            // ================= 上传选择窗（阶段 192） =================
+            //
+            // ⚠️ 用户 2026-11-28：「**上传这个目录和上传文件不能用同一个按钮
+            //   吗？选择文件或目录，确定，然后上传？**」
+            // ⇒ 这段验**整条链**：一颗「上传」按钮 ⇒ 弹出自绘窗口 ⇒
+            //   **文件与目录都列出来** ⇒ 勾上就亮「上传」⇒ 确定 ⇒ 二次确认
+            //   ⇒ **真传上去**（远端能查到内容）。
+            {
+                // 本地造一个目录：一个**文件** ＋ 一个**子目录**（目录里再放一个
+                // 文件 ⇒ 传完能查内容）。
+                let pick_root = tmp_dir.join("pp-pick-root-192");
+                let _ = std::fs::remove_dir_all(&pick_root);
+                let pick_dir = pick_root.join("pp-pick-dir-192");
+                std::fs::create_dir_all(&pick_dir).expect("造子目录");
+                std::fs::write(pick_dir.join("inner.txt"), "pick-inner").expect("造目录里的文件");
+                std::fs::write(pick_root.join("pp-pick-file-192.txt"), "pick-file").expect("造文件");
+
+                // ---- 点「上传」那颗 ⇒ 选择窗打开 ----
+                let clicked = dockerui::files_toolbar_click_for_test(
+                    &panel2.st,
+                    "把本地的文件或目录上传到容器当前目录",
+                );
+                check!(
+                    "㉒ 点「上传」弹出了选择窗（就那一颗按钮）",
+                    clicked,
+                    "工具条上找不到那颗「上传」"
+                );
+                pump(300);
+                check!(
+                    "㉒ 选择窗开着",
+                    dockerui::upload_pick_open_for_test(&panel2.st),
+                    "选择窗没打开"
+                );
+                // ⚠️ **一个都没勾** ⇒ 「上传」按钮**灰着**（别让人点了个空）。
+                check!(
+                    "㉒ 没勾东西时「上传」是灰的",
+                    !dockerui::upload_pick_upload_sensitive_for_test(&panel2.st),
+                    "没勾东西也能点上传"
+                );
+
+                // ---- 停到刚造好的目录（原生「浏览…」自动化点不了 ⇒ 用钩子）----
+                check!(
+                    "㉒ 选择窗能停到指定的本地目录",
+                    dockerui::upload_pick_set_dir_for_test(&panel2.st, &pick_root),
+                    "换目录失败"
+                );
+                pump(200);
+                let names = dockerui::upload_pick_entries_for_test(&panel2.st);
+                check!(
+                    "㉒ 选择窗里**文件和目录都列出来了**",
+                    names.iter().any(|n| n == "pp-pick-file-192.txt")
+                        && names.iter().any(|n| n == "pp-pick-dir-192"),
+                    format!("列出来的={names:?}")
+                );
+
+                // ---- 勾一个**目录**（用户要的就是「传目录」）⇒ 「上传」变亮 ----
+                let idx = names
+                    .iter()
+                    .position(|n| n == "pp-pick-dir-192")
+                    .unwrap_or(0);
+                check!(
+                    "㉒ 能勾选一个目录",
+                    dockerui::upload_pick_check_for_test(&panel2.st, idx, true),
+                    "勾不上"
+                );
+                pump(200);
+                check!(
+                    "㉒ 勾上以后「上传」能点了",
+                    dockerui::upload_pick_upload_sensitive_for_test(&panel2.st),
+                    "勾了还是灰的"
+                );
+                // 想看图？`PP_DOCKER_SHOT=/tmp/docker` ⇒ 截一张「上传内容」窗口。
+                if let Ok(base) = std::env::var("PP_DOCKER_SHOT") {
+                    pump(300);
+                    shot(&format!("{base}-upload-pick.png"));
+                }
+
+                // ---- 确定 ⇒ 二次确认 ⇒ 真传 ----
+                let seq6 = dockerui::files_xfer_done_for_test(&panel2.st);
+                let before = toplevel_count();
+                dockerui::upload_pick_submit_for_test(&panel2.st);
+                pump(400);
+                check!(
+                    "㉒ 点「上传」弹出二次确认框（写操作）",
+                    toplevel_count() > before,
+                    format!("顶层窗口数 {before} → {}（没弹出确认框）", toplevel_count())
+                );
+                confirm_last_dialog();
+                let mut waited10 = 0;
+                while waited10 < 60 && dockerui::files_xfer_done_for_test(&panel2.st) == seq6 {
+                    pump(300);
+                    waited10 += 1;
+                }
+                let pick_status = dockerui::files_xfer_status_for_test(&panel2.st);
+                check!(
+                    "㉒ 选择窗里勾的东西上传完成了",
+                    pick_status.contains("上传完成"),
+                    format!("状态行={pick_status:?}")
+                );
+                // 远端：那个**目录**（连同里面的文件）搬过去了
+                let remote_pick = remote_cmd(
+                    &opts_f,
+                    &format!("docker exec {sel} cat /tmp/pp-pick-dir-192/inner.txt 2>/dev/null"),
+                );
+                check!(
+                    "㉒ 勾上传上去的**目录**在容器里，内容也对",
+                    remote_pick.trim() == "pick-inner",
+                    format!("远端={remote_pick:?}")
+                );
+            }
+
             // ================= 二进制往返（用户 2026-11-16 提问） =================
             //
             // ⚠️ **这条是「二进制能不能传」的证据**：文件里塞满 0x00~0xFF
