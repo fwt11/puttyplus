@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2247] = [
+pub static EN: [(&str, &str); 2246] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -197,7 +197,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("{v0} 已经是 OpenSSH 格式的私钥，直接用就行。", "{v0} is already an OpenSSH private key, just use it as is."),
     ("{v0} 条密码已从 connections.ini 迁入存储，ini 中的明文已删除。\n\n{v1}", "{v0} passwords were moved from connections.ini into the vault; the plain text in the ini was deleted.\n\n{v1}"),
     ("{v0} 行", "{v0} rows"),
-    ("{v0} 行 · {v1} ms", "{v0} rows · {v1} ms"),
     ("{v0} 高亮", "{v0} highlights"),
     ("{v0}　{v1}", "{v0}  {v1}"),
     ("{v0}（{v1}）", "{v0} ({v1})"),
@@ -1423,6 +1422,7 @@ pub static EN: [(&str, &str); 2247] = [
     ("本机没有 tar 命令，打不了包：{e}", "No local tar command, cannot pack the folder: {e}"),
     ("本机没有 tar 命令，解不开目录：{e}", "No local tar command, cannot unpack the folder: {e}"),
     ("本机没有 tar 命令，解不开：{e}", "No local tar command, cannot unpack: {e}"),
+    ("本页 {v0} 行 · {v1} ms", "This page: {v0} rows · {v1} ms"),
     ("机制", "Mechanism"),
     ("权限", "Permissions"),
     ("权限不足 ⇒ 读不了这个目录。检查容器里这个文件的属主和权限，或换一个权限更高的账号进容器。", "Permission denied ⇒ cannot read this directory. Check the file's owner and mode inside the container, or connect with an account that has more rights."),
@@ -1720,7 +1720,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("端口，或 地址:端口", "port, or address:port"),
     ("端口：{c} → {ip}:{hp}", "Port: {c} → {ip}:{hp}"),
     ("端口：{c}（未发布）", "Port: {c} (not published)"),
-    ("符合条件的行数：{n}", "Rows matching the condition: {n}"),
     ("第 1 页", "Page 1"),
     ("第 {i} 列", "Column {i}"),
     ("第 {page} 页", "Page {page}"),

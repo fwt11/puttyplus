@@ -782,9 +782,25 @@ pub fn get_bool(group: &str, key: &str, default: bool) -> bool {
     kf.boolean(group, key).unwrap_or(default)
 }
 
+/// 数据库工作台的 **SQL 编辑区是不是收着的**（阶段 188）。
+///
+/// ⚠️ **默认 true（收着）**：用户 2026-11-28 原话「sql 编辑的区域还是很大，
+///   应该是尽量显示数据，用户不一定需要编辑 sql，所以它不需要这么大」
+///   ⇒ 默认把下半区**让给结果网格**，只留工具条那一行。
+///
+/// ⚠️ **用户手动展开过就记住**：他要是自己要写 SQL，展开过一次就别再
+///   每次都给他收起（⇒ 存成设置，下次按他上次的状态来）。
+pub fn db_sql_collapsed() -> bool {
+    get_bool("db", "sql_collapsed", true)
+}
+
+/// 记住「SQL 编辑区收没收着」。
+pub fn set_db_sql_collapsed(on: bool) {
+    set_bool("db", "sql_collapsed", on);
+}
+
 /// 存一个布尔键。
-pub fn set_bool(group: &str, key: &str, value: bool) {
-    let p = path();
+pub fn set_bool(group: &str, key: &str, value: bool) {    let p = path();
     let kf = glib::KeyFile::new();
     let _ = kf.load_from_file(&p, glib::KeyFileFlags::NONE);
     kf.set_boolean(group, key, value);

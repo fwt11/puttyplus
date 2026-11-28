@@ -1856,6 +1856,17 @@ tooltip { background-color: @pp_bg; color: @pp_fg; border-color: @pp_border; }
 /* 面包屑最后一片（"N 字段" / "N 列"）：是补充信息，压暗一点 */
 .pp-crumb.pp-crumb-dim { color: @pp_dim; }
 
+/* 底栏的**分隔竖线**（阶段 188：用户「这行显示的有些混乱」）。
+ *
+ * ⚠️ **为什么用 border 画、不用「│」字符**：字体不一定有那个字形
+ *   （缺字形就是一块豆腐）⇒ 跟字体无关才稳。
+ * ⚠️ **min-height 要给**：空 Label 的自然高度是 0 ⇒ 不给高度就**看不见**。 */
+.pp-foot-sep {
+  border-left: 1px solid @pp_border;
+  min-width: 1px;
+  min-height: 14px;
+}
+
 /* 错误提示（解锁失败、约束冲突…）。
  *
  * ⚠️ **不能用 GTK 内置的 `.error`**：Adwaita 写的是 `label.error`，但本项目

@@ -54,6 +54,13 @@ fn main() {
         let _ = std::fs::remove_file(&db_ini);
         unsafe { std::env::set_var("PUTTYPLUS_DB_INI", &db_ini) };
         let _guard = IniGuard(db_ini.clone());
+        // ⚠️ **设置也要隔离**（阶段 188）：点「展开 SQL 编辑器」会**写设置**
+        //   （`[db] sql_collapsed`）⇒ 不隔离就会把用户的真实配置改掉。
+        let set_ini = std::env::temp_dir()
+            .join(format!("pp-db-empty-smoke-settings-{}.ini", std::process::id()));
+        let _ = std::fs::remove_file(&set_ini);
+        unsafe { std::env::set_var("PUTTYPLUS_SETTINGS_INI", &set_ini) };
+        let _guard2 = IniGuard(set_ini.clone());
 
         let panel = SftpPanel::new(&ConnOptions::default());
         panel::on_open_db(&panel.st);
@@ -62,6 +69,26 @@ fn main() {
         pump(400);
 
         /* ---- 断言 1/2：SQL 编辑器的占位提示 ---- */
+        //
+        // ⚠️⚠️ **阶段 188：编辑区默认是「收着的」**（用户 2026-11-28：「sql 编辑的
+        //   区域还是很大 ⇒ 应该尽量显示数据，用户不一定需要编辑 sql」）⇒
+        //   编辑区整个藏起来 ⇒ **屏幕上没有占位提示**（GTK4 的 `is_visible()`
+        //   连**祖先**一起算 ⇒ 父级一藏，子控件就不算"可见"了）。
+        //   ⇒ 先断言这个新行为，再**展开**编辑区验占位提示本身。
+        assert!(
+            dbui::sql_editor_collapsed(&panel.st),
+            "SQL 编辑区默认应当是收着的（用户要的是「尽量显示数据」）"
+        );
+        assert!(
+            !dbui::sql_placeholder_visible(&panel.st),
+            "编辑区收着时不该显示占位提示（屏幕上根本没有编辑区）"
+        );
+        dbui::set_sql_editor_collapsed(&panel.st, false);
+        pump(300);
+        assert!(
+            !dbui::sql_editor_collapsed(&panel.st),
+            "展开 SQL 编辑区失败"
+        );
         assert!(
             dbui::sql_placeholder_visible(&panel.st),
             "编辑器空着时该显示占位提示（用户看着一片空白，不知道能干嘛）"

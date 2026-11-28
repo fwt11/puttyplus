@@ -137,6 +137,18 @@ pub struct DbUi {
     /// GTK4 的 `TextView` 没有 `set_placeholder_text` ⇒ 自己拿 Overlay 叠的。
     /// 存一份字段，冒烟能问"它现在显不显示"。
     sql_ph: gtk::Label,
+    /// 「收起 / 展开 SQL 编辑器」那颗**开关按钮**（阶段 188）。
+    ///
+    /// ⚠️ **为什么存一份**：收起态是**默认**的（用户 2026-11-28：「sql 编辑的
+    ///   区域还是很大 ⇒ 应该尽量显示数据」）⇒ 冒烟要能**展开**它才能验
+    ///   编辑器的行为 ⇒ 存一份按钮，测试点它 ⇒ 走的是**用户点一下的那条路**
+    ///   （同一条逻辑，不另开一条后门）。
+    sql_toggle: gtk::Button,
+    /// SQL 编辑区**现在收没收着**（阶段 188）。
+    ///
+    /// ⚠️ **为什么单独记、不靠按钮文案反推**：文案随语言变（英文界面 tooltip
+    ///   是 "Expand SQL editor"）⇒ 靠文案判状态在英文界面会失灵。
+    sql_collapsed: Rc<Cell<bool>>,
     meta: gtk::Label,
     /// 结果页签
     notebook: gtk::Notebook,
@@ -1492,6 +1504,10 @@ fn build(st: &Rc<PanelState>) -> DbUi {
 
     // ---- 「收起 / 展开 SQL 编辑区」的开关 ----
     //
+    // ⚠️ **状态用 `Cell` 记着，不靠按钮文案反推**：文案会随语言变
+    //   （英文界面 tooltip 是 "Expand SQL editor"）⇒ 靠文案判状态会失灵。
+    let sql_state = Rc::new(Cell::new(crate::settings::db_sql_collapsed()));
+    //
     // ⚠️ **收起不只是把编辑区藏起来**（实测，见 `examples/paned_probe.rs`）：
     //   只 `set_visible(false)` 的话，Paned 的分隔条**不动** ⇒ 下半区照样
     //   占着那么大高度 ⇒ 空间白留着（用户看到的还是"SQL 区太大"）。
@@ -1499,28 +1515,40 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     //   （= 总高 − 下半区的最小高度）⇒ 空间才真的还给结果区。
     //
     // ⚠️ **展开时还原用户拖过的位置**：收起前把 position 记下来。
+    //
+    // ⚠️⚠️ **默认是「收着的」**（阶段 188，用户 2026-11-28 原话
+    //   「sql 编辑的区域还是很大 ⇒ 应该是尽量显示数据，用户不一定需要
+    //   编辑 sql，所以它不需要这么大」）⇒ 默认把下半区**让给结果网格**，
+    //   只留工具条那一行（那颗「展开」按钮一直在那儿）。
+    //   ⇒ 展开过就**记住**（存进设置），别每次都跟用户对着干。
     {
         let btn = btn_sql_toggle.clone();
         let btn2 = btn.clone();
         let overlay = sql_overlay.clone();
         let paned = right.clone();
-        let saved_pos = Rc::new(Cell::new(320i32));
+        let state = sql_state.clone();
+        let state2 = state.clone();
+        // 初始状态：按设置来（默认收起）
+        set_sql_collapsed(&paned, &overlay, &btn2, state.get());
         btn.connect_clicked(move |_| {
-            let collapsed = overlay.is_visible();
-            if collapsed {
-                // 收起：记住用户拖过的位置（展开时还原）
-                saved_pos.set(paned.position());
-                overlay.set_visible(false);
-                btn2.set_icon_name("view-reveal-symbolic");
-                btn2.set_tooltip_text(Some(tr("展开 SQL 编辑器")));
-                paned.set_position(i32::MAX);
-            } else {
-                overlay.set_visible(true);
-                btn2.set_icon_name("view-conceal-symbolic");
-                btn2.set_tooltip_text(Some(tr("收起 SQL 编辑器")));
-                paned.set_position(saved_pos.get());
-            }
+            let next = !state2.get();
+            state2.set(next);
+            set_sql_collapsed(&paned, &overlay, &btn2, next);
+            // ⚠️ **记住用户的选择**：他要写 SQL 时展开过一次 ⇒ 下次别再收起
+            crate::settings::set_db_sql_collapsed(next);
         });
+        // ⚠️ **窗口一变，折叠态要重新贴底**（实测，`examples/paned_probe.rs`）：
+        //   GTK 会把「夹紧后的位置」**写回** ⇒ 窗口拉大后那条位置还是旧的
+        //   ⇒ 下半区又空出一大块（折叠就失效了）⇒ 每次分配变化都重新顶一次。
+        {
+            let paned = right.clone();
+            let state = state.clone();
+            right.connect_notify_local(Some("max-position"), move |p, _| {
+                if state.get() {
+                    p.set_position(i32::MAX);
+                }
+            });
+        }
     }
 
     let main = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -1593,6 +1621,8 @@ fn build(st: &Rc<PanelState>) -> DbUi {
         status,
         sql,
         sql_ph,
+        sql_toggle: btn_sql_toggle.clone(),
+        sql_collapsed: sql_state.clone(),
         sql_hl,
         meta,
         notebook,
@@ -2601,6 +2631,58 @@ fn icon_button(icon: &str, tip: &str) -> gtk::Button {
     b
 }
 
+/// 展开 SQL 编辑区时给它的高度（像素，≈5 行）。
+///
+/// ⚠️ **为什么给一个固定值、而不是「剩下的全部」**：默认收起时下半区
+///   空着 ⇒ 展开就该给一块**够写 SQL 的地方**，而不是把结果区挤没。
+const SQL_EDITOR_H: i32 = 160;
+
+/// 把 SQL 编辑区**收起来 / 展开**。
+///
+/// ⚠️ **收起时必须把分隔条顶到上限**（实测，`examples/paned_probe.rs`）：
+///   只 `set_visible(false)` 的话，Paned 的分隔条**不动** ⇒ 下半区照样占着
+///   那么大高度 ⇒ 空间**白留着**（用户看到的还是"SQL 区太大"）。
+///   ⇒ position 顶到上限 ⇒ Paned 自己夹到「总高 − 下半区的最小高度」
+///   ⇒ 空间才真的还给结果网格。
+fn set_sql_collapsed(
+    paned: &gtk::Paned,
+    overlay: &impl IsA<gtk::Widget>,
+    btn: &gtk::Button,
+    collapsed: bool,
+) {
+    overlay.set_visible(!collapsed);
+    btn.set_icon_name(if collapsed {
+        "view-reveal-symbolic"
+    } else {
+        "view-conceal-symbolic"
+    });
+    btn.set_tooltip_text(Some(if collapsed {
+        tr("展开 SQL 编辑器")
+    } else {
+        tr("收起 SQL 编辑器")
+    }));
+    if collapsed {
+        paned.set_position(i32::MAX);
+    } else {
+        // 展开：给一块**够写 SQL** 的地方（剩下的全给结果区）
+        let total = paned.height();
+        if total > 0 {
+            paned.set_position((total - SQL_EDITOR_H).max(0));
+        }
+    }
+}
+
+/// 底栏的**分隔竖线**（把一排控件分成几段）。///
+/// ⚠️ **为什么用 CSS 画、不用「│」字符**：字体不一定有那个字形
+///   （缺字形就是一块豆腐）⇒ 用 `border-left` 画 ⇒ 跟字体无关。
+fn foot_sep() -> gtk::Label {
+    let l = gtk::Label::new(Some(""));
+    l.add_css_class("pp-foot-sep");
+    l.set_margin_start(4);
+    l.set_margin_end(4);
+    l
+}
+
 /// 新建一个结果页签（标题取 SQL 首行的摘要）。
 fn new_tab(st: &Rc<PanelState>, ui: &DbUi, sql: &str) -> Rc<ResultTab> {
     let title = sql_title(sql);
@@ -2817,9 +2899,15 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // 每页行数：dbx 有这个下拉，改了立刻重查
     let btn_size = gtk::ComboBoxText::new();
     for n in [100usize, 200, 500, 1000] {
+        // ⚠️⚠️ **`append` 的参数顺序是 `(id, text)`**——GTK4 把它换了
+        //   （GTK3 是 `(text, id)`）⇒ 传反了 `set_active_id` 就**永远选不中**
+        //   ⇒ 下拉框**一个字都不显示**（用户 2026-11-28：「后面的下拉框又是
+        //   什么意思」—— 因为它压根就是空的！）。
+        //   ⇒ id = 程序认的数字，text = 给用户看的「200 行」。
+        //
         // ⚠️ **下拉里只写「200 行」**：左边有个「每页」标签 ⇒ 读起来是
         //   「每页 200 行」⇒ 不用在每一项里再写一遍「/页」。
-        btn_size.append(Some(&trf!("{n} 行", n = n)), &n.to_string());
+        btn_size.append(Some(&n.to_string()), &trf!("{n} 行", n = n));
     }
     btn_size.set_active_id(Some("200"));
     btn_size.set_tooltip_text(Some(tr("每页取多少行（改了会重新查）")));
@@ -2843,15 +2931,26 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     btn_total.set_sensitive(false);
 
     let foot = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    // 左：行数 / 耗时 / 待保存项数 + 页签自己的状态
-    foot.append(&foot_info);
-    foot.append(&status);
+    // ⚠️⚠️ **底栏要分段**（用户 2026-11-28：「这行显示的有些混乱，
+    //   你不读代码能一眼明白什么意思吗」）⇒ 几段之间加**竖线分隔**，
+    //   一眼分得清「哪段是哪段」：
+    //   〔行数·耗时·状态〕│〔当前 SQL〕│〔总行数〕│〔每页行数〕│〔分页〕
+    //
+    // 左：行数 / 耗时 / 待保存项数 + 页签自己的状态（**一组**，状态常常是空的）
+    let foot_left = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    foot_left.append(&foot_info);
+    foot_left.append(&status);
+    foot.append(&foot_left);
+    foot.append(&foot_sep());
     // 中：当前 SQL（在中间那一格里居中）
     foot.append(&foot_sql);
+    foot.append(&foot_sep());
     // 右：总行数 + 每页行数 + 分页
     foot.append(&btn_total);
+    foot.append(&foot_sep());
     foot.append(&lbl_size);
     foot.append(&btn_size);
+    foot.append(&foot_sep());
     foot.append(&btn_first);
     foot.append(&btn_prev);
     foot.append(&foot_page);
@@ -9027,7 +9126,10 @@ fn on_row_count(tab: &Rc<ResultTab>, result: Result<Option<u64>, String>) {
             //   ⇒ 统计完把数字显示出来：「总行数 117837」）。
             tab.total_count.set(Some(n));
             update_total_button(tab);
-            set_tab_status(tab, &trf!("符合条件的行数：{n}", n = n));
+            // ⚠️ **不再往状态栏写一遍**（用户 2026-11-28：「这行显示的有些
+            //   混乱」）：按钮上已经有「总行数 1989」了 ⇒ 状态栏再写一遍
+            //   「符合条件的行数：1989」⇒ 同一件事说两遍 ⇒ 去掉。
+            set_tab_status(tab, "");
         }
         Ok(None) => {
             tab.total_count.set(None);
@@ -9074,7 +9176,14 @@ fn update_foot(_ui: &DbUi, tab: &Rc<ResultTab>) {
     let pending = tab.grid.pending_edits().len()
         + tab.grid.pending_inserts().len()
         + tab.grid.pending_deletes().len();
-    let mut info = trf!("{v0} 行 · {v1} ms", v0 = tab.last_rows.get(), v1 = tab.last_elapsed.get());
+    // ⚠️ **要写「本页」**（用户 2026-11-28：「这行显示的有些混乱」）——
+    //   底栏右边就摆着「总行数 1989」⇒ 光写「200 行」会被当成**总数**
+    //   ⇒ 写成「本页 200 行」才分得清。
+    let mut info = trf!(
+        "本页 {v0} 行 · {v1} ms",
+        v0 = tab.last_rows.get(),
+        v1 = tab.last_elapsed.get()
+    );
     if pending > 0 {
         info.push_str(&trf!(" · {pending} 项待保存", pending = pending));
     }
@@ -11396,6 +11505,27 @@ pub fn sql_placeholder_visible(st: &Rc<PanelState>) -> bool {
     let slot = st.db_ui.borrow();
     let Some(ui) = slot.as_ref() else { return false };
     ui.sql_ph.is_visible()
+}
+
+/// 冒烟测试用：**展开 / 收起** SQL 编辑区（阶段 188）。
+///
+/// ⚠️ **为什么走按钮而不是另开一条后门**：收起态是**默认**的 ⇒ 冒烟要能
+///   展开它才能验编辑器的行为（占位提示、高亮…）⇒ 点那颗**真按钮**
+///   ⇒ 走的是**用户点一下的那条路**（同一套逻辑：改状态 → 收/展 → 记设置）
+///   ⇒ 测试和产品不会走偏。
+pub fn set_sql_editor_collapsed(st: &Rc<PanelState>, collapsed: bool) {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return };
+    if ui.sql_collapsed.get() != collapsed {
+        ui.sql_toggle.emit_clicked();
+    }
+}
+
+/// 冒烟测试用：SQL 编辑区**现在收没收着**（阶段 188）。
+pub fn sql_editor_collapsed(st: &Rc<PanelState>) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    ui.sql_collapsed.get()
 }
 
 /// 冒烟测试用：第 `idx` 个结果页签的**空结果态**。

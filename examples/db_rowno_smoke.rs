@@ -91,6 +91,23 @@ fn find_sql_paned(root: &gtk::Widget, editor: &gtk::Widget) -> Option<gtk::Paned
     None
 }
 
+/// 控件树里带这个 CSS 类的节点有几个。
+fn count_class(root: &gtk::Widget, cls: &str) -> usize {
+    let mut n = 0;
+    let mut stack = vec![root.clone()];
+    while let Some(w) = stack.pop() {
+        if w.css_classes().iter().any(|c| c == cls) {
+            n += 1;
+        }
+        let mut c = w.first_child();
+        while let Some(ch) = c {
+            stack.push(ch.clone());
+            c = ch.next_sibling();
+        }
+    }
+    n
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let hold = args.iter().any(|a| a == "--hold");
@@ -189,12 +206,34 @@ fn main() {
     win.set_child(Some(panel.widget()));
     win.present();
     // 连接页的子标签（真实运行时由 tabs.rs 建）
-    *panel.st.sub_tabs.borrow_mut() = Some(panel::subtabs::SubTabs::new());
+    let sub = panel::subtabs::SubTabs::new();
+    *panel.st.sub_tabs.borrow_mut() = Some(sub.clone());
+    // ⚠️⚠️ **子标签那一块得真的在屏幕上**：工作台是它的**子页签**，
+    //   不把它放进窗口 ⇒ 工作台不会被布局（高度恒为 0 ⇒ 量不出
+    //   「SQL 区占了多高」）⇒ 底栏/分隔条的断言就成了空断言。
+    let sub_win = gtk::Window::new();
+    sub_win.set_title(Some("db rowno smoke · 子标签"));
+    sub_win.set_default_size(1200, 780);
+    sub_win.set_child(Some(sub.root()));
+    sub_win.present();
     pump(200);
 
     panel::on_open_db(&panel.st);
     puttyplus::panel::dbui::mount_for_test(&panel.st);
     pump(400);
+    // ⚠️ **必须切到数据库那一页**：工作台是连接页的**子标签**，不切过去
+    //   它就没被布局（分隔条的高度是 0 ⇒ 量不出「SQL 区占了多高」）。
+    if let Some(sub) = panel.st.sub_tabs() {
+        let db_id = panel
+            .st
+            .db_ui
+            .borrow()
+            .as_ref()
+            .map(|u| u.tab_id.get())
+            .unwrap_or(0);
+        sub.switch_to(db_id);
+    }
+    pump(500);
     let db_open = panel.st.db_ui.borrow().is_some();
     check!("数据库工作台能建出来", db_open, "工作台没打开".to_string());
     if !db_open {
@@ -225,14 +264,16 @@ fn main() {
         std::process::exit(1);
     };
 
-    // 收起前：编辑区可见
+    // ⚠️ **默认就是「收着的」**（用户 2026-11-28：「sql 编辑的区域还是很大
+    //   ⇒ 应该是尽量显示数据，用户不一定需要编辑 sql」）⇒ 启动时编辑区
+    //   **藏起来**，下半区让给结果网格。
     check!(
-        "收起前 SQL 编辑区是**可见**的",
-        sql_editor.is_visible(),
-        "编辑区一开始就不见了".to_string()
+        "**默认**SQL 编辑区就是**收着的**（空间让给结果网格）",
+        !sql_editor.is_visible(),
+        "编辑区默认可见 ⇒ 下半区被占了一半".to_string()
     );
 
-    // ⚠️ **分隔条的位置**＝「SQL 区占了多高」⇒ 收起来之后它必须**下移**
+    // ⚠️ **分隔条的位置**＝「SQL 区占了多高」⇒ 收着时它必须**贴到最下边**
     //   （只把编辑区藏起来而不管分隔条 ⇒ 空间白留着，用户看到的还是
     //   "SQL 区太大" ⇒ 这条断言才是「真的收起」的证据）。
     let editor_w: gtk::Widget = sql_editor.clone().upcast();
@@ -242,36 +283,36 @@ fn main() {
         paned.is_some(),
         "没找到竖直 Paned".to_string()
     );
-    let pos_before = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
+    let pos_collapsed = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
 
-    // 点一下 ⇒ 编辑区藏起来
+    // 点一下 ⇒ 展开（编辑区回来 + 给一块够写 SQL 的地方）
     toggle.emit_clicked();
     pump(300);
     check!(
-        "点一下 ⇒ SQL 编辑区**收起来**了",
-        !sql_editor.is_visible(),
-        "编辑区还看得见".to_string()
-    );
-    let pos_after = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
-    check!(
-        "收起后**分隔条下移**（空间真的还给结果区了）",
-        pos_after > pos_before + 100,
-        format!("分隔条位置 {pos_before} → {pos_after}（没下移 ⇒ 空间白留着）")
-    );
-
-    // 再点一下 ⇒ 编辑区回来
-    toggle.emit_clicked();
-    pump(300);
-    check!(
-        "再点一下 ⇒ SQL 编辑区**展开**回来",
+        "点一下 ⇒ SQL 编辑区**展开**回来",
         sql_editor.is_visible(),
         "编辑区没回来".to_string()
     );
-    let pos_back = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
+    let pos_expanded = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
     check!(
-        "展开后分隔条**回到原位**",
-        (pos_back - pos_before).abs() <= 2,
-        format!("分隔条位置 {pos_before} → {pos_back}（没还原）")
+        "展开后**分隔条上移**（编辑区拿到了空间）",
+        pos_expanded < pos_collapsed - 50,
+        format!("分隔条位置 {pos_collapsed} → {pos_expanded}（没上移 ⇒ 编辑区还是没地方写）")
+    );
+
+    // 再点一下 ⇒ 又收起来
+    toggle.emit_clicked();
+    pump(300);
+    check!(
+        "再点一下 ⇒ SQL 编辑区**收起来**",
+        !sql_editor.is_visible(),
+        "编辑区没收起来".to_string()
+    );
+    let pos_again = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
+    check!(
+        "收起后**分隔条回到最下边**",
+        pos_again >= pos_collapsed - 2,
+        format!("分隔条位置 {pos_collapsed} → {pos_again}（没贴底 ⇒ 空间白留着）")
     );
 
     /* ================= ③ 底栏自解释 ================= */
@@ -307,6 +348,47 @@ fn main() {
         "没找到「每页」标签".to_string()
     );
 
+    // ⚠️⚠️ **下拉框必须真的有文字**（用户 2026-11-28：「后面的下拉框又是
+    //   什么意思」—— 因为 `ComboBoxText::append` 的参数顺序在 GTK4 里是
+    //   **`(id, text)`**（GTK3 是 `(text, id)`）⇒ 传反了 `set_active_id`
+    //   永远选不中 ⇒ **下拉框一个字都不显示**）。
+    let combo = find::<gtk::ComboBoxText>(&ui_page, |_| true);
+    check!(
+        "「每页行数」下拉框**有当前值**（不是空的）",
+        combo
+            .as_ref()
+            .and_then(|c| c.active_text())
+            .map(|t| t == "200 行")
+            .unwrap_or(false),
+        format!(
+            "下拉框当前值 = {:?}",
+            combo.as_ref().and_then(|c| c.active_text())
+        )
+    );
+
+    // ⚠️ **底栏要分段**（用户：「这行显示的有些混乱」）⇒ 几段之间有竖线
+    let seps = count_class(&ui_page, "pp-foot-sep");
+    check!(
+        "底栏**分了段**（段与段之间有竖线）",
+        seps >= 4,
+        format!("只找到 {seps} 条分隔线（至少 4 段）")
+    );
+
+    // ⚠️ **「本页 200 行」**：光写「200 行」会被当成**总数**
+    //   （旁边就摆着「总行数 1989」）⇒ 得分清。
+    // ⚠️ **要 `starts_with("本页 ")`**：光 `contains("本页")` 会匹配到
+    //   「**筛本页**」那个标签 ⇒ 断言就成了永远为真的假阳性。
+    let info = find::<gtk::Label>(&ui_page, |w| {
+        w.downcast_ref::<gtk::Label>()
+            .map(|l| l.text().starts_with("本页 ") && l.text().contains("行"))
+            .unwrap_or(false)
+    });
+    check!(
+        "底栏左侧写的是「**本页** N 行」（跟「总行数」分得清）",
+        info.is_some(),
+        "没找到「本页 N 行」".to_string()
+    );
+
     // 「总行数」按钮：没统计过时是「总行数」
     let btn_total = find::<gtk::Button>(&ui_page, |w| {
         w.downcast_ref::<gtk::Button>()
@@ -333,18 +415,6 @@ fn main() {
     //
     // ⚠️ **切到数据库那一页** ⇒ 面板窗口里显示的就是工作台
     //   （工作台是连接页的**子标签**，不切过去看不到）。
-    if let Some(sub) = panel.st.sub_tabs() {
-        let db_id = panel
-            .st
-            .db_ui
-            .borrow()
-            .as_ref()
-            .map(|u| u.tab_id.get())
-            .unwrap_or(0);
-        sub.switch_to(db_id);
-    }
-    pump(500);
-
     // 另开一个窗口给「行号列」的特写（行号列在最左边 ⇒ 看得最清楚）
     {
         let win = gtk::ApplicationWindow::builder()
