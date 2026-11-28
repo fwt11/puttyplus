@@ -693,6 +693,12 @@ struct ResultTab {
     foot_sql: gtk::Label,
     /// 底栏里的「总行数」按钮（阶段 84）：当场跑一次 count(*)
     btn_total: gtk::Button,
+    /// 最近一次统计出来的**总行数**（`None` = 还没统计过）。
+    ///
+    /// ⚠️ **为什么存一份**：用户 2026-11-27 问「『总行数』是什么意思」——
+    ///   按钮点了之后**结果得看得见** ⇒ 统计完把数字显示在**按钮自己身上**
+    ///   （「总行数 117837」）⇒ 不用去别处找。
+    total_count: Cell<Option<u64>>,
     /// 最近一次执行的 SQL 原文（底栏显示用）
     last_sql: RefCell<String>,
     /// 底栏右半：页码（第 N 页）
@@ -1450,6 +1456,14 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     meta.set_max_width_chars(30);
     sql_row.append(&meta);
 
+    // ---- 收起 / 展开 SQL 编辑区（用户 2026-11-27：「默认的 SQL 命令编辑区域
+    //      太大 ⇒ 要一种能隐藏它的办法」）----
+    //
+    // ⚠️ **按钮必须放在工具条上、不能放进编辑区**：编辑区收起后按钮也跟着
+    //   没了 ⇒ 用户再也展不开 ⇒ 按钮要留在**永远可见**的那一行。
+    let btn_sql_toggle = icon_button("view-conceal-symbolic", tr("收起 SQL 编辑器"));
+    sql_row.append(&btn_sql_toggle);
+
     let sql_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sql_box.append(&sql_row);
     sql_box.append(&sql_overlay);
@@ -1475,6 +1489,39 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     // 下半区 198），两边都拿到够用的高度。
     right.set_shrink_start_child(false);
     right.set_shrink_end_child(false);
+
+    // ---- 「收起 / 展开 SQL 编辑区」的开关 ----
+    //
+    // ⚠️ **收起不只是把编辑区藏起来**（实测，见 `examples/paned_probe.rs`）：
+    //   只 `set_visible(false)` 的话，Paned 的分隔条**不动** ⇒ 下半区照样
+    //   占着那么大高度 ⇒ 空间白留着（用户看到的还是"SQL 区太大"）。
+    //   ⇒ 还得把 **position 顶到上限**：Paned 会自己夹到「合法最大位置」
+    //   （= 总高 − 下半区的最小高度）⇒ 空间才真的还给结果区。
+    //
+    // ⚠️ **展开时还原用户拖过的位置**：收起前把 position 记下来。
+    {
+        let btn = btn_sql_toggle.clone();
+        let btn2 = btn.clone();
+        let overlay = sql_overlay.clone();
+        let paned = right.clone();
+        let saved_pos = Rc::new(Cell::new(320i32));
+        btn.connect_clicked(move |_| {
+            let collapsed = overlay.is_visible();
+            if collapsed {
+                // 收起：记住用户拖过的位置（展开时还原）
+                saved_pos.set(paned.position());
+                overlay.set_visible(false);
+                btn2.set_icon_name("view-reveal-symbolic");
+                btn2.set_tooltip_text(Some(tr("展开 SQL 编辑器")));
+                paned.set_position(i32::MAX);
+            } else {
+                overlay.set_visible(true);
+                btn2.set_icon_name("view-conceal-symbolic");
+                btn2.set_tooltip_text(Some(tr("收起 SQL 编辑器")));
+                paned.set_position(saved_pos.get());
+            }
+        });
+    }
 
     let main = gtk::Paned::new(gtk::Orientation::Horizontal);
     main.set_vexpand(true);
@@ -2770,12 +2817,18 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     // 每页行数：dbx 有这个下拉，改了立刻重查
     let btn_size = gtk::ComboBoxText::new();
     for n in [100usize, 200, 500, 1000] {
-        btn_size.append(Some(&trf!("{n} 行/页", n = n)), &n.to_string());
+        // ⚠️ **下拉里只写「200 行」**：左边有个「每页」标签 ⇒ 读起来是
+        //   「每页 200 行」⇒ 不用在每一项里再写一遍「/页」。
+        btn_size.append(Some(&trf!("{n} 行", n = n)), &n.to_string());
     }
     btn_size.set_active_id(Some("200"));
     btn_size.set_tooltip_text(Some(tr("每页取多少行（改了会重新查）")));
     // 限宽：不设的话它会被旁边的控件挤成只剩一个箭头，文字看不见
     btn_size.set_size_request(96, -1);
+    // ⚠️ **要有标签**（用户 2026-11-27：「后面的下拉框又是什么意思」）：
+    //   光一个孤零零的下拉框，用户不知道它是"每页取多少行" ⇒ 前面补个字。
+    let lbl_size = gtk::Label::new(Some(tr("每页")));
+    lbl_size.add_css_class("dim-label");
 
     // ---- 「统计总行数」（阶段 84，对标 dbx 的「统计总行数」链接）----
     //
@@ -2797,6 +2850,7 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
     foot.append(&foot_sql);
     // 右：总行数 + 每页行数 + 分页
     foot.append(&btn_total);
+    foot.append(&lbl_size);
     foot.append(&btn_size);
     foot.append(&btn_first);
     foot.append(&btn_prev);
@@ -2842,6 +2896,7 @@ fn build_result_tab(st: &Rc<PanelState>, ui: &DbUi, title: &str) -> Rc<ResultTab
         foot_info,
         foot_sql,
         btn_total,
+        total_count: Cell::new(None),
         last_sql: RefCell::new(String::new()),
         foot_page,
         btn_first,
@@ -7417,6 +7472,14 @@ pub fn on_rows(st: &Rc<PanelState>, id: u64, rows: DbRows) {
         }
         data.rows = rows.rows.clone();
         tab.grid.set_data(data);
+        // ⚠️ **行号跟着分页走**（Excel 式，用户 2026-11-27 要的序号）：
+        //   跳页之后（`OFFSET 400`）网格里装的是**表的第 401 行起**
+        //   ⇒ 行号要从 401 开始。
+        //
+        // ⚠️ **为什么只在「整份结果集换掉」时设**：往后翻页是**追加**
+        //   （网格里已有的行不动）⇒ 偏移不能跟着加（否则前 200 行的
+        //   行号会突然从 1..200 变成 201..400）。
+        tab.grid.set_row_number_offset(tab.offset.get());
         // 套上用户之前定好的**列显示设置**（阶段 20）与**列宽**（阶段 89）。
         apply_stored_layout(&tab, &rows.columns);
     } else {
@@ -8178,6 +8241,9 @@ fn apply_where_text(tab: &Rc<ResultTab>, text: &str) -> Result<String, String> {
     };
     let where_sql = dbmeta::check_free_where(text)?;
     *tab.filter_where.borrow_mut() = where_sql.clone();
+    // ⚠️ **条件变了 ⇒ 之前统计的总行数作废**（统计的是"符合条件"的行数）
+    tab.total_count.set(None);
+    update_total_button(tab);
     // 条件变了 → 回到第一页重查（否则第 3 页的偏移对不上新的结果集）
     tab.page.set(1);
     tab.offset.set(0);
@@ -8374,6 +8440,9 @@ fn clear_conds(tab: &Rc<ResultTab>) {
         return;
     };
     *tab.filter_where.borrow_mut() = String::new();
+    // ⚠️ **条件清了 ⇒ 之前统计的总行数也作废**
+    tab.total_count.set(None);
+    update_total_button(tab);
     *tab.order_col.borrow_mut() = String::new();
     *tab.order_by.borrow_mut() = String::new();
     tab.order_asc.set(true);
@@ -8953,10 +9022,45 @@ fn request_row_count(tab: &Rc<ResultTab>) {
 fn on_row_count(tab: &Rc<ResultTab>, result: Result<Option<u64>, String>) {
     match result {
         Ok(Some(n)) => {
+            // ⚠️ **结果显示在按钮自己身上**（用户 2026-11-27 问「『总行数』
+            //   是什么意思」⇒ 光有一颗写着「总行数」的按钮，看不出它是干啥的
+            //   ⇒ 统计完把数字显示出来：「总行数 117837」）。
+            tab.total_count.set(Some(n));
+            update_total_button(tab);
             set_tab_status(tab, &trf!("符合条件的行数：{n}", n = n));
         }
-        Ok(None) => set_tab_status_err(tab, tr("统计总行数失败：查不到这张表")),
-        Err(e) => set_tab_status_err(tab, &trf!("统计总行数失败：{e}", e = e)),
+        Ok(None) => {
+            tab.total_count.set(None);
+            update_total_button(tab);
+            set_tab_status_err(tab, tr("统计总行数失败：查不到这张表"));
+        }
+        Err(e) => {
+            tab.total_count.set(None);
+            update_total_button(tab);
+            set_tab_status_err(tab, &trf!("统计总行数失败：{e}", e = e));
+        }
+    }
+}
+
+/// 把「总行数」按钮的文字刷成当前状态。
+///
+/// ⚠️ **为什么要单独一个函数**：按钮的文字有两种形态——
+///   没统计过 = 「总行数」（是个**按钮**，点了会算）；
+///   统计过了 = 「总行数 117837」（是个**结果**）。
+///   ⇒ 状态存一份（`total_count`），文字由它推出来，别到处直接 `set_label`。
+fn update_total_button(tab: &Rc<ResultTab>) {
+    tab.btn_total.set_label(&total_button_text(tab.total_count.get()));
+}
+
+/// 「总行数」按钮该显示什么（**纯函数**，方便单测）。
+///
+/// ⚠️ **为什么抽成纯函数**：按钮有两种形态，没统计过时是「总行数」（一个
+///   **动作**），统计过之后是「总行数 117837」（一个**结果**）⇒
+///   这段映射得有个能单独验的地方。
+pub fn total_button_text(count: Option<u64>) -> String {
+    match count {
+        Some(n) => trf!("总行数 {n}", n = n),
+        None => tr("总行数").to_string(),
     }
 }
 
@@ -12023,5 +12127,18 @@ mod tests {
     fn 排序方向的文字() {
         assert_eq!(order_dir_text(true), "↑ 升序");
         assert_eq!(order_dir_text(false), "↓ 降序");
+    }
+
+    /// 「总行数」按钮的**两种形态**（用户 2026-11-27：「『总行数』是什么意思」）。
+    ///
+    /// ⚠️ **为什么要有这个断言**：那颗按钮**没统计过时是个动作**
+    ///   （「总行数」＝点了会算），**统计过之后是个结果**
+    ///   （「总行数 117837」）⇒ 两种文字都得对。
+    #[test]
+    fn 总行数按钮的两种形态() {
+        assert_eq!(total_button_text(None), "总行数");
+        assert_eq!(total_button_text(Some(117_837)), "总行数 117837");
+        // 0 行也是个数（不是"没有"）
+        assert_eq!(total_button_text(Some(0)), "总行数 0");
     }
 }

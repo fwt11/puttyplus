@@ -271,13 +271,14 @@ fn main() {
     eprintln!("P2.5 阶段 46：列头 + 多选");
     /* ---- 阶段 46：dbx 风格列头（列名 + 类型小字）+ 多选 ---- */
     let cols = grid.view.columns();
-    assert_eq!(cols.len(), 2, "列数不对：{}", cols.len());
+    // ⚠️ **第 0 列是行号列**（Excel 式，阶段 187）⇒ 数据列从第 1 列开始。
+    assert_eq!(cols.len(), 3, "列数不对：{}", cols.len());
     // ⚠️ **`title` 属性还得留着**：导出、过滤条件编辑器、列类型映射都靠
     // `col.title()` 拿列名。列头换成 widget 之后这里要是空了，那些地方就全瞎。
-    assert_eq!(cols[0].title(), "id", "列标题丢了：{}", cols[0].title());
-    assert_eq!(cols[1].title(), "name");
+    assert_eq!(cols[1].title(), "id", "列标题丢了：{}", cols[1].title());
+    assert_eq!(cols[2].title(), "name");
     // 列头换成了自定义 widget（dbx 的「列名 + 类型小字 + ⋮」）
-    let Some(header) = cols[0].widget() else {
+    let Some(header) = cols[1].widget() else {
         panic!("列头没有自定义 widget");
     };
     let hb = header
@@ -505,7 +506,9 @@ fn main() {
         win.present();
         pump(300);
 
-        assert!(grid.row_menu_popup_now(0, Some(1)), "行右键菜单没弹出来");
+        // ⚠️ **显示列位置要 +1**：第 0 列是行号列（阶段 187）⇒ 第 2 个
+        //   **数据**列在显示位置 2（原始列下标仍是 1）。
+        assert!(grid.row_menu_popup_now(0, Some(2)), "行右键菜单没弹出来");
         let titles = grid.row_menu_titles();
         println!("行菜单：{titles:?}");
         assert!(

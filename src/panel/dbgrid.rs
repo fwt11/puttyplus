@@ -143,6 +143,18 @@ pub fn transpose(data: &GridData) -> GridData {
 /// 面板窄到连这个宽度都放不下（列很多）⇒ 才退回「自然宽 + 横向滚动条」。
 const MIN_COL: i32 = 60;
 
+/// **行号列**（Excel 式）的宽度（像素）。
+///
+/// ⚠️ **为什么固定**：Excel 的行号列就是窄窄一条、拖不动 ⇒ 它**不参与**
+///   「按内容分配剩余宽度」那套（见 [`DbGrid::apply_column_widths`]）。
+const ROW_NUM_WIDTH: i32 = 56;
+
+/// 行号列在**模型**里的列下标。
+///
+/// ⚠️ **模型第 0 列是行号** ⇒ 数据列整体后移一格 ⇒ 数据列 `i` 在模型里
+///   是 `i + 1`（见 [`DbGrid::model_col`]）。
+const MODEL_ROW_NUM: i32 = 0;
+
 /// 把**可用宽度**分给各列（纯函数，方便单测）。
 ///
 /// - `nat`：每列的**自然宽**（内容有多长）。
@@ -296,6 +308,12 @@ pub struct DbGrid {
     inserts: RefCell<Vec<Vec<Option<String>>>>,
     /// 待删除的源行号（标记后立刻从网格里消失，可"放弃修改"恢复）
     deletes: RefCell<HashSet<usize>>,
+    /// **行号的起始偏移**（分页用）。
+    ///
+    /// ⚠️ **为什么需要**：查询是**分页**的（第 2 页的第一行是表的第 201 行）
+    ///   ⇒ 行号得接着页码走 ⇒ 上层把「已经跳过的行数」告诉网格
+    ///   （见 [`DbGrid::set_row_number_offset`]）。
+    row_no_offset: Cell<usize>,
     /// 显示顺序：显示行号 → 数据来源
     visible: RefCell<Vec<RowRef>>,
     /// **显式行序**（用户「上移 / 下移」后固定下来的顺序）。
@@ -481,6 +499,7 @@ impl DbGrid {
                 edits: RefCell::new(HashMap::new()),
                 inserts: RefCell::new(Vec::new()),
                 deletes: RefCell::new(HashSet::new()),
+                row_no_offset: Cell::new(0),
                 visible: RefCell::new(Vec::new()),
                 order: RefCell::new(None),
                 sort: Cell::new(None),
@@ -688,17 +707,19 @@ impl DbGrid {
         if ncols == 0 {
             return;
         }
+        // ⚠️ **行号列不参与分配**（固定宽度）⇒ 数据列只有 `ncols - 1` 列。
+        let ndata = ncols.saturating_sub(1);
         // ⚠️ **自然宽跟列数对不上就重算**：藏过一列 / 换过列布局之后，
         // 缓存里的自然宽是按**旧**列数算的，直接用会把宽度错配到别的列上。
         //
         // ⚠️ **借用要在这里结束**（`let` 一句里就掉）：下面 `borrow_mut`
         // 的时候同一个 RefCell 再借就是 panic。
-        let stale = self.nat_widths.borrow().len() != ncols;
+        let stale = self.nat_widths.borrow().len() != ndata;
         if stale {
             self.recompute_nat_widths();
         }
         let nat = self.nat_widths.borrow().clone();
-        if nat.is_empty() || nat.len() != ncols {
+        if nat.is_empty() || nat.len() != ndata {
             return;
         }
         // ⚠️ **用户拖过的列 = 钉死的**：其余列分剩下的空间。
@@ -711,7 +732,13 @@ impl DbGrid {
             .iter()
             .filter_map(|(orig, w)| order.iter().position(|o| o == orig).map(|p| (p, *w)))
             .collect();
-        let widths = alloc_widths_with_fixed(&nat, avail, &fixed);
+        // ⚠️ **可用宽度要减掉行号列**：它固定 56px ⇒ 剩下的才分给数据列。
+        let avail_data = (avail - ROW_NUM_WIDTH).max(MIN_COL);
+        let widths_data = alloc_widths_with_fixed(&nat, avail_data, &fixed);
+        // ⚠️ **拼上行号列**：宽度数组按**视图位置**排（第 0 位 = 行号列）。
+        let mut widths = Vec::with_capacity(ncols);
+        widths.push(ROW_NUM_WIDTH);
+        widths.extend(widths_data);
         // ⚠️ **宽度没变就别再设**：反复 `set_fixed_width` 会触发重排，
         // 重排又可能改宽度 ⇒ 来回抖。
         if *self.applied_widths.borrow() == widths {
@@ -767,11 +794,16 @@ impl DbGrid {
     ///
     /// **这是"打算给多宽"**，跟 `column_widths()`（GTK 实际分配的）分开：
     /// 两者不一致说明 GTK 没按我们说的做，那才是真 bug。
+    ///
+    /// ⚠️ **含行号列**（第 0 位）：这两个函数说的都是「网格里有哪些列」
+    ///   ⇒ 行号列也是一列 ⇒ 在里面（否则调用方按显示顺序取下标会错位）。
     pub fn planned_widths(&self) -> Vec<i32> {
         self.applied_widths.borrow().clone()
     }
 
     /// GTK 实际分配给各列的宽度（像素，按显示顺序）——测试钩子。
+    ///
+    /// ⚠️ **含行号列**（跟 [`DbGrid::planned_widths`] 一个口径）。
     pub fn column_widths(&self) -> Vec<i32> {
         self.view.columns().iter().map(|c| c.width()).collect()
     }
@@ -953,9 +985,34 @@ impl DbGrid {
     ///
     /// ⚠️ 隐藏过列以后，显示位置跟原始下标就错位了——菜单里的动作一律
     /// 用**原始下标**（改数据、保存、导出都以原始列为准）。
+    ///
+    /// ⚠️ **显示位置 0 是行号列**（Excel 式）⇒ 它没有"原始列下标"
+    ///   （菜单/编辑对它没意义）⇒ 返回 `None`。
     fn orig_col(&self, disp: usize) -> Option<usize> {
+        if disp == 0 {
+            return None;
+        }
         let n = self.data.borrow().columns.len();
-        resolve_visible(&self.col_layout.borrow(), n).get(disp).copied()
+        resolve_visible(&self.col_layout.borrow(), n).get(disp - 1).copied()
+    }
+
+    /// **原始列下标** → **模型里的列下标**。
+    ///
+    /// ⚠️ **模型第 0 列是行号列** ⇒ 数据列整体后移一格。
+    fn model_col(&self, orig: usize) -> usize {
+        orig + 1
+    }
+
+    /// 行号的**起始偏移**（分页用）。
+    ///
+    /// ⚠️ **为什么需要**：查询是分页的（第 2 页的第一行是表的第 201 行）
+    ///   ⇒ 行号得接着页码走 ⇒ 上层把「已经跳过的行数」告诉网格。
+    pub fn set_row_number_offset(&self, offset: usize) {
+        if self.row_no_offset.get() == offset {
+            return;
+        }
+        self.row_no_offset.set(offset);
+        self.rebuild_rows();
     }
 
     /// 行右键菜单（阶段 47：对标 dbx 的网格右键菜单）。
@@ -1345,6 +1402,22 @@ impl DbGrid {
         true
     }
 
+    /// 某一行的**行号**（Excel 式，阶段 187）——测试钩子。
+    ///
+    /// ⚠️ 行号在**模型第 0 列**（不是数据列）⇒ 单独给一个读法，
+    ///   别让调用方自己去猜下标。
+    pub fn row_number_text(&self, display_row: usize) -> String {
+        let store = self.model.borrow();
+        let path = gtk::TreePath::from_indices(&[display_row as i32]);
+        let Some(iter) = store.iter(&path) else {
+            return String::new();
+        };
+        store
+            .get_value(&iter, MODEL_ROW_NUM)
+            .get::<String>()
+            .unwrap_or_default()
+    }
+
     /// 某个显示行、某一列的**当前显示值**（含已改的；NULL 显示 "NULL"）。
     pub fn cell_text(&self, display_row: usize, col: usize) -> String {
         let data = self.data.borrow();
@@ -1384,8 +1457,9 @@ impl DbGrid {
         let Some(iter) = store.iter(&path) else {
             return String::new();
         };
+        // ⚠️ **`col` 是数据列下标**（不含行号列）⇒ 模型里要 +1。
         store
-            .get_value(&iter, col as i32)
+            .get_value(&iter, self.model_col(col) as i32)
             .get::<String>()
             .unwrap_or_default()
     }
@@ -1453,8 +1527,10 @@ impl DbGrid {
         // **模型列数必须等于数据列数**：ListStore 的列数是建的时候定死的，
         // 往不存在的列上写值 GTK 会进入不可预期的状态（实测直接把进程
         // 撑到几十 GB 内存）。所以每次换结果集都重建模型。
+        //
+        // ⚠️ **模型第 0 列是行号列**（Excel 式）⇒ 模型列数 = 数据列数 + 1。
         let ncols = data.columns.len().max(1);
-        let types: Vec<glib::Type> = (0..ncols).map(|_| glib::Type::STRING).collect();
+        let types: Vec<glib::Type> = (0..=ncols).map(|_| glib::Type::STRING).collect();
         let model = gtk::ListStore::new(&types);
         self.view.set_model(Some(&model));
         *self.model.borrow_mut() = model;
@@ -1508,6 +1584,31 @@ impl DbGrid {
         // 可见列的顺序（**原始列下标**）；没设过 = 全部可见、原序。
         // 越界的（换了更小的结果集）直接丢掉。
         let order = resolve_visible(&self.col_layout.borrow(), names.len());
+        // ---- 行号列（Excel 式）：固定在最左边 ----
+        //
+        // ⚠️ **用户 2026-11-27**：「数据库表显示部分要有序号（像 Excel），
+        //   让用户知道这是第几行」⇒ 最左边加一列行号。
+        //
+        // ⚠️ **它不是数据列**：模型第 0 列（`MODEL_ROW_NUM`）⇒ 数据列
+        //   整体后移一格（见 [`DbGrid::model_col`]）。
+        {
+            let renderer = gtk::CellRendererText::new();
+            renderer.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            // ⚠️ **行号不许编辑**：它是算出来的 ⇒ 改了会跟真实行号对不上。
+            renderer.set_editable(false);
+            let col = gtk::TreeViewColumn::new();
+            // ⚠️ **固定宽度、拖不动**（Excel 的行号列就是那样）⇒ 也不参与
+            //   「用户拖过的列宽」那套（见 `sync_user_widths`）。
+            col.set_resizable(false);
+            col.set_expand(false);
+            col.set_sizing(gtk::TreeViewColumnSizing::Fixed);
+            col.set_fixed_width(ROW_NUM_WIDTH);
+            col.pack_start(&renderer, true);
+            col.add_attribute(&renderer, "text", MODEL_ROW_NUM);
+            // 列头留空（Excel 的行号列头就是空的）
+            col.set_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+            self.view.append_column(&col);
+        }
         for i in order {
             let name = &names[i];
             let renderer = gtk::CellRendererText::new();
@@ -1554,7 +1655,10 @@ impl DbGrid {
             col.pack_start(&renderer, true);
             // 必须显式绑定 "text"：GTK4 的 pack_start 不会把某一列的文本喂给
             // 渲染器，不绑就是一片空白（列头还在，看着像"查出来是空的"）。
-            col.add_attribute(&renderer, "text", i as i32);
+            //
+            // ⚠️ **绑的是模型列 `i + 1`**：模型第 0 列是行号（见
+            //   [`DbGrid::model_col`]）⇒ 数据列整体后移一格。
+            col.add_attribute(&renderer, "text", self.model_col(i) as i32);
             // 不可排序的表（表结构页签的字段表）列头不可点，也不显示排序箭头
             col.set_clickable(self.sortable.get());
             if self.sortable.get() {
@@ -1754,7 +1858,8 @@ impl DbGrid {
         };
         let cols = self.view.columns();
         for (n, c) in cols.iter().enumerate() {
-            let orig = order.get(n).copied();
+            // ⚠️ **行号列（第 0 位）不参与排序** ⇒ 没有原始列下标。
+            let orig = if n == 0 { None } else { order.get(n - 1).copied() };
             // ⚠️ GTK4 的 `SortType` **没有 "None"**（GTK3 有 GTK_SORT_NONE），
             // "没排序"要靠 `set_sort_indicator(false)` 表达。
             let ord = match (self.sort.get(), orig) {
@@ -1847,7 +1952,13 @@ impl DbGrid {
         let order = self.visible_order();
         let mut changed = false;
         for (disp, col) in self.view.columns().iter().enumerate() {
-            let Some(orig) = order.get(disp).copied() else {
+            // ⚠️ **行号列（第 0 位）拖不动**（固定宽度）⇒ 不记它的宽度。
+            if disp == 0 {
+                continue;
+            }
+            // ⚠️ **显示位置 → 原始列下标**：数据列从显示位置 **1** 开始
+            //   （第 0 位是行号列）。
+            let Some(orig) = order.get(disp - 1).copied() else {
                 continue;
             };
             let fw = col.fixed_width();
@@ -2134,7 +2245,7 @@ impl DbGrid {
         let inserts = self.inserts.borrow();
         let store = self.model.borrow();
         store.clear();
-        for &r in self.visible.borrow().iter() {
+        for (disp, &r) in self.visible.borrow().iter().enumerate() {
             let vals: Vec<String> = match r {
                 RowRef::Src(src) => {
                     let Some(row) = data.rows.get(src) else { continue };
@@ -2169,7 +2280,15 @@ impl DbGrid {
                         .collect()
                 }
             };
-            append_row(&store, &vals);
+            // ⚠️ **行号列**（Excel 式）：模型第 0 列 ⇒ 值放在最前面。
+            //   号码 = **分页偏移 + 显示行序 + 1** ⇒ 第 2 页的第一行是
+            //   201（跟表里的真实行号对得上）。
+            //   ⚠️ 用的是「显示行序」而不是「源行号」⇒ 排序/筛选之后行号
+            //   连着走（跟 Excel 一样：排完序行号重排，不会乱跳）。
+            let mut all: Vec<String> = Vec::with_capacity(vals.len() + 1);
+            all.push((self.row_no_offset.get() + disp + 1).to_string());
+            all.extend(vals);
+            append_row(&store, &all);
         }
         // ⚠️ **重建 model 会丢选择**（`store.clear()` 把选中状态清了）。
         // 多选是阶段 46 的能力、批量改数据是阶段 47 的能力——改完一个格子

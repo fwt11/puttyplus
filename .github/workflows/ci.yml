@@ -331,13 +331,18 @@ jobs:
           #     恰好两个（连接 / 文件）＋ 连接树还在 ＋ **文件面板挂在侧边栏**
           #     ＋ 切连接标签**跟着换人** ＋ 折叠后整栏收起、展开回上次页签。
           #     ⚠️ 它**不连服务器**（面板只挂不连）⇒ CI 上跑得动。
+          #   - `db_rowno_smoke`：**阶段 187 的数据库工作台三处改造** ⇒
+          #     网格最左边的**行号列**（Excel 式，跳页时接着页码走）＋
+          #     SQL 编辑区能**收起**（分隔条真的下移 ⇒ 空间还给结果区）＋
+          #     底栏的「每页」标签 ＋「总行数」按钮统计后**显示结果**。
+          #     ⚠️ 它**不连真库**（用 `make_test_result_tab` 造假数据）。
           for ex in db_ui_smoke db_empty_smoke tree_panel_smoke fileedit_panel_smoke selfheal_smoke \
                      sidebar_rowmenu_pos_smoke dbedit_remember_smoke sidebar_menu_smoke \
                      docker_perm_smoke editor_dock_smoke compose_jump_smoke newmenu_smoke \
                      localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke \
                      editor_home_smoke ui_baseline_smoke \
                      welcome_semantics_smoke er_state_smoke db_workspace_empty_smoke \
-                     queue_group_smoke perf_regress_smoke sidebar_tabs_smoke; do
+                     queue_group_smoke perf_regress_smoke sidebar_tabs_smoke db_rowno_smoke; do
             echo "::group::$ex"
             # ⚠️⚠️ **先编，再直接跑二进制**（别用 `cargo run`）：2026-11-26 实测
             #    `cargo run` 会把**几百行编译警告**也混进同一个日志 ⇒ 失败时

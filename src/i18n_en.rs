@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2243] = [
+pub static EN: [(&str, &str); 2247] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -881,6 +881,7 @@ pub static EN: [(&str, &str); 2243] = [
     ("尚未扫描。选择两端目录后点「扫描差异」。", "Not scanned yet. Choose the directories on both sides and click \"Scan for differences\"."),
     ("尚未连接数据库", "No database connection yet"),
     ("就绪", "Ready"),
+    ("展开 SQL 编辑器", "Show the SQL editor"),
     ("展开左侧对象树，按模式找表 / 视图 / 函数；双击表看数据", "Expand the object tree on the left to find tables / views / functions by schema; double-click a table to see its data"),
     ("属性", "Properties"),
     ("工作目录", "Working directory"),
@@ -1047,6 +1048,7 @@ pub static EN: [(&str, &str); 2243] = [
     ("忽略", "Ignore"),
     ("忽略规则，逗号分隔（改完要重新扫描）", "Ignore rules, comma separated (you have to rescan after changing them)"),
     ("总行数", "Total rows"),
+    ("总行数 {n}", "Total rows {n}"),
     ("恢复默认宽度", "Reset the column width"),
     ("成功", "Succeeded"),
     ("成功 {n}", "Succeeded {n}"),
@@ -1202,6 +1204,7 @@ pub static EN: [(&str, &str); 2243] = [
     ("操作失败", "The operation failed"),
     ("操作没完成 ⇒ 详情里是原始报错。", "The operation did not complete ⇒ the original error is in the details."),
     ("操作超时了 ⇒ 稍后重试；如果一直这样，先看看容器是不是卡住了。", "The operation timed out ⇒ try again in a moment; if it keeps happening, check whether the container is stuck."),
+    ("收起 SQL 编辑器", "Hide the SQL editor"),
     ("收起对象树：给主区腾出宽度", "Hide the object tree: give the main area more width"),
     ("改主密码", "Change the master password"),
     ("改主密码…", "Change the master password…"),
@@ -1523,6 +1526,7 @@ pub static EN: [(&str, &str); 2243] = [
     ("正在重启（退出码 {c}）", "Restarting (exit code {c})"),
     ("正在重新连接…", "Reconnecting…"),
     ("正在重试刚才那条查询…", "Retrying the previous query…"),
+    ("每页", "Rows per page"),
     ("每页取多少行（改了会重新查）", "How many rows to fetch per page (changing this re-queries)"),
     ("比较方式", "Comparison"),
     ("没拿到文件数据，请改用「上传…」", "No file data received; please use \"Upload…\" instead"),

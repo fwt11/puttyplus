@@ -38,13 +38,17 @@ fn header_type_texts(grid: &dbgrid::DbGrid) -> Vec<String> {
     let mut out = Vec::new();
     for c in grid.view.columns().iter() {
         let Some(w) = c.widget() else {
-            panic!("列头没有自定义 widget");
+            continue;
         };
         let hb = w.downcast_ref::<gtk::Box>().expect("列头不是 Box").clone();
-        let vb = hb
+        // ⚠️ **行号列（Excel 式，阶段 187）跳过**：它的列头是**空的**
+        //   （Excel 的行号列头就是空的）⇒ 里面没有「竖向 Box」。
+        let Some(vb) = hb
             .first_child()
             .and_then(|x| x.downcast_ref::<gtk::Box>().cloned())
-            .expect("列头里没有竖向 Box");
+        else {
+            continue;
+        };
         let mut labels = Vec::new();
         let mut child = vb.first_child();
         while let Some(c) = child {

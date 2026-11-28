@@ -82,20 +82,24 @@ fn main() {
 
         // ---- 断言 1/2：列头 ----
         let cols = grid.view.columns();
-        assert_eq!(cols.len(), 5, "列数不对");
+        // ⚠️ **第 0 列是行号列**（Excel 式，阶段 187）⇒ 数据列从第 1 列开始。
+        assert_eq!(cols.len(), 6, "列数不对");
         // ⚠️ `title` 必须还在：导出、过滤条件、列类型映射都靠它拿列名
-        assert_eq!(cols[0].title(), "id", "列标题丢了：{}", cols[0].title());
-        assert_eq!(cols[3].title(), "age");
+        assert_eq!(cols[1].title(), "id", "列标题丢了：{}", cols[1].title());
+        assert_eq!(cols[4].title(), "age");
         let mut types = Vec::new();
         for c in cols.iter() {
             let Some(w) = c.widget() else {
                 panic!("列头没有自定义 widget（dbx 风格列头没生效）");
             };
             let hb = w.downcast_ref::<gtk::Box>().expect("列头不是 Box").clone();
-            let vb = hb
+            // ⚠️ **行号列跳过**：它的列头是空的（Excel 的行号列头就是空的）
+            let Some(vb) = hb
                 .first_child()
                 .and_then(|x| x.downcast_ref::<gtk::Box>().cloned())
-                .expect("列头里没有竖向 Box");
+            else {
+                continue;
+            };
             let mut labels = Vec::new();
             let mut child = vb.first_child();
             while let Some(c) = child {
@@ -255,11 +259,12 @@ fn main() {
                 .view
                 .translate_coordinates(&win, 0.0, 0.0)
                 .expect("换算坐标失败");
-            // 第 2 列（name）的 x
-            let x0 = grid.view.columns()[1].x_offset() as f64 + vx + 10.0;
+            // 第 2 个**数据**列（name）的 x
+            // ⚠️ **下标要 +1**：第 0 列是行号列（阶段 187）⇒ 数据列从 1 开始。
+            let x0 = grid.view.columns()[2].x_offset() as f64 + vx + 10.0;
             // ⚠️ **多试几个 y**：表头是两行（列名 + 类型小字），高度不好算，
             // 猜错就点到列头上去了（列头右键弹的是**列**菜单）。
-            println!("网格在窗口里的原点：({vx:.0}, {vy:.0})，第 2 列 x = {}", grid.view.columns()[1].x_offset());
+            println!("网格在窗口里的原点：({vx:.0}, {vy:.0})，第 2 个数据列 x = {}", grid.view.columns()[2].x_offset());
             // ⚠️ **先按 ESC 关掉还开着的弹层**：GTK4 的 Popover 打开时会
             // **grab 住指针**，后面的右键全被它吃掉（点哪儿都是"关菜单"）。
             let _ = std::process::Command::new("xdotool")

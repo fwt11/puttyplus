@@ -110,9 +110,10 @@ fn main() {
             let actual = grid.column_widths();
             let avail = grid.view.width();
             println!("可用宽度：{avail} / 计划列宽：{planned:?} / 实际列宽：{actual:?}");
+            // ⚠️ **含行号列**（阶段 187）：3 个数据列 + 1 个行号列
             assert_eq!(
                 planned.len(),
-                3,
+                4,
                 "计划列宽的条数应当跟列数一样：{planned:?}"
             );
             // 撑满：各列加起来不应当比可用宽度少一大截（少 30px 以内算舍入）
@@ -122,12 +123,14 @@ fn main() {
                 "各列加起来没撑满可用宽度（{sum} < {avail}）：{actual:?}"
             );
             // 按内容比例：长内容列更宽（不是平分）
+            // ⚠️ **下标要 +1**：第 0 列是行号列（阶段 187）⇒
+            //   id 在 1、email 在 2。
             assert!(
-                actual[1] > actual[0] * 2,
+                actual[2] > actual[1] * 2,
                 "email 列（长内容）应当明显比 id 列（短内容）宽：{actual:?}"
             );
             assert!(
-                actual[0] > 0 && actual[2] > 0,
+                actual.iter().all(|w| *w > 0),
                 "每列都得有宽度：{actual:?}"
             );
             println!("列宽分配 ✓");

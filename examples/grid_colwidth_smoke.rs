@@ -115,7 +115,8 @@ fn main() {
         // ---- ① 初始宽度是"按内容分"的 ----
         let planned = grid.planned_widths();
         println!("初始列宽：{planned:?}");
-        assert_eq!(planned.len(), 4);
+        // ⚠️ **含行号列**（阶段 187）：4 个数据列 + 1 个行号列
+        assert_eq!(planned.len(), 5);
         assert!(
             planned.iter().all(|w| *w > 0),
             "初始列宽不对：{planned:?}"
@@ -127,11 +128,14 @@ fn main() {
         pump(120);
         let planned = grid.planned_widths();
         println!("设宽后：{planned:?}（user_widths={:?}）", grid.user_widths());
-        assert_eq!(planned[1], 400, "钉住的列宽被覆盖了：{planned:?}");
+        // ⚠️ **下标要 +1**：钉住的是第 2 个**数据**列（原始下标 1）⇒
+        //   在视图里是第 2 位（第 0 位是行号列）。
+        assert_eq!(planned[2], 400, "钉住的列宽被覆盖了：{planned:?}");
         assert_eq!(grid.user_width(1), Some(400));
         // 其余列得**让出空间**（不然钉住的那列就是从别人身上抢的）
-        let rest_before = before_planned[0] + before_planned[2] + before_planned[3];
-        let rest_after = planned[0] + planned[2] + planned[3];
+        // ⚠️ **除被钉住的那一列（视图第 2 位）之外的全算「其余列」**
+        let rest_before = before_planned[0] + before_planned[1] + before_planned[3] + before_planned[4];
+        let rest_after = planned[0] + planned[1] + planned[3] + planned[4];
         assert!(
             rest_after < rest_before,
             "其余列没让出空间：{before_planned:?} → {planned:?}"
@@ -148,7 +152,7 @@ fn main() {
         assert!(grid.clear_user_width(1), "清掉用户宽度失败");
         pump(120);
         assert_eq!(grid.user_width(1), None);
-        assert_ne!(grid.planned_widths()[1], 400, "恢复默认宽度没生效");
+        assert_ne!(grid.planned_widths()[2], 400, "恢复默认宽度没生效");
 
         // ---- ③ 真拖（xdotool）：按住列头右边缘往右挪 ----
         let winid = win_id("阶段 85 列宽拖拽柄冒烟");
@@ -157,8 +161,9 @@ fn main() {
             .view
             .translate_coordinates(&win, 0.0, 0.0)
             .expect("换算坐标失败");
-        // 第 2 列（name）的列头
-        let col = grid.view.columns()[1].clone();
+        // 第 2 个**数据**列（name）的列头
+        // ⚠️ **下标要 +1**：第 0 列是行号列（阶段 187）⇒ 数据列从 1 开始。
+        let col = grid.view.columns()[2].clone();
         let header = col.widget().expect("列头没有自定义 widget");
         let (hx, hy) = header
             .translate_coordinates(&win, 0.0, 0.0)
@@ -188,7 +193,7 @@ fn main() {
         xdo(&["mouseup", "1"]);
         pump(300);
 
-        let after = grid.view.columns()[1].width();
+        let after = grid.view.columns()[2].width();
         let user = grid.user_width(1);
         println!("拖之后第 2 列宽 = {after}（user_width = {user:?}）");
         assert!(
@@ -201,7 +206,7 @@ fn main() {
         );
         assert_eq!(after, user.unwrap(), "实际宽度与记录的用户宽度对不上");
         assert_eq!(
-            grid.planned_widths()[1],
+            grid.planned_widths()[2],
             after,
             "拖完的宽度被『按可用宽度重排』覆盖了：{:?} / {after}",
             grid.planned_widths()
@@ -213,7 +218,7 @@ fn main() {
 
         // ---- ④ 列头的单击照常排序（拖拽手势不能把单击抢走）----
         {
-            let col = grid.view.columns()[1].clone();
+            let col = grid.view.columns()[2].clone();
             let x = vx + col.x_offset() as f64 + 12.0;
             let y = hy + hh / 2.0;
             xdo(&["mousemove", "--window", &winid, &format!("{x:.0}"), &format!("{y:.0}")]);
@@ -229,8 +234,10 @@ fn main() {
 
         // ---- ⑤ 列菜单：拖过的列才有「恢复默认宽度」----
         {
+            // ⚠️ **显示位置要 +1**：第 0 列是行号列（阶段 187）⇒ 刚才拖过的是
+            //   第 2 个**数据**列 ⇒ 它的显示位置是 2。
             assert!(
-                grid.col_menu_popup_now(1),
+                grid.col_menu_popup_now(2),
                 "列菜单没弹出来"
             );
             let titles = grid.column_menu_titles();
@@ -240,7 +247,7 @@ fn main() {
                 "列菜单里没有「恢复默认宽度」：{titles:?}"
             );
             // 点它 ⇒ 宽度回到自动
-            let pop = grid.col_menu_popup_now(1);
+            let pop = grid.col_menu_popup_now(2);
             assert!(pop);
             let _ = std::process::Command::new("xdotool")
                 .args(["key", "Escape"])
@@ -262,13 +269,15 @@ fn main() {
             ]);
             pump(200);
             // 右键**第 2 个可见列**（email，原始下标 2）
-            assert!(grid.col_menu_popup_now(1), "列菜单没弹出来");
+            // ⚠️ **显示位置要 +1**：第 0 列是行号列（阶段 187）⇒
+            //   第 2 个**数据**列的显示位置是 2。
+            assert!(grid.col_menu_popup_now(2), "列菜单没弹出来");
             let col = grid.column_menu_col();
             println!("藏过列之后右键第 2 个可见列 ⇒ 菜单作用在原始列 {col:?}");
             assert_eq!(
                 col,
                 Some(2),
-                "菜单作用到别的列上了（显示位置 1 ≠ 原始下标 2）"
+                "菜单作用到别的列上了（显示位置 2 ≠ 原始下标 2）"
             );
             let titles = grid.column_menu_titles();
             println!("列菜单文字：{titles:?}");
