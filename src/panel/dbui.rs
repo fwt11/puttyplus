@@ -1473,7 +1473,26 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     //
     // ⚠️ **按钮必须放在工具条上、不能放进编辑区**：编辑区收起后按钮也跟着
     //   没了 ⇒ 用户再也展不开 ⇒ 按钮要留在**永远可见**的那一行。
-    let btn_sql_toggle = icon_button("view-conceal-symbolic", tr("收起 SQL 编辑器"));
+    //
+    // ⚠️⚠️ **这颗按钮必须自解释**（用户 2026-11-28：「这个按钮究竟是干什么用的」）：
+    //   光一颗图标 ⇒ 用户既不知道它管的是**哪一块**，也不知道点了会发生什么
+    //   （"眼睛"到底是"现在是藏着的"还是"点了会藏起来"？两样都讲得通）
+    //   ⇒ 改成 **带文字「SQL」+ 箭头**：
+    //   - 文字说清「它管的是 SQL 那块」；
+    //   - 箭头说清「点了面板往哪儿走」（朝上 = 升起来展开，朝下 = 压下去收起）。
+    //
+    // ⚠️ **内容得自己拼**（GTK4 实测）：`gtk_button_set_icon_name()` 会把
+    //   按钮的内容**换成那颗图标** ⇒ 文字被冲掉（`label()` 变成 None）
+    //   ⇒ 自己拿一个 Box 装「图标 + 文字」。
+    let btn_sql_toggle = gtk::Button::new();
+    let img_sql_toggle = gtk::Image::from_icon_name("pan-up-symbolic");
+    {
+        let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        box_.append(&img_sql_toggle);
+        box_.append(&gtk::Label::new(Some(tr("SQL"))));
+        btn_sql_toggle.set_child(Some(&box_));
+    }
+    btn_sql_toggle.set_tooltip_text(Some(tr("展开 SQL 编辑器")));
     sql_row.append(&btn_sql_toggle);
 
     let sql_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -1508,7 +1527,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     //   （英文界面 tooltip 是 "Expand SQL editor"）⇒ 靠文案判状态会失灵。
     let sql_state = Rc::new(Cell::new(crate::settings::db_sql_collapsed()));
     //
-    // ⚠️ **收起不只是把编辑区藏起来**（实测，见 `examples/paned_probe.rs`）：
+    // ⚠️ **收起不只是把编辑区藏起来**（实测，护栏见 `examples/db_rowno_smoke.rs`）：
     //   只 `set_visible(false)` 的话，Paned 的分隔条**不动** ⇒ 下半区照样
     //   占着那么大高度 ⇒ 空间白留着（用户看到的还是"SQL 区太大"）。
     //   ⇒ 还得把 **position 顶到上限**：Paned 会自己夹到「合法最大位置」
@@ -1529,23 +1548,25 @@ fn build(st: &Rc<PanelState>) -> DbUi {
         let state = sql_state.clone();
         let state2 = state.clone();
         // 初始状态：按设置来（默认收起）
-        set_sql_collapsed(&paned, &overlay, &btn2, state.get());
+        set_sql_collapsed(&paned, &overlay, &btn2, &img_sql_toggle, state.get());
         btn.connect_clicked(move |_| {
             let next = !state2.get();
             state2.set(next);
-            set_sql_collapsed(&paned, &overlay, &btn2, next);
+            set_sql_collapsed(&paned, &overlay, &btn2, &img_sql_toggle, next);
             // ⚠️ **记住用户的选择**：他要写 SQL 时展开过一次 ⇒ 下次别再收起
             crate::settings::set_db_sql_collapsed(next);
         });
-        // ⚠️ **窗口一变，折叠态要重新贴底**（实测，`examples/paned_probe.rs`）：
+        // ⚠️ **窗口一变，折叠态要重新贴底**（实测，护栏见 `examples/db_rowno_smoke.rs`）：
         //   GTK 会把「夹紧后的位置」**写回** ⇒ 窗口拉大后那条位置还是旧的
         //   ⇒ 下半区又空出一大块（折叠就失效了）⇒ 每次分配变化都重新顶一次。
+        // ⚠️ **顶的是 `max_position`、不是 `i32::MAX`**：后者会让**上半区拿到
+        //   21 亿像素的高度** ⇒ 布局崩 ⇒ 卡死 + 控件消失（见 `set_sql_collapsed`）。
         {
             let paned = right.clone();
             let state = state.clone();
             right.connect_notify_local(Some("max-position"), move |p, _| {
                 if state.get() {
-                    p.set_position(i32::MAX);
+                    p.set_position(p.max_position());
                 }
             });
         }
@@ -2639,35 +2660,46 @@ const SQL_EDITOR_H: i32 = 160;
 
 /// 把 SQL 编辑区**收起来 / 展开**。
 ///
-/// ⚠️ **收起时必须把分隔条顶到上限**（实测，`examples/paned_probe.rs`）：
-///   只 `set_visible(false)` 的话，Paned 的分隔条**不动** ⇒ 下半区照样占着
-///   那么大高度 ⇒ 空间**白留着**（用户看到的还是"SQL 区太大"）。
-///   ⇒ position 顶到上限 ⇒ Paned 自己夹到「总高 − 下半区的最小高度」
-///   ⇒ 空间才真的还给结果网格。
+/// ⚠️⚠️ **收起时 position 不能写 `i32::MAX`**（GTK 4.18 实测，2026-11-28）：
+///   GTK 会把这个值**当成上半区（结果网格）的高度** ⇒ 它拿到 **21 亿像素**
+///   ⇒ 整个工作台的尺寸协商崩掉 ⇒ **界面卡死、控件整个消失**，切页面才恢复
+///   （用户 2026-11-28 报：「点几次就卡死了，然后整个控件都不见了，必须切换
+///   页面它才能重新显示」）。
+///   ⇒ 写 **`max_position`**（GTK 自己算出来的合法上限）⇒ 空间正好还给结果区。
+///
+/// ⚠️ **只藏控件不够**：Paned 的分隔条不动 ⇒ 下半区照样占着那么大高度 ⇒
+///   空间**白留着**（用户看到的还是"SQL 区太大"）⇒ 还得把 position 顶上去。
 fn set_sql_collapsed(
     paned: &gtk::Paned,
     overlay: &impl IsA<gtk::Widget>,
     btn: &gtk::Button,
+    arrow: &gtk::Image,
     collapsed: bool,
 ) {
     overlay.set_visible(!collapsed);
-    btn.set_icon_name(if collapsed {
-        "view-reveal-symbolic"
+    // ⚠️ **箭头说清「点了面板往哪儿走」**（用户 2026-11-28：「这个按钮究竟
+    //   是干什么用的」）：朝上 = 把它**升起来**（展开）；朝下 = 把它**压下去**
+    //   （收起）。光靠"眼睛"图标 ⇒ 用户分不清是"现在是隐藏的"还是"点了会隐藏"。
+    arrow.set_icon_name(Some(if collapsed {
+        "pan-up-symbolic"
     } else {
-        "view-conceal-symbolic"
-    });
+        "pan-down-symbolic"
+    }));
     btn.set_tooltip_text(Some(if collapsed {
         tr("展开 SQL 编辑器")
     } else {
         tr("收起 SQL 编辑器")
     }));
     if collapsed {
-        paned.set_position(i32::MAX);
+        paned.set_position(paned.max_position());
     } else {
         // 展开：给一块**够写 SQL** 的地方（剩下的全给结果区）
         let total = paned.height();
         if total > 0 {
-            paned.set_position((total - SQL_EDITOR_H).max(0));
+            // ⚠️ **也要夹到合法上限**：编辑区一显示 ⇒ 下半区的最小高度变大
+            //   ⇒ 合法上限变小 ⇒ 不夹的话结果区会被挤到它的最小高度。
+            let want = (total - SQL_EDITOR_H).max(0);
+            paned.set_position(want.min(paned.max_position().max(0)));
         }
     }
 }

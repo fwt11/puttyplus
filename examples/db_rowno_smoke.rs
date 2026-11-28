@@ -301,7 +301,19 @@ fn main() {
     );
 
     // 再点一下 ⇒ 又收起来
+    // ⚠️⚠️ **必须同步读**：`emit_clicked()` 是**同步**的（处理器当场跑完）⇒
+    //   紧接着读 position 读到的就是「**刚写进去的那个值**」⇒ 才能抓住
+    //   `i32::MAX`（写成它 ⇒ 结果区拿到 21 亿像素 ⇒ 布局崩 ⇒ 卡死/控件消失）。
+    //   ⚠️ **先 pump 再读就抓不到了**：主循环里的分配会把位置**修回来**
+    //   （notify 处理器会重新贴底）⇒ 断言就成了永远为真的假阳性。
     toggle.emit_clicked();
+    let pos_sync = paned.as_ref().map(|p| p.position()).unwrap_or(-1);
+    let max_sync = paned.as_ref().map(|p| p.max_position()).unwrap_or(-1);
+    check!(
+        "收起时 position **不超过合法上限**（不能写 i32::MAX ⇒ 结果区会被撑爆）",
+        pos_sync <= max_sync,
+        format!("刚写进去的 position = {pos_sync}，合法上限 = {max_sync}")
+    );
     pump(300);
     check!(
         "再点一下 ⇒ SQL 编辑区**收起来**",
@@ -313,6 +325,33 @@ fn main() {
         "收起后**分隔条回到最下边**",
         pos_again >= pos_collapsed - 2,
         format!("分隔条位置 {pos_collapsed} → {pos_again}（没贴底 ⇒ 空间白留着）")
+    );
+
+    // ⚠️⚠️ **回归护栏：结果区拿到的高度必须是「正常值」**（2026-11-28 修的
+    //   一个真 bug）：收起时把 Paned 的 position 写成 `i32::MAX` ⇒ GTK 把它
+    //   **当成上半区（结果网格）的高度** ⇒ 结果区拿到 **21 亿像素** ⇒ 整个
+    //   工作台的尺寸协商崩掉 ⇒ **界面卡死、控件整个消失**，切页面才恢复
+    //   （用户原话：「点几次就卡死了，然后整个控件都不见了」）。
+    // ⇒ 现在写的是 `max_position`（GTK 自己算的合法上限）⇒ 高度必须是 sane 的。
+    let start_h = paned
+        .as_ref()
+        .and_then(|p| p.start_child())
+        .map(|c| c.height())
+        .unwrap_or(-1);
+    let paned_h = paned.as_ref().map(|p| p.height()).unwrap_or(-1);
+    check!(
+        "结果区拿到的**高度是正常值**（不是 21 亿像素 ⇒ 布局不会崩）",
+        start_h > 0 && start_h < 100_000,
+        format!("结果区高度 = {start_h}px（Paned 总高 {paned_h}px）")
+    );
+    let pos_vs_max = paned
+        .as_ref()
+        .map(|p| (p.position(), p.max_position()))
+        .unwrap_or((-1, -1));
+    check!(
+        "分隔条位置**不超过合法上限**（不会再越界 ⇒ 不会把结果区撑爆）",
+        pos_vs_max.0 <= pos_vs_max.1,
+        format!("position = {}，max_position = {}", pos_vs_max.0, pos_vs_max.1)
     );
 
     /* ================= ③ 底栏自解释 ================= */
