@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2247] = [
+pub static EN: [(&str, &str); 2250] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -1069,6 +1069,7 @@ pub static EN: [(&str, &str); 2247] = [
     ("打开传输队列", "Open the transfer queue"),
     ("打开凭据库…", "Open the credential vault…"),
     ("打开后，在任意终端里敲的按键会同时发给其它终端（Alt+Shift+B 开关）。\n分屏的两个终端是各自独立的会话，所以也会互相转发——\n不想同步时随时关掉即可。\n目标终端若开了应用光标键（vi/less），方向键仍按 ESC [ A 发送。", "Once this is on, keystrokes typed in any terminal also go to the other terminals (toggle with Alt+Shift+B).\nThe two terminals of a split are separate sessions, so they forward to each other as well —\njust switch it off when you do not want them in sync.\nIf the target terminal has application cursor keys enabled (vi/less), the arrow keys are still sent as ESC [ A."),
+    ("打开容器工作台（当前会话）", "Open the container workbench (in the current session)"),
     ("打开录制回放…", "Open recording…"),
     ("打开录制文件失败：{e}", "Failed to open the recording file: {e}"),
     ("打开快捷键说明窗口…", "Open the shortcut help window…"),
@@ -1309,12 +1310,14 @@ pub static EN: [(&str, &str); 2247] = [
     ("新建快速命令", "New quick command"),
     ("新建快速命令…", "New quick command…"),
     ("新建数据库连接…", "New database connection…"),
+    ("新建数据库连接…（当前会话）", "New database connection… (in the current session)"),
     ("新建数据库连接（当前会话）", "New database connection (current session)"),
     ("新建文件夹", "New folder"),
     ("新建本地目录", "New local directory"),
     ("新建标签", "New tab"),
     ("新建第一条", "Create the first one"),
     ("新建终端", "New terminal"),
+    ("新建终端（当前会话）", "New terminal (in the current session)"),
     ("新建表", "New table"),
     ("新建表…", "New table…"),
     ("新建远程目录", "New remote directory"),
@@ -1363,8 +1366,8 @@ pub static EN: [(&str, &str); 2247] = [
     ("显示 {s} / 共 {n} 个网络", "Showing {s} of {n} networks"),
     ("显示 {s} / 共 {n} 个镜像", "Showing {s} of {n} images"),
     ("显示/隐藏 会话侧边栏", "Show/hide the session sidebar"),
-    ("显示/隐藏 会话列表 (Ctrl+Shift+B)", "Show/hide the session list (Ctrl+Shift+B)"),
     ("显示/隐藏 隐藏文件", "Show/hide hidden files"),
+    ("显示/隐藏侧边栏 (Ctrl+Shift+B)", "Show/hide the sidebar (Ctrl+Shift+B)"),
     ("显示侧边栏", "Show sidebar"),
     ("显示列", "Show columns"),
     ("显示所有传输项", "Show all transfers"),

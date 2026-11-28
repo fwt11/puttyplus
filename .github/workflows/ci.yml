@@ -342,7 +342,8 @@ jobs:
                      localdir_smoke ssh_fail_hint_smoke docker_actioncol_smoke \
                      editor_home_smoke ui_baseline_smoke \
                      welcome_semantics_smoke er_state_smoke db_workspace_empty_smoke \
-                     queue_group_smoke perf_regress_smoke sidebar_tabs_smoke db_rowno_smoke; do
+                     queue_group_smoke perf_regress_smoke sidebar_tabs_smoke db_rowno_smoke \
+                     topbar_actions_smoke; do
             echo "::group::$ex"
             # ⚠️⚠️ **先编，再直接跑二进制**（别用 `cargo run`）：2026-11-26 实测
             #    `cargo run` 会把**几百行编译警告**也混进同一个日志 ⇒ 失败时

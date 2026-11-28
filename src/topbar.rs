@@ -496,7 +496,48 @@ pub fn app_menubar(
     bar
 }
 
-/// **顶栏**（侧栏开关 + 应用名 + 菜单栏）。
+/// 顶栏右端「**当前会话**」的三颗直出按钮（阶段 193）。
+///
+/// 每一项 = **（图标, tooltip 原文, action 名）**。
+///
+/// ⚠️ **为什么抽成表**：界面与单测共用**同一份规格** ⇒ 少写一处就少漂一处
+///   （AGENTS.md：「测试不许造假，逻辑要抽成真函数共用」）。
+/// ⚠️ **三个图标都是 Adwaita 真有的**（已用 `gtk::IconTheme::has_icon` 实测）：
+///   `utilities-terminal-symbolic` / `drive-harddisk-symbolic` /
+///   `package-x-generic-symbolic`（容器用 Adwaita 的**箱子** ⇒
+///   `docker-symbolic` 来自 docker-icon-theme 包，大多数系统没装 ⇒ 会缺图）。
+pub const SESSION_ACTIONS: &[(&str, &str, &str)] = &[
+    (
+        "utilities-terminal-symbolic",
+        "新建终端（当前会话）",
+        "new_term",
+    ),
+    (
+        "drive-harddisk-symbolic",
+        "新建数据库连接…（当前会话）",
+        "new_db",
+    ),
+    (
+        "package-x-generic-symbolic",
+        "打开容器工作台（当前会话）",
+        "docker",
+    ),
+];
+
+/// 侧栏开关的图标（顶栏**最右**，紧挨窗口按钮）。
+///
+/// ⚠️ **为什么仍是 `sidebar-show-symbolic`**：Adwaita 里**只有这一个**侧栏
+///   图标（实测 `sidebar-hide-symbolic` / `view-pane-symbolic` /
+///   `view-columns-symbolic` **都不存在** ⇒ 用它们会显示成「缺图占位符」；
+///   而 `view-reveal-symbolic` 实测渲染出来是个**靶心**，看不出是侧栏）。
+///   ⇒ 「像软件图标」这件事**靠位置解决**：它现在在**右上角**、紧挨窗口
+///   按钮（属于「界面控件区」），不再是紧挨窗口左边框的那个位置。
+pub const SIDEBAR_TOGGLE_ICON: &str = "sidebar-show-symbolic";
+
+/// 侧栏开关的 tooltip（写清快捷键）。
+pub const SIDEBAR_TOGGLE_TOOLTIP: &str = "显示/隐藏侧边栏 (Ctrl+Shift+B)";
+
+/// **顶栏**（菜单栏 + 应用名 + 当前会话的三颗直出按钮 + 侧栏开关）。
 ///
 /// ⚠️ **为什么是独立函数**：界面语言要能**实时切换**（用户 2026-11-09：
 /// 「切换语言也应该实时生效」）⇒ 语言一变就把顶栏（连菜单栏）**重建
@@ -511,57 +552,108 @@ pub fn build_header(
     let header = gtk::HeaderBar::new();
     header.add_css_class("pp-header");
 
-    let b_side = crate::a11y::icon_button("sidebar-show-symbolic");
+    header.set_title_widget(Some(header_title));
+
+    // ⚠️ **顶栏里刻意不放的三样东西**（都是历史结论，别又加回来）：
+    //
+    // ① **「＋新建」按钮**（阶段 92c，用户 2026-11-01：「顶栏的加号也可以
+    //    去掉了」）—— 理由跟凭据库徽标一样：**同一个入口出现两遍**（侧栏
+    //    标题栏已经有一个「＋」，阶段 68 起它就是「新建」菜单的入口，菜单项
+    //    与顶栏那份**完全相同**）⇒ 顶栏再放一个就是重复 ⇒ 功能一点不丢。
+    // ② **凭据库状态标志**（阶段 92）—— 以前顶栏与**侧栏标题栏**各有一个
+    //    `crate::vaultui::badge_button()` ⇒ 同一个状态在屏幕上出现**两次**
+    //    （用户 2026-11-01 报「界面上有两处『凭证库已锁定』是否重复」）⇒
+    //    留的是**侧栏那个**（那儿是配连接、勾「记住密码」的地方）。
+    // ③ **「全局状态区」chip**（阶段 77c-2 / 审计 P1-9，正常时只显示「已
+    //    连接」三个字）—— **用户 2026-11-07 明确要求删掉**：它**不指示是哪
+    //    一条连接**（连着多台服务器时根本说不清），而且"连上了"本身也不是
+    //    什么需要一直挂在顶栏的消息。⇒ 信息没丢：每个标签头上有**聚合状态
+    //    点**（`crate::tabs::update_dot`）⇒ "哪台离线了"在对应的标签上看
+    //    得见，正是用户要的位置。
+
+    // ---- 菜单栏（**左边**）----
+    //
+    // ⚠️ **阶段 193**：以前这里先 pack 了**侧栏开关**（`pack_start` 的第一个）
+    //   ⇒ 它落在整条顶栏的**最左边**、紧挨窗口边框 ⇒ 那个「带左栏的方框」
+    //   图形（`sidebar-show-symbolic`）**看着就像软件图标**（用户 2026-11-28：
+    //   「显示侧边栏的按钮放在那里，很多人可能误以为是软件图标」）
+    //   ⇒ 现在它挪到**右端**、紧挨窗口按钮（见下面）。
+    let menubar = app_menubar(win, tabs, toggle_sidebar, sb);
+    header.pack_start(&menubar);
+
+    // ---- 右端：**当前会话**的「新建」三件套 ＋ 侧栏开关（阶段 193）----
+    //
+    // ⚠️ **为什么放顶栏右端**：顶栏标题**就是当前会话名**（阶段 75：标题跟着
+    //   标签走）⇒ 标题**右边**的按钮天然是「对**当前会话**做什么」⇒ 作用域
+    //   与标题一致，用户不用猜这颗按钮管哪条连接。
+    //
+    // ⚠️ **为什么以前藏在「+」里**：阶段 68 把「新建」的动作统一成一张表，
+    //   侧栏与子标签栏的「+」都指着它 ⇒ 每次开一个终端要点**两次**
+    //   （先点「+」再点「新建终端」）⇒ 用户 2026-11-28：「新建终端，新建
+    //   数据库，容器几个按钮**从『+』里放出来**，这样操作更方便些」
+    //   ⇒ 现在**直出**；「+」菜单里**仍然保留**这三项（那是「全部动作」的
+    //   清单，老习惯不用改；两处走的是**同一份实现**）。
+    //
+    // ⚠️ **三颗都用 Adwaita 真有的图标**（已用 `gtk::IconTheme::has_icon`
+    //   实测）：`utilities-terminal-symbolic` / `drive-harddisk-symbolic` /
+    //   `package-x-generic-symbolic`。
+    let mut session_btns: Vec<gtk::Button> = Vec::new();
+    let right = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    for (icon, tip, action) in SESSION_ACTIONS.iter().copied() {
+        let b = crate::a11y::icon_button(icon);
+        b.add_css_class("flat");
+        b.set_tooltip_text(Some(tr(tip)));
+        {
+            let t = Rc::clone(tabs);
+            b.connect_clicked(move |_| crate::newmenu::run_in(&t, action));
+        }
+        session_btns.push(b.clone());
+        right.append(&b);
+    }
+
+    // ---- 侧栏开关（**最右**，紧挨窗口按钮）----
+    //
+    // ⚠️ 图标与理由见 [`SIDEBAR_TOGGLE_ICON`]（Adwaita 里只有这一个侧栏图标；
+    //   「像软件图标」靠**位置**解决，不靠换图标）。
+    let b_side = crate::a11y::icon_button(SIDEBAR_TOGGLE_ICON);
     b_side.add_css_class("flat");
-    b_side.set_tooltip_text(Some(tr("显示/隐藏 会话列表 (Ctrl+Shift+B)")));
+    b_side.set_tooltip_text(Some(tr(SIDEBAR_TOGGLE_TOOLTIP)));
     {
         let t = Rc::clone(toggle_sidebar);
         b_side.connect_clicked(move |_| t());
     }
-    header.pack_start(&b_side);
 
-    header.set_title_widget(Some(header_title));
+    // 分隔线：把「当前会话的动作」与「界面开关」分开（不然一排图标看不出
+    // 哪颗是干什么的）。
+    let sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    sep.set_margin_start(6);
+    sep.set_margin_end(6);
+    right.append(&sep);
+    right.append(&b_side);
 
-    // ⚠️ 顶栏**不再有「＋新建」按钮**（阶段 92c，用户 2026-11-01：
-    // 「顶栏的加号也可以去掉了」）。
-    //
-    // 理由跟凭据库徽标一样——**同一个入口出现两遍**：侧栏标题栏已经有一
-    // 个「＋」（阶段 68 起它就是「新建」菜单的入口，菜单项与顶栏那份
-    // **完全相同**：`NewEntry::items()` 对 TopBar / Sidebar 都给全集），
-    // 顶栏再放一个就是重复 ⇒ 删掉，功能一点不丢。
-    //
-    // 顶栏右端现在只剩：窗口按钮。
+    header.pack_end(&right);
 
-    // ⚠️ 这里**不再放凭据库状态标志**（阶段 92）。
+    // ⚠️ **没会话时那三颗要灰着**（P1-2 的老教训：亮着但点了没反应 ⇒
+    //   用户以为程序卡了）。切标签时「当前会话」会变 ⇒ 跟着刷新。
     //
-    // 以前顶栏与**侧栏标题栏**各有一个 `crate::vaultui::badge_button()` ⇒ 同一
-    // 个状态在屏幕上出现**两次**（用户 2026-11-01 报「界面上有两处『凭证库
-    // 已锁定』是否重复」）。
-    //
-    // 留的是**侧栏那个**：阶段 77a/77b 的既定设计——连接管理器删掉后，
-    // "我到底开没开凭据库"就挪到侧栏标题栏（那儿是配连接、勾「记住密码」
-    // 的地方），两个冒烟也一直盯着它。顶栏这个是更早的遗留，阶段 77a
-    // 挪位时忘了删 ⇒ 这次补上。
-    //
-    // 代价：侧栏收起时看不到凭据库状态。但侧栏收起时用户在看终端/
-    // 工作台，不是配连接的时候；真要查，工具 → 凭据库管理器里也有。
-
-    // ⚠️ **这里原来有一个「全局状态区」chip**（阶段 77c-2 / 审计 P1-9），
-    // 正常时只显示「已连接」三个字。
-    //
-    // **用户 2026-11-07 明确要求删掉**：它**不指示是哪一条连接**——
-    // 连着多台服务器时，"已连接"说的是哪台根本说不清；而"连上了"这件事
-    // 本身也不是什么需要一直挂在顶栏的消息。
-    //
-    // 删了之后信息**没丢**：每个标签头上本来就有**聚合状态点**
-    // （`crate::tabs::update_dot`：● 已连 / ◐ 连接中 / ○ 还没连，tooltip 说清
-    // 是文件面板、终端还是数据库出的问题）⇒ "哪台离线了"在**对应的标签
-    // 上**看得见，正是用户要的位置。
-
-    // 菜单栏（文件/编辑/会话/视图/帮助）：入口不再只有图标，
-    // 与 PuTTY 用户的菜单使用习惯也对得上
-    let menubar = app_menubar(win, tabs, toggle_sidebar, sb);
-    header.pack_start(&menubar);
+    // ⚠️ **弱引用**（AGENTS.md 的引用环红线）：notebook 持有这个回调 ⇒
+    //   回调若抓 `Rc<Tabs>` 强引用 ⇒ notebook → 回调 → Tabs → notebook ⇒
+    //   **环** ⇒ 窗口永远回收不掉 ⇒ 这里只抓 `Weak`。
+    {
+        let btns = session_btns.clone();
+        let tw = Rc::downgrade(tabs);
+        let refresh: Rc<dyn Fn()> = Rc::new(move || {
+            let has = tw
+                .upgrade()
+                .map(|t| t.current_panel_state().is_some())
+                .unwrap_or(false);
+            for b in btns.iter() {
+                b.set_sensitive(has);
+            }
+        });
+        refresh();
+        tabs.notebook.connect_switch_page(move |_, _, _| refresh());
+    }
 
     header
 }
@@ -593,5 +685,48 @@ pub fn toggle_search_for(term: &crate::termview::TermView) {
             }
         }
         w = p.parent();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **顶栏右端那三颗按钮的规格不能缺项**（阶段 193）。
+    ///
+    /// ⚠️ **为什么要钉**：用户 2026-11-28 要求把「新建终端 / 新建数据库 /
+    ///   容器」从「+」菜单里**放出来** ⇒ 这三颗是**直出入口** ⇒ 少一颗
+    ///   就等于那个功能又得点两次。
+    #[test]
+    fn 当前会话的三颗直出按钮都在() {
+        let actions: Vec<&str> = SESSION_ACTIONS.iter().map(|(_, _, a)| *a).collect();
+        assert_eq!(
+            actions,
+            vec!["new_term", "new_db", "docker"],
+            "顶栏直出的三颗按钮少了或多了一颗"
+        );
+    }
+
+    /// **每颗都得有图标和 tooltip**（否则既看不出是啥、读屏也念不出来）。
+    #[test]
+    fn 每颗按钮都有图标和tooltip() {
+        for (icon, tip, action) in SESSION_ACTIONS.iter() {
+            assert!(!icon.trim().is_empty(), "「{action}」没有图标");
+            assert!(!tip.trim().is_empty(), "「{action}」没有 tooltip");
+        }
+        // ⚠️ 侧栏开关也一样（它刚从顶栏**最左**挪到**最右**）。
+        assert!(!SIDEBAR_TOGGLE_ICON.trim().is_empty());
+        assert!(!SIDEBAR_TOGGLE_TOOLTIP.trim().is_empty());
+    }
+
+    /// **三颗的动作名必须是「新」动作表里真有的**（阶段 68：动作表是唯一来源）。
+    ///
+    /// ⚠️ 写错动作名 ⇒ 点下去**毫无反应**（界面不报错）⇒ 钉住。
+    #[test]
+    fn 三颗按钮的动作名都在动作表里() {
+        for (_, _, action) in SESSION_ACTIONS.iter() {
+            let known = crate::topmenus::NEW_ITEMS.iter().any(|i| i.action == *action);
+            assert!(known, "动作「{action}」不在 NEW_ITEMS 里（点了会没反应）");
+        }
     }
 }
