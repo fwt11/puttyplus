@@ -129,6 +129,12 @@ fn check(app: &gtk::Application) {
     pump(200);
 
     // ---- 2. 关掉终端 ⇒ 终端那一格**收拢**（从树上摘掉）----
+    //
+    // ⚠️⚠️ **先拆出第二格**（走**生产路径**：顶栏「视图 → 拆分格子」）：
+    //   `close_cell` 的规则是「**最后一个格子不关**」—— 关掉它连接页就空了 ⇒
+    //   连「+」按钮都看不到 ⇒ 用户没法再开终端（死路）⇒ 宁可留一个空格子。
+    //   ⇒ 树里**只有一格**时，那一格空了也**留在树上**（这正是本冒烟原先
+    //   断言错的地方）⇒ 要验「空格了 ⇒ 摘掉」，得先有第二格。
     let term_sub = tree
         .cell(term_cell)
         .expect("终端那一格还在")
@@ -139,13 +145,17 @@ fn check(app: &gtk::Application) {
         .first()
         .copied()
         .expect("应当有终端页");
+    puttyplus::tabs::split_cell(&page, false);
+    pump(400);
+    assert_eq!(tree.cell_count(), 2, "应当拆出第二格（才有得摘）");
     assert!(term_sub.close_page(term_page), "应当能关掉终端页签");
-    pump(300);
+    pump(400);
     assert!(
         !is_live(&tree, term_cell),
         "终端那一格空了 ⇒ 应当收拢（从树上摘掉）"
     );
-    println!("[2] 关掉终端 ⇒ 那一格收拢 ✔");
+    assert_eq!(tree.cell_count(), 1, "摘掉之后应当还剩一格");
+    println!("[2] 关掉终端 ⇒ 那一格收拢（从树上摘掉）✔");
 
     // ---- 3. 新建终端（**走生产路径**：`Tabs::new_term_page_cwd`）----
     //
@@ -191,6 +201,28 @@ fn check(app: &gtk::Application) {
         "编辑器应当是那一格**当前显示**的页（用户要一眼看见它）"
     );
     println!("[4] 关掉终端 + 新建终端之后打开编辑器 ⇒ 编辑器出现了 ✔");
+
+    // ---- 5. **最后一格不关**（`close_cell` 的明文规则）----
+    //
+    // ⚠️ 上一条验的是「还有别的格子时，空格被摘掉」；这一条验**反过来**：
+    //   **只剩一格**时把它关空 ⇒ 它**留在树上**（否则连接页空了 ⇒ 用户连
+    //   「+」按钮都看不到 ⇒ 没法再开终端 ⇒ 死路）。
+    {
+        let last = tree.ids().first().copied().expect("应当还剩一格");
+        let sub = tree.cell(last).expect("还活着的那一格").tabs.clone();
+        for id in sub.page_ids_of_kind(PageKind::Editor) {
+            let _ = sub.close_page(id);
+        }
+        for id in sub.page_ids_of_kind(PageKind::Terminal) {
+            let _ = sub.close_page(id);
+        }
+        pump(400);
+        assert!(
+            is_live(&tree, last),
+            "最后一格空了也**留在树上**（关掉它 ⇒ 连「+」都没了 ⇒ 没法再开终端）"
+        );
+        println!("[5] 最后一格空了也留在树上（不关）✔");
+    }
 
     // 收尾。
     let _ = tabs.close_page_forced(&page);

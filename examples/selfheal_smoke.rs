@@ -246,11 +246,23 @@ fn main() {
         assert!(!tst.conn_ok.get(), "SFTP 应当是断着的");
         // 点「重新连接终端」
         tabs.reconnect_term_page(&page);
+        // ⚠️⚠️ **终端才刚开始重连 ⇒ 不该抢着连 SFTP**（阶段 186，用户 2026-11-27
+        //   报：「点击重连终端，会报 sftp 连接失败」⇒ 进程内 SSH 下终端与 SFTP
+        //   **共用一条连接**（连接中枢）⇒ 终端刚开始重连时那条共享连接**还没换
+        //   掉** ⇒ 这时候去连 SFTP ⇒ 抢到那条将死的连接 ⇒ 开通道失败）。
+        //   ⇒ 改成等终端的会话**真的起来**再救（见 `note_term_session_ready`）。
+        assert!(
+            !tst.connecting.get(),
+            "终端才刚开始重连 ⇒ 不该抢着连 SFTP（会抢到将死的共享连接）"
+        );
+        // 终端会话**真的起来了** ⇒ 这时才救 SFTP（这才是用户要的
+        // 「重连终端 ⇒ sftp 也跟着重连」）。
+        panel::note_term_session_ready(&tst);
         assert!(
             tst.connecting.get(),
-            "重连终端 ⇒ 断了的 SFTP 也该自动重连（connecting 应当是 true）"
+            "终端会话就绪 ⇒ 断了的 SFTP 该自动重连（connecting 应当是 true）"
         );
-        println!("[8] 重连终端 ⇒ 断了的 SFTP 也自动重连 ✓");
+        println!("[8] 重连终端 ⇒ 会话就绪后自动重连 SFTP ✓");
     }
 
     let _ = std::fs::remove_dir_all(&home);
