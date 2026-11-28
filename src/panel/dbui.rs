@@ -144,6 +144,12 @@ pub struct DbUi {
     ///   编辑器的行为 ⇒ 存一份按钮，测试点它 ⇒ 走的是**用户点一下的那条路**
     ///   （同一条逻辑，不另开一条后门）。
     sql_toggle: gtk::Button,
+    /// SQL 编辑区所在的那条**竖直分隔**（阶段 190）。
+    ///
+    /// ⚠️ **为什么存一份**：用户可以直接**拖分隔条**把编辑区拖出来
+    ///   （用户 2026-11-28 报：拖出来却打不了字）⇒ 冒烟要能**模拟那次拖动**
+    ///   ⇒ 存一份分隔条，测试改它的 position ⇒ 走的是**产品自己的那条路**。
+    pub sql_paned: gtk::Paned,
     /// SQL 编辑区**现在收没收着**（阶段 188）。
     ///
     /// ⚠️ **为什么单独记、不靠按钮文案反推**：文案随语言变（英文界面 tooltip
@@ -1542,31 +1548,96 @@ fn build(st: &Rc<PanelState>) -> DbUi {
     //   ⇒ 展开过就**记住**（存进设置），别每次都跟用户对着干。
     {
         let btn = btn_sql_toggle.clone();
-        let btn2 = btn.clone();
         let overlay = sql_overlay.clone();
         let paned = right.clone();
         let state = sql_state.clone();
         let state2 = state.clone();
         // 初始状态：按设置来（默认收起）
-        set_sql_collapsed(&paned, &overlay, &btn2, &img_sql_toggle, state.get());
-        btn.connect_clicked(move |_| {
-            let next = !state2.get();
-            state2.set(next);
-            set_sql_collapsed(&paned, &overlay, &btn2, &img_sql_toggle, next);
-            // ⚠️ **记住用户的选择**：他要写 SQL 时展开过一次 ⇒ 下次别再收起
-            crate::settings::set_db_sql_collapsed(next);
-        });
+        set_sql_collapsed(&paned, &overlay, &btn, &img_sql_toggle, state.get());
+        //
+        // ⚠️⚠️ **闭包只抓弱引用**（AGENTS.md 的引用环红线）：按钮 / 编辑器 /
+        //   分隔条**都在同一棵控件树里** ⇒ 抓强引用 = 自己抓自己 ⇒ 环 ⇒
+        //   面板永远释放不掉。
+        let btn_w = btn.downgrade();
+        let overlay_w = overlay.downgrade();
+        let arrow_w = img_sql_toggle.downgrade();
+        let paned_w = paned.downgrade();
+        // ⚠️ **弱引用拿面板**（重算按钮使能要用 `DbUi`）⇒ 不能抓强引用
+        //   （面板 → 控件树 → 闭包 → 面板 = 环，AGENTS.md 的红线）。
+        let stw = Rc::downgrade(st);
+        {
+            let btn_w = btn_w.clone();
+            let stw = stw.clone();
+            let overlay_w = overlay_w.clone();
+            let arrow_w = arrow_w.clone();
+            let paned_w = paned_w.clone();
+            btn.connect_clicked(move |_| {
+                let (Some(btn), Some(overlay), Some(arrow), Some(paned)) = (
+                    btn_w.upgrade(),
+                    overlay_w.upgrade(),
+                    arrow_w.upgrade(),
+                    paned_w.upgrade(),
+                ) else {
+                    return;
+                };
+                let next = !state2.get();
+                state2.set(next);
+                set_sql_collapsed(&paned, &overlay, &btn, &arrow, next);
+                // ⚠️ **记住用户的选择**：他要写 SQL 时展开过一次 ⇒ 下次别再收起
+                crate::settings::set_db_sql_collapsed(next);
+                // ⚠️ **编辑区收/放 ⇒ 四颗按钮跟着变灰/变亮**
+                //   （用户 2026-11-28：「编辑区域如果没有出现，这些按钮最好
+                //   禁用，否则用户不知道干啥」）。
+                if let Some(st) = stw.upgrade() {
+                    let slot = st.db_ui.borrow();
+                    if let Some(ui) = slot.as_ref() {
+                        update_buttons(ui);
+                    }
+                }
+            });
+        }
         // ⚠️ **窗口一变，折叠态要重新贴底**（实测，护栏见 `examples/db_rowno_smoke.rs`）：
         //   GTK 会把「夹紧后的位置」**写回** ⇒ 窗口拉大后那条位置还是旧的
         //   ⇒ 下半区又空出一大块（折叠就失效了）⇒ 每次分配变化都重新顶一次。
         // ⚠️ **顶的是 `max_position`、不是 `i32::MAX`**：后者会让**上半区拿到
         //   21 亿像素的高度** ⇒ 布局崩 ⇒ 卡死 + 控件消失（见 `set_sql_collapsed`）。
+        // ⚠️ **不捕获 `paned`**：信号参数就是它自己 ⇒ 捕获 = 自己抓自己 = 环。
         {
-            let paned = right.clone();
             let state = state.clone();
             right.connect_notify_local(Some("max-position"), move |p, _| {
                 if state.get() {
                     p.set_position(p.max_position());
+                }
+            });
+        }
+        // ⚠️⚠️ **拖分隔条 ⇒ 把编辑区放出来**（阶段 190，用户 2026-11-28：
+        //   「如果我不点『SQL』按钮，而是通过鼠标把这个区域边界拖动，让它显示
+        //   出来，那就不能输入文字，这是否合理？我觉得用户会感到诧异，不知所措」
+        //   ⇒ 收起时拖出来的是**一片空地**（编辑区还藏着）⇒ 打不了字）。
+        //   ⇒ 拖动 = 「我要那块地方」⇒ 直接把**能编辑的**编辑区放出来。
+        // ⚠️ GTK4 的 `GtkPaned` **没有** GTK3 那个 `resize-start` 信号 ⇒ 靠
+        //   「position 变了且**小于合法上限**」来认「这是用户拖的」（我们自己
+        //   写 position 时写的正是 `max_position()` ⇒ 相等 ⇒ 不算拖动）。
+        {
+            let state = state.clone();
+            let stw = stw.clone();
+            let btn_w = btn_w.clone();
+            let overlay_w = overlay_w.clone();
+            let arrow_w = arrow_w.clone();
+            right.connect_notify_local(Some("position"), move |p, _| {
+                let (Some(btn), Some(overlay), Some(arrow)) =
+                    (btn_w.upgrade(), overlay_w.upgrade(), arrow_w.upgrade())
+                else {
+                    return;
+                };
+                if expand_sql_on_drag(p, &overlay, &btn, &arrow, &state) {
+                    // ⚠️ **编辑区被拖出来了 ⇒ 四颗按钮也该亮了**
+                    if let Some(st) = stw.upgrade() {
+                        let slot = st.db_ui.borrow();
+                        if let Some(ui) = slot.as_ref() {
+                            update_buttons(ui);
+                        }
+                    }
                 }
             });
         }
@@ -1643,6 +1714,7 @@ fn build(st: &Rc<PanelState>) -> DbUi {
         sql,
         sql_ph,
         sql_toggle: btn_sql_toggle.clone(),
+        sql_paned: right.clone(),
         sql_collapsed: sql_state.clone(),
         sql_hl,
         meta,
@@ -2658,19 +2730,11 @@ fn icon_button(icon: &str, tip: &str) -> gtk::Button {
 ///   空着 ⇒ 展开就该给一块**够写 SQL 的地方**，而不是把结果区挤没。
 const SQL_EDITOR_H: i32 = 160;
 
-/// 把 SQL 编辑区**收起来 / 展开**。
+/// 把 SQL 编辑区的**样子**改掉（可见性 + 箭头 + 悬停说明）。
 ///
-/// ⚠️⚠️ **收起时 position 不能写 `i32::MAX`**（GTK 4.18 实测，2026-11-28）：
-///   GTK 会把这个值**当成上半区（结果网格）的高度** ⇒ 它拿到 **21 亿像素**
-///   ⇒ 整个工作台的尺寸协商崩掉 ⇒ **界面卡死、控件整个消失**，切页面才恢复
-///   （用户 2026-11-28 报：「点几次就卡死了，然后整个控件都不见了，必须切换
-///   页面它才能重新显示」）。
-///   ⇒ 写 **`max_position`**（GTK 自己算出来的合法上限）⇒ 空间正好还给结果区。
-///
-/// ⚠️ **只藏控件不够**：Paned 的分隔条不动 ⇒ 下半区照样占着那么大高度 ⇒
-///   空间**白留着**（用户看到的还是"SQL 区太大"）⇒ 还得把 position 顶上去。
-fn set_sql_collapsed(
-    paned: &gtk::Paned,
+/// ⚠️ **和「位置」分开**：拖分隔条时，位置归**那一次拖动**管（我们只把
+///   编辑区放出来，不去抢位置 ⇒ 用户的鼠标说停就停）。
+fn sql_editor_ui(
     overlay: &impl IsA<gtk::Widget>,
     btn: &gtk::Button,
     arrow: &gtk::Image,
@@ -2690,6 +2754,60 @@ fn set_sql_collapsed(
     } else {
         tr("收起 SQL 编辑器")
     }));
+}
+
+/// 收起时**用户拖了分隔条** ⇒ 把编辑区放出来（而且是**能编辑的**）。
+///
+/// ⚠️ **为什么**（用户 2026-11-28：「如果我不点『SQL』按钮，而是通过鼠标把
+///   这个区域边界拖动，让它显示出来，那就**不能输入文字**，这是否合理？我觉得
+///   用户会感到诧异，不知所措」⇒ 收起时拖出来的是**一片空地**（编辑区还藏着）
+///   ⇒ 打不了字 ⇒ 用户懵）。
+///   ⇒ 拖动 = 「我要那块地方」⇒ 直接把**能编辑的**编辑区放出来。
+///
+/// ⚠️ **不碰位置**：位置归**那一次拖动**管（抢一下就跟鼠标打架）。
+///
+/// 返回 true = 状态变了（收着 → 展开）。
+fn expand_sql_on_drag(
+    paned: &gtk::Paned,
+    overlay: &gtk::Overlay,
+    btn: &gtk::Button,
+    arrow: &gtk::Image,
+    state: &Cell<bool>,
+) -> bool {
+    if !state.get() {
+        return false;
+    }
+    // ⚠️ **只有「比合法上限小」才是用户拖的**：我们自己写 position 时写的
+    //   就是 `max_position()` ⇒ 相等 ⇒ 不算拖动（否则每次重贴底都会误判）。
+    if paned.position() >= paned.max_position() {
+        return false;
+    }
+    state.set(false);
+    sql_editor_ui(overlay, btn, arrow, false);
+    // ⚠️ **记住**：用户自己把那块地方拖出来了 ⇒ 下次别再替他收起。
+    crate::settings::set_db_sql_collapsed(false);
+    true
+}
+
+/// 把 SQL 编辑区**收起来 / 展开**。
+///
+/// ⚠️⚠️ **收起时 position 不能写 `i32::MAX`**（GTK 4.18 实测，2026-11-28）：
+///   GTK 会把这个值**当成上半区（结果网格）的高度** ⇒ 它拿到 **21 亿像素**
+///   ⇒ 整个工作台的尺寸协商崩掉 ⇒ **界面卡死、控件整个消失**，切页面才恢复
+///   （用户 2026-11-28 报：「点几次就卡死了，然后整个控件都不见了，必须切换
+///   页面它才能重新显示」）。
+///   ⇒ 写 **`max_position`**（GTK 自己算出来的合法上限）⇒ 空间正好还给结果区。
+///
+/// ⚠️ **只藏控件不够**：Paned 的分隔条不动 ⇒ 下半区照样占着那么大高度 ⇒
+///   空间**白留着**（用户看到的还是"SQL 区太大"）⇒ 还得把 position 顶上去。
+fn set_sql_collapsed(
+    paned: &gtk::Paned,
+    overlay: &impl IsA<gtk::Widget>,
+    btn: &gtk::Button,
+    arrow: &gtk::Image,
+    collapsed: bool,
+) {
+    sql_editor_ui(overlay, btn, arrow, collapsed);
     if collapsed {
         paned.set_position(paned.max_position());
     } else {
@@ -7008,9 +7126,16 @@ pub fn on_er(
 fn update_buttons(ui: &DbUi) {
     let idle = !ui.busy.get();
     let conn = ui.connected.get();
-    ui.btn_run.set_sensitive(idle && conn);
-    ui.btn_run_sel.set_sensitive(idle && conn);
-    ui.btn_cancel.set_sensitive(conn && ui.busy.get());
+    // ⚠️⚠️ **编辑区收着 ⇒ 这四颗按钮全是「哑弹」**（用户 2026-11-28：
+    //   「编辑区域如果没有出现，这些按钮最好禁用，否则用户不知道干啥」）
+    //   ⇒ 编辑区**不可见**时一律灰掉（不管有没有连上库、有没有 SQL）。
+    //   ⇒ 展开时再按「连上了吗 / 忙不忙 / 有没有选区」恢复。
+    let editor = !ui.sql_collapsed.get();
+    ui.btn_run.set_sensitive(editor && idle && conn);
+    ui.btn_run_sel.set_sensitive(editor && idle && conn);
+    ui.btn_cancel.set_sensitive(editor && conn && ui.busy.get());
+    // ⚠️ **「历史」跟内容/连接无关** ⇒ 只要编辑区在就能点。
+    ui.btn_history.set_sensitive(editor);
     // ⚠️ **可见 ≠ 可点**：导入导出按钮没连上库的时候是**灰的**——
     // set_visible(true) 不会让它能点（AGENTS.md 的老坑）。
     ui.btn_transfer.set_sensitive(conn);
@@ -11551,6 +11676,22 @@ pub fn set_sql_editor_collapsed(st: &Rc<PanelState>, collapsed: bool) {
     if ui.sql_collapsed.get() != collapsed {
         ui.sql_toggle.emit_clicked();
     }
+}
+
+/// 冒烟测试用：**模拟用户拖分隔条**（阶段 190）。
+///
+/// ⚠️ **走的是真路径**：这里**只改分隔条的位置**（＝ 用户拖分隔条这件事本身）
+///   ⇒ 产品的 `notify::position` 处理器会自己认出「用户拖了」⇒ 把**能编辑的**
+///   编辑区放出来 ⇒ **逻辑不复制**（测试里没有第二份实现）。
+///
+/// `by` = 往上拖多少像素。
+pub fn drag_sql_paned_for_test(st: &Rc<PanelState>, by: i32) -> bool {
+    let slot = st.db_ui.borrow();
+    let Some(ui) = slot.as_ref() else { return false };
+    let p = &ui.sql_paned;
+    let target = (p.max_position() - by).max(0);
+    p.set_position(target);
+    true
 }
 
 /// 冒烟测试用：SQL 编辑区**现在收没收着**（阶段 188）。

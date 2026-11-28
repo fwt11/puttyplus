@@ -354,6 +354,71 @@ fn main() {
         format!("position = {}，max_position = {}", pos_vs_max.0, pos_vs_max.1)
     );
 
+    /* ================= ②b 编辑区收着 ⇒ 按钮全灰；拖分隔条也能用 ================= */
+
+    // ⚠️⚠️ **编辑区收着 ⇒ 那四颗按钮全是「哑弹」**（用户 2026-11-28：
+    //   「编辑区域如果没有出现，这些按钮最好禁用，否则用户不知道干啥」）。
+    //   灰的是：执行 / 执行选中 / 取消 / 历史（靠 tooltip 认，图标名不算数）。
+    let find_sql_btn = |needle: &str| -> Option<gtk::Button> {
+        find::<gtk::Button>(&ui_page, |w| {
+            w.downcast_ref::<gtk::Button>()
+                .and_then(|b| b.tooltip_text())
+                .map(|t| t.contains(needle))
+                .unwrap_or(false)
+        })
+    };
+    let sql_btns: Vec<(&str, gtk::Button)> = ["执行：", "执行选中：", "取消：", "历史："]
+        .iter()
+        .filter_map(|n| find_sql_btn(n).map(|b| (*n, b)))
+        .collect();
+    check!(
+        "找得到 SQL 工具条上的四颗按钮（执行/执行选中/取消/历史）",
+        sql_btns.len() == 4,
+        format!("只找到 {} 颗：{:?}", sql_btns.len(), sql_btns.iter().map(|(n, _)| *n).collect::<Vec<_>>())
+    );
+    let all_grey = sql_btns.iter().all(|(_, b)| !b.is_sensitive());
+    check!(
+        "**编辑区收着** ⇒ 四颗按钮**都是灰的**（点了没反应 ⇒ 用户懵）",
+        all_grey,
+        format!(
+            "各按钮状态：{:?}",
+            sql_btns.iter().map(|(n, b)| (*n, b.is_sensitive())).collect::<Vec<_>>()
+        )
+    );
+
+    // ⚠️⚠️ **拖分隔条 ⇒ 编辑区放出来（而且能编辑）**（用户 2026-11-28：
+    //   「如果我不点『SQL』按钮，而是通过鼠标把这个区域边界拖动，让它显示
+    //   出来，那就不能输入文字……用户会感到诧异，不知所措」）。
+    //   ⇒ 拖出来的是**能编辑的编辑区**，不是一片空地。
+    puttyplus::panel::dbui::drag_sql_paned_for_test(&panel.st, 120);
+    pump(400);
+    check!(
+        "拖分隔条 ⇒ SQL 编辑区**放出来**（不是一片打不了字的空地）",
+        sql_editor.is_visible(),
+        "拖出来还是空的（编辑区没被放出来）".to_string()
+    );
+    check!(
+        "拖分隔条 ⇒ 状态变成「展开」（按钮该变成 ⌄）",
+        !puttyplus::panel::dbui::sql_editor_collapsed(&panel.st),
+        "拖出来了却还记着「收着」".to_string()
+    );
+    // ⚠️ **「取消」不算**：它只在**有语句正在跑**时才亮（那是另一条规则，
+    //   这里没有语句在跑 ⇒ 它本来就该是灰的）。
+    let live_ones: Vec<(&str, gtk::Button)> = sql_btns
+        .iter()
+        .filter(|(n, _)| !n.contains("取消"))
+        .cloned()
+        .collect();
+    let all_live = live_ones.iter().all(|(_, b)| b.is_sensitive());
+    check!(
+        "编辑区出来了 ⇒ 执行/执行选中/历史**亮了**（这时才有用）",
+        all_live,
+        format!(
+            "各按钮状态：{:?}",
+            sql_btns.iter().map(|(n, b)| (*n, b.is_sensitive())).collect::<Vec<_>>()
+        )
+    );
+
     /* ================= ③ 底栏自解释 ================= */
 
     // ⚠️ **底栏属于「结果页签」**（不是工作台本身）⇒ 得先有一个结果页签
