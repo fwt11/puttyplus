@@ -3533,10 +3533,11 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     d_pill.set_valign(gtk::Align::Center);
     d_row.append(&d_title);
     d_row.append(&d_pill);
-    // ⚠️ **阶段 156**：末尾放一个**「关闭」** ⇒ 弹窗里永远有一个看得见的
-    //   关闭入口（普通 `GtkWindow` 没有自带标题栏 ⇒ 外面那个 X 不一定在）。
-    let d_close = detail_close_button();
-    d_row.append(&d_close);
+    // ⚠️⚠️ **阶段 191：内容里不再摆「关闭」按钮**（用户 2026-11-28：「右上角
+    //   专门的关闭按钮也不需要了，**用窗口本身的关闭按钮**就够了」）。
+    //   原来摆它的理由是「普通 `GtkWindow` 没有自带标题栏 ⇒ 外面那个 X 不
+    //   一定在」⇒ 但这扇窗**明明有标题栏**（用户截图里 X 就在那儿）⇒ 冗余。
+    //   ⇒ 关闭靠**窗口自己的 X**（`close-request` ⇒ 藏起来不销毁）＋ **Esc**。
 
     // 一张卡片 = 标题 + **键值表**（UI 审查 D9：不是一坨自动换行的文本）。
     let (c_config, card_config) = mk_kv_card(tr("运行配置"));
@@ -3660,11 +3661,19 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     //   - 下载 ⇒ **文件夹 + 下箭头**（`folder-download`）⇒ 一眼就是「取下来」；
     //   - 查看 ⇒ **放大镜**（`edit-find`）⇒ 一眼就是「看看内容」。
     //   ⇒ **全是 Adwaita 真有的图标**（已核对 `/usr/share/icons/Adwaita/symbolic`）。
+    // ⚠️⚠️ **阶段 191：工具条只留三颗**（用户 2026-11-28：「这个按钮不需要
+    //   这么多，**刷新，上传，下载**就够了」）：
+    //   - 刷新 ⇒ 重新读一遍这个目录；
+    //   - 上传 ⇒ 把本地文件传上去；
+    //   - 下载 ⇒ 把容器里的文件取下来。
+    //   ⇒ **去掉的两颗**：
+    //   - 「查看内容」⇒ **双击那一行照样能看**（`connect_row_activated` ⇒
+    //     `files_view`）⇒ 功能没丢，只是少一个入口；
+    //   - 「上传整个目录」⇒ 与**主文件面板同一口径**（那边也只有一颗
+    //     「上传」）⇒ 容器这边也只留一颗。
     let f_refresh = icon_btn("view-refresh-symbolic", tr("重新读取这个目录"));
     let f_upload = icon_btn("send-to-symbolic", tr("把本地文件上传到容器当前目录"));
-    let f_uploaddir = icon_btn("folder-new-symbolic", tr("把本地整个目录上传到容器当前目录"));
     let f_download = icon_btn("folder-download-symbolic", tr("把容器里的文件下载到本地"));
-    let f_view = icon_btn("edit-find-symbolic", tr("查看容器里这个文件的内容"));
 
     let f_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     f_bar.set_margin_start(6);
@@ -3672,7 +3681,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     f_bar.set_margin_top(2);
     f_bar.set_margin_bottom(2);
     f_bar.append(&f_path);
-    for b in [&f_refresh, &f_upload, &f_uploaddir, &f_download, &f_view] {
+    for b in [&f_refresh, &f_upload, &f_download] {
         f_bar.append(b);
     }
 
@@ -3735,8 +3744,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
 
     // ---- 日志窗：标题行 ＋ 日志正文 ----
     //
-    // ⚠️ **标题行里放一个「关闭」**（跟概览窗一个口径）⇒ 普通 `GtkWindow`
-    //   没有自带标题栏 ⇒ 用户可能一个关闭入口都看不到。
+    // ⚠️ **阶段 191：标题行只留标题**（关闭靠窗口自己的 X ＋ Esc ⇒ 见上面
+    //   容器详情那处的说明）。
     let log_head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     log_head.set_margin_start(8);
     log_head.set_margin_end(8);
@@ -3745,9 +3754,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     log_head_title.set_xalign(0.0);
     log_head_title.set_hexpand(true);
     log_head_title.add_css_class("heading");
-    let log_close = detail_close_button();
     log_head.append(&log_head_title);
-    log_head.append(&log_close);
     let logs_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     logs_box.append(&log_head);
     logs_box.append(&log_root);
@@ -3761,9 +3768,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     files_head_title.set_xalign(0.0);
     files_head_title.set_hexpand(true);
     files_head_title.add_css_class("heading");
-    let files_close = detail_close_button();
     files_head.append(&files_head_title);
-    files_head.append(&files_close);
     let files_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     files_box.append(&files_head);
     files_box.append(&f_root);
@@ -3783,10 +3788,8 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
     p_row.set_margin_end(8);
     p_row.set_margin_top(4);
     p_row.append(&p_title);
-    // ⚠️ **阶段 156**：项目详情也得有**「关闭」**（一个 widget 只能有一个
-    //   parent ⇒ 不能跟容器详情那个共用同一个按钮）。
-    let p_close = detail_close_button();
-    p_row.append(&p_close);
+    // ⚠️ **阶段 191：内容里不再摆「关闭」**（同一扇窗 ⇒ 关闭靠窗口自己的 X
+    //   ＋ Esc ⇒ 见容器详情那处的说明）。
 
     let p_info = gtk::Label::new(Some(""));
     p_info.set_xalign(0.0);
@@ -3952,12 +3955,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
         files_window: RefCell::new(None),
         file_view_window: RefCell::new(None),
         file_view_text: RefCell::new(None),
-        detail_close_btns: RefCell::new(vec![
-            d_close.clone(),
-            p_close.clone(),
-            log_close.clone(),
-            files_close.clone(),
-        ]),
+        // ⚠️ **阶段 191：内容里没有「关闭」按钮了**（用窗口自己的 X）⇒
+        //   这张表永远是空的（留着是为了让冒烟能钉住"别再加回来"）。
+        detail_close_btns: RefCell::new(Vec::new()),
         detail: DetailUi {
             root: d_root,
             title: d_title,
@@ -4035,9 +4035,7 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             btns: vec![
                 f_refresh.clone(),
                 f_upload.clone(),
-                f_uploaddir.clone(),
                 f_download.clone(),
-                f_view.clone(),
             ],
             status: f_status,
             xfer_status: f_xfer_status,
@@ -4847,7 +4845,9 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             });
         }
         // **「上传文件…」/「上传目录…」**
-        for (btn, is_dir) in [(f_upload, false), (f_uploaddir, true)] {
+        // ⚠️ **阶段 191：只剩「上传文件」这一种**（见上面的工具条说明）。
+        {
+            let btn = f_upload;
             let stw = Rc::downgrade(st);
             let u = Rc::downgrade(&ui);
             btn.connect_clicked(move |_| {
@@ -4864,18 +4864,12 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
                     return;
                 }
                 let top = host_window(&u, &st);
+                // ⚠️ **阶段 191：只剩「上传文件」**（工具条上三颗：刷新/上传/下载）
+                //   ⇒ 选择器固定成「选文件」（以前还有一颗「上传整个目录」）。
                 let mut b = gtk::FileChooserNative::builder()
                     .modal(true)
-                    .title(if is_dir {
-                        tr("选要上传的目录")
-                    } else {
-                        tr("选要上传的文件")
-                    })
-                    .action(if is_dir {
-                        gtk::FileChooserAction::SelectFolder
-                    } else {
-                        gtk::FileChooserAction::Open
-                    })
+                    .title(tr("选要上传的文件"))
+                    .action(gtk::FileChooserAction::Open)
                     .accept_label(tr("上传"))
                     .cancel_label(tr("取消"));
                 if let Some(p) = top.as_ref() {
@@ -4993,48 +4987,6 @@ fn build(st: &Rc<PanelState>) -> Rc<DockerUi> {
             });
         }
         // **「查看…」**
-        {
-            let stw = Rc::downgrade(st);
-            let u = Rc::downgrade(&ui);
-            f_view.connect_clicked(move |_| {
-                let Some(u) = u.upgrade() else { return };
-                let Some(st) = stw.upgrade() else { return };
-                let container = u.selected.borrow().clone();
-                if container.is_empty() {
-                    return;
-                }
-                let Some((name, kind)) = files_selected(&u) else {
-                    let parent = host_window(&u, &st);
-                    crate::panel::dialogs::show_error(
-                        parent.as_ref(),
-                        &tr("先选一个条目"),
-                        &tr("先在列表里选中一个文件，再点「查看…」"),
-                    );
-                    return;
-                };
-                if kind == "dir" {
-                    let parent = host_window(&u, &st);
-                    crate::panel::dialogs::show_error(
-                        parent.as_ref(),
-                        &tr("看不了目录"),
-                        &tr("目录请用「下载…」整个拉下来"),
-                    );
-                    return;
-                }
-                // ⚠️ **阶段 162：「..」是上一级目录**，不是文件 ⇒ 说清楚。
-                if kind == "up" {
-                    let parent = host_window(&u, &st);
-                    crate::panel::dialogs::show_error(
-                        parent.as_ref(),
-                        &tr("这是上一级目录"),
-                        &tr("双击列表里的「..」就能回到上一级"),
-                    );
-                    return;
-                }
-                let remote = files_remote_path(&u, &name);
-                files_view(&st, &u, &container, &remote);
-            });
-        }
     }
     // **暂停 / 继续**
     //
@@ -5830,24 +5782,16 @@ fn dispatch_row_action(st: &Rc<PanelState>, ui: &Rc<DockerUi>, hit: &ActionHit) 
 ///
 /// ⚠️ **只藏，不销毁**：弹窗里装着**共享的**详情控件（`detail_box`）
 ///   ⇒ 销毁了就再也开不出来（控件全成悬空句柄）。
-fn detail_close_button() -> gtk::Button {
-    let b = gtk::Button::with_label(tr("关闭"));
-    b.add_css_class("flat");
-    b.set_valign(gtk::Align::Center);
-    // ⚠️ **阶段 157：图标按钮/动作按钮都要有 tooltip**（用户 2026-11-23：
-    //   「按钮增加 tooltip」）⇒ 这里是纯文字按钮 ⇒ 补一句说明它做什么。
-    b.set_tooltip_text(Some(tr("关掉这个详情窗口（内容留着，下次打开还在）")));
-    b.connect_clicked(|b| {
-        // ⚠️ 往上找那扇窗（按钮是弹窗内容的一部分）⇒ **藏起来**，不销毁。
-        if let Some(w) = b
-            .ancestor(gtk::Window::static_type())
-            .and_downcast::<gtk::Window>()
-        {
-            w.set_visible(false);
-        }
-    });
-    b
-}
+/// ⚠️ **阶段 191：这里原来有个「关闭」按钮，现在没了**。
+///
+/// 用户 2026-11-28：「右上角专门的关闭按钮也不需要了，**用窗口本身的关闭
+/// 按钮**就够了」⇒ 概览 / 日志 / 容器文件 / 项目详情这四块**都不再摆**
+/// 「关闭」⇒ 关闭靠**窗口自己的 X**（`close-request` ⇒ 藏起来、不销毁）
+/// ＋ **Esc**（`new_tool_window` 里那个）。
+///
+/// ⚠️ **为什么不担心"外面那个 X 不一定在"**：这扇窗**明明有标题栏**
+///   （`gtk::Window` + `set_title` ⇒ 有 WM 就有标题栏与 X）⇒ 原来那条
+///   理由在真机上不成立。
 
 /// **三扇详情窗里的哪一扇**（阶段 165）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7385,26 +7329,13 @@ pub fn action_tooltip_at_for_test(st: &Rc<PanelState>, x: i32, y: i32) -> Option
     )
 }
 
-/// 测试钩子：详情弹窗里**「关闭」按钮**的个数（阶段 156：容器 / 项目各一个）。
-pub fn detail_close_button_count_for_test(st: &Rc<PanelState>) -> usize {
-    st.docker_ui
-        .borrow()
-        .as_ref()
-        .map(|u| u.detail_close_btns.borrow().len())
-        .unwrap_or(0)
-}
-
-/// 测试钩子：**点一下**详情弹窗里的「关闭」按钮（阶段 156）。
+/// 测试钩子：内容里还有几颗「关闭」按钮（阶段 191 ⇒ **恒为 0**）。
 ///
-/// ⚠️ 走的是**按钮自己的点击处理**（不是直接藏窗口）⇒ 跟用户真点一下是
-///   同一条路。
-pub fn close_detail_for_test(st: &Rc<PanelState>) {
+/// 干什么用：钉住「**别再把『关闭』按钮加回来**」（用户 2026-11-28：
+/// 「用窗口本身的关闭按钮就够了」）⇒ 关窗改走 `request_close_detail_for_test`。
+pub fn detail_close_button_count_for_test(st: &Rc<PanelState>) -> usize {
     let slot = st.docker_ui.borrow();
-    let Some(ui) = slot.as_ref() else { return };
-    let btns = ui.detail_close_btns.borrow();
-    if let Some(b) = btns.first() {
-        b.emit_clicked();
-    }
+    slot.as_ref().map(|u| u.detail_close_btns.borrow().len()).unwrap_or(0)
 }
 
 /// 测试钩子：**概览窗**开着吗（阶段 165：三扇窗之一）。

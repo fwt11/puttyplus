@@ -559,19 +559,21 @@ fn main() {
     //
     // ⚠️ **用户 2026-11-23 报的**：「操作列点详情按钮，弹出对话框没法关闭」。
     {
-        // ⚠️ **内容里必须有「关闭」按钮**（普通 `GtkWindow` 没有自带标题栏
-        //   ⇒ 外面那个 X 不一定在 ⇒ 用户可能一个关闭入口都看不到）。
-        assert!(
-            dockerui::detail_close_button_count_for_test(&panel.st) >= 2,
-            "详情弹窗里应当有「关闭」按钮（容器详情 + 项目详情各一个）"
+        // ⚠️⚠️ **阶段 191：内容里不再摆「关闭」按钮**（用户 2026-11-28：
+        //   「右上角专门的关闭按钮也不需要了，用窗口本身的关闭按钮就够了」）
+        //   ⇒ 关闭靠**窗口自己的 X**（`close-request`）＋ Esc。
+        assert_eq!(
+            dockerui::detail_close_button_count_for_test(&panel.st),
+            0,
+            "内容里不该再有「关闭」按钮（窗口自己那个 X 就够了）"
         );
 
-        // 点「关闭」⇒ 弹窗藏起来。
-        dockerui::close_detail_for_test(&panel.st);
+        // 点**窗口自己的 X**（走 `close-request`）⇒ 弹窗藏起来。
+        dockerui::request_close_detail_for_test(&panel.st);
         pump(300);
         assert!(
             !dockerui::detail_visible_for_test(&panel.st),
-            "点了「关闭」弹窗还开着"
+            "点了窗口的 X 弹窗还开着"
         );
         // ⚠️ **关掉不许销毁内容**（弹窗里装着**共享的**详情控件）。
         assert!(

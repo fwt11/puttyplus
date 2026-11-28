@@ -13,7 +13,7 @@
 //! ```
 
 /// （中文原文, 英文译文）—— 按中文原文排序，供二分查找。
-pub static EN: [(&str, &str); 2247] = [
+pub static EN: [(&str, &str); 2240] = [
     ("\n\n⚠ 有规则没能写进 PuTTY 会话（该格式表达不了），仍留在 PuTTYPlus 里：\n{v0}", "\n\n⚠ Some rules could not be written into the PuTTY session (that format cannot express them); they stay in PuTTYPlus:\n{v0}"),
     ("\n\n失败：\n{v0}", "\n\nFailed:\n{v0}"),
     ("\n\n当前会话没有保存在连接列表里——不影响使用：从这个会话打开工作台就能看到这条连接。它跟着当前会话走，当前会话不保存，它也不会进连接列表。", "\n\nThis session is not saved in the connection list — that does not affect anything: opening the workbench from this session shows the connection. It follows the current session; if the session is not saved, it is not added to the connection list either."),
@@ -422,7 +422,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("允许把本地 ssh-agent 临时转发给源服务器（直连认证用）", "Allow forwarding the local ssh-agent to the origin server temporarily (used for direct authentication)"),
     ("先写个关键词再搜", "Type a keyword first, then search"),
     ("先在列表里选中一个容器", "Select a container in the list first"),
-    ("先在列表里选中一个文件，再点「查看…」", "Select a file in the list, then click “View…”"),
     ("先在列表里选中一个条目，再点「下载…」", "Select an item in the list, then click “Download…”"),
     ("先在列表里选中一条命令", "Select a command in the list first"),
     ("先在左侧打开一个数据库连接", "Open a database connection on the left first"),
@@ -465,7 +464,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("关", "Off"),
     ("关于 PuTTYPlus", "About PuTTYPlus"),
     ("关掉这个容器里的 shell（回到概览）", "Close the shell in this container (back to the overview)"),
-    ("关掉这个详情窗口（内容留着，下次打开还在）", "Close this detail window (the content stays, it is still there next time)"),
     ("关闭", "Close"),
     ("关闭其它标签", "Close the other tabs"),
     ("关闭当前标签", "Close the current tab"),
@@ -1138,7 +1136,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("把当前显示的全部日志复制到剪贴板", "Copy all the logs currently shown to the clipboard"),
     ("把整张表导出到本地文件（CSV / SQL / JSON），或把本地 CSV 导入到表里", "Export the whole table to a local file (CSV / SQL / JSON), or import a local CSV into the table"),
     ("把日志保存到哪个文件", "Save the log to which file"),
-    ("把本地整个目录上传到容器当前目录", "Upload a whole local directory into the container's current directory"),
     ("把本地文件上传到容器当前目录", "Upload a local file into the container's current directory"),
     ("把表「{table}」改成新名字。", "Rename table \"{table}\"."),
     ("把这一行往上挪一位：新加的字段会按这个顺序加进表里（已有列的物理顺序数据库改不了，要改得重建表）", "Move this row up one position: newly added fields are added to the table in this order (the database cannot change the physical order of existing columns — that needs a table rebuild)"),
@@ -1445,7 +1442,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("查看…", "View…"),
     ("查看原因", "Show the reason"),
     ("查看定义", "View the definition"),
-    ("查看容器里这个文件的内容", "View the contents of this file in the container"),
     ("查看数据", "View the data"),
     ("查看文件", "View file"),
     ("查看文件失败", "Cannot view the file"),
@@ -1636,7 +1632,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {path}", "The directory is too deep (more than {MAX_DEPTH} levels), aborted: {path}"),
     ("目录层级过深（超过 {MAX_DEPTH} 层），已中止: {rsrc}", "The directory is too deep (more than {MAX_DEPTH} levels), aborted: {rsrc}"),
     ("目录没填", "The directory is not filled in"),
-    ("目录请用「下载…」整个拉下来", "Use “Download…” to pull the whole folder down"),
     ("目录镜像 — PuTTYPlus", "Directory mirror — PuTTYPlus"),
     ("目录镜像忽略规则", "Directory mirror ignore rules"),
     ("目录镜像（本地 → 远程）", "Directory mirror (local → remote)"),
@@ -1667,7 +1662,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("直连完成（{touched} 项）", "Direct connection done ({touched} items)"),
     ("直连：在源服务器上执行 scp，把文件直接送到目标（需要源能登录目标）。\n本机中转：读源服务器、写目标服务器，不依赖服务器上的 scp/ssh。", "Direct: scp runs on the source server and sends the files straight to the target (the source has to be able to log in to the target).\nRelay through this machine: read from the source server, write to the target server, without needing scp/ssh on the servers."),
     ("相对路径", "Relative path"),
-    ("看不了目录", "Cannot view a folder"),
     ("看失败详情", "Show failure details"),
     ("看容器的日志", "View the container logs"),
     ("看容器里的文件", "View the files inside the container"),
@@ -2144,7 +2138,6 @@ pub static EN: [(&str, &str); 2247] = [
     ("选择要显示的列…", "Choose the columns to show…"),
     ("选本地目录", "Choose the local directory"),
     ("选要上传的文件", "Choose the file to upload"),
-    ("选要上传的目录", "Choose the folder to upload"),
     ("逐个确认", "Confirm one by one"),
     ("逗号（,）", "Comma (,)"),
     ("通知中心 — PuTTYPlus", "Notification centre — PuTTYPlus"),
